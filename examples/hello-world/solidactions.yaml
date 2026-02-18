@@ -1,0 +1,7 @@
+project: hello-world
+
+workflows:
+  - id: hello
+    name: Hello World
+    file: src/hello.ts
+    trigger: webhook

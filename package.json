@@ -1,0 +1,58 @@
+{
+    "name": "@solidactions/cli",
+    "version": "0.1.0",
+    "description": "SolidActions CLI - Deploy and manage workflow automation",
+    "main": "dist/index.js",
+    "bin": {
+        "solidactions": "./dist/index.js"
+    },
+    "files": [
+        "dist"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/SolidActions/solidactions-cli.git"
+    },
+    "homepage": "https://github.com/SolidActions/solidactions-cli",
+    "bugs": {
+        "url": "https://github.com/SolidActions/solidactions-cli/issues"
+    },
+    "license": "MIT",
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "keywords": [
+        "solidactions",
+        "cli",
+        "workflow",
+        "automation",
+        "deploy"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "prepublishOnly": "npm run build"
+    },
+    "dependencies": {
+        "adm-zip": "^0.5.16",
+        "archiver": "^7.0.0",
+        "axios": "^1.6.0",
+        "chalk": "^4.1.2",
+        "commander": "^11.0.0",
+        "form-data": "^4.0.0",
+        "fs-extra": "^11.0.0",
+        "js-yaml": "^4.1.0",
+        "prompts": "^2.4.2"
+    },
+    "devDependencies": {
+        "@types/adm-zip": "^0.5.7",
+        "@types/archiver": "^6.0.0",
+        "@types/fs-extra": "^11.0.0",
+        "@types/js-yaml": "^4.0.9",
+        "@types/node": "^20.0.0",
+        "@types/prompts": "^2.4.9",
+        "typescript": "^5.0.0"
+    }
+}
