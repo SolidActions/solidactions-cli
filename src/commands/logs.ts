@@ -32,8 +32,8 @@ export async function logs(runId: string, options: { follow?: boolean }) {
             },
         });
 
-        let logEntries = logsResponse.data.logs || [];
-        displayLogs(logEntries);
+        const logData = logsResponse.data.logs || '';
+        let printed = displayLogs(logData);
 
         if (options.follow && runData.status === 'running') {
             console.log(chalk.gray('\n--- Following logs (Ctrl+C to stop) ---\n'));
@@ -47,10 +47,11 @@ export async function logs(runId: string, options: { follow?: boolean }) {
                         },
                     });
 
-                    const newLogs = refreshResponse.data.logs || [];
-                    const newEntries = newLogs.slice(logEntries.length);
-                    displayLogs(newEntries);
-                    logEntries = newLogs;
+                    const newLogData = refreshResponse.data.logs || '';
+                    if (newLogData.length > printed) {
+                        const newContent = newLogData.substring(printed);
+                        printed += displayLogs(newContent);
+                    }
 
                     // Check if run is complete
                     const runStatus = await axios.get(`${config.host}/api/v1/runs/${runId}`, {
@@ -86,20 +87,28 @@ export async function logs(runId: string, options: { follow?: boolean }) {
     }
 }
 
-function displayLogs(entries: any[]) {
-    for (const entry of entries) {
+/**
+ * Display log content. Handles both string logs and array-of-entry logs.
+ * Returns the number of characters printed (for follow-mode diffing).
+ */
+function displayLogs(logData: string | any[]): number {
+    if (typeof logData === 'string') {
+        if (logData.trim()) {
+            console.log(logData);
+        }
+        return logData.length;
+    }
+
+    // Handle array format in case the API changes
+    for (const entry of logData) {
+        const message = entry.message || entry.content || '';
+        if (!message.trim()) continue;
+
         const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '??:??:??';
         const stream = entry.stream || 'stdout';
-        const message = entry.message || entry.content || '';
-
-        let coloredMessage: string;
-        if (stream === 'stderr') {
-            coloredMessage = chalk.red(message);
-        } else {
-            coloredMessage = chalk.white(message);
-        }
-
         const streamIndicator = stream === 'stderr' ? chalk.red('[err]') : chalk.gray('[out]');
+        const coloredMessage = stream === 'stderr' ? chalk.red(message) : chalk.white(message);
         console.log(`${chalk.gray(`[${timestamp}]`)} ${streamIndicator} ${coloredMessage}`);
     }
+    return logData.length;
 }
