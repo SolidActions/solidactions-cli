@@ -36,9 +36,14 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     try {
         if (projectName) {
             // List project variable mappings
-            console.log(chalk.blue(`Environment variables for project "${projectName}":`));
+            const environment = options.env || 'dev';
+            const projectSlug = environment === 'production'
+                ? projectName
+                : `${projectName}-${environment}`;
 
-            const response = await axios.get(`${config.host}/api/v1/projects/${projectName}/variable-mappings`, {
+            console.log(chalk.blue(`Environment variables for project "${projectName}" (${environment}):`));
+
+            const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: {
                     'Authorization': `Bearer ${config.apiKey}`,
                     'Accept': 'application/json',
@@ -192,7 +197,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             if (error.response.status === 401) {
                 console.error(chalk.red('Authentication failed. Run "solidactions init <api-key>" to re-configure.'));
             } else if (error.response.status === 404) {
-                console.error(chalk.red(projectName ? `Project "${projectName}" not found.` : 'Resource not found.'));
+                console.error(chalk.red(projectName ? `Project "${projectName}" not found for the specified environment.` : 'Resource not found.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }
