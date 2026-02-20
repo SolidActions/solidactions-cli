@@ -25,13 +25,14 @@ interface WorkflowConfig {
 interface ParsedEnvVar {
     key: string;
     mappedTo: string | null;
+    oauthName: string | null;
 }
 
 interface SolidActionsConfig {
     workflows: WorkflowConfig[];
     // New format: deployEnv at top level, env is a simple list
     deployEnv?: boolean;
-    env?: (string | { [key: string]: string })[];
+    env?: (string | { [key: string]: string | { oauth: string } })[];
 }
 
 /**
@@ -173,14 +174,21 @@ function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
     for (const item of config.env) {
         if (typeof item === 'string') {
             // Simple string: - VAR_NAME (declared only, needs configuration)
-            parsedVars.push({ key: item, mappedTo: null });
+            parsedVars.push({ key: item, mappedTo: null, oauthName: null });
         } else if (typeof item === 'object' && item !== null) {
-            // Object: - VAR_NAME: GLOBAL_NAME (mapped to global)
+            // Object: - VAR_NAME: GLOBAL_NAME or - VAR_NAME: { oauth: connection-name }
             const keys = Object.keys(item);
             if (keys.length === 1) {
                 const key = keys[0];
-                const mappedTo = item[key];
-                parsedVars.push({ key, mappedTo: mappedTo || null });
+                const value = item[key];
+                if (typeof value === 'object' && value !== null && 'oauth' in value) {
+                    if (typeof value.oauth !== 'string' || !value.oauth) {
+                        throw new Error(`Invalid env config for ${key}: 'oauth' must be a non-empty string`);
+                    }
+                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth });
+                } else {
+                    parsedVars.push({ key, mappedTo: value || null, oauthName: null });
+                }
             }
         }
     }
@@ -229,6 +237,7 @@ async function pushYamlDeclarations(
     const declarations = parsedVars.map(v => ({
         env_name: v.key,
         yaml_default_global_key: v.mappedTo,
+        yaml_default_oauth_name: v.oauthName,
         source: 'yaml' as const,
     }));
 
