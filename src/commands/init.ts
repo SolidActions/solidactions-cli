@@ -48,7 +48,7 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
     } else if (options.dev) {
         host = 'http://localhost:8000';
     } else {
-        host = 'https://solidactions.io';
+        host = 'https://app.solidactions.com';
     }
 
     // Validate API key format (should be a Sanctum token)
