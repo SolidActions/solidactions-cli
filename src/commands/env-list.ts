@@ -58,22 +58,46 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             }
 
             console.log('');
-            console.log(chalk.gray('KEY'.padEnd(30) + 'VALUE'.padEnd(30) + 'SOURCE'.padEnd(12) + 'GLOBAL KEY'));
-            console.log(chalk.gray('-'.repeat(100)));
+            console.log(chalk.gray('KEY'.padEnd(28) + 'VALUE'.padEnd(24) + 'TYPE'.padEnd(14) + 'SOURCE'));
+            console.log(chalk.gray('-'.repeat(90)));
 
             for (const mapping of mappings) {
                 const key = mapping.env_name || '?';
-                const value = mapping.is_secret ? chalk.yellow('********') : (mapping.value || '-');
-                const source = mapping.source || 'manual';
-                const globalKey = mapping.global_variable_key || chalk.gray('(local)');
 
-                const sourceColor = source === 'yaml' ? chalk.cyan : (source === 'override' ? chalk.yellow : chalk.gray);
+                // Value display (resolved_value includes global/oauth resolution)
+                const rawValue = mapping.resolved_value ?? mapping.value;
+                let value: string;
+                if (mapping.is_secret) {
+                    value = chalk.yellow('••••••');
+                } else if (rawValue) {
+                    value = rawValue.toString().substring(0, 22);
+                } else {
+                    value = chalk.gray('-');
+                }
+
+                // Type & source (mirrors UI getMappingType)
+                let type: string;
+                let source: string;
+
+                if (mapping.source_type === 'oauth_connection' && mapping.oauth_connection_id) {
+                    type = chalk.blue('oauth');
+                    source = chalk.blue(mapping.oauth_connection_name || 'OAuth');
+                } else if (mapping.global_variable_key) {
+                    type = chalk.green('global');
+                    source = chalk.green(mapping.global_variable_key);
+                } else if (mapping.has_value) {
+                    type = chalk.gray('project var');
+                    source = chalk.gray('local');
+                } else {
+                    type = chalk.gray('-');
+                    source = chalk.gray('-');
+                }
 
                 console.log(
-                    key.padEnd(30) +
-                    (mapping.is_secret ? chalk.yellow('********'.padEnd(30)) : (mapping.value || '-').toString().substring(0, 28).padEnd(30)) +
-                    sourceColor(source.padEnd(12)) +
-                    (mapping.global_variable_key || chalk.gray('(local)'))
+                    key.padEnd(28) +
+                    value.padEnd(24) +
+                    type.padEnd(14) +
+                    source
                 );
             }
 
