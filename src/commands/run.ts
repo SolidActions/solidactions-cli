@@ -2,14 +2,19 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getConfig } from './init';
 
-export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean }) {
+export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
     const config = getConfig();
     if (!config?.apiKey) {
         console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
         process.exit(1);
     }
 
-    console.log(chalk.blue(`Running workflow "${workflowName}" in project "${projectName}"...`));
+    const environment = options.env || 'dev';
+    const projectSlug = environment === 'production'
+        ? projectName
+        : `${projectName}-${environment}`;
+
+    console.log(chalk.blue(`Running workflow "${workflowName}" in project "${projectName}" (${environment})...`));
 
     let inputData: Record<string, any> = {};
     if (options.input) {
@@ -23,7 +28,7 @@ export async function run(projectName: string, workflowName: string, options: { 
 
     try {
         const response = await axios.post(
-            `${config.host}/api/v1/projects/${projectName}/workflows/${workflowName}/trigger`,
+            `${config.host}/api/v1/projects/${projectSlug}/workflows/${workflowName}/trigger`,
             { input: inputData },
             {
                 headers: {

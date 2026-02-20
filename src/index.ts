@@ -85,6 +85,7 @@ program
     .description('Trigger a workflow run')
     .argument('<project>', 'Project name')
     .argument('<workflow>', 'Workflow name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-i, --input <json>', 'JSON input for the workflow')
     .option('-w, --wait', 'Wait for the workflow to complete')
     .action((project, workflow, options) => {
