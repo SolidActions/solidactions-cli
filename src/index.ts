@@ -22,7 +22,7 @@ const program = new Command();
 program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
-    .version('0.1.0');
+    .version('0.2.1');
 
 // =============================================================================
 // Authentication & Configuration
@@ -61,7 +61,7 @@ program
     .description('Deploy a project to SolidActions')
     .argument('<project-name>', 'Project name (will be created if it doesn\'t exist)')
     .argument('[path]', 'Source directory to deploy (defaults to current directory)')
-    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'production')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .action((projectName, path, options) => {
         deploy(projectName, path, options);
@@ -173,7 +173,7 @@ program
     .command('env:pull')
     .description('Pull resolved environment variables to a local file')
     .argument('<project>', 'Project name')
-    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'production')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-o, --output <file>', 'Output file path (defaults to .env or .env.{environment})')
     .option('-y, --yes', 'Skip confirmation for secrets')
     .action((project, options) => {

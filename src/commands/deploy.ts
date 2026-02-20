@@ -342,7 +342,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     }
 
     const sourceDir = sourcePath ? path.resolve(sourcePath) : process.cwd();
-    const environment = options.env || 'production';
+    const environment = options.env || 'dev';
 
     if (!fs.existsSync(sourceDir)) {
         console.error(chalk.red(`Source directory not found: ${sourceDir}`));

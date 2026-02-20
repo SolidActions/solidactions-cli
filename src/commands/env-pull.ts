@@ -35,7 +35,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
         process.exit(1);
     }
 
-    const environment = options.env || 'production';
+    const environment = options.env || 'dev';
 
     // Build the project slug for lookup
     const projectSlug = environment === 'production'

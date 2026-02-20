@@ -14,7 +14,7 @@ export async function webhookList(projectName: string, options: WebhookListOptio
         process.exit(1);
     }
 
-    const environment = options.env || 'production';
+    const environment = options.env || 'dev';
     const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     console.log(chalk.blue(`Webhooks for project "${projectName}"${environment !== 'production' ? ` (${environment})` : ''}:`));

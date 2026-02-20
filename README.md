@@ -39,6 +39,7 @@ solidactions deploy <project-name> <path>
 | `schedule:set <project> <cron>` | Set a cron schedule for a workflow |
 | `schedule:list <project>` | List schedules for a project |
 | `schedule:delete <project> <id>` | Delete a schedule |
+| `webhooks <project>` | List webhook URLs for a project |
 
 See [docs/cli.md](docs/cli.md) for full documentation.
 

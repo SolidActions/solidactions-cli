@@ -87,13 +87,20 @@ solidactions deploy my-project ./src
 - `<project-name>` - Project name (will be created if it doesn't exist)
 - `[path]` - Source directory to deploy (defaults to current directory)
 
+**Options:**
+- `-e, --env <environment>` - Target environment: production/staging/dev (default: `dev`)
+- `--create` - Create environment project if it doesn't exist
+
 **Example:**
 ```bash
-# Deploy current directory
+# Deploy current directory (to dev by default)
 solidactions deploy my-project
 
 # Deploy a specific directory
 solidactions deploy my-project ./workflows
+
+# Deploy to production
+solidactions deploy my-project --env production
 ```
 
 ### `pull <project-name> [path]`
@@ -239,6 +246,9 @@ solidactions env:list my-project
 **Arguments:**
 - `[project]` - Project name (omit for global variables)
 
+**Options:**
+- `-e, --env <environment>` - Filter by environment: production/staging/dev
+
 **Example output (global):**
 ```
 Global environment variables:
@@ -311,6 +321,65 @@ solidactions env:map my-project DB_URL DATABASE_URL
 ```bash
 # Map DATABASE_URL global var to DB_CONNECTION in the project
 solidactions env:map my-project DB_CONNECTION DATABASE_URL
+```
+
+### `env:pull <project>`
+
+Pull resolved environment variables to a local file.
+
+```bash
+solidactions env:pull my-project
+```
+
+**Arguments:**
+- `<project>` - Project name
+
+**Options:**
+- `-e, --env <environment>` - Environment: production/staging/dev (default: `dev`)
+- `-o, --output <file>` - Output file path (defaults to `.env` or `.env.{environment}`)
+- `-y, --yes` - Skip confirmation for secrets
+
+**Examples:**
+```bash
+# Pull dev env vars (default)
+solidactions env:pull my-project
+
+# Pull production env vars
+solidactions env:pull my-project --env production
+
+# Pull to a specific file
+solidactions env:pull my-project -o .env.local
+```
+
+---
+
+## Webhooks
+
+### `webhooks <project>`
+
+List webhook URLs for a project.
+
+```bash
+solidactions webhooks my-project
+```
+
+**Arguments:**
+- `<project>` - Project name
+
+**Options:**
+- `-e, --env <environment>` - Environment: production/staging/dev (default: `dev`)
+- `--show-secrets` - Show webhook secrets
+
+**Examples:**
+```bash
+# List dev webhooks (default)
+solidactions webhooks my-project
+
+# List production webhooks
+solidactions webhooks my-project --env production
+
+# Show webhook secrets
+solidactions webhooks my-project --show-secrets
 ```
 
 ---
