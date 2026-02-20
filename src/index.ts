@@ -17,12 +17,15 @@ import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhooks';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pkg = require('../package.json');
+
 const program = new Command();
 
 program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
-    .version('0.2.1');
+    .version(pkg.version);
 
 // =============================================================================
 // Authentication & Configuration
