@@ -15,6 +15,7 @@ import { envPull } from './commands/env-pull';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
+import { webhookList } from './commands/webhooks';
 
 const program = new Command();
 
@@ -210,6 +211,20 @@ program
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((project, scheduleId, options) => {
         scheduleDelete(project, scheduleId, options);
+    });
+
+// =============================================================================
+// Webhooks
+// =============================================================================
+
+program
+    .command('webhooks')
+    .description('List webhook URLs for a project')
+    .argument('<project>', 'Project name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)')
+    .option('--show-secrets', 'Show webhook secrets')
+    .action((project, options) => {
+        webhookList(project, options);
     });
 
 program.parse();
