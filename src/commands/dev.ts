@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import chalk from 'chalk';
+import dotenv from 'dotenv';
 
 interface DevOptions {
     input?: string;
@@ -36,6 +37,13 @@ export async function dev(file: string, options: DevOptions) {
         console.error(chalk.red('@solidactions/sdk version does not include testing utilities.'));
         console.log(chalk.gray('Update to the latest SDK version: npm install @solidactions/sdk@latest'));
         process.exit(1);
+    }
+
+    // Load .env file from project root
+    const envPath = path.join(projectDir, '.env');
+    if (fs.existsSync(envPath)) {
+        dotenv.config({ path: envPath });
+        console.log(chalk.gray(`Loaded .env from ${projectDir}`));
     }
 
     // Validate input JSON if provided
