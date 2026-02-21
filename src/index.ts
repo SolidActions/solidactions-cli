@@ -16,6 +16,7 @@ import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhooks';
+import { dev } from './commands/dev';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -102,6 +103,15 @@ program
     .option('-l, --limit <number>', 'Number of runs to show', parseInt)
     .action((project, options) => {
         runs(project, options);
+    });
+
+program
+    .command('dev')
+    .description('Run a workflow locally using an in-memory mock server (no deploy needed)')
+    .argument('<file>', 'Workflow file to run (e.g., src/simple-steps.ts)')
+    .option('-i, --input <json>', 'JSON input for the workflow', '{}')
+    .action((file, options) => {
+        dev(file, options);
     });
 
 // =============================================================================
