@@ -174,6 +174,47 @@ ID                                     WORKFLOW                 STATUS      STAR
 Showing 2 run(s)
 ```
 
+### `dev <file>`
+
+Run a workflow locally using an in-memory mock server. No deploy, no auth, no backend needed — just runs your workflow logic directly.
+
+```bash
+solidactions dev src/simple-steps.ts
+```
+
+**Arguments:**
+- `<file>` - Workflow file to run (e.g., `src/simple-steps.ts`)
+
+**Options:**
+- `-i, --input <json>` - JSON input for the workflow (default: `{}`)
+
+**Examples:**
+```bash
+# Run with default empty input
+solidactions dev src/my-workflow.ts
+
+# Run with JSON input
+solidactions dev src/process-data.ts -i '{"userId": 123, "action": "sync"}'
+```
+
+**How it works:**
+1. Starts an in-memory mock server (implements the full SolidActions API)
+2. Sets `SOLIDACTIONS_API_URL`, `SOLIDACTIONS_API_KEY`, and `WORKFLOW_INPUT` env vars
+3. Runs your workflow file with `npx tsx`
+4. All step execution works normally — output appears in your terminal
+
+**Requirements:**
+- `@solidactions/sdk` must be installed in the project (v0.2.0+)
+- The workflow file must call `SolidActions.run()` at module level (standard pattern)
+
+**What works locally vs what doesn't:**
+
+| Works | No-op locally |
+|-------|---------------|
+| Sequential & parallel steps | Durable sleep scheduler wakeups |
+| Child workflows | Cross-process messaging |
+| Events, streams, retries | Tenant env var injection |
+
 ---
 
 ## Logs
