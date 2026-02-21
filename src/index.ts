@@ -190,6 +190,7 @@ program
     .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-o, --output <file>', 'Output file path (defaults to .env or .env.{environment})')
     .option('-y, --yes', 'Skip confirmation for secrets')
+    .option('--update-oauth', 'Only pull OAuth tokens and merge into existing .env file')
     .action((project, options) => {
         envPull(project, options);
     });

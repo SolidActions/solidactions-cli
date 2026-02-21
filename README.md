@@ -35,7 +35,7 @@ solidactions deploy <project-name> <path>
 | `env:list [project]` | List environment variables |
 | `env:delete <key>` | Delete an environment variable |
 | `env:map <project> <key> <global-key>` | Map a global variable to a project |
-| `env:pull <project>` | Pull resolved env vars to a local file |
+| `env:pull <project>` | Pull resolved env vars (including OAuth tokens) to a local file |
 | `schedule:set <project> <cron>` | Set a cron schedule for a workflow |
 | `schedule:list <project>` | List schedules for a project |
 | `schedule:delete <project> <id>` | Delete a schedule |

@@ -1,6 +1,6 @@
 {
     "name": "@solidactions/cli",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "SolidActions CLI - Deploy and manage workflow automation",
     "main": "dist/index.js",
     "bin": {

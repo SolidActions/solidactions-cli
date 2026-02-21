@@ -379,6 +379,7 @@ solidactions env:pull my-project
 - `-e, --env <environment>` - Environment: production/staging/dev (default: `dev`)
 - `-o, --output <file>` - Output file path (defaults to `.env` or `.env.{environment}`)
 - `-y, --yes` - Skip confirmation for secrets
+- `--update-oauth` - Only pull OAuth tokens and merge into existing .env file
 
 **Examples:**
 ```bash
@@ -390,7 +391,18 @@ solidactions env:pull my-project --env production
 
 # Pull to a specific file
 solidactions env:pull my-project -o .env.local
+
+# Pull all env vars including fresh OAuth tokens
+solidactions env:pull my-project
+
+# Quick refresh of only OAuth tokens (merges into existing .env)
+solidactions env:pull my-project --update-oauth
+
+# Refresh OAuth tokens for staging
+solidactions env:pull my-project --update-oauth --env staging
 ```
+
+OAuth tokens are short-lived. Use `--update-oauth` for quick refreshes without re-pulling all variables. Each pull fetches a fresh token from the OAuth provider.
 
 ---
 
