@@ -12,6 +12,7 @@ import { envList } from './commands/env-list';
 import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
 import { envPull } from './commands/env-pull';
+import { envPush } from './commands/env-push';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
@@ -193,6 +194,19 @@ program
     .option('--update-oauth', 'Only pull OAuth tokens and merge into existing .env file')
     .action((project, options) => {
         envPull(project, options);
+    });
+
+program
+    .command('env:push')
+    .description('Push environment variables from .env file to a project')
+    .argument('<project>', 'Project name')
+    .argument('[path]', 'Source directory with solidactions.yaml and .env file', '.')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('--new-only', 'Only push new or empty variables (skip existing)')
+    .option('--include-undeclared', 'Also push vars not declared in solidactions.yaml')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action((project, path, options) => {
+        envPush(project, path, options);
     });
 
 // =============================================================================

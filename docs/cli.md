@@ -404,6 +404,47 @@ solidactions env:pull my-project --update-oauth --env staging
 
 OAuth tokens are short-lived. Use `--update-oauth` for quick refreshes without re-pulling all variables. Each pull fetches a fresh token from the OAuth provider.
 
+### `env:push <project> [path]`
+
+Push environment variables from a `.env` file to a project.
+
+```bash
+solidactions env:push my-project
+```
+
+**Arguments:**
+- `<project>` - Project name
+- `[path]` - Source directory with `solidactions.yaml` and `.env` file (default: `.`)
+
+**Options:**
+- `-e, --env <environment>` - Target environment: production/staging/dev (default: `dev`)
+- `--new-only` - Only push new or empty variables (skip existing)
+- `--include-undeclared` - Also push vars not declared in `solidactions.yaml`
+- `-y, --yes` - Skip confirmation prompt
+
+**Examples:**
+```bash
+# Push dev env vars from current directory
+solidactions env:push my-project
+
+# Push from a specific directory
+solidactions env:push my-project ./my-app
+
+# Push production env vars
+solidactions env:push my-project --env production
+
+# Only push new variables (don't overwrite existing)
+solidactions env:push my-project --new-only
+
+# Push all .env vars, even those not in solidactions.yaml
+solidactions env:push my-project --include-undeclared
+
+# Push without confirmation prompt
+solidactions env:push my-project -y
+```
+
+By default, only variables declared in `solidactions.yaml` are pushed. Use `--include-undeclared` to push all variables from the `.env` file. Variables with names matching common secret patterns (secret, key, token, password, credential) are automatically marked as secrets.
+
 ---
 
 ## Webhooks
@@ -544,10 +585,13 @@ solidactions env:create API_KEY "..." --secret
 # 3. Deploy your project
 solidactions deploy my-project ./src
 
-# 4. Set up a schedule
+# 4. Push env vars from local .env
+solidactions env:push my-project ./src
+
+# 5. Set up a schedule
 solidactions schedule:set my-project "0 9 * * *"
 
-# 5. Trigger a test run
+# 6. Trigger a test run
 solidactions run my-project main-workflow
 ```
 
