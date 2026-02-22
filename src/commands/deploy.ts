@@ -6,34 +6,7 @@ import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { getConfig } from './init';
-
-interface WorkflowConfig {
-    id?: string;
-    name: string;
-    command?: string;
-    file?: string;
-    enabled?: boolean;
-}
-
-/**
- * Parsed environment variable declaration from YAML.
- * New format examples:
- *   - TEST_ENV_VAR                    -> { key: "TEST_ENV_VAR", mappedTo: null }
- *   - MAPPED_SECRET: JIMBO            -> { key: "MAPPED_SECRET", mappedTo: "JIMBO" }
- *   - DATABASE_URL: DATABASE_URL      -> { key: "DATABASE_URL", mappedTo: "DATABASE_URL" }
- */
-interface ParsedEnvVar {
-    key: string;
-    mappedTo: string | null;
-    oauthName: string | null;
-}
-
-interface SolidActionsConfig {
-    workflows: WorkflowConfig[];
-    // New format: deployEnv at top level, env is a simple list
-    deployEnv?: boolean;
-    env?: (string | { [key: string]: string | { oauth: string } })[];
-}
+import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 
 /**
  * Validate project structure before deployment.
@@ -118,100 +91,6 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
     return { valid: errors.length === 0, errors, warnings };
 }
 
-/**
- * Parse a .env file into a key-value map.
- */
-function parseEnvFile(filePath: string): Map<string, string> {
-    const envMap = new Map<string, string>();
-
-    if (!fs.existsSync(filePath)) {
-        return envMap;
-    }
-
-    const content = fs.readFileSync(filePath, 'utf8');
-    const lines = content.split('\n');
-
-    for (const line of lines) {
-        const trimmed = line.trim();
-        // Skip empty lines and comments
-        if (!trimmed || trimmed.startsWith('#')) {
-            continue;
-        }
-
-        const equalsIndex = trimmed.indexOf('=');
-        if (equalsIndex === -1) {
-            continue;
-        }
-
-        const key = trimmed.substring(0, equalsIndex).trim();
-        let value = trimmed.substring(equalsIndex + 1).trim();
-
-        // Remove surrounding quotes if present
-        if ((value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1);
-        }
-
-        envMap.set(key, value);
-    }
-
-    return envMap;
-}
-
-/**
- * Parse YAML env declarations into structured format.
- * Handles the new simplified format:
- *   - VAR_NAME           -> { key: "VAR_NAME", mappedTo: null }
- *   - VAR_NAME: GLOBAL   -> { key: "VAR_NAME", mappedTo: "GLOBAL" }
- */
-function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
-    const parsedVars: ParsedEnvVar[] = [];
-
-    if (!config.env || !Array.isArray(config.env)) {
-        return parsedVars;
-    }
-
-    for (const item of config.env) {
-        if (typeof item === 'string') {
-            // Simple string: - VAR_NAME (declared only, needs configuration)
-            parsedVars.push({ key: item, mappedTo: null, oauthName: null });
-        } else if (typeof item === 'object' && item !== null) {
-            // Object: - VAR_NAME: GLOBAL_NAME or - VAR_NAME: { oauth: connection-name }
-            const keys = Object.keys(item);
-            if (keys.length === 1) {
-                const key = keys[0];
-                const value = item[key];
-                if (typeof value === 'object' && value !== null && 'oauth' in value) {
-                    if (typeof value.oauth !== 'string' || !value.oauth) {
-                        throw new Error(`Invalid env config for ${key}: 'oauth' must be a non-empty string`);
-                    }
-                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth });
-                } else {
-                    parsedVars.push({ key, mappedTo: value || null, oauthName: null });
-                }
-            }
-        }
-    }
-
-    return parsedVars;
-}
-
-/**
- * Extract declared variable keys from solidactions.yaml env config.
- * Returns a set of env var keys that are declared in YAML.
- */
-function getYamlDeclaredVars(config: SolidActionsConfig): Set<string> {
-    const parsedVars = parseYamlEnvVars(config);
-    return new Set(parsedVars.map(v => v.key));
-}
-
-/**
- * Check if deployEnv is enabled in the config.
- * New format has deployEnv at top level.
- */
-function isDeployEnvEnabled(config: SolidActionsConfig): boolean {
-    return config.deployEnv === true;
-}
 
 interface DeployOptions {
     env?: string;
@@ -256,90 +135,6 @@ async function pushYamlDeclarations(
         console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations`));
     } catch (error: any) {
         console.error(chalk.yellow('Warning: Failed to sync YAML declarations:'), error.response?.data?.message || error.message);
-    }
-}
-
-/**
- * Push environment variables from .env file to project.
- * Only pushes vars that are declared in solidactions.yaml.
- */
-async function pushEnvVars(
-    host: string,
-    apiKey: string,
-    projectSlug: string,
-    sourceDir: string,
-    environment: string,
-    yamlConfig: SolidActionsConfig
-): Promise<void> {
-    // Get vars declared in YAML
-    const declaredVars = getYamlDeclaredVars(yamlConfig);
-    if (declaredVars.size === 0) {
-        console.log(chalk.gray('No environment variables declared in solidactions.yaml'));
-        return;
-    }
-
-    // Read the .env file for this environment
-    const envFileName = environment === 'production' ? '.env' : `.env.${environment}`;
-    const envFilePath = path.join(sourceDir, envFileName);
-
-    if (!fs.existsSync(envFilePath)) {
-        console.log(chalk.yellow(`⚠ ${envFileName} not found, skipping env push`));
-        // Warn about each missing declared var
-        for (const key of declaredVars) {
-            console.log(chalk.yellow(`  ⚠ ${key}: no value (not in ${envFileName})`));
-        }
-        return;
-    }
-
-    // Parse the .env file
-    const envValues = parseEnvFile(envFilePath);
-
-    // Filter to only YAML-declared vars
-    const variables: { key: string; value: string; is_secret: boolean }[] = [];
-    const missing: string[] = [];
-
-    for (const key of declaredVars) {
-        const value = envValues.get(key);
-        if (value !== undefined) {
-            // Mark vars containing "secret", "key", "token", "password" as secrets
-            const isSecret = /secret|key|token|password|credential/i.test(key);
-            variables.push({ key, value, is_secret: isSecret });
-        } else {
-            missing.push(key);
-        }
-    }
-
-    // Warn about missing vars
-    for (const key of missing) {
-        console.log(chalk.yellow(`⚠ ${key}: not found in ${envFileName}`));
-    }
-
-    if (variables.length === 0) {
-        console.log(chalk.yellow('No matching environment variables to push'));
-        return;
-    }
-
-    // Push to API
-    try {
-        const response = await axios.post(
-            `${host}/api/v1/projects/${projectSlug}/variable-mappings/bulk`,
-            { variables },
-            {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                },
-            }
-        );
-
-        const { created, updated } = response.data;
-        console.log(chalk.green(`✓ Pushed ${variables.length} environment variables from ${envFileName}`));
-        if (created > 0 || updated > 0) {
-            console.log(chalk.gray(`  (${created} created, ${updated} updated)`));
-        }
-    } catch (error: any) {
-        console.error(chalk.red('Failed to push environment variables:'), error.response?.data?.message || error.message);
     }
 }
 
@@ -501,19 +296,6 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                                 config.host,
                                 config.apiKey,
                                 projectSlug,
-                                yamlConfig
-                            );
-                        }
-
-                        // Push .env values if deployEnv is enabled
-                        if (yamlConfig && isDeployEnvEnabled(yamlConfig)) {
-                            console.log(chalk.blue('\nPushing environment variables...'));
-                            await pushEnvVars(
-                                config.host,
-                                config.apiKey,
-                                projectSlug,
-                                sourceDir,
-                                environment,
                                 yamlConfig
                             );
                         }
