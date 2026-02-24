@@ -18,6 +18,8 @@ import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhooks';
 import { dev } from './commands/dev';
+import { aiInit } from './commands/ai-init';
+import { aiExamples } from './commands/ai-examples';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -255,5 +257,24 @@ program
     .action((project, options) => {
         webhookList(project, options);
     });
+
+// =============================================================================
+// AI Helper
+// =============================================================================
+
+program
+    .command('ai:init')
+    .description('Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development')
+    .option('--claude', 'Use CLAUDE.md (for Claude Code)')
+    .option('--agents', 'Use AGENTS.md (for Cursor, Windsurf, etc.)')
+    .action((options) => { aiInit(options); });
+
+program
+    .command('ai:examples')
+    .description('Install example workflows for AI reference')
+    .argument('[names...]', 'Example names to install (omit for interactive selector)')
+    .option('--all', 'Install all available examples')
+    .option('--overwrite', 'Overwrite existing examples without warning')
+    .action((names, options) => { aiExamples(names, options); });
 
 program.parse();
