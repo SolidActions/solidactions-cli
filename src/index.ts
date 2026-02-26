@@ -4,6 +4,7 @@ import { deploy } from './commands/deploy';
 import { init, logout, whoami } from './commands/init';
 import { logs } from './commands/logs';
 import { logsBuild } from './commands/logs-build';
+import { steps } from './commands/steps';
 import { run } from './commands/run';
 import { runs } from './commands/runs';
 import { pull } from './commands/pull';
@@ -136,6 +137,17 @@ program
     .argument('<project>', 'Project name')
     .action((project) => {
         logsBuild(project);
+    });
+
+program
+    .command('steps')
+    .description('View step outputs and timing for a workflow run')
+    .argument('<run-id>', 'Run ID')
+    .option('-s, --step <name>', 'Show output for a specific step')
+    .option('--json', 'Output as JSON (for piping/redirection)')
+    .option('-f, --follow', 'Follow step progress for in-progress runs')
+    .action((runId, options) => {
+        steps(runId, options);
     });
 
 // =============================================================================
