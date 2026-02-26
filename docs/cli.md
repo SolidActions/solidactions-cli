@@ -248,9 +248,49 @@ solidactions logs:build my-project
 
 ## Environment Variables
 
+### `env:set <key> <value>` (global) or `env:set <project> <key> <value>` (project)
+
+Set an environment variable (create or update). Works for both global and project-level variables.
+
+```bash
+# Set a global variable (create or update)
+solidactions env:set DATABASE_URL "postgres://localhost/mydb"
+
+# Set a project variable (create or update)
+solidactions env:set my-project API_URL "https://api.example.com"
+```
+
+**Arguments (global mode):**
+- `<key>` - Variable name
+- `<value>` - Variable value
+
+**Arguments (project mode):**
+- `<project>` - Project name
+- `<key>` - Variable name
+- `<value>` - Variable value
+
+**Options:**
+- `-s, --secret` - Mark as encrypted secret (value will be hidden in listings)
+- `-e, --env <environment>` - Target environment for project vars: production/staging/dev (default: `dev`)
+
+**Examples:**
+```bash
+# Set a global variable
+solidactions env:set API_URL "https://api.example.com"
+
+# Set a global secret
+solidactions env:set API_KEY "sk_live_secret123" --secret
+
+# Set a project variable
+solidactions env:set my-project CUSTOM_VAR "my-value"
+
+# Set a project variable for production
+solidactions env:set my-project DB_HOST "prod-db.example.com" --env production
+```
+
 ### `env:create <key> <value>`
 
-Create a global environment variable.
+Create a global environment variable. (Alias: use `env:set` for create-or-update behavior.)
 
 ```bash
 solidactions env:create DATABASE_URL "postgres://localhost/mydb"
@@ -262,15 +302,6 @@ solidactions env:create DATABASE_URL "postgres://localhost/mydb"
 
 **Options:**
 - `-s, --secret` - Mark as encrypted secret (value will be hidden in listings)
-
-**Examples:**
-```bash
-# Create a regular variable
-solidactions env:create API_URL "https://api.example.com"
-
-# Create a secret
-solidactions env:create API_KEY "sk_live_secret123" --secret
-```
 
 ### `env:list [project]`
 
@@ -579,8 +610,8 @@ solidactions schedule:delete my-project 1 --yes
 solidactions init sk_live_abc123
 
 # 2. Create environment variables
-solidactions env:create DATABASE_URL "postgres://..." --secret
-solidactions env:create API_KEY "..." --secret
+solidactions env:set DATABASE_URL "postgres://..." --secret
+solidactions env:set API_KEY "..." --secret
 
 # 3. Deploy your project
 solidactions deploy my-project ./src
@@ -604,11 +635,11 @@ solidactions env:list
 # View project-specific mappings
 solidactions env:list my-project
 
-# Create a new secret
-solidactions env:create NEW_API_KEY "secret123" --secret
+# Set a global variable
+solidactions env:set NEW_API_KEY "secret123" --secret
 
-# Map it to a project
-solidactions env:map my-project API_KEY NEW_API_KEY
+# Set a project variable directly
+solidactions env:set my-project API_KEY "secret123" --secret
 
 # Delete an old variable
 solidactions env:delete OLD_VAR --yes

@@ -14,6 +14,7 @@ import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
 import { envPull } from './commands/env-pull';
 import { envPush } from './commands/env-push';
+import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
@@ -167,6 +168,18 @@ program
     .option('--dev-inherit-staging', 'Dev inherits from staging')
     .action((key, value, options) => {
         envCreate(key, value, options);
+    });
+
+program
+    .command('env:set')
+    .description('Set an environment variable (create or update, global or project)')
+    .argument('<key-or-project>', 'Variable key (global) or project name')
+    .argument('<value-or-key>', 'Variable value (global) or variable key (project)')
+    .argument('[value]', 'Variable value (when first arg is project)')
+    .option('-s, --secret', 'Mark as encrypted secret')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .action((keyOrProject, valueOrKey, value, options) => {
+        envSet(keyOrProject, valueOrKey, value, options);
     });
 
 program

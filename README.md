@@ -31,6 +31,8 @@ solidactions deploy <project-name> <path>
 | `runs [project]` | List recent workflow runs |
 | `logs <run-id>` | View logs for a workflow run |
 | `logs:build <project>` | View build/deployment logs |
+| `env:set <key> <value>` | Set a global variable (create or update) |
+| `env:set <project> <key> <value>` | Set a project variable (create or update) |
 | `env:create <key> <value>` | Create a global environment variable |
 | `env:list [project]` | List environment variables |
 | `env:delete <key>` | Delete an environment variable |
