@@ -273,6 +273,13 @@ solidactions env:set my-project API_URL "https://api.example.com"
 - `-s, --secret` - Mark as encrypted secret (value will be hidden in listings)
 - `-e, --env <environment>` - Target environment for project vars: production/staging/dev (default: `dev`)
 
+**Per-environment options (global mode only):**
+- `--staging-value <value>` - Set a different value for staging
+- `--dev-value <value>` - Set a different value for dev
+- `--staging-inherit` - Staging inherits from production
+- `--dev-inherit` - Dev inherits from production
+- `--dev-inherit-staging` - Dev inherits from staging
+
 **Examples:**
 ```bash
 # Set a global variable
@@ -281,27 +288,20 @@ solidactions env:set API_URL "https://api.example.com"
 # Set a global secret
 solidactions env:set API_KEY "sk_live_secret123" --secret
 
+# Set a global variable with per-environment values
+solidactions env:set DATABASE_URL "postgres://prod-db/mydb" \
+  --staging-value "postgres://staging-db/mydb" \
+  --dev-value "postgres://localhost/mydb"
+
+# Set a global variable where staging/dev inherit from production
+solidactions env:set API_URL "https://api.example.com" --staging-inherit --dev-inherit
+
 # Set a project variable
 solidactions env:set my-project CUSTOM_VAR "my-value"
 
 # Set a project variable for production
 solidactions env:set my-project DB_HOST "prod-db.example.com" --env production
 ```
-
-### `env:create <key> <value>`
-
-Create a global environment variable. (Alias: use `env:set` for create-or-update behavior.)
-
-```bash
-solidactions env:create DATABASE_URL "postgres://localhost/mydb"
-```
-
-**Arguments:**
-- `<key>` - Variable name
-- `<value>` - Variable value
-
-**Options:**
-- `-s, --secret` - Mark as encrypted secret (value will be hidden in listings)
 
 ### `env:list [project]`
 
@@ -674,6 +674,6 @@ solidactions logs <run-id> --follow
 solidactions --help
 
 # Command-specific help
-solidactions env:create --help
+solidactions env:set --help
 solidactions schedule:set --help
 ```

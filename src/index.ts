@@ -8,7 +8,6 @@ import { steps } from './commands/steps';
 import { run } from './commands/run';
 import { runs } from './commands/runs';
 import { pull } from './commands/pull';
-import { envCreate } from './commands/env-create';
 import { envList } from './commands/env-list';
 import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
@@ -156,21 +155,6 @@ program
 // =============================================================================
 
 program
-    .command('env:create')
-    .description('Create a global environment variable')
-    .argument('<key>', 'Variable name')
-    .argument('<value>', 'Production value')
-    .option('-s, --secret', 'Mark as encrypted secret')
-    .option('--staging-value <value>', 'Staging environment value')
-    .option('--dev-value <value>', 'Dev environment value')
-    .option('--staging-inherit', 'Staging inherits from production')
-    .option('--dev-inherit', 'Dev inherits from production')
-    .option('--dev-inherit-staging', 'Dev inherits from staging')
-    .action((key, value, options) => {
-        envCreate(key, value, options);
-    });
-
-program
     .command('env:set')
     .description('Set an environment variable (create or update, global or project)')
     .argument('<key-or-project>', 'Variable key (global) or project name')
@@ -178,6 +162,11 @@ program
     .argument('[value]', 'Variable value (when first arg is project)')
     .option('-s, --secret', 'Mark as encrypted secret')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('--staging-value <value>', 'Staging environment value (global only)')
+    .option('--dev-value <value>', 'Dev environment value (global only)')
+    .option('--staging-inherit', 'Staging inherits from production (global only)')
+    .option('--dev-inherit', 'Dev inherits from production (global only)')
+    .option('--dev-inherit-staging', 'Dev inherits from staging (global only)')
     .action((keyOrProject, valueOrKey, value, options) => {
         envSet(keyOrProject, valueOrKey, value, options);
     });

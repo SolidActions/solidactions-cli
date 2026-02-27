@@ -5,6 +5,11 @@ import { getConfig } from './init';
 interface EnvSetOptions {
     secret?: boolean;
     env?: string;
+    stagingValue?: string;
+    devValue?: string;
+    stagingInherit?: boolean;
+    devInherit?: boolean;
+    devInheritStaging?: boolean;
 }
 
 export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfProject?: string, options: EnvSetOptions = {}): Promise<void> {
@@ -77,6 +82,31 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         const value = valueOrKey!;
         const isSecret = options.secret || false;
 
+        // Build the request body with per-environment values
+        const body: Record<string, any> = {
+            key,
+            production_value: value,
+            is_secret: isSecret,
+        };
+
+        // Handle staging value and inheritance
+        if (options.stagingInherit) {
+            body.staging_source = 'inherit_production';
+        } else if (options.stagingValue !== undefined) {
+            body.staging_value = options.stagingValue;
+            body.staging_source = 'value';
+        }
+
+        // Handle dev value and inheritance
+        if (options.devInheritStaging) {
+            body.dev_source = 'inherit_staging';
+        } else if (options.devInherit) {
+            body.dev_source = 'inherit_production';
+        } else if (options.devValue !== undefined) {
+            body.dev_value = options.devValue;
+            body.dev_source = 'value';
+        }
+
         try {
             // Check if variable already exists
             const getResponse = await axios.get(`${config.host}/api/v1/variables`, {
@@ -92,14 +122,9 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
             let action: string;
 
             if (existing) {
-                // Update existing variable
                 await axios.put(
                     `${config.host}/api/v1/variables/${existing.id}`,
-                    {
-                        key,
-                        production_value: value,
-                        is_secret: isSecret,
-                    },
+                    body,
                     {
                         headers: {
                             'Authorization': `Bearer ${config.apiKey}`,
@@ -110,14 +135,9 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 );
                 action = 'updated';
             } else {
-                // Create new variable
                 await axios.post(
                     `${config.host}/api/v1/variables`,
-                    {
-                        key,
-                        production_value: value,
-                        is_secret: isSecret,
-                    },
+                    body,
                     {
                         headers: {
                             'Authorization': `Bearer ${config.apiKey}`,
@@ -129,13 +149,28 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 action = 'created';
             }
 
-            console.log(chalk.green(`Global variable "${key}" ${action} successfully.`));
+            const typeLabel = isSecret ? 'secret' : 'variable';
+            console.log(chalk.green(`Global ${typeLabel} "${key}" ${action} successfully.`));
+
+            // Show summary of per-environment values
+            if (options.stagingValue) {
+                console.log(chalk.gray(`  Staging: ${isSecret ? '********' : options.stagingValue}`));
+            } else if (options.stagingInherit) {
+                console.log(chalk.gray('  Staging: (inherits from production)'));
+            }
+            if (options.devValue) {
+                console.log(chalk.gray(`  Dev: ${isSecret ? '********' : options.devValue}`));
+            } else if (options.devInheritStaging) {
+                console.log(chalk.gray('  Dev: (inherits from staging)'));
+            } else if (options.devInherit) {
+                console.log(chalk.gray('  Dev: (inherits from production)'));
+            }
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
                     console.error(chalk.red('Authentication failed. Run "solidactions init <api-key>" to re-configure.'));
                 } else if (error.response.status === 422) {
-                    console.error(chalk.red('Validation error:'), error.response.data);
+                    console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
                 } else {
                     console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
                 }
