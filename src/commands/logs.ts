@@ -32,6 +32,14 @@ export async function logs(runId: string, options: { follow?: boolean }) {
             },
         });
 
+        const errors = logsResponse.data.errors || [];
+        if (errors.length > 0) {
+            for (const err of errors) {
+                console.log(chalk.red(`Worker ${err.worker}: ${err.error}`));
+            }
+            console.log(chalk.gray('---'));
+        }
+
         const logData = logsResponse.data.logs || '';
         let printed = displayLogs(logData);
 
