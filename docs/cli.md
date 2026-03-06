@@ -540,7 +540,12 @@ solidactions schedule:set my-project "0 9 * * *" --workflow daily-sync
 
 # With input data
 solidactions schedule:set my-project "0 9 * * *" -i '{"mode": "full"}'
+
+# Monthly report with structured input
+solidactions schedule:set my-project "0 8 1 * *" --workflow monthly-report -i '{"mode": "monthly", "notify": true}'
 ```
+
+The input JSON is passed as the workflow's trigger input on each scheduled run. Your workflow receives it the same way it would receive webhook payload data.
 
 **Common cron patterns:**
 | Pattern | Description |
@@ -551,6 +556,8 @@ solidactions schedule:set my-project "0 9 * * *" -i '{"mode": "full"}'
 | `0 9 * * *` | Daily at 9am |
 | `0 9 * * 1` | Every Monday at 9am |
 | `0 0 1 * *` | First of every month |
+
+> **Tip:** Schedules can also be defined in `solidactions.yaml` and deployed with your code. The YAML `schedule` field supports both a simple cron string and an extended object with `cron`, `timezone`, `input`, and `enabled`. See the [solidactions.yaml reference](#solidactionsyaml) for details.
 
 ### `schedule:list <project>`
 

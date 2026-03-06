@@ -237,16 +237,16 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     }
 
-    const zipPath = path.join(sourceDir, '.steps-deploy.zip');
-    const output = fs.createWriteStream(zipPath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');
+    const output = fs.createWriteStream(archivePath);
+    const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
 
     output.on('close', async () => {
-        console.log(chalk.gray(`Zipped ${archive.pointer()} total bytes`));
+        console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
             const form = new FormData();
-            form.append('source', fs.createReadStream(zipPath));
+            form.append('source', fs.createReadStream(archivePath));
 
             console.log(chalk.yellow('Uploading...'));
 
@@ -300,7 +300,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             );
                         }
 
-                        fs.unlinkSync(zipPath);
+                        fs.unlinkSync(archivePath);
                         process.exit(0);
                     } else if (status === 'error') {
                         clearInterval(poll);
@@ -310,12 +310,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(build_log));
                             console.log(chalk.yellow('--- End Build Log ---\n'));
                         }
-                        fs.unlinkSync(zipPath);
+                        fs.unlinkSync(archivePath);
                         process.exit(1);
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        fs.unlinkSync(zipPath);
+                        fs.unlinkSync(archivePath);
                         process.exit(1);
                     }
                 } catch {
@@ -334,7 +334,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             } else {
                 console.error(error.message);
             }
-            if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+            if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
             process.exit(1);
         }
     });
@@ -346,13 +346,28 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     archive.pipe(output);
 
     // Glob patterns to ignore
-    const ignore = ['node_modules/**', '.git/**', '.steps-deploy.zip', 'dist/**', 'vendor/**', '**/node_modules/**'];
+    const ignore = ['node_modules/**', '.git/**', '.steps-deploy.tar.gz', '.steps-deploy.zip', 'dist/**', 'vendor/**', '**/node_modules/**'];
 
+    // User code goes under tenantcode/ so it never conflicts with our Dockerfile
     archive.glob('**/*', {
         cwd: sourceDir,
         ignore: ignore,
         dot: true
+    }, {
+        prefix: 'tenantcode'
     });
+
+    // Dockerfile always at archive root, referencing tenantcode/
+    const universalDockerfile = [
+        'FROM node:20-alpine',
+        'WORKDIR /app',
+        'COPY tenantcode/package.json tenantcode/package-lock.json* ./',
+        'RUN npm install',
+        'COPY tenantcode/ .',
+        'RUN npm run build',
+    ].join('\n') + '\n';
+
+    archive.append(universalDockerfile, { name: 'Dockerfile' });
 
     await archive.finalize();
 }
