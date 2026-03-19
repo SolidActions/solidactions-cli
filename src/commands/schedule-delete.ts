@@ -1,24 +1,17 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function scheduleDelete(projectName: string, scheduleId: string, options: { yes?: boolean } = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     console.log(chalk.blue(`Deleting schedule ${scheduleId} from project "${projectName}"...`));
 
     try {
         // First, get the schedule details for confirmation
         const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/schedules`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const schedules = listResponse.data || [];
@@ -46,10 +39,7 @@ export async function scheduleDelete(projectName: string, scheduleId: string, op
 
         // Delete the schedule
         await axios.delete(`${config.host}/api/v1/projects/${projectName}/schedules/${scheduleId}`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         console.log(chalk.green(`Schedule ${scheduleId} deleted successfully.`));

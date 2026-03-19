@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface WebhookListOptions {
     env?: string;
@@ -8,11 +8,7 @@ interface WebhookListOptions {
 }
 
 export async function webhookList(projectName: string, options: WebhookListOptions = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
     const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
@@ -26,10 +22,7 @@ export async function webhookList(projectName: string, options: WebhookListOptio
         }
 
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/webhooks`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
             params,
         });
 

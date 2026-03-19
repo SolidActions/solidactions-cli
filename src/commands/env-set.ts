@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface EnvSetOptions {
     secret?: boolean;
@@ -13,11 +13,7 @@ interface EnvSetOptions {
 }
 
 export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfProject?: string, options: EnvSetOptions = {}): Promise<void> {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     // Detect mode based on arguments
     const isProjectMode = valueIfProject !== undefined;
@@ -49,11 +45,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                     }]
                 },
                 {
-                    headers: {
-                        'Authorization': `Bearer ${config.apiKey}`,
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                    },
+                    headers: getApiHeaders(config, 'application/json'),
                 }
             );
 
@@ -110,10 +102,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         try {
             // Check if variable already exists
             const getResponse = await axios.get(`${config.host}/api/v1/variables`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             const variables = getResponse.data?.data || [];
@@ -126,11 +115,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                     `${config.host}/api/v1/variables/${existing.id}`,
                     body,
                     {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json',
-                        },
+                        headers: getApiHeaders(config, 'application/json'),
                     }
                 );
                 action = 'updated';
@@ -139,11 +124,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                     `${config.host}/api/v1/variables`,
                     body,
                     {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json',
-                        },
+                        headers: getApiHeaders(config, 'application/json'),
                     }
                 );
                 action = 'created';

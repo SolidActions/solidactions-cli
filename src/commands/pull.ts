@@ -3,14 +3,10 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import AdmZip from 'adm-zip';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function pull(projectName: string, destPath?: string) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions init <api-key>` first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const destination = destPath ? path.resolve(destPath) : process.cwd();
 
@@ -18,10 +14,7 @@ export async function pull(projectName: string, destPath?: string) {
 
     try {
         const response = await axios.get(`${config.host}/api/v1/projects/${projectName}/source`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/octet-stream',
-            },
+            headers: { ...getApiHeaders(config), 'Accept': 'application/octet-stream' },
             responseType: 'arraybuffer',
         });
 

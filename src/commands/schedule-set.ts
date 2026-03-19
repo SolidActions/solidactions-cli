@@ -1,13 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string }) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
@@ -36,11 +32,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
         }
 
         await axios.post(`${config.host}/api/v1/projects/${projectName}/schedules`, payload, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-            },
+            headers: getApiHeaders(config, 'application/json'),
         });
 
         console.log(chalk.green(`Schedule set successfully!`));

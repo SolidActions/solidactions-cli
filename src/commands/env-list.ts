@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface EnvListOptions {
     env?: string;
@@ -27,11 +27,7 @@ function formatEnvValue(value: string | null, source: string | null, isSecret: b
 }
 
 export async function envList(projectName?: string, options: EnvListOptions = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     try {
         if (projectName) {
@@ -44,10 +40,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             console.log(chalk.blue(`Environment variables for project "${projectName}" (${environment}):`));
 
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             const mappings = response.data || [];
@@ -108,10 +101,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             console.log(chalk.blue('Global environment variables:'));
 
             const response = await axios.get(`${config.host}/api/v1/variables`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             const variables = response.data?.data || [];

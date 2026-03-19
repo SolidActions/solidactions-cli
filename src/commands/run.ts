@@ -1,13 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
     const projectSlug = environment === 'production'
@@ -31,11 +27,7 @@ export async function run(projectName: string, workflowName: string, options: { 
             `${config.host}/api/v1/projects/${projectSlug}/workflows/${workflowName}/trigger`,
             { input: inputData },
             {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                },
+                headers: getApiHeaders(config, 'application/json'),
             }
         );
 
@@ -53,10 +45,7 @@ export async function run(projectName: string, workflowName: string, options: { 
                     attempts++;
 
                     const statusResponse = await axios.get(`${config.host}/api/v1/runs/${runData.id}`, {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                        },
+                        headers: getApiHeaders(config),
                     });
 
                     const status = statusResponse.data.status;

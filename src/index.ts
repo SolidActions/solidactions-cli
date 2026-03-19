@@ -21,6 +21,7 @@ import { webhookList } from './commands/webhooks';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
+import { workspacesList, workspaceSet } from './commands/workspaces';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -270,6 +271,25 @@ program
     .option('--show-secrets', 'Show webhook secrets')
     .action((project, options) => {
         webhookList(project, options);
+    });
+
+// =============================================================================
+// Workspaces
+// =============================================================================
+
+program
+    .command('workspaces')
+    .description('List your workspaces across all organizations')
+    .action(() => {
+        workspacesList();
+    });
+
+program
+    .command('workspace:set')
+    .description('Set the active workspace for CLI operations')
+    .argument('<workspace-id>', 'Workspace ID, slug, or name')
+    .action((workspaceId) => {
+        workspaceSet(workspaceId);
     });
 
 // =============================================================================

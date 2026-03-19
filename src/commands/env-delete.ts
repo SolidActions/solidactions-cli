@@ -1,14 +1,10 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean } = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     // Determine mode: if keyIfProject is provided, it's project mapping delete
     const isProjectMode = keyIfProject !== undefined;
@@ -22,10 +18,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
 
             // First, get the mapping to find its ID
             const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/variable-mappings`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             const mappings = listResponse.data || [];
@@ -55,10 +48,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
 
             // Delete the mapping
             await axios.delete(`${config.host}/api/v1/projects/${projectName}/variable-mappings/${mapping.id}`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             if (mapping.is_yaml_declared) {
@@ -72,10 +62,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
 
             // First, get the variable to find its ID
             const listResponse = await axios.get(`${config.host}/api/v1/variables`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             const variables = listResponse.data?.data || [];
@@ -103,10 +90,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
 
             // Delete the variable
             await axios.delete(`${config.host}/api/v1/variables/${variable.id}`, {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                },
+                headers: getApiHeaders(config),
             });
 
             console.log(chalk.green(`Global variable "${key}" deleted successfully.`));

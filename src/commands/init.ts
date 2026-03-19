@@ -9,6 +9,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export interface Config {
     host: string;
     apiKey: string;
+    workspaceId?: string;
 }
 
 export function getConfig(): Config | null {

@@ -1,23 +1,16 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function envMap(projectName: string, projectKey: string, globalKey: string) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     console.log(chalk.blue(`Mapping global variable "${globalKey}" to project key "${projectKey}" in "${projectName}"...`));
 
     try {
         // First, get the global variable ID by key
         const varsResponse = await axios.get(`${config.host}/api/v1/variables`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const variables = varsResponse.data.data || varsResponse.data;
@@ -34,11 +27,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
             project_key: projectKey,
             global_variable_id: globalVar.id,
         }, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-            },
+            headers: getApiHeaders(config, 'application/json'),
         });
 
         console.log(chalk.green(`Variable mapping created!`));

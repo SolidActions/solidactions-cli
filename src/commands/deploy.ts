@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { getConfig } from './init';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 /**
  * Validate project structure before deployment.
@@ -102,8 +103,7 @@ interface DeployOptions {
  * This registers all YAML-declared vars and their mappings.
  */
 async function pushYamlDeclarations(
-    host: string,
-    apiKey: string,
+    config: { host: string; apiKey: string; workspaceId?: string },
     projectSlug: string,
     yamlConfig: SolidActionsConfig
 ): Promise<void> {
@@ -122,14 +122,10 @@ async function pushYamlDeclarations(
 
     try {
         await axios.post(
-            `${host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
+            `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
             { declarations },
             {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                },
+                headers: getApiHeaders(config, 'application/json'),
             }
         );
         console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations`));
@@ -139,11 +135,7 @@ async function pushYamlDeclarations(
 }
 
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions init <api-key>` first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const sourceDir = sourcePath ? path.resolve(sourcePath) : process.cwd();
     const environment = options.env || 'dev';
@@ -197,10 +189,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             : `${projectName}-${environment}`;
 
         const checkResponse = await axios.get(`${config.host}/api/v1/projects/${lookupSlug}`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
         projectSlug = checkResponse.data.slug || checkResponse.data.name;
     } catch (error: any) {
@@ -219,11 +208,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     slug: projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-') + (environment !== 'production' ? `-${environment}` : ''),
                     environment: environment,
                 }, {
-                    headers: {
-                        'Authorization': `Bearer ${config.apiKey}`,
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                    },
+                    headers: getApiHeaders(config, 'application/json'),
                 });
                 projectSlug = createResponse.data.slug || createResponse.data.name;
                 console.log(chalk.green(`Project "${projectName}"${envLabel} created.`));
@@ -253,8 +238,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
                 headers: {
                     ...form.getHeaders(),
-                    'Accept': 'application/json',
-                    'Authorization': `Bearer ${config.apiKey}`,
+                    ...getApiHeaders(config),
                 },
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
@@ -265,14 +249,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
             // Poll for completion
             let attempts = 0;
-            const maxAttempts = 120; // 2 minutes timeout
+            const maxAttempts = 600; // 10 minutes of inactivity timeout
             let lastLogLength = 0;
 
             const poll = setInterval(async () => {
                 try {
                     attempts++;
                     const statusRes = await axios.get(`${config.host}/api/v1/projects/${projectSlug}`, {
-                        headers: { 'Authorization': `Bearer ${config.apiKey}` }
+                        headers: getApiHeaders(config),
                     });
                     const { status, build_log } = statusRes.data;
 
@@ -284,6 +268,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             process.stdout.write('\n');
                         }
                         lastLogLength = build_log.length;
+                        attempts = 0; // Reset timeout — build is still progressing
+                    }
+
+                    // Periodic waiting indicator when no logs yet
+                    if (attempts > 0 && attempts % 15 === 0 && lastLogLength === 0) {
+                        console.log(chalk.gray('Still waiting for build to start...'));
                     }
 
                     if (status === 'deployed') {
@@ -292,12 +282,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
                         // Always sync YAML declarations (registers env vars and their mappings)
                         if (yamlConfig) {
-                            await pushYamlDeclarations(
-                                config.host,
-                                config.apiKey,
-                                projectSlug,
-                                yamlConfig
-                            );
+                            await pushYamlDeclarations(config, projectSlug, yamlConfig);
                         }
 
                         fs.unlinkSync(archivePath);

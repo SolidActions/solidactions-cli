@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig } from '../utils/env';
 
 interface EnvPushOptions {
@@ -14,11 +14,7 @@ interface EnvPushOptions {
 }
 
 export async function envPush(projectName: string, sourcePath: string, options: EnvPushOptions = {}): Promise<void> {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const sourceDir = path.resolve(sourcePath);
     const environment = options.env || 'dev';
@@ -99,10 +95,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
     let serverMappings: any[] = [];
     try {
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
         serverMappings = response.data || [];
     } catch (error: any) {
@@ -227,11 +220,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
             `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/bulk`,
             { variables },
             {
-                headers: {
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                },
+                headers: getApiHeaders(config, 'application/json'),
             }
         );
 

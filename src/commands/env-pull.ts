@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface EnvPullOptions {
     env?: string;
@@ -30,11 +30,7 @@ async function confirm(message: string): Promise<boolean> {
 }
 
 export async function envPull(projectName: string, options: EnvPullOptions = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
 
@@ -52,10 +48,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
     try {
         // First, check if there are any secrets
         const checkResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const mappings = checkResponse.data || [];
@@ -79,10 +72,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
 
         // Now fetch with reveal=true to get actual values
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings?reveal=true&resolve_oauth=true`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const variables = response.data || [];

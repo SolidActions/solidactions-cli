@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface StepsOptions {
     step?: string;
@@ -9,11 +9,7 @@ interface StepsOptions {
 }
 
 export async function steps(runId: string, options: StepsOptions) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     // Flag validation: --follow and --step are incompatible
     if (options.follow && options.step) {
@@ -23,10 +19,7 @@ export async function steps(runId: string, options: StepsOptions) {
 
     try {
         const response = await axios.get(`${config.host}/api/v1/runs/${runId}/steps`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const data = response.data;
@@ -76,17 +69,11 @@ export async function steps(runId: string, options: StepsOptions) {
             const pollInterval = setInterval(async () => {
                 try {
                     const refreshResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/steps`, {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                        },
+                        headers: getApiHeaders(config),
                     });
 
                     const runStatus = await axios.get(`${config.host}/api/v1/runs/${runId}`, {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                        },
+                        headers: getApiHeaders(config),
                     });
 
                     console.clear();

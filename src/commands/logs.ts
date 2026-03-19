@@ -1,23 +1,16 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function logs(runId: string, options: { follow?: boolean }) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     console.log(chalk.blue(`Fetching logs for run: ${runId}...`));
 
     try {
         // Get the run status first
         const runResponse = await axios.get(`${config.host}/api/v1/runs/${runId}`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const runData = runResponse.data;
@@ -26,10 +19,7 @@ export async function logs(runId: string, options: { follow?: boolean }) {
 
         // Get the logs for this run
         const logsResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/logs`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
         });
 
         const errors = logsResponse.data.errors || [];
@@ -49,10 +39,7 @@ export async function logs(runId: string, options: { follow?: boolean }) {
             const pollInterval = setInterval(async () => {
                 try {
                     const refreshResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/logs`, {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                        },
+                        headers: getApiHeaders(config),
                     });
 
                     const newLogData = refreshResponse.data.logs || '';
@@ -63,10 +50,7 @@ export async function logs(runId: string, options: { follow?: boolean }) {
 
                     // Check if run is complete
                     const runStatus = await axios.get(`${config.host}/api/v1/runs/${runId}`, {
-                        headers: {
-                            'Authorization': `Bearer ${config.apiKey}`,
-                            'Accept': 'application/json',
-                        },
+                        headers: getApiHeaders(config),
                     });
 
                     if (['completed', 'failed', 'acknowledged'].includes(runStatus.data.status)) {

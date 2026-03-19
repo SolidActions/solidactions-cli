@@ -1,13 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getConfig } from './init';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function runs(projectName?: string, options: { limit?: number } = {}) {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run "solidactions init <api-key>" first.'));
-        process.exit(1);
-    }
+    const config = await requireConfigWithWorkspace();
 
     const limit = options.limit || 20;
 
@@ -20,10 +16,7 @@ export async function runs(projectName?: string, options: { limit?: number } = {
         }
 
         const response = await axios.get(`${config.host}/api/v1/runs`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
+            headers: getApiHeaders(config),
             params,
         });
 
