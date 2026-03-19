@@ -43,6 +43,7 @@ program
     .argument('<api-key>', 'Your SolidActions API key')
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
+    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt)')
     .action((apiKey, options) => {
         init(apiKey, options);
     });
