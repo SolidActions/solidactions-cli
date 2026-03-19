@@ -11,8 +11,11 @@ npm install -g @solidactions/cli
 ## Quick Start
 
 ```bash
-# Initialize with your API key
+# Initialize with your API key (prompts for workspace selection)
 solidactions init <api-key>
+
+# Initialize and set workspace directly (no prompt)
+solidactions init <api-key> --workspace <name-or-id>
 
 # Deploy a project
 solidactions deploy <project-name> <path>
@@ -22,9 +25,12 @@ solidactions deploy <project-name> <path>
 
 | Command | Description |
 |---------|-------------|
-| `init <api-key>` | Initialize CLI with your API key |
+| `init <api-key>` | Initialize CLI with your API key (prompts for workspace selection) |
+| `init <api-key> --workspace <name-or-id>` | Initialize and set workspace directly |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
+| `workspaces` | List all workspaces |
+| `workspace:set <name-or-id>` | Change the active workspace |
 | `deploy <project> [path]` | Deploy a project to SolidActions |
 | `pull <project> [path]` | Pull project source from SolidActions |
 | `run <project> <workflow>` | Trigger a workflow run |
