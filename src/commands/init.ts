@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
+import { ensureWorkspaceSelected } from '../utils/api';
 
 const CONFIG_DIR = path.join(os.homedir(), '.solidactions');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -63,13 +64,23 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
     console.log(chalk.gray(`Host: ${host}`));
 
     // Save the configuration
-    saveConfig({
+    const config: Config = {
         host,
         apiKey: apiKey.trim(),
-    });
+    };
+    saveConfig(config);
 
     console.log(chalk.green('CLI initialized successfully!'));
     console.log(chalk.gray(`Configuration saved to ${CONFIG_FILE}`));
+    console.log('');
+
+    // Auto-select workspace
+    try {
+        await ensureWorkspaceSelected(config);
+    } catch {
+        console.log(chalk.yellow('Could not auto-select workspace. Run `solidactions workspace:set` later.'));
+    }
+
     console.log('');
     console.log(chalk.blue('Quick start:'));
     console.log(chalk.gray('  solidactions deploy <project-name>    Deploy current directory'));
