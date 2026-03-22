@@ -18,7 +18,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
 
         if (!globalVar) {
             console.error(chalk.red(`Global variable "${globalKey}" not found.`));
-            console.log(chalk.gray('Create it with: solidactions env:set ' + globalKey + ' <value>'));
+            console.log(chalk.gray('Create it with: solidactions env set ' + globalKey + ' <value>'));
             process.exit(1);
         }
 

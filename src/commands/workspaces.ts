@@ -75,7 +75,7 @@ export async function workspaceSet(workspaceId: string) {
         const workspace = allWorkspaces.find((w: any) => w.id === workspaceId || w.slug === workspaceId || w.name === workspaceId);
 
         if (!workspace) {
-            console.error(chalk.red(`Workspace "${workspaceId}" not found. Run \`solidactions workspaces\` to list available workspaces.`));
+            console.error(chalk.red(`Workspace "${workspaceId}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
             process.exit(1);
         }
 

@@ -83,14 +83,14 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
             await ensureWorkspaceSelected(config);
         }
     } catch {
-        console.log(chalk.yellow('Could not set workspace. Run `solidactions workspace:set` later.'));
+        console.log(chalk.yellow('Could not set workspace. Run `solidactions workspace set` later.'));
     }
 
     console.log('');
     console.log(chalk.blue('Quick start:'));
-    console.log(chalk.gray('  solidactions deploy <project-name>    Deploy current directory'));
-    console.log(chalk.gray('  solidactions run <project> <workflow> Run a workflow'));
-    console.log(chalk.gray('  solidactions runs                     List recent runs'));
+    console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
+    console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
+    console.log(chalk.gray('  solidactions run list                 List recent runs'));
 }
 
 export async function logout() {

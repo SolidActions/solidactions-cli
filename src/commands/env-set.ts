@@ -19,7 +19,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
     const isProjectMode = valueIfProject !== undefined;
 
     if (isProjectMode) {
-        // Project mode: solidactions env:set <project> <key> <value>
+        // Project mode: solidactions env set <project> <key> <value>
         const projectName = keyOrProject;
         const key = valueOrKey!;
         const value = valueIfProject;
@@ -69,7 +69,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
             process.exit(1);
         }
     } else {
-        // Global mode: solidactions env:set <key> <value>
+        // Global mode: solidactions env set <key> <value>
         const key = keyOrProject;
         const value = valueOrKey!;
         const isSecret = options.secret || false;
