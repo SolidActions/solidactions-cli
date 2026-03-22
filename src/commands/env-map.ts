@@ -1,8 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function envMap(projectName: string, projectKey: string, globalKey: string) {
+export async function envMap(projectName: string, projectKey: string, globalKey: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
 
     console.log(chalk.blue(`Mapping global variable "${globalKey}" to project key "${projectKey}" in "${projectName}"...`));
@@ -20,6 +21,33 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
             console.error(chalk.red(`Global variable "${globalKey}" not found.`));
             console.log(chalk.gray('Create it with: solidactions env set ' + globalKey + ' <value>'));
             process.exit(1);
+        }
+
+        // Check if project key already has a mapping
+        if (!options.yes) {
+            const mappingsResponse = await axios.get(
+                `${config.host}/api/v1/projects/${projectName}/variable-mappings`,
+                { headers: getApiHeaders(config) }
+            );
+            const mappings = mappingsResponse.data || [];
+            const existing = mappings.find((m: any) => m.env_name === projectKey);
+
+            if (existing && (existing.has_value || existing.global_variable_id)) {
+                const currentSource = existing.global_variable_id
+                    ? `mapped to global "${existing.global_variable_key || 'unknown'}"`
+                    : 'has a local value';
+                console.log(chalk.yellow(`"${projectKey}" already ${currentSource} in "${projectName}".`));
+                const confirm = await prompts({
+                    type: 'confirm',
+                    name: 'proceed',
+                    message: 'Overwrite mapping?',
+                    initial: false,
+                });
+                if (!confirm.proceed) {
+                    console.log(chalk.gray('Cancelled.'));
+                    return;
+                }
+            }
         }
 
         // Create the mapping

@@ -170,6 +170,7 @@ env
     .option('--staging-inherit', 'Staging inherits from production (global only)')
     .option('--dev-inherit', 'Dev inherits from production (global only)')
     .option('--dev-inherit-staging', 'Dev inherits from staging (global only)')
+    .option('-y, --yes', 'Skip overwrite confirmation')
     .action((keyOrProject, valueOrKey, value, options) => {
         envSet(keyOrProject, valueOrKey, value, options);
     });
@@ -199,8 +200,9 @@ env
     .argument('<project>', 'Project name')
     .argument('<key>', 'Project-specific variable name')
     .argument('<global-key>', 'Global variable name to map from')
-    .action((projectName, key, globalKey) => {
-        envMap(projectName, key, globalKey);
+    .option('-y, --yes', 'Skip overwrite confirmation')
+    .action((projectName, key, globalKey, options) => {
+        envMap(projectName, key, globalKey, options);
     });
 
 env
@@ -241,6 +243,7 @@ schedule
     .argument('<cron>', 'Cron expression (e.g., "0 9 * * *" for daily at 9am)')
     .option('-w, --workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
+    .option('-y, --yes', 'Skip confirmation if schedule already exists')
     .action((projectName, cron, options) => {
         scheduleSet(projectName, cron, options);
     });
