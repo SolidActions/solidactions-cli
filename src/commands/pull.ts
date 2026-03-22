@@ -6,12 +6,32 @@ import { Readable } from 'stream';
 import { extract } from 'tar';
 import axios from 'axios';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function pull(projectName: string, destPath?: string) {
+export async function pull(projectName: string, destPath?: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
 
     const destination = destPath ? path.resolve(destPath) : process.cwd();
+
+    // Warn if destination has existing files
+    if (fs.existsSync(destination)) {
+        const entries = fs.readdirSync(destination);
+        if (entries.length > 0 && !options.yes) {
+            console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
+            console.log(chalk.yellow('Pulling will overwrite existing files.'));
+            const response = await prompts({
+                type: 'confirm',
+                name: 'proceed',
+                message: 'Continue?',
+                initial: false,
+            });
+            if (!response.proceed) {
+                console.log(chalk.gray('Cancelled.'));
+                process.exit(0);
+            }
+        }
+    }
 
     console.log(chalk.blue(`Pulling project "${projectName}"...`));
 

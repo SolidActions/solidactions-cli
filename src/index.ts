@@ -93,8 +93,9 @@ project
     .description('Pull project source from SolidActions')
     .argument('<project-name>', 'Project name')
     .argument('[path]', 'Destination directory (defaults to current directory)')
-    .action((projectName, path) => {
-        pull(projectName, path);
+    .option('-y, --yes', 'Skip overwrite confirmation')
+    .action((projectName, path, options) => {
+        pull(projectName, path, options);
     });
 
 project
