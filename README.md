@@ -18,10 +18,12 @@ solidactions init <api-key>
 solidactions init <api-key> --workspace <name-or-id>
 
 # Deploy a project
-solidactions deploy <project-name> <path>
+solidactions project deploy <project-name> <path>
 ```
 
 ## Commands
+
+### Top-level Commands
 
 | Command | Description |
 |---------|-------------|
@@ -29,25 +31,64 @@ solidactions deploy <project-name> <path>
 | `init <api-key> --workspace <name-or-id>` | Initialize and set workspace directly |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
-| `workspaces` | List all workspaces |
-| `workspace:set <name-or-id>` | Change the active workspace |
-| `deploy <project> [path]` | Deploy a project to SolidActions |
-| `pull <project> [path]` | Pull project source from SolidActions |
-| `run <project> <workflow>` | Trigger a workflow run |
-| `runs [project]` | List recent workflow runs |
-| `logs <run-id>` | View logs for a workflow run |
-| `logs:build <project>` | View build/deployment logs |
-| `env:set <key> <value>` | Set a global variable (create or update) |
-| `env:set <project> <key> <value>` | Set a project variable (create or update) |
-| `env:list [project]` | List environment variables |
-| `env:delete <key>` | Delete an environment variable |
-| `env:map <project> <key> <global-key>` | Map a global variable to a project |
-| `env:pull <project>` | Pull resolved env vars (including OAuth tokens) to a local file |
-| `env:push <project> [path]` | Push .env values to a project |
-| `schedule:set <project> <cron>` | Set a cron schedule for a workflow |
-| `schedule:list <project>` | List schedules for a project |
-| `schedule:delete <project> <id>` | Delete a schedule |
-| `webhooks <project>` | List webhook URLs for a project |
+| `dev <file>` | Run a workflow locally using an in-memory mock server (no deploy needed) |
+
+### project
+
+| Command | Description |
+|---------|-------------|
+| `project deploy <project-name> [path]` | Deploy a project to SolidActions |
+| `project pull <project-name> [path]` | Pull project source from SolidActions |
+| `project logs <project>` | View build/deployment logs for a project |
+| `project list` | List all projects |
+
+### run
+
+| Command | Description |
+|---------|-------------|
+| `run start <project> <workflow>` | Trigger a workflow run |
+| `run list [project]` | List recent workflow runs |
+| `run view <run-id>` | View details, timeline, steps, or logs for a workflow run |
+
+### env
+
+| Command | Description |
+|---------|-------------|
+| `env set <key> <value>` | Set a global variable (create or update) |
+| `env set <project> <key> <value>` | Set a project variable (create or update) |
+| `env list [project]` | List environment variables |
+| `env delete <key-or-project> [key]` | Delete an environment variable |
+| `env map <project> <key> <global-key>` | Map a global variable to a project-specific key |
+| `env pull <project>` | Pull resolved env vars (including OAuth tokens) to a local file |
+| `env push <project> [path]` | Push .env values to a project |
+
+### schedule
+
+| Command | Description |
+|---------|-------------|
+| `schedule set <project> <cron>` | Set a cron schedule for a workflow |
+| `schedule list <project>` | List schedules for a project |
+| `schedule delete <project> <schedule-id>` | Delete a schedule |
+
+### webhook
+
+| Command | Description |
+|---------|-------------|
+| `webhook list <project>` | List webhook URLs for a project |
+
+### workspace
+
+| Command | Description |
+|---------|-------------|
+| `workspace list` | List all workspaces |
+| `workspace set <workspace-id>` | Set the active workspace for CLI operations |
+
+### ai
+
+| Command | Description |
+|---------|-------------|
+| `ai init` | Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development |
+| `ai examples [names...]` | Install example workflows for AI reference |
 
 See [docs/cli.md](docs/cli.md) for full documentation.
 
