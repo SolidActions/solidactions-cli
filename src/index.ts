@@ -137,6 +137,12 @@ runCmd
     .description('List recent workflow runs')
     .argument('[project]', 'Filter by project name')
     .option('-l, --limit <number>', 'Number of runs to show', parseInt)
+    .option('--offset <number>', 'Skip first N runs (pagination)', parseInt)
+    .option('--status <status>', 'Filter by status (completed, failed, queued, running)')
+    .option('--since <duration>', 'Filter to runs since (e.g., 1h, 30m, 2d, 1w)')
+    .option('--workflow <name>', 'Filter by workflow name')
+    .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
+    .option('--json', 'Output as JSON')
     .action((projectName, options) => {
         runs(projectName, options);
     });
@@ -148,6 +154,7 @@ runCmd
     .option('--timeline', 'Show only timeline data')
     .option('--steps', 'Show only step data')
     .option('--logs', 'Show raw logs')
+    .option('--json', 'Output as JSON')
     .action((runId, options) => {
         runView(runId, options);
     });
