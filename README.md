@@ -11,86 +11,82 @@ npm install -g @solidactions/cli
 ## Quick Start
 
 ```bash
-# Initialize with your API key (prompts for workspace selection)
-solidactions init <api-key>
-
-# Initialize and set workspace directly (no prompt)
-solidactions init <api-key> --workspace <name-or-id>
-
-# Deploy a project
-solidactions project deploy <project-name> <path>
+solidactions init <api-key>                          # Initialize (prompts for workspace)
+solidactions init <api-key> --workspace <name>       # Initialize with workspace
+solidactions project deploy <project> <path>         # Deploy a project
+solidactions run start <project> <workflow>           # Trigger a workflow
+solidactions run view <run-id>                        # Inspect a run
 ```
 
 ## Commands
 
-### Top-level Commands
+Use `solidactions <command> --help` for full flag details on any command.
+
+### Top-level
 
 | Command | Description |
 |---------|-------------|
-| `init <api-key>` | Initialize CLI with your API key (prompts for workspace selection) |
-| `init <api-key> --workspace <name-or-id>` | Initialize and set workspace directly |
+| `init <api-key>` | Initialize CLI with API key |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
-| `dev <file>` | Run a workflow locally using an in-memory mock server (no deploy needed) |
+| `dev <file>` | Run a workflow locally (no deploy needed) |
 
 ### project
 
-| Command | Description |
-|---------|-------------|
-| `project deploy <project-name> [path]` | Deploy a project to SolidActions |
-| `project pull <project-name> [path]` | Pull project source from SolidActions |
-| `project logs <project>` | View build/deployment logs for a project |
-| `project list` | List all projects |
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only` | Deploy or sync config only |
+| `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
+| `project logs <name>` | | View build logs |
+| `project list` | | List all projects |
 
 ### run
 
-| Command | Description |
-|---------|-------------|
-| `run start <project> <workflow>` | Trigger a workflow run |
-| `run list [project]` | List recent workflow runs |
-| `run view <run-id>` | View details, timeline, steps, or logs for a workflow run |
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `run start <project> <workflow>` | `-e`, `-i`, `-w` | Trigger a workflow run |
+| `run list [project]` | `--json`, `--detailed`, `--status`, `--since`, `--workflow`, `--limit`, `--offset` | List and filter runs |
+| `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run |
 
 ### env
 
-| Command | Description |
-|---------|-------------|
-| `env set <key> <value>` | Set a global variable (create or update) |
-| `env set <project> <key> <value>` | Set a project variable (create or update) |
-| `env list [project]` | List environment variables |
-| `env delete <key-or-project> [key]` | Delete an environment variable |
-| `env map <project> <key> <global-key>` | Map a global variable to a project-specific key |
-| `env pull <project>` | Pull resolved env vars (including OAuth tokens) to a local file |
-| `env push <project> [path]` | Push .env values to a project |
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `env set <key> <value>` | `-s`, `-y`, `--staging-value`, `--dev-value` | Set global variable (warns before overwriting) |
+| `env set <project> <key> <value>` | `-e`, `-s`, `-y` | Set project variable (warns before overwriting) |
+| `env list [project]` | `-e` | List variables |
+| `env delete <key-or-project> [key]` | `-y` | Delete a variable |
+| `env map <project> <key> <global-key>` | `-y` | Map global to project key (warns before overwriting) |
+| `env pull <project>` | `-e`, `-o`, `-y`, `--update-oauth` | Pull resolved env vars to .env file |
+| `env push <project> [path]` | `-e`, `-y`, `--new-only`, `--include-undeclared` | Push .env values to project |
 
 ### schedule
 
-| Command | Description |
-|---------|-------------|
-| `schedule set <project> <cron>` | Set a cron schedule for a workflow |
-| `schedule list <project>` | List schedules for a project |
-| `schedule delete <project> <schedule-id>` | Delete a schedule |
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `schedule set <project> <cron>` | `-w`, `-i`, `-y` | Set cron schedule (warns if exists) |
+| `schedule list <project>` | | List schedules |
+| `schedule delete <project> <id>` | `-y` | Delete a schedule |
 
 ### webhook
 
-| Command | Description |
-|---------|-------------|
-| `webhook list <project>` | List webhook URLs for a project |
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `webhook list <project>` | `-e`, `--show-secrets` | List webhook URLs |
 
 ### workspace
 
 | Command | Description |
 |---------|-------------|
 | `workspace list` | List all workspaces |
-| `workspace set <workspace-id>` | Set the active workspace for CLI operations |
+| `workspace set <id>` | Set active workspace (by ID, slug, or name) |
 
 ### ai
 
-| Command | Description |
-|---------|-------------|
-| `ai init` | Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development |
-| `ai examples [names...]` | Install example workflows for AI reference |
-
-See [docs/cli.md](docs/cli.md) for full documentation.
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `ai init` | `--claude`, `--agents` | Install AI helper docs |
+| `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
 ## Development
 
