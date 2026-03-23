@@ -20,17 +20,19 @@ export async function runView(runId: string, options: RunViewOptions) {
         const runData = runResponse.data;
 
         // Build timeline
+        // Duration = container start → container stop (not triggered → stop)
         const triggeredAt = runData.triggered_at || runData.created_at;
         const sessionStartedMs = runData.session_started_at_epoch_ms;
         const sessionCompletedMs = runData.session_completed_at_epoch_ms;
-        const triggeredMs = triggeredAt ? new Date(triggeredAt).getTime() : null;
-        const totalMs = (triggeredMs && sessionCompletedMs) ? sessionCompletedMs - triggeredMs : null;
+        const durationMs = (sessionStartedMs && sessionCompletedMs)
+            ? sessionCompletedMs - sessionStartedMs
+            : null;
 
         const timeline = {
             triggered: triggeredAt || null,
             started: sessionStartedMs ? new Date(sessionStartedMs).toISOString() : null,
             completed: sessionCompletedMs ? new Date(sessionCompletedMs).toISOString() : null,
-            totalMs,
+            durationMs,
         };
 
         // --logs: fetch and display raw logs
@@ -133,7 +135,7 @@ function displayFullView(runData: any, timeline: any, steps: any[], logsData: an
     console.log(`  Trigger:   ${chalk.gray(runData.triggered_by || '-')}`);
 
     // Timeline
-    displayTimeline(runData, timeline);
+    displayTimeline(runData, timeline, steps);
 
     // Steps
     if (steps.length > 0) {
@@ -183,17 +185,28 @@ function displayFullView(runData: any, timeline: any, steps: any[], logsData: an
     console.log('');
 }
 
-function displayTimeline(runData: any, timeline: any) {
+function displayTimeline(runData: any, timeline: any, steps: any[] = []) {
     const formatTs = (iso: string | null) => {
         if (!iso) return '-';
         const d = new Date(iso);
         return d.toLocaleString();
     };
 
-    console.log(`  Triggered: ${chalk.gray(formatTs(timeline.triggered))}`);
+    // Compute startup: triggered → first step start
+    let startupMs: number | null = null;
+    if (timeline.triggered && steps.length > 0 && steps[0].startedAt) {
+        const triggeredMs = new Date(timeline.triggered).getTime();
+        const firstStepMs = new Date(steps[0].startedAt).getTime();
+        startupMs = firstStepMs - triggeredMs;
+    }
+
+    console.log(`  Created:   ${chalk.gray(formatTs(timeline.triggered))}`);
     console.log(`  Started:   ${chalk.gray(formatTs(timeline.started))}`);
     console.log(`  Completed: ${chalk.gray(formatTs(timeline.completed))}`);
-    console.log(`  Duration:  ${chalk.gray(timeline.totalMs ? formatDuration(timeline.totalMs) : '-')}`);
+    if (startupMs !== null && startupMs > 0) {
+        console.log(`  Startup:   ${chalk.gray(formatDuration(startupMs))}`);
+    }
+    console.log(`  Duration:  ${chalk.gray(timeline.durationMs ? formatDuration(timeline.durationMs) : '-')}`);
 }
 
 function displayStepsTable(steps: any[], indent: string = '  ') {
