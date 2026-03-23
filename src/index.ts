@@ -84,6 +84,7 @@ project
     .argument('[path]', 'Source directory to deploy (defaults to current directory)')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
     .option('--create', 'Create environment project if it doesn\'t exist')
+    .option('--config-only', 'Sync YAML env declarations without building/deploying')
     .action((projectName, path, options) => {
         deploy(projectName, path, options);
     });
