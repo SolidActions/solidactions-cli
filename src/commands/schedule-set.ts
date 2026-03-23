@@ -1,11 +1,10 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string }) {
+export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; yes?: boolean }) {
     const config = await requireConfigWithWorkspace();
-
-    console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
     // Parse input JSON if provided
     let inputData: Record<string, any> | undefined;
@@ -17,6 +16,52 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
             process.exit(1);
         }
     }
+
+    // Check for existing schedule on the same workflow
+    if (!options.yes) {
+        try {
+            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/schedules`, {
+                headers: getApiHeaders(config),
+            });
+            const schedules = listResponse.data.data || listResponse.data || [];
+            const existing = schedules.find((s: any) => {
+                if (options.workflow) {
+                    return s.workflow_name === options.workflow || s.workflow_slug === options.workflow;
+                }
+                return true; // No workflow specified — any existing schedule is a match
+            });
+
+            if (existing) {
+                const workflowName = existing.workflow_name || existing.workflow_slug || 'unknown';
+                console.log(chalk.yellow(`"${workflowName}" already has a schedule: ${existing.cron_expression}`));
+                const confirm = await prompts({
+                    type: 'select',
+                    name: 'action',
+                    message: 'What would you like to do?',
+                    choices: [
+                        { title: 'Replace existing schedule', value: 'replace' },
+                        { title: 'Add another schedule', value: 'add' },
+                        { title: 'Cancel', value: 'cancel' },
+                    ],
+                });
+                if (confirm.action === 'cancel' || confirm.action === undefined) {
+                    console.log(chalk.gray('Cancelled.'));
+                    return;
+                }
+                if (confirm.action === 'replace') {
+                    // Delete the existing schedule first
+                    await axios.delete(`${config.host}/api/v1/projects/${projectName}/schedules/${existing.id}`, {
+                        headers: getApiHeaders(config),
+                    });
+                    console.log(chalk.gray(`Removed old schedule (${existing.cron_expression}).`));
+                }
+            }
+        } catch {
+            // If we can't check, proceed anyway
+        }
+    }
+
+    console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
     try {
         const payload: Record<string, any> = {

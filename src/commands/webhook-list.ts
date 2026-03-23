@@ -26,7 +26,7 @@ export async function webhookList(projectName: string, options: WebhookListOptio
             params,
         });
 
-        const webhooks = response.data || [];
+        const webhooks = response.data.data || [];
 
         if (webhooks.length === 0) {
             console.log(chalk.yellow('No webhooks found for project "' + projectName + '".'));
@@ -44,13 +44,13 @@ export async function webhookList(projectName: string, options: WebhookListOptio
         }
 
         for (const webhook of webhooks) {
-            const name = webhook.name || webhook.slug || '?';
-            const url = webhook.url || '?';
+            const name = webhook.workflow_name || webhook.workflow_slug || '?';
+            const url = webhook.webhook_path_url || webhook.webhook_url || '?';
 
             let line = name.padEnd(30) + chalk.cyan(url.padEnd(60));
 
             if (options.showSecrets) {
-                const secret = webhook.secret || '-';
+                const secret = webhook.webhook_secret || '-';
                 line += chalk.gray(secret);
             }
 

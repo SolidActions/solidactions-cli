@@ -96,6 +96,7 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
 interface DeployOptions {
     env?: string;
     create?: boolean;
+    configOnly?: boolean;
 }
 
 /**
@@ -220,6 +221,18 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             console.error(chalk.red('Failed to check project:'), error.response?.data?.message || error.message);
             process.exit(1);
         }
+    }
+
+    // --config-only: sync YAML env declarations without building
+    if (options.configOnly) {
+        if (!yamlConfig) {
+            console.error(chalk.red('Cannot sync config: solidactions.yaml not found or invalid.'));
+            process.exit(1);
+        }
+
+        await pushYamlDeclarations(config, projectSlug, yamlConfig);
+        console.log(chalk.green(`✓ Config synced for ${projectSlug}${envLabel}`));
+        return;
     }
 
     const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');

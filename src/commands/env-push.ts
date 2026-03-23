@@ -104,7 +104,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
             process.exit(1);
         } else if (error.response?.status === 404) {
             console.error(chalk.red(`Project "${projectSlug}" not found.`));
-            console.log(chalk.gray(`Deploy first with: solidactions deploy ${projectName} --env ${environment}` + (environment !== 'production' ? ' --create' : '')));
+            console.log(chalk.gray(`Deploy first with: solidactions project deploy ${projectName} --env ${environment}` + (environment !== 'production' ? ' --create' : '')));
             process.exit(1);
         }
         throw error;

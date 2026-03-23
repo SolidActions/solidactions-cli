@@ -1,14 +1,37 @@
 import fs from 'fs';
 import path from 'path';
+import { createGunzip } from 'zlib';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
+import { extract } from 'tar';
 import axios from 'axios';
 import chalk from 'chalk';
-import AdmZip from 'adm-zip';
+import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function pull(projectName: string, destPath?: string) {
+export async function pull(projectName: string, destPath?: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
 
     const destination = destPath ? path.resolve(destPath) : process.cwd();
+
+    // Warn if destination has existing files
+    if (fs.existsSync(destination)) {
+        const entries = fs.readdirSync(destination);
+        if (entries.length > 0 && !options.yes) {
+            console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
+            console.log(chalk.yellow('Pulling will overwrite existing files.'));
+            const response = await prompts({
+                type: 'confirm',
+                name: 'proceed',
+                message: 'Continue?',
+                initial: false,
+            });
+            if (!response.proceed) {
+                console.log(chalk.gray('Cancelled.'));
+                process.exit(0);
+            }
+        }
+    }
 
     console.log(chalk.blue(`Pulling project "${projectName}"...`));
 
@@ -18,21 +41,19 @@ export async function pull(projectName: string, destPath?: string) {
             responseType: 'arraybuffer',
         });
 
-        const zipBuffer = Buffer.from(response.data);
-        const tempZipPath = path.join(destination, '.steps-pull-temp.zip');
+        const buffer = Buffer.from(response.data);
 
-        // Write the zip to a temp file
-        fs.writeFileSync(tempZipPath, zipBuffer);
-
-        console.log(chalk.gray(`Downloaded ${zipBuffer.length} bytes`));
+        console.log(chalk.gray(`Downloaded ${buffer.length} bytes`));
         console.log(chalk.yellow(`Extracting to ${destination}...`));
 
-        // Extract the zip
-        const zip = new AdmZip(tempZipPath);
-        zip.extractAllTo(destination, true);
+        fs.mkdirSync(destination, { recursive: true });
 
-        // Clean up temp file
-        fs.unlinkSync(tempZipPath);
+        const readable = Readable.from(buffer);
+        await pipeline(
+            readable,
+            createGunzip(),
+            extract({ cwd: destination, strip: 0 })
+        );
 
         console.log(chalk.green(`Project "${projectName}" pulled successfully!`));
     } catch (error: any) {

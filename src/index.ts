@@ -2,12 +2,12 @@
 import { Command } from 'commander';
 import { deploy } from './commands/deploy';
 import { init, logout, whoami } from './commands/init';
-import { logs } from './commands/logs';
-import { logsBuild } from './commands/logs-build';
-import { steps } from './commands/steps';
-import { run } from './commands/run';
-import { runs } from './commands/runs';
 import { pull } from './commands/pull';
+import { projectList } from './commands/project-list';
+import { logsBuild } from './commands/project-logs';
+import { run } from './commands/run-start';
+import { runs } from './commands/run-list';
+import { runView } from './commands/run-view';
 import { envList } from './commands/env-list';
 import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
@@ -17,7 +17,7 @@ import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
-import { webhookList } from './commands/webhooks';
+import { webhookList } from './commands/webhook-list';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
@@ -34,7 +34,7 @@ program
     .version(pkg.version);
 
 // =============================================================================
-// Authentication & Configuration
+// Top-level commands
 // =============================================================================
 
 program
@@ -62,55 +62,6 @@ program
         whoami();
     });
 
-// =============================================================================
-// Project Management
-// =============================================================================
-
-program
-    .command('deploy')
-    .description('Deploy a project to SolidActions')
-    .argument('<project-name>', 'Project name (will be created if it doesn\'t exist)')
-    .argument('[path]', 'Source directory to deploy (defaults to current directory)')
-    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
-    .option('--create', 'Create environment project if it doesn\'t exist')
-    .action((projectName, path, options) => {
-        deploy(projectName, path, options);
-    });
-
-program
-    .command('pull')
-    .description('Pull project source from SolidActions')
-    .argument('<project-name>', 'Project name')
-    .argument('[path]', 'Destination directory (defaults to current directory)')
-    .action((projectName, path) => {
-        pull(projectName, path);
-    });
-
-// =============================================================================
-// Workflow Execution
-// =============================================================================
-
-program
-    .command('run')
-    .description('Trigger a workflow run')
-    .argument('<project>', 'Project name')
-    .argument('<workflow>', 'Workflow name')
-    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
-    .option('-i, --input <json>', 'JSON input for the workflow')
-    .option('-w, --wait', 'Wait for the workflow to complete')
-    .action((project, workflow, options) => {
-        run(project, workflow, options);
-    });
-
-program
-    .command('runs')
-    .description('List recent workflow runs')
-    .argument('[project]', 'Filter by project name')
-    .option('-l, --limit <number>', 'Number of runs to show', parseInt)
-    .action((project, options) => {
-        runs(project, options);
-    });
-
 program
     .command('dev')
     .description('Run a workflow locally using an in-memory mock server (no deploy needed)')
@@ -121,43 +72,101 @@ program
     });
 
 // =============================================================================
-// Logs
+// project <subcommand>
 // =============================================================================
 
-program
-    .command('logs')
-    .description('View logs for a workflow run')
-    .argument('<run-id>', 'Run ID')
-    .option('-f, --follow', 'Follow log output (tail -f style)')
-    .action((runId, options) => {
-        logs(runId, options);
+const project = program.command('project').description('Manage projects');
+
+project
+    .command('deploy')
+    .description('Deploy a project to SolidActions')
+    .argument('<project-name>', 'Project name (will be created if it doesn\'t exist)')
+    .argument('[path]', 'Source directory to deploy (defaults to current directory)')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('--create', 'Create environment project if it doesn\'t exist')
+    .option('--config-only', 'Sync YAML env declarations without building/deploying')
+    .action((projectName, path, options) => {
+        deploy(projectName, path, options);
     });
 
-program
-    .command('logs:build')
+project
+    .command('pull')
+    .description('Pull project source from SolidActions')
+    .argument('<project-name>', 'Project name')
+    .argument('[path]', 'Destination directory (defaults to current directory)')
+    .option('-y, --yes', 'Skip overwrite confirmation')
+    .action((projectName, path, options) => {
+        pull(projectName, path, options);
+    });
+
+project
+    .command('logs')
     .description('View build/deployment logs for a project')
     .argument('<project>', 'Project name')
-    .action((project) => {
-        logsBuild(project);
+    .action((projectName) => {
+        logsBuild(projectName);
     });
 
-program
-    .command('steps')
-    .description('View step outputs and timing for a workflow run')
+project
+    .command('list')
+    .description('List all projects')
+    .action(() => {
+        projectList();
+    });
+
+// =============================================================================
+// run <subcommand>
+// =============================================================================
+
+const runCmd = program.command('run').description('Manage workflow runs');
+
+runCmd
+    .command('start')
+    .description('Trigger a workflow run')
+    .argument('<project>', 'Project name')
+    .argument('<workflow>', 'Workflow name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
+    .option('-i, --input <json>', 'JSON input for the workflow')
+    .option('-w, --wait', 'Wait for the workflow to complete')
+    .action((projectName, workflow, options) => {
+        run(projectName, workflow, options);
+    });
+
+runCmd
+    .command('list')
+    .description('List recent workflow runs')
+    .argument('[project]', 'Filter by project name')
+    .option('-l, --limit <number>', 'Number of runs to show', parseInt)
+    .option('--offset <number>', 'Skip first N runs (pagination)', parseInt)
+    .option('--status <status>', 'Filter by status (completed, failed, queued, running)')
+    .option('--since <duration>', 'Filter to runs since (e.g., 1h, 30m, 2d, 1w)')
+    .option('--workflow <name>', 'Filter by workflow name')
+    .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
+    .option('--json', 'Output as JSON')
+    .action((projectName, options) => {
+        runs(projectName, options);
+    });
+
+runCmd
+    .command('view')
+    .description('View details, timeline, steps, or logs for a workflow run')
     .argument('<run-id>', 'Run ID')
-    .option('-s, --step <name>', 'Show output for a specific step')
-    .option('--json', 'Output as JSON (for piping/redirection)')
-    .option('-f, --follow', 'Follow step progress for in-progress runs')
+    .option('--timeline', 'Show only timeline data')
+    .option('--steps', 'Show only step data')
+    .option('--logs', 'Show raw logs')
+    .option('--json', 'Output as JSON')
     .action((runId, options) => {
-        steps(runId, options);
+        runView(runId, options);
     });
 
 // =============================================================================
-// Environment Variables
+// env <subcommand>
 // =============================================================================
 
-program
-    .command('env:set')
+const env = program.command('env').description('Manage environment variables');
+
+env
+    .command('set')
     .description('Set an environment variable (create or update, global or project)')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('<value-or-key>', 'Variable value (global) or variable key (project)')
@@ -169,21 +178,22 @@ program
     .option('--staging-inherit', 'Staging inherits from production (global only)')
     .option('--dev-inherit', 'Dev inherits from production (global only)')
     .option('--dev-inherit-staging', 'Dev inherits from staging (global only)')
+    .option('-y, --yes', 'Skip overwrite confirmation')
     .action((keyOrProject, valueOrKey, value, options) => {
         envSet(keyOrProject, valueOrKey, value, options);
     });
 
-program
-    .command('env:list')
+env
+    .command('list')
     .description('List environment variables')
     .argument('[project]', 'Project name (omit for global variables)')
     .option('-e, --env <environment>', 'Filter by environment (production/staging/dev)')
-    .action((project, options) => {
-        envList(project, options);
+    .action((projectName, options) => {
+        envList(projectName, options);
     });
 
-program
-    .command('env:delete')
+env
+    .command('delete')
     .description('Delete an environment variable')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('[key]', 'Variable key (if first arg is project)')
@@ -192,30 +202,31 @@ program
         envDelete(keyOrProject, key, options);
     });
 
-program
-    .command('env:map')
+env
+    .command('map')
     .description('Map a global variable to a project-specific key')
     .argument('<project>', 'Project name')
     .argument('<key>', 'Project-specific variable name')
     .argument('<global-key>', 'Global variable name to map from')
-    .action((project, key, globalKey) => {
-        envMap(project, key, globalKey);
+    .option('-y, --yes', 'Skip overwrite confirmation')
+    .action((projectName, key, globalKey, options) => {
+        envMap(projectName, key, globalKey, options);
     });
 
-program
-    .command('env:pull')
+env
+    .command('pull')
     .description('Pull resolved environment variables to a local file')
     .argument('<project>', 'Project name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-o, --output <file>', 'Output file path (defaults to .env or .env.{environment})')
     .option('-y, --yes', 'Skip confirmation for secrets')
     .option('--update-oauth', 'Only pull OAuth tokens and merge into existing .env file')
-    .action((project, options) => {
-        envPull(project, options);
+    .action((projectName, options) => {
+        envPull(projectName, options);
     });
 
-program
-    .command('env:push')
+env
+    .command('push')
     .description('Push environment variables from .env file to a project')
     .argument('<project>', 'Project name')
     .argument('[path]', 'Source directory with solidactions.yaml and .env file', '.')
@@ -223,70 +234,77 @@ program
     .option('--new-only', 'Only push new or empty variables (skip existing)')
     .option('--include-undeclared', 'Also push vars not declared in solidactions.yaml')
     .option('-y, --yes', 'Skip confirmation prompt')
-    .action((project, path, options) => {
-        envPush(project, path, options);
+    .action((projectName, path, options) => {
+        envPush(projectName, path, options);
     });
 
 // =============================================================================
-// Scheduling
+// schedule <subcommand>
 // =============================================================================
 
-program
-    .command('schedule:set')
+const schedule = program.command('schedule').description('Manage cron schedules');
+
+schedule
+    .command('set')
     .description('Set a cron schedule for a workflow')
     .argument('<project>', 'Project name')
     .argument('<cron>', 'Cron expression (e.g., "0 9 * * *" for daily at 9am)')
     .option('-w, --workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
-    .action((project, cron, options) => {
-        scheduleSet(project, cron, options);
+    .option('-y, --yes', 'Skip confirmation if schedule already exists')
+    .action((projectName, cron, options) => {
+        scheduleSet(projectName, cron, options);
     });
 
-program
-    .command('schedule:list')
+schedule
+    .command('list')
     .description('List schedules for a project')
     .argument('<project>', 'Project name')
-    .action((project) => {
-        scheduleList(project);
+    .action((projectName) => {
+        scheduleList(projectName);
     });
 
-program
-    .command('schedule:delete')
+schedule
+    .command('delete')
     .description('Delete a schedule')
     .argument('<project>', 'Project name')
     .argument('<schedule-id>', 'Schedule ID')
     .option('-y, --yes', 'Skip confirmation prompt')
-    .action((project, scheduleId, options) => {
-        scheduleDelete(project, scheduleId, options);
+    .action((projectName, scheduleId, options) => {
+        scheduleDelete(projectName, scheduleId, options);
     });
 
 // =============================================================================
-// Webhooks
+// webhook <subcommand>
 // =============================================================================
 
-program
-    .command('webhooks')
+const webhook = program.command('webhook').description('Manage webhooks');
+
+webhook
+    .command('list')
     .description('List webhook URLs for a project')
     .argument('<project>', 'Project name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)')
     .option('--show-secrets', 'Show webhook secrets')
-    .action((project, options) => {
-        webhookList(project, options);
+    .action((projectName, options) => {
+        webhookList(projectName, options);
     });
 
 // =============================================================================
-// Workspaces
+// workspace <subcommand>
 // =============================================================================
 
-program
-    .command('workspaces')
+const workspace = program.command('workspace').description('Manage workspaces');
+
+workspace
+    .command('list')
     .description('List your workspaces across all organizations')
     .action(() => {
         workspacesList();
     });
 
-program
-    .command('workspace:set')
+workspace
+    .command('set')
     .description('Set the active workspace for CLI operations')
     .argument('<workspace-id>', 'Workspace ID, slug, or name')
     .action((workspaceId) => {
@@ -294,18 +312,20 @@ program
     });
 
 // =============================================================================
-// AI Helper
+// ai <subcommand>
 // =============================================================================
 
-program
-    .command('ai:init')
+const ai = program.command('ai').description('AI helper tools');
+
+ai
+    .command('init')
     .description('Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development')
     .option('--claude', 'Use CLAUDE.md (for Claude Code)')
     .option('--agents', 'Use AGENTS.md (for Cursor, Windsurf, etc.)')
     .action((options) => { aiInit(options); });
 
-program
-    .command('ai:examples')
+ai
+    .command('examples')
     .description('Install example workflows for AI reference')
     .argument('[names...]', 'Example names to install (omit for interactive selector)')
     .option('--all', 'Install all available examples')

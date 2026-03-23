@@ -97,7 +97,7 @@ export async function aiExamples(names: string[], options: AiExamplesOptions = {
         // Detect AI helper file and upsert examples reference
         const aiHelperFile = findAiHelperFile();
         if (!aiHelperFile) {
-            console.log(chalk.yellow('No AI helper file found. Run "solidactions ai:init" first to create one.'));
+            console.log(chalk.yellow('No AI helper file found. Run "solidactions ai init" first to create one.'));
         } else {
             // List ALL installed examples (existing + newly installed)
             const allInstalled: string[] = [];
