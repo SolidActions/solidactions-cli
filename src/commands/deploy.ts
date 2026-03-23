@@ -344,7 +344,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     // Dockerfile always at archive root, referencing tenantcode/
     const universalDockerfile = [
-        'FROM node:20-alpine',
+        'FROM node:24-alpine',
         'WORKDIR /app',
         'COPY tenantcode/package.json tenantcode/package-lock.json* ./',
         'RUN npm install',
