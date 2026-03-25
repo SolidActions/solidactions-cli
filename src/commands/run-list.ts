@@ -9,6 +9,7 @@ interface RunListOptions {
     since?: string;
     workflow?: string;
     detailed?: boolean;
+    hasErrors?: boolean;
     json?: boolean;
 }
 
@@ -28,6 +29,7 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         if (options.since) params.since = parseSince(options.since);
         if (options.workflow) params.workflow = options.workflow;
         if (options.detailed) params.detailed = '1';
+        if (options.hasErrors) params.has_errors = '1';
 
         const response = await axios.get(`${config.host}/api/v1/runs`, {
             headers: getApiHeaders(config),
@@ -108,9 +110,11 @@ function displayDetailedList(runsList: any[], projectName?: string) {
         const status = run.execution_status || run.status || '?';
         const statusColor = getStatusColor(status);
         const exitStr = run.exit_code !== null && run.exit_code !== undefined ? ` (exit ${run.exit_code})` : '';
+        const isSilentFailure = hasRunErrors(run) && isSuccessStatus(status);
 
         console.log('');
-        console.log(chalk.bold(`  Run #${run.id}`) + chalk.gray(` — ${run.workflow_name || '?'} (${run.project_name || '?'})`));
+        const silentTag = isSilentFailure ? chalk.yellow(' [DEGRADED]') : '';
+        console.log(chalk.bold(`  Run #${run.id}`) + chalk.gray(` — ${run.workflow_name || '?'} (${run.project_name || '?'})`) + silentTag);
         console.log(`    Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
         console.log(`    Trigger:   ${chalk.gray(run.triggered_by || '-')}`);
 
@@ -122,11 +126,26 @@ function displayDetailedList(runsList: any[], projectName?: string) {
             console.log(`    Completed: ${chalk.gray(formatTs(run.timeline.completed))}`);
         }
 
-        // Steps summary
+        // Steps detail
         if (run.steps && run.steps.length > 0) {
-            const completed = run.steps.filter((s: any) => s.completed_at || s.completed_at_epoch_ms).length;
-            const totalDuration = run.steps.reduce((sum: number, s: any) => sum + (s.duration_ms || 0), 0);
-            console.log(`    Steps:     ${chalk.gray(`${completed}/${run.steps.length} completed (${formatDuration(totalDuration)} total)`)}`);
+            displayStepsDetail(run.steps);
+        }
+
+        // Workflow output
+        if (run.output) {
+            console.log('');
+            console.log(chalk.bold('    Output:'));
+            const outputStr = JSON.stringify(unwrapOutput(run.output), null, 2);
+            for (const line of outputStr.split('\n')) {
+                console.log(chalk.gray(`      ${line}`));
+            }
+        }
+
+        // Workflow error
+        if (run.error) {
+            console.log('');
+            console.log(chalk.bold.red('    Error:'));
+            console.log(chalk.red(`      ${run.error}`));
         }
 
         // Logs snippet (first errors or last 3 lines)
@@ -134,7 +153,7 @@ function displayDetailedList(runsList: any[], projectName?: string) {
             const lines = run.logs.trim().split('\n');
             const errorLines = lines.filter((l: string) => /error|fail|exception/i.test(l));
             if (errorLines.length > 0) {
-                console.log(`    Errors:`);
+                console.log(`    Logs:`);
                 for (const line of errorLines.slice(0, 3)) {
                     console.log(chalk.red(`      ${truncate(line, 80)}`));
                 }
@@ -146,7 +165,92 @@ function displayDetailedList(runsList: any[], projectName?: string) {
     console.log(chalk.gray(`Showing ${runsList.length} run(s)`));
 }
 
+function displayStepsDetail(steps: any[]) {
+    const completed = steps.filter((s: any) => s.completed_at || s.completed_at_epoch_ms).length;
+    const totalDuration = steps.reduce((sum: number, s: any) => sum + (s.duration_ms || 0), 0);
+    const errorCount = steps.filter((s: any) => s.error || s.status === 'error' || s.status === 'failed').length;
+    const retryCount = steps.filter((s: any) => s.retried || s.status === 'retried').length;
+
+    let summary = `${completed}/${steps.length} completed (${formatDuration(totalDuration)} total)`;
+    if (errorCount > 0) summary += chalk.red(` · ${errorCount} errored`);
+    if (retryCount > 0) summary += chalk.yellow(` · ${retryCount} retried`);
+    console.log(`    Steps:     ${chalk.gray(summary)}`);
+
+    // Per-step detail table
+    console.log(chalk.gray(`      ${'STEP'.padEnd(22)}${'STATUS'.padEnd(12)}${'DURATION'.padEnd(10)}ERROR`));
+    console.log(chalk.gray(`      ${'─'.repeat(66)}`));
+
+    for (const step of steps) {
+        const name = truncate(step.name || '?', 21).padEnd(22);
+        const stepStatus = getStepStatus(step);
+        const stepStatusColor = getStepStatusColor(stepStatus);
+        const duration = formatDuration(step.duration_ms);
+        const error = step.error ? truncate(String(step.error), 30) : '-';
+        const errorColor = step.error ? chalk.red : chalk.gray;
+
+        console.log(
+            `      ${name}${stepStatusColor(stepStatus.padEnd(12))}${chalk.gray(duration.padEnd(10))}${errorColor(error)}`
+        );
+    }
+}
+
 // ─── Utility ───────────────────────────────────────────────────────────────
+
+function unwrapOutput(output: any): any {
+    if (output && output.__solidactions_serializer === 'superjson' && output.json) {
+        return output.json;
+    }
+    return output;
+}
+
+/**
+ * Determine if a run has any errors (step errors, retries, or non-empty error arrays in output).
+ */
+function hasRunErrors(run: any): boolean {
+    // Check step-level errors
+    if (run.steps && run.steps.some((s: any) => s.error || s.status === 'error' || s.status === 'failed' || s.retried || s.status === 'retried')) {
+        return true;
+    }
+    // Check workflow-level error
+    if (run.error) return true;
+    // Check output.errors array
+    const output = unwrapOutput(run.output);
+    if (output && Array.isArray(output.errors) && output.errors.length > 0) return true;
+    return false;
+}
+
+function isSuccessStatus(status: string): boolean {
+    const s = status?.toLowerCase();
+    return s === 'completed' || s === 'success';
+}
+
+function getStepStatus(step: any): string {
+    if (step.status) return step.status;
+    if (step.error) return 'error';
+    if (step.completed_at || step.completed_at_epoch_ms) return 'completed';
+    if (step.started_at || step.started_at_epoch_ms) return 'running';
+    return 'pending';
+}
+
+function getStepStatusColor(status: string): (text: string) => string {
+    switch (status?.toLowerCase()) {
+        case 'completed':
+        case 'success':
+            return chalk.green;
+        case 'running':
+            return chalk.blue;
+        case 'pending':
+        case 'queued':
+            return chalk.yellow;
+        case 'failed':
+        case 'error':
+            return chalk.red;
+        case 'retried':
+            return chalk.yellow;
+        default:
+            return chalk.gray;
+    }
+}
 
 /**
  * Parse --since value into epoch ms.
