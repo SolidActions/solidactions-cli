@@ -142,6 +142,7 @@ runCmd
     .option('--since <duration>', 'Filter to runs since (e.g., 1h, 30m, 2d, 1w)')
     .option('--workflow <name>', 'Filter by workflow name')
     .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
+    .option('--has-errors', 'Show only runs with step errors or run-level errors')
     .option('--json', 'Output as JSON')
     .action((projectName, options) => {
         runs(projectName, options);
