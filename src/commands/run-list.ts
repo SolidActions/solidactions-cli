@@ -133,19 +133,25 @@ function displayDetailedList(runsList: any[], projectName?: string) {
 
         // Workflow output
         if (run.output) {
-            console.log('');
-            console.log(chalk.bold('    Output:'));
             const outputStr = JSON.stringify(unwrapOutput(run.output), null, 2);
-            for (const line of outputStr.split('\n')) {
-                console.log(chalk.gray(`      ${line}`));
+            const lines = outputStr.split('\n');
+            if (lines.length === 1) {
+                console.log(`    Output:    ${chalk.gray(truncate(outputStr, 60))}`);
+            } else {
+                console.log(`    Output:`);
+                for (const line of lines.slice(0, 5)) {
+                    console.log(chalk.gray(`      ${line}`));
+                }
+                if (lines.length > 5) {
+                    console.log(chalk.gray(`      ... (${lines.length - 5} more lines)`));
+                }
             }
         }
 
         // Workflow error
         if (run.error) {
-            console.log('');
-            console.log(chalk.bold.red('    Error:'));
-            console.log(chalk.red(`      ${run.error}`));
+            const errMsg = typeof run.error === 'string' ? run.error : JSON.stringify(run.error);
+            console.log(`    ${chalk.bold.red('Error:')}    ${chalk.red(truncate(errMsg, 60))}`);
         }
 
         // Logs snippet (first errors or last 3 lines)
@@ -177,20 +183,24 @@ function displayStepsDetail(steps: any[]) {
     console.log(`    Steps:     ${chalk.gray(summary)}`);
 
     // Per-step detail table
-    console.log(chalk.gray(`      ${'STEP'.padEnd(22)}${'STATUS'.padEnd(12)}${'DURATION'.padEnd(10)}ERROR`));
-    console.log(chalk.gray(`      ${'─'.repeat(66)}`));
+    console.log(chalk.gray(`      ${'NAME'.padEnd(24)}${'STATUS'.padEnd(12)}${'DURATION'.padEnd(10)}OUTPUT`));
+    console.log(chalk.gray(`      ${'─'.repeat(70)}`));
 
     for (const step of steps) {
-        const name = truncate(step.name || '?', 21).padEnd(22);
+        const name = truncate(step.name || '?', 23).padEnd(24);
         const stepStatus = getStepStatus(step);
         const stepStatusColor = getStepStatusColor(stepStatus);
         const duration = formatDuration(step.duration_ms);
-        const error = step.error ? truncate(String(step.error), 30) : '-';
-        const errorColor = step.error ? chalk.red : chalk.gray;
+        const output = step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-';
 
         console.log(
-            `      ${name}${stepStatusColor(stepStatus.padEnd(12))}${chalk.gray(duration.padEnd(10))}${errorColor(error)}`
+            `      ${name}${stepStatusColor(stepStatus.padEnd(12))}${chalk.gray(duration.padEnd(10))}${chalk.gray(output)}`
         );
+
+        if (step.error) {
+            const errMsg = typeof step.error === 'string' ? step.error : JSON.stringify(step.error);
+            console.log(chalk.red(`        error: ${truncate(errMsg, 70)}`));
+        }
     }
 }
 
