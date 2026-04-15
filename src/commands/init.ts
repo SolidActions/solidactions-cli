@@ -1,46 +1,30 @@
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
+import {
+    Config,
+    resolveConfig,
+    readConfigFile,
+    writeConfigFile,
+    removeConfigFile,
+    getGlobalConfigPath,
+} from '../utils/config';
 
-const CONFIG_DIR = path.join(os.homedir(), '.solidactions');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-
-export interface Config {
-    host: string;
-    apiKey: string;
-    workspaceId?: string;
-}
+export type { Config };
 
 export function getConfig(): Config | null {
-    if (!fs.existsSync(CONFIG_FILE)) {
-        return null;
-    }
-    try {
-        const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-        // Handle legacy config format (token -> apiKey)
-        if (config.token && !config.apiKey) {
-            config.apiKey = config.token;
-        }
-        return config;
-    } catch {
-        return null;
-    }
+    const resolved = resolveConfig();
+    return resolved ? resolved.config : null;
 }
 
 export function saveConfig(config: Config): void {
-    if (!fs.existsSync(CONFIG_DIR)) {
-        fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    }
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+    const resolved = resolveConfig();
+    const targetPath = resolved ? resolved.activePath : getGlobalConfigPath();
+    writeConfigFile(targetPath, config);
 }
 
 export function clearConfig(): void {
-    if (fs.existsSync(CONFIG_FILE)) {
-        fs.unlinkSync(CONFIG_FILE);
-    }
+    removeConfigFile(getGlobalConfigPath());
 }
 
 export async function init(apiKey: string, options: { dev?: boolean; host?: string; workspace?: string }) {
@@ -72,7 +56,7 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
     saveConfig(config);
 
     console.log(chalk.green('CLI initialized successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${CONFIG_FILE}`));
+    console.log(chalk.gray(`Configuration saved to ${getGlobalConfigPath()}`));
     console.log('');
 
     // Set workspace — explicit flag or interactive prompt
@@ -94,7 +78,7 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
 }
 
 export async function logout() {
-    if (fs.existsSync(CONFIG_FILE)) {
+    if (readConfigFile(getGlobalConfigPath())) {
         clearConfig();
         console.log(chalk.green('Logged out successfully.'));
     } else {
