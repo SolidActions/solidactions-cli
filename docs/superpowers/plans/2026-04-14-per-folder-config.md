@@ -725,7 +725,7 @@ git commit -m "feat(init): add --local, --global, interactive prompt, non-TTY gu
 **Files:**
 - Modify: `src/commands/init.ts`
 
-- [ ] **Step 1: Add the helper**
+- [x] **Step 1: Add the helper**
 
 Add this function just above `init()` in `src/commands/init.ts`:
 
@@ -769,7 +769,7 @@ async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<
 
 Add imports if not already present: `import fs from 'fs'; import path from 'path';`.
 
-- [ ] **Step 2: Call it from `init` when target is local**
+- [x] **Step 2: Call it from `init` when target is local**
 
 In `init()`, after `writeConfigFile(targetPath, config);` and before the "CLI initialized successfully!" log, add:
 
@@ -779,7 +779,7 @@ In `init()`, after `writeConfigFile(targetPath, config);` and before the "CLI in
     }
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -787,7 +787,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 4: Verify fresh folder prompts (interactive)**
+- [x] **Step 4: Verify fresh folder prompts (interactive)**
 
 ```bash
 rm -rf /tmp/solidactions-gi-test && mkdir -p /tmp/solidactions-gi-test && cd /tmp/solidactions-gi-test && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy --local --host https://example.test
