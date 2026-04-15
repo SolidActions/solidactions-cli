@@ -829,7 +829,7 @@ git commit -m "feat(init): prompt to add .solidactions/ to .gitignore on --local
 **Files:**
 - Modify: `src/commands/init.ts` (`whoami` function)
 
-- [ ] **Step 1: Replace `whoami`**
+- [x] **Step 1: Replace `whoami`**
 
 Replace the existing `whoami()` in `src/commands/init.ts` with:
 
@@ -871,7 +871,7 @@ import {
 } from '../utils/config';
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -879,7 +879,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Verify against global config**
+- [x] **Step 3: Verify against global config**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -887,7 +887,7 @@ cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoam
 
 Expected: prints `Host`, `API Key`, `Workspace` each annotated with `(from /home/mercer/.solidactions/config.json)`.
 
-- [ ] **Step 4: Verify mixed sources**
+- [x] **Step 4: Verify mixed sources**
 
 ```bash
 cd /tmp/solidactions-init-local-test && SOLIDACTIONS_WORKSPACE_ID=env-ws-123 node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -897,7 +897,7 @@ Expected:
 - `Host` and `API Key` show `(from /tmp/solidactions-init-local-test/.solidactions/config.json)`
 - `Workspace` shows `env-ws-123` with `(from $SOLIDACTIONS_* env var)`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/commands/init.ts
