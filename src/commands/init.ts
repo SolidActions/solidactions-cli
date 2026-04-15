@@ -6,6 +6,7 @@ import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
 import {
     Config,
+    ConfigSource,
     resolveConfig,
     readConfigFile,
     writeConfigFile,
@@ -181,14 +182,26 @@ export async function logout() {
 }
 
 export async function whoami() {
-    const config = getConfig();
-    if (!config) {
+    const resolved = resolveConfig();
+    if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
         console.log(chalk.gray('Run "solidactions init <api-key>" to configure.'));
         process.exit(1);
     }
 
+    const { config, sources } = resolved;
+    const maskedKey = config.apiKey.length > 12
+        ? `${config.apiKey.substring(0, 8)}...${config.apiKey.slice(-4)}`
+        : config.apiKey;
+
+    const fmt = (src: ConfigSource): string => {
+        if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
+        if (src === null) return chalk.gray('(unset)');
+        return chalk.gray(`(from ${src})`);
+    };
+
     console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host: ${config.host}`);
-    console.log(`  API Key: ${config.apiKey.substring(0, 8)}...${config.apiKey.slice(-4)}`);
+    console.log(`  Host:        ${config.host.padEnd(40)} ${fmt(sources.host)}`);
+    console.log(`  API Key:     ${maskedKey.padEnd(40)} ${fmt(sources.apiKey)}`);
+    console.log(`  Workspace:   ${(config.workspaceId ?? '').padEnd(40)} ${fmt(sources.workspaceId)}`);
 }
