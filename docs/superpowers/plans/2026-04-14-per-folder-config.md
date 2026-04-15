@@ -534,7 +534,7 @@ git commit -m "refactor(config): add requireResolvedConfig and skip workspace sa
 - Modify: `src/index.ts` (commander `init` command, lines 40–49)
 - Modify: `src/commands/init.ts` (`init` function)
 
-- [ ] **Step 1: Update the `init` command registration in `src/index.ts`**
+- [x] **Step 1: Update the `init` command registration in `src/index.ts`**
 
 Replace lines 40–49 in `src/index.ts` with:
 
@@ -554,7 +554,7 @@ program
     });
 ```
 
-- [ ] **Step 2: Update the `init` function in `src/commands/init.ts`**
+- [x] **Step 2: Update the `init` function in `src/commands/init.ts`**
 
 Replace the current `init` function body with this. Add imports at the top: `import readline from 'readline';` `import path from 'path';` `import { getLocalConfigPath } from '../utils/config';`
 
@@ -660,7 +660,7 @@ import {
 
 Remove the now-unused imports (`ensureWorkspaceSelected` remains; the old `fs`/`os`/`path` imports are gone unless used elsewhere in the file).
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -668,7 +668,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 4: Verify `--global` (existing behavior)**
+- [x] **Step 4: Verify `--global` (existing behavior)**
 
 ```bash
 mkdir -p /tmp/solidactions-init-test && cd /tmp/solidactions-init-test && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy-key --global --host https://example.test --workspace nonexistent 2>&1 | head -10
@@ -685,7 +685,7 @@ cp ~/.solidactions/config.json ~/.solidactions/config.json.backup
 cp ~/.solidactions/config.json.backup ~/.solidactions/config.json
 ```
 
-- [ ] **Step 5: Verify `--local`**
+- [x] **Step 5: Verify `--local`**
 
 ```bash
 rm -rf /tmp/solidactions-init-local-test && mkdir -p /tmp/solidactions-init-local-test && cd /tmp/solidactions-init-local-test && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy-key --local --host https://example.test 2>&1 | head -20
@@ -695,7 +695,7 @@ cat .solidactions/config.json
 
 Expected: `./.solidactions/config.json` exists, contains `host`/`apiKey`. File mode `-rw-------` (0o600). Directory mode `drwx------` (0o700).
 
-- [ ] **Step 6: Verify non-TTY guard**
+- [x] **Step 6: Verify non-TTY guard**
 
 ```bash
 cd /tmp && echo "" | node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy-key --host https://example.test </dev/null 2>&1 | head -5
@@ -703,7 +703,7 @@ cd /tmp && echo "" | node /home/mercer/projects/solid/solidactions-cli/dist/inde
 
 Expected: prints `Refusing to init non-interactively. Pass --local or --global.` and exits non-zero.
 
-- [ ] **Step 7: Verify both-flags guard**
+- [x] **Step 7: Verify both-flags guard**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy-key --local --global --host https://example.test 2>&1 | head -5
@@ -711,7 +711,7 @@ cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init 
 
 Expected: prints `Error: --local and --global are mutually exclusive.`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/index.ts src/commands/init.ts
