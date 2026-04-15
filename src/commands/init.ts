@@ -1,3 +1,4 @@
+import readline from 'readline';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
@@ -8,6 +9,7 @@ import {
     writeConfigFile,
     removeConfigFile,
     getGlobalConfigPath,
+    getLocalConfigPath,
 } from '../utils/config';
 
 export type { Config };
@@ -27,8 +29,21 @@ export function clearConfig(): void {
     removeConfigFile(getGlobalConfigPath());
 }
 
-export async function init(apiKey: string, options: { dev?: boolean; host?: string; workspace?: string }) {
-    // Determine host
+async function promptLocation(): Promise<'local' | 'global'> {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((resolve) => {
+        rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
+    });
+    rl.close();
+    const normalized = answer.trim().toLowerCase();
+    if (normalized === 'local' || normalized === 'l') return 'local';
+    return 'global';
+}
+
+export async function init(
+    apiKey: string,
+    options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
+) {
     let host: string;
     if (options.host) {
         host = options.host;
@@ -38,28 +53,50 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
         host = 'https://app.solidactions.com';
     }
 
-    // Validate API key format (should be a Sanctum token)
     if (!apiKey || apiKey.trim().length === 0) {
         console.error(chalk.red('Error: API key is required.'));
         console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
         process.exit(1);
     }
 
+    // Determine target location.
+    let target: 'local' | 'global';
+    if (options.local && options.global) {
+        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
+        process.exit(1);
+    } else if (options.local) {
+        target = 'local';
+    } else if (options.global) {
+        target = 'global';
+    } else if (process.stdin.isTTY) {
+        target = await promptLocation();
+    } else {
+        console.error(chalk.red('Refusing to init non-interactively. Pass --local or --global.'));
+        process.exit(1);
+    }
+
+    const targetPath = target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
+
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
     console.log(chalk.gray(`Host: ${host}`));
 
-    // Save the configuration
+    if (readConfigFile(targetPath)) {
+        console.log(chalk.yellow(`Existing config at ${targetPath} will be overwritten.`));
+    }
+
     const config: Config = {
         host,
         apiKey: apiKey.trim(),
     };
-    saveConfig(config);
+    writeConfigFile(targetPath, config);
+
+    // TODO(chunk-d): call ensureGitignoreCovers here when target === 'local'
 
     console.log(chalk.green('CLI initialized successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${getGlobalConfigPath()}`));
+    console.log(chalk.gray(`Configuration saved to ${targetPath}`));
     console.log('');
 
-    // Set workspace — explicit flag or interactive prompt
+    // Workspace selection — ensureWorkspaceSelected writes to the right file via the resolver.
     try {
         if (options.workspace) {
             await workspaceSet(options.workspace);
