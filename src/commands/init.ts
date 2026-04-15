@@ -173,7 +173,7 @@ export async function init(
     console.log(chalk.gray('  solidactions run list                 List recent runs'));
 }
 
-export async function logout(options: { local?: boolean; global?: boolean } = {}) {
+export function logout(options: { local?: boolean; global?: boolean } = {}) {
     if (options.local && options.global) {
         console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
         process.exit(1);
@@ -203,7 +203,7 @@ export async function logout(options: { local?: boolean; global?: boolean } = {}
     }
 }
 
-export async function whoami() {
+export function whoami() {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
