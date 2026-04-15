@@ -2,12 +2,15 @@ import fs from 'fs';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import fsExtra from 'fs-extra';
+import path from 'path';
 import { fetchRawFile } from '../utils/github';
 import { upsertMarkerSection } from '../utils/markers';
+import { detectSkillTargets, installSkills, fetchClaudeMdContent } from '../utils/skills';
 
 interface AiInitOptions {
     claude?: boolean;
     agents?: boolean;
+    skills?: boolean;  // commander auto-negates --no-skills into skills: false
 }
 
 export async function aiInit(options: AiInitOptions = {}) {
@@ -43,18 +46,54 @@ export async function aiInit(options: AiInitOptions = {}) {
             targetFile = response.file;
         }
 
+        // Decide whether to install skills (default true; --no-skills opts out)
+        const installSkillsEnabled = options.skills !== false;
+
+        // Determine skill targets if installing.
+        // Skills are Claude Code-specific (.claude/skills/) and not meaningful for other AI tools.
+        let skillTargets: string[] = [];
+        if (installSkillsEnabled && targetFile === 'CLAUDE.md') {
+            skillTargets = detectSkillTargets();
+            if (skillTargets.length === 0) {
+                const resp = await prompts({
+                    type: 'confirm',
+                    name: 'create',
+                    message: 'No `.claude/` directory found. Create `.claude/skills/` for SolidActions skills?',
+                    initial: true,
+                });
+                if (resp.create === undefined) {
+                    // User cancelled (Ctrl+C) — treat as abort, not decline
+                    console.log(chalk.yellow('Cancelled.'));
+                    process.exit(0);
+                } else if (resp.create) {
+                    skillTargets = [path.join(process.cwd(), '.claude', 'skills')];
+                } else {
+                    console.log(chalk.yellow('Skipping skill install. Run with --no-skills to silence this prompt.'));
+                }
+            }
+        }
+
         console.log(chalk.blue('Fetching AI helper content...'));
 
-        // Fetch AI helper content from examples repo
-        const aiContent = await fetchRawFile('SolidActions', 'solidactions-examples', 'CLAUDE.md');
+        // Fetch CLAUDE.md content (slim pointer if skills installed, else full)
+        const aiContent = await fetchClaudeMdContent(skillTargets.length > 0);
 
-        // Fetch SDK reference
+        // Fetch SDK reference (always)
         const sdkContent = await fetchRawFile('SolidActions', 'solidactions-ts-sdk', 'docs/sdk-reference.md');
 
         // Save SDK reference to .solidactions/sdk-reference.md
         fsExtra.ensureDirSync('.solidactions');
         fs.writeFileSync('.solidactions/sdk-reference.md', sdkContent, 'utf8');
         console.log(chalk.green('✓ SDK reference saved to .solidactions/sdk-reference.md'));
+
+        // Install skills if enabled and targets exist
+        if (skillTargets.length > 0) {
+            console.log(chalk.blue('Installing SolidActions skills...'));
+            const { written } = await installSkills(skillTargets);
+            for (const f of written) {
+                console.log(chalk.green(`✓ ${path.relative(process.cwd(), f)}`));
+            }
+        }
 
         // Upsert main AI helper section
         upsertMarkerSection(targetFile, 'SolidActions', aiContent);
