@@ -911,7 +911,7 @@ git commit -m "feat(whoami): show per-field config sources (#13)"
 **Files:**
 - Modify: `src/commands/workspaces.ts`
 
-- [ ] **Step 1: Update `workspaceSet`**
+- [x] **Step 1: Update `workspaceSet`**
 
 Replace the entire `workspaceSet` function in `src/commands/workspaces.ts` with:
 
@@ -976,7 +976,7 @@ import { Config, writeConfigFile } from '../utils/config';
 
 Remove the now-unused `saveConfig` and `getApiHeaders` imports. `requireConfig` is still needed by `workspacesList` elsewhere in this file.
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -984,7 +984,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Verify env conflict error**
+- [x] **Step 3: Verify env conflict error**
 
 ```bash
 SOLIDACTIONS_WORKSPACE_ID=pinned cd /tmp && SOLIDACTIONS_WORKSPACE_ID=pinned node /home/mercer/projects/solid/solidactions-cli/dist/index.js workspace set some-workspace 2>&1 | head -5
@@ -992,7 +992,7 @@ SOLIDACTIONS_WORKSPACE_ID=pinned cd /tmp && SOLIDACTIONS_WORKSPACE_ID=pinned nod
 
 Expected: prints the env-conflict error and exits non-zero.
 
-- [ ] **Step 4: Verify it writes to active path (local)**
+- [x] **Step 4: Verify it writes to active path (local)**
 
 Precondition: `/tmp/solidactions-init-local-test/.solidactions/config.json` exists from Task 6.
 
@@ -1002,7 +1002,7 @@ cd /tmp/solidactions-init-local-test && node /home/mercer/projects/solid/solidac
 
 Expected: error about "Workspace 'does-not-exist' not found." (Because the API will fail first — but that's expected; the point of this step is that we *would* have written to the local path, which we can't fully verify without a real workspace. See step 5.)
 
-- [ ] **Step 5: Verify path annotation on success (requires real workspace)**
+- [x] **Step 5: Verify path annotation on success (requires real workspace)**
 
 If you have a real API key and workspace in local config:
 
@@ -1015,7 +1015,7 @@ Expected: prints `Saved to /tmp/solidactions-init-local-test/.solidactions/confi
 
 If no real workspace available, skip this step and verify logic via code review.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/commands/workspaces.ts
