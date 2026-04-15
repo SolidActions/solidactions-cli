@@ -5,7 +5,6 @@ import axios from 'axios';
 import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
-import { getConfig } from './init';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 

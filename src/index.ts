@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import chalk from 'chalk';
 import { Command } from 'commander';
 import { deploy } from './commands/deploy';
 import { init, logout, whoami } from './commands/init';
@@ -28,6 +29,26 @@ const pkg = require('../package.json');
 
 const program = new Command();
 
+if (process.env.SOLIDACTIONS_DEBUG === '1') {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { resolveConfig } = require('./utils/config');
+    const resolved = resolveConfig();
+    if (resolved) {
+        const fmt = (src: any) => {
+            if (src === 'env') return '(from $SOLIDACTIONS_* env var)';
+            if (src === null) return '(unset)';
+            return `(from ${src})`;
+        };
+        process.stderr.write('[SOLIDACTIONS_DEBUG] resolved configuration:\n');
+        process.stderr.write(`  host:        ${resolved.config.host} ${fmt(resolved.sources.host)}\n`);
+        process.stderr.write(`  apiKey:      <redacted> ${fmt(resolved.sources.apiKey)}\n`);
+        process.stderr.write(`  workspaceId: ${resolved.config.workspaceId ?? ''} ${fmt(resolved.sources.workspaceId)}\n`);
+        process.stderr.write(`  activePath:  ${resolved.activePath}\n`);
+    } else {
+        process.stderr.write('[SOLIDACTIONS_DEBUG] no config resolvable\n');
+    }
+}
+
 program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
@@ -44,15 +65,20 @@ program
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
     .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt)')
-    .action((apiKey, options) => {
-        init(apiKey, options);
+    .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
+    .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
+    .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
+    .action(async (apiKey, options) => {
+        await init(apiKey, options);
     });
 
 program
     .command('logout')
     .description('Remove saved credentials')
-    .action(() => {
-        logout();
+    .option('--local', 'Remove only the nearest local ./.solidactions/config.json')
+    .option('--global', 'Remove only ~/.solidactions/config.json')
+    .action((options) => {
+        logout(options);
     });
 
 program
@@ -333,4 +359,7 @@ ai
     .option('--overwrite', 'Overwrite existing examples without warning')
     .action((names, options) => { aiExamples(names, options); });
 
-program.parse();
+program.parseAsync().catch((err) => {
+    console.error(chalk.red(err.message ?? String(err)));
+    process.exit(1);
+});

@@ -1,50 +1,106 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
+import readline from 'readline';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
+import {
+    Config,
+    ConfigSource,
+    resolveConfig,
+    readConfigFile,
+    writeConfigFile,
+    removeConfigFile,
+    findLocalConfigPath,
+    getGlobalConfigPath,
+    getLocalConfigPath,
+} from '../utils/config';
 
-const CONFIG_DIR = path.join(os.homedir(), '.solidactions');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-
-export interface Config {
-    host: string;
-    apiKey: string;
-    workspaceId?: string;
-}
+export type { Config };
 
 export function getConfig(): Config | null {
-    if (!fs.existsSync(CONFIG_FILE)) {
-        return null;
-    }
-    try {
-        const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-        // Handle legacy config format (token -> apiKey)
-        if (config.token && !config.apiKey) {
-            config.apiKey = config.token;
-        }
-        return config;
-    } catch {
-        return null;
-    }
+    const resolved = resolveConfig();
+    return resolved ? resolved.config : null;
 }
 
 export function saveConfig(config: Config): void {
-    if (!fs.existsSync(CONFIG_DIR)) {
-        fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    }
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+    const resolved = resolveConfig();
+    const targetPath = resolved ? resolved.activePath : getGlobalConfigPath();
+    writeConfigFile(targetPath, config);
 }
 
 export function clearConfig(): void {
-    if (fs.existsSync(CONFIG_FILE)) {
-        fs.unlinkSync(CONFIG_FILE);
+    removeConfigFile(getGlobalConfigPath());
+}
+
+async function promptLocation(): Promise<'local' | 'global'> {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        while (true) {
+            const answer = await new Promise<string>((resolve) => {
+                rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
+            });
+            const normalized = answer.trim().toLowerCase();
+            if (normalized === '' || normalized === 'global' || normalized === 'g') return 'global';
+            if (normalized === 'local' || normalized === 'l') return 'local';
+            console.log(chalk.yellow("Please answer 'local' or 'global' (or press Enter for global)."));
+        }
+    } finally {
+        rl.close();
     }
 }
 
-export async function init(apiKey: string, options: { dev?: boolean; host?: string; workspace?: string }) {
-    // Determine host
+async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<void> {
+    const gitignorePath = path.join(targetDir, '.gitignore');
+    const patternToAdd = '.solidactions/';
+
+    let existing = '';
+    if (fs.existsSync(gitignorePath)) {
+        existing = fs.readFileSync(gitignorePath, 'utf-8');
+        const lines = existing.split('\n').map((l) => l.trim());
+        const isCovered = lines.some((line) => {
+            const normalized = line
+                .replace(/^\*\*\//, '')
+                .replace(/^\//, '')
+                .replace(/\/(\*\*|\*)?$/, '');
+            return normalized === '.solidactions';
+        });
+        if (isCovered) {
+            return; // already covered
+        }
+    }
+
+    let shouldAdd = auto;
+    if (!shouldAdd && process.stdin.isTTY) {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await new Promise<string>((resolve) => {
+            rl.question(
+                chalk.yellow(`Local config contains an API key. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
+                resolve,
+            );
+        });
+        rl.close();
+        shouldAdd = !(answer.trim().toLowerCase().startsWith('n'));
+    }
+
+    if (!shouldAdd) {
+        console.log(chalk.yellow(`Skipping .gitignore update. Remember: ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
+        return;
+    }
+
+    const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+    try {
+        fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
+        console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
+    } catch (err: any) {
+        console.log(chalk.yellow(`Could not update ${gitignorePath}: ${err.message}. Add \`.solidactions/\` to it manually — ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
+    }
+}
+
+export async function init(
+    apiKey: string,
+    options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
+) {
     let host: string;
     if (options.host) {
         host = options.host;
@@ -54,28 +110,52 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
         host = 'https://app.solidactions.com';
     }
 
-    // Validate API key format (should be a Sanctum token)
     if (!apiKey || apiKey.trim().length === 0) {
         console.error(chalk.red('Error: API key is required.'));
         console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
         process.exit(1);
     }
 
+    // Determine target location.
+    let target: 'local' | 'global';
+    if (options.local && options.global) {
+        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
+        process.exit(1);
+    } else if (options.local) {
+        target = 'local';
+    } else if (options.global) {
+        target = 'global';
+    } else if (process.stdin.isTTY) {
+        target = await promptLocation();
+    } else {
+        console.error(chalk.red('Refusing to init non-interactively. Pass --local or --global.'));
+        process.exit(1);
+    }
+
+    const targetPath = target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
+
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
     console.log(chalk.gray(`Host: ${host}`));
 
-    // Save the configuration
+    if (readConfigFile(targetPath)) {
+        console.log(chalk.yellow(`Existing config at ${targetPath} will be overwritten.`));
+    }
+
     const config: Config = {
         host,
         apiKey: apiKey.trim(),
     };
-    saveConfig(config);
+    writeConfigFile(targetPath, config);
+
+    if (target === 'local') {
+        await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
+    }
 
     console.log(chalk.green('CLI initialized successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${CONFIG_FILE}`));
+    console.log(chalk.gray(`Configuration saved to ${targetPath}`));
     console.log('');
 
-    // Set workspace — explicit flag or interactive prompt
+    // Workspace selection — ensureWorkspaceSelected writes to the right file via the resolver.
     try {
         if (options.workspace) {
             await workspaceSet(options.workspace);
@@ -93,24 +173,57 @@ export async function init(apiKey: string, options: { dev?: boolean; host?: stri
     console.log(chalk.gray('  solidactions run list                 List recent runs'));
 }
 
-export async function logout() {
-    if (fs.existsSync(CONFIG_FILE)) {
-        clearConfig();
-        console.log(chalk.green('Logged out successfully.'));
+export function logout(options: { local?: boolean; global?: boolean } = {}) {
+    if (options.local && options.global) {
+        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
+        process.exit(1);
+    }
+
+    const globalPath = getGlobalConfigPath();
+    const localPath = findLocalConfigPath(process.cwd());
+
+    let targetPath: string | null;
+    if (options.local) {
+        targetPath = localPath;
+        if (!targetPath) {
+            console.error(chalk.red(`No local config found in ${process.cwd()} or any parent directory.`));
+            process.exit(1);
+        }
+    } else if (options.global) {
+        targetPath = globalPath;
     } else {
-        console.log(chalk.gray('Not logged in.'));
+        targetPath = localPath ?? globalPath;
+    }
+
+    const removed = removeConfigFile(targetPath);
+    if (removed) {
+        console.log(chalk.green(`Logged out. Removed ${targetPath}`));
+    } else {
+        console.log(chalk.gray(`Not logged in (no config at ${targetPath}).`));
     }
 }
 
-export async function whoami() {
-    const config = getConfig();
-    if (!config) {
+export function whoami() {
+    const resolved = resolveConfig();
+    if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
         console.log(chalk.gray('Run "solidactions init <api-key>" to configure.'));
         process.exit(1);
     }
 
+    const { config, sources } = resolved;
+    const maskedKey = config.apiKey.length > 12
+        ? `${config.apiKey.substring(0, 8)}...${config.apiKey.slice(-4)}`
+        : config.apiKey;
+
+    const fmt = (src: ConfigSource): string => {
+        if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
+        if (src === null) return chalk.gray('(unset)');
+        return chalk.gray(`(from ${src})`);
+    };
+
     console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host: ${config.host}`);
-    console.log(`  API Key: ${config.apiKey.substring(0, 8)}...${config.apiKey.slice(-4)}`);
+    console.log(`  Host:        ${config.host.padEnd(40)} ${fmt(sources.host)}`);
+    console.log(`  API Key:     ${maskedKey.padEnd(40)} ${fmt(sources.apiKey)}`);
+    console.log(`  Workspace:   ${(config.workspaceId ?? '').padEnd(40)} ${fmt(sources.workspaceId)}`);
 }

@@ -18,6 +18,48 @@ solidactions run start <project> <workflow>           # Trigger a workflow
 solidactions run view <run-id>                        # Inspect a run
 ```
 
+## Configuration
+
+The CLI stores `host`, `apiKey`, and `workspaceId` in a JSON config file. Two locations are supported:
+
+- **Global** — `~/.solidactions/config.json`. Used by default, shared across all folders for a single user.
+- **Local** — `./.solidactions/config.json`. Scoped to a project folder; takes precedence over the global file when running commands from inside that folder (or any subdirectory — the CLI walks up looking for it).
+
+### Resolution order
+
+For each field (`host`, `apiKey`, `workspaceId`), the CLI resolves independently in this order:
+
+1. Environment variables: `SOLIDACTIONS_HOST`, `SOLIDACTIONS_API_KEY`, `SOLIDACTIONS_WORKSPACE_ID`
+2. Nearest local `./.solidactions/config.json` (walking up from cwd)
+3. Global `~/.solidactions/config.json`
+
+You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while letting `host` and `apiKey` come from a file.
+
+### `solidactions init` flags
+
+- `--local` — write config to `./.solidactions/config.json` in the current folder.
+- `--global` — write config to `~/.solidactions/config.json` (today's default).
+- `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
+
+In interactive shells, `init` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
+
+### `solidactions logout` flags
+
+- `--local` — remove only the nearest local config (walks up from cwd).
+- `--global` — remove only the global config.
+- Bare `logout` — removes the nearest local if present, otherwise removes global.
+
+### Debugging resolution
+
+Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration and per-field sources to stderr before the command runs. `solidactions whoami` also shows this information.
+
+### Use case: multiple AI agents in parallel
+
+If you run multiple AI coding agents in different project folders simultaneously, either:
+
+- Run `solidactions init <key> --local` in each folder so each has its own config, or
+- Set `SOLIDACTIONS_API_KEY` / `SOLIDACTIONS_WORKSPACE_ID` in the environment each agent uses (no files to share or stomp).
+
 ## Commands
 
 Use `solidactions <command> --help` for full flag details on any command.

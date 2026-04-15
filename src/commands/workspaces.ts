@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { requireConfig, getApiHeaders } from '../utils/api';
-import { saveConfig } from './init';
+import { requireConfig, requireResolvedConfig } from '../utils/api';
+import { Config, writeConfigFile } from '../utils/config';
 
 export async function workspacesList() {
     const config = requireConfig();
@@ -51,9 +51,17 @@ export async function workspacesList() {
 }
 
 export async function workspaceSet(workspaceId: string) {
-    const config = requireConfig();
+    if (process.env.SOLIDACTIONS_WORKSPACE_ID) {
+        console.error(chalk.red(
+            'SOLIDACTIONS_WORKSPACE_ID is set in the environment; the change would not take effect. ' +
+            'Unset the env var or edit the config file directly.',
+        ));
+        process.exit(1);
+    }
 
-    // Validate the workspace exists and user has access
+    const resolved = requireResolvedConfig();
+    const config = resolved.config;
+
     try {
         const response = await axios.get(`${config.host}/api/v1/workspaces`, {
             headers: {
@@ -62,7 +70,6 @@ export async function workspaceSet(workspaceId: string) {
             },
         });
 
-        // Flatten grouped response
         const grouped = response.data.workspaces || response.data.data || response.data;
         let allWorkspaces: any[] = [];
         if (typeof grouped === 'object' && !Array.isArray(grouped)) {
@@ -72,16 +79,19 @@ export async function workspaceSet(workspaceId: string) {
         } else if (Array.isArray(grouped)) {
             allWorkspaces = grouped;
         }
-        const workspace = allWorkspaces.find((w: any) => w.id === workspaceId || w.slug === workspaceId || w.name === workspaceId);
+        const workspace = allWorkspaces.find(
+            (w: any) => w.id === workspaceId || w.slug === workspaceId || w.name === workspaceId,
+        );
 
         if (!workspace) {
             console.error(chalk.red(`Workspace "${workspaceId}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
             process.exit(1);
         }
 
-        config.workspaceId = workspace.id;
-        saveConfig(config);
+        const updated: Config = { ...config, workspaceId: workspace.id };
+        writeConfigFile(resolved.activePath, updated);
         console.log(chalk.green(`Workspace set to: ${workspace.name} (${workspace.id})`));
+        console.log(chalk.gray(`Saved to ${resolved.activePath}`));
     } catch (error: any) {
         console.error(chalk.red('Failed to set workspace:'), error.response?.data?.message || error.message);
         process.exit(1);
