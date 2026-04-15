@@ -56,7 +56,14 @@ async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<
     if (fs.existsSync(gitignorePath)) {
         existing = fs.readFileSync(gitignorePath, 'utf-8');
         const lines = existing.split('\n').map((l) => l.trim());
-        if (lines.includes('.solidactions/') || lines.includes('.solidactions') || lines.includes('/.solidactions/')) {
+        const isCovered = lines.some((line) => {
+            const normalized = line
+                .replace(/^\*\*\//, '')
+                .replace(/^\//, '')
+                .replace(/\/(\*\*|\*)?$/, '');
+            return normalized === '.solidactions';
+        });
+        if (isCovered) {
             return; // already covered
         }
     }
@@ -80,8 +87,12 @@ async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<
     }
 
     const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-    fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
-    console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
+    try {
+        fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
+        console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
+    } catch (err: any) {
+        console.log(chalk.yellow(`Could not update ${gitignorePath}: ${err.message}. Add \`.solidactions/\` to it manually — ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
+    }
 }
 
 export async function init(
