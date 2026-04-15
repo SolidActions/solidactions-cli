@@ -1148,7 +1148,7 @@ git commit -m "feat(logout): add --local/--global flags; default to walk-up remo
 **Files:**
 - Modify: `src/index.ts`
 
-- [ ] **Step 1: Add the debug hook**
+- [x] **Step 1: Add the debug hook**
 
 In `src/index.ts`, insert this block immediately after `const program = new Command();` (line 29):
 
@@ -1174,7 +1174,7 @@ if (process.env.SOLIDACTIONS_DEBUG === '1') {
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -1182,7 +1182,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Verify the dump appears on stderr**
+- [x] **Step 3: Verify the dump appears on stderr**
 
 ```bash
 cd /tmp && SOLIDACTIONS_DEBUG=1 node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami 2>/tmp/solidactions-debug-stderr
@@ -1191,7 +1191,7 @@ cat /tmp/solidactions-debug-stderr
 
 Expected: file contains the `[SOLIDACTIONS_DEBUG]` block with resolved sources.
 
-- [ ] **Step 4: Verify it's silent when the env var is not set**
+- [x] **Step 4: Verify it's silent when the env var is not set**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami 2>/tmp/solidactions-nodbg-stderr
@@ -1200,7 +1200,7 @@ wc -l /tmp/solidactions-nodbg-stderr
 
 Expected: `0 /tmp/solidactions-nodbg-stderr`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/index.ts
