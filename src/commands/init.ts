@@ -11,6 +11,7 @@ import {
     readConfigFile,
     writeConfigFile,
     removeConfigFile,
+    findLocalConfigPath,
     getGlobalConfigPath,
     getLocalConfigPath,
 } from '../utils/config';
@@ -172,12 +173,33 @@ export async function init(
     console.log(chalk.gray('  solidactions run list                 List recent runs'));
 }
 
-export async function logout() {
-    if (readConfigFile(getGlobalConfigPath())) {
-        clearConfig();
-        console.log(chalk.green('Logged out successfully.'));
+export async function logout(options: { local?: boolean; global?: boolean } = {}) {
+    if (options.local && options.global) {
+        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
+        process.exit(1);
+    }
+
+    const globalPath = getGlobalConfigPath();
+    const localPath = findLocalConfigPath(process.cwd());
+
+    let targetPath: string | null;
+    if (options.local) {
+        targetPath = localPath;
+        if (!targetPath) {
+            console.error(chalk.red(`No local config found in ${process.cwd()} or any parent directory.`));
+            process.exit(1);
+        }
+    } else if (options.global) {
+        targetPath = globalPath;
     } else {
-        console.log(chalk.gray('Not logged in.'));
+        targetPath = localPath ?? globalPath;
+    }
+
+    const removed = removeConfigFile(targetPath);
+    if (removed) {
+        console.log(chalk.green(`Logged out. Removed ${targetPath}`));
+    } else {
+        console.log(chalk.gray(`Not logged in (no config at ${targetPath}).`));
     }
 }
 

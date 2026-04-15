@@ -55,8 +55,10 @@ program
 program
     .command('logout')
     .description('Remove saved credentials')
-    .action(() => {
-        logout();
+    .option('--local', 'Remove only the nearest local ./.solidactions/config.json')
+    .option('--global', 'Remove only ~/.solidactions/config.json')
+    .action((options) => {
+        logout(options);
     });
 
 program
