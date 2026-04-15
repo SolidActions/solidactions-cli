@@ -1347,13 +1347,13 @@ git commit -m "docs: record test TODO for per-folder config feature (#13)"
 
 Final pass to confirm nothing regressed and all user-facing flows behave as specified.
 
-- [ ] **Step 1: Back up your real global config**
+- [x] **Step 1: Back up your real global config**
 
 ```bash
 cp ~/.solidactions/config.json ~/.solidactions/config.json.e2e-backup
 ```
 
-- [ ] **Step 2: Scenario — global-only (existing user, no changes)**
+- [x] **Step 2: Scenario — global-only (existing user, no changes)**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -1361,7 +1361,7 @@ cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoam
 
 Expected: prints host / API key / workspace, all sourced from `~/.solidactions/config.json`. Same as pre-change behavior.
 
-- [ ] **Step 3: Scenario — local takes precedence over global**
+- [x] **Step 3: Scenario — local takes precedence over global**
 
 ```bash
 rm -rf /tmp/sa-e2e-local && mkdir -p /tmp/sa-e2e-local/.solidactions && echo '{"host":"https://local.test","apiKey":"local-key","workspaceId":"local-ws"}' > /tmp/sa-e2e-local/.solidactions/config.json
@@ -1370,7 +1370,7 @@ cd /tmp/sa-e2e-local && node /home/mercer/projects/solid/solidactions-cli/dist/i
 
 Expected: all three fields sourced from `/tmp/sa-e2e-local/.solidactions/config.json`.
 
-- [ ] **Step 4: Scenario — local from subdirectory (walk-up)**
+- [x] **Step 4: Scenario — local from subdirectory (walk-up)**
 
 ```bash
 mkdir -p /tmp/sa-e2e-local/deep/nested/subdir && cd /tmp/sa-e2e-local/deep/nested/subdir && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -1378,7 +1378,7 @@ mkdir -p /tmp/sa-e2e-local/deep/nested/subdir && cd /tmp/sa-e2e-local/deep/neste
 
 Expected: same output as Step 3 (walks up to `/tmp/sa-e2e-local`).
 
-- [ ] **Step 5: Scenario — env override for one field only**
+- [x] **Step 5: Scenario — env override for one field only**
 
 ```bash
 cd /tmp/sa-e2e-local && SOLIDACTIONS_WORKSPACE_ID=env-override-ws node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -1386,7 +1386,7 @@ cd /tmp/sa-e2e-local && SOLIDACTIONS_WORKSPACE_ID=env-override-ws node /home/mer
 
 Expected: `Workspace: env-override-ws` with `(from $SOLIDACTIONS_* env var)`; `host` and `apiKey` still from local file.
 
-- [ ] **Step 6: Scenario — walk-up does NOT match `~/.solidactions/config.json`**
+- [x] **Step 6: Scenario — walk-up does NOT match `~/.solidactions/config.json`**
 
 ```bash
 cd ~ && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
@@ -1394,7 +1394,7 @@ cd ~ && node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami
 
 Expected: sources for `host`/`apiKey`/`workspaceId` show `(from /home/mercer/.solidactions/config.json)` — meaning they were resolved via the global layer, not mistakenly matched as a local hit during walk-up. The key assertion: the source path output is the global path, reached through the "global layer" not through the walk-up logic.
 
-- [ ] **Step 7: Scenario — `workspace set` errors with env var**
+- [x] **Step 7: Scenario — `workspace set` errors with env var**
 
 ```bash
 cd /tmp && SOLIDACTIONS_WORKSPACE_ID=pinned node /home/mercer/projects/solid/solidactions-cli/dist/index.js workspace set anything 2>&1 | head -3
@@ -1402,7 +1402,7 @@ cd /tmp && SOLIDACTIONS_WORKSPACE_ID=pinned node /home/mercer/projects/solid/sol
 
 Expected: error about env var being set.
 
-- [ ] **Step 8: Scenario — `SOLIDACTIONS_DEBUG` dumps resolution**
+- [x] **Step 8: Scenario — `SOLIDACTIONS_DEBUG` dumps resolution**
 
 ```bash
 cd /tmp/sa-e2e-local && SOLIDACTIONS_DEBUG=1 node /home/mercer/projects/solid/solidactions-cli/dist/index.js whoami 2>&1 >/dev/null | head -10
@@ -1410,20 +1410,20 @@ cd /tmp/sa-e2e-local && SOLIDACTIONS_DEBUG=1 node /home/mercer/projects/solid/so
 
 Expected: `[SOLIDACTIONS_DEBUG]` block appears on stderr with per-field sources.
 
-- [ ] **Step 9: Restore real global config**
+- [x] **Step 9: Restore real global config**
 
 ```bash
 cp ~/.solidactions/config.json.e2e-backup ~/.solidactions/config.json
 rm ~/.solidactions/config.json.e2e-backup
 ```
 
-- [ ] **Step 10: Clean up scratch dirs**
+- [x] **Step 10: Clean up scratch dirs**
 
 ```bash
 rm -rf /tmp/sa-e2e-local /tmp/solidactions-init-test /tmp/solidactions-init-local-test /tmp/solidactions-gi-test /tmp/solidactions-gi-auto-test /tmp/solidactions-gi-skip-test /tmp/solidactions-logout-test /tmp/solidactions-debug-stderr /tmp/solidactions-nodbg-stderr
 ```
 
-- [ ] **Step 11: Final sanity — real command against real server (if you have a dev workspace)**
+- [x] **Step 11: Final sanity — real command against real server (if you have a dev workspace)**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js project list
@@ -1431,6 +1431,6 @@ cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js proje
 
 Expected: lists projects as before — full round-trip against the API still works.
 
-- [ ] **Step 12: Open PR**
+- [x] **Step 12: Open PR**
 
 At this point, the branch `feat/issue-13-per-folder-config` is ready. Ask the user before pushing or opening the PR.
