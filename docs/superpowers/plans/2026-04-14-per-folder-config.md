@@ -306,7 +306,7 @@ Routes existing `getConfig` / `saveConfig` / `clearConfig` through the new modul
 **Files:**
 - Modify: `src/commands/init.ts:1-44` (the config I/O section)
 
-- [ ] **Step 1: Replace the file I/O block**
+- [x] **Step 1: Replace the file I/O block**
 
 Replace lines 1–44 of `src/commands/init.ts` (from `import fs` through the end of `clearConfig()`) with:
 
@@ -345,7 +345,7 @@ Leave the rest of the file (`init`, `logout`, `whoami`) unchanged for now. Their
 
 No change needed in `src/utils/api.ts` for this task. `Config` now lives in `config.ts` but is re-exported from `init.ts` via `export type { Config }`, so the existing `import { getConfig, saveConfig, Config } from '../commands/init';` continues to compile. Task 5 rewrites `api.ts` to use the resolver directly.
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -353,7 +353,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0 with no errors.
 
-- [ ] **Step 3: Verify existing CLI still works (back-compat)**
+- [x] **Step 3: Verify existing CLI still works (back-compat)**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && node dist/index.js whoami
@@ -361,7 +361,7 @@ cd /home/mercer/projects/solid/solidactions-cli && node dist/index.js whoami
 
 Expected: same output as before this change — prints host + truncated API key from `~/.solidactions/config.json` (or "Not initialized" if none). No change in behavior.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/commands/init.ts
@@ -377,7 +377,7 @@ Today `ensureWorkspaceSelected` saves the workspace selection via `saveConfig()`
 **Files:**
 - Modify: `src/utils/api.ts`
 
-- [ ] **Step 1: Update `src/utils/api.ts`**
+- [x] **Step 1: Update `src/utils/api.ts`**
 
 Replace the body of `src/utils/api.ts` with:
 
@@ -503,7 +503,7 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -511,7 +511,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Verify back-compat**
+- [x] **Step 3: Verify back-compat**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && node dist/index.js whoami
@@ -519,7 +519,7 @@ cd /home/mercer/projects/solid/solidactions-cli && node dist/index.js whoami
 
 Expected: same output as before.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/utils/api.ts
