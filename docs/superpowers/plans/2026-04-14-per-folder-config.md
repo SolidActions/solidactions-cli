@@ -1030,7 +1030,7 @@ git commit -m "feat(workspace): write to active config path; error on env confli
 - Modify: `src/index.ts` (logout registration, lines 51–56)
 - Modify: `src/commands/init.ts` (`logout` function)
 
-- [ ] **Step 1: Update the `logout` command registration**
+- [x] **Step 1: Update the `logout` command registration**
 
 Replace lines 51–56 in `src/index.ts` with:
 
@@ -1045,7 +1045,7 @@ program
     });
 ```
 
-- [ ] **Step 2: Replace the `logout` function**
+- [x] **Step 2: Replace the `logout` function**
 
 Replace the existing `logout()` in `src/commands/init.ts` with:
 
@@ -1097,7 +1097,7 @@ import {
 } from '../utils/config';
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -1105,7 +1105,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 4: Verify `logout --local`**
+- [x] **Step 4: Verify `logout --local`**
 
 ```bash
 rm -rf /tmp/solidactions-logout-test && mkdir -p /tmp/solidactions-logout-test && cd /tmp/solidactions-logout-test && mkdir .solidactions && echo '{"host":"h","apiKey":"k"}' > .solidactions/config.json
@@ -1115,7 +1115,7 @@ ls .solidactions/ 2>&1
 
 Expected: prints `Logged out. Removed /tmp/solidactions-logout-test/.solidactions/config.json`. The config file is gone.
 
-- [ ] **Step 5: Verify bare `logout` with only global**
+- [x] **Step 5: Verify bare `logout` with only global**
 
 ```bash
 # Back up real global, then run logout
@@ -1126,7 +1126,7 @@ cp ~/.solidactions/config.json.logout-backup ~/.solidactions/config.json  # rest
 
 Expected: prints `Logged out. Removed /home/mercer/.solidactions/config.json`.
 
-- [ ] **Step 6: Verify `logout --local` errors when no local config is walk-up-findable**
+- [x] **Step 6: Verify `logout --local` errors when no local config is walk-up-findable**
 
 ```bash
 cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js logout --local 2>&1 | head -3
@@ -1134,7 +1134,7 @@ cd /tmp && node /home/mercer/projects/solid/solidactions-cli/dist/index.js logou
 
 Expected: prints `No local config found in /tmp or any parent directory.`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/index.ts src/commands/init.ts
