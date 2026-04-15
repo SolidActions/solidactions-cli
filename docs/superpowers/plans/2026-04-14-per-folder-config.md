@@ -31,7 +31,7 @@
 **Files:**
 - Create: `src/utils/config.ts`
 
-- [ ] **Step 1: Write the skeleton file**
+- [x] **Step 1: Write the skeleton file**
 
 ```ts
 // src/utils/config.ts
@@ -71,7 +71,7 @@ export function getLocalConfigPath(cwd: string = process.cwd()): string {
 }
 ```
 
-- [ ] **Step 2: Build to confirm it compiles**
+- [x] **Step 2: Build to confirm it compiles**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -79,7 +79,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0 with no errors. `dist/utils/config.js` exists.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/utils/config.ts
@@ -93,7 +93,7 @@ git commit -m "feat(config): scaffold config module with types and path helpers 
 **Files:**
 - Modify: `src/utils/config.ts`
 
-- [ ] **Step 1: Append walk-up and file helpers**
+- [x] **Step 1: Append walk-up and file helpers**
 
 Append to `src/utils/config.ts`:
 
@@ -165,7 +165,7 @@ export function removeConfigFile(filePath: string): boolean {
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -173,7 +173,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Manually exercise walk-up via a tinker-style one-liner**
+- [x] **Step 3: Manually exercise walk-up via a tinker-style one-liner**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && node -e "
@@ -187,7 +187,7 @@ console.log('walk-up from \$HOME:', findLocalConfigPath(process.env.HOME));
 
 Expected: prints paths; `walk-up from $HOME` prints `null` (because we skip `$HOME` itself and no parent above it has `.solidactions/config.json`).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/utils/config.ts
@@ -201,7 +201,7 @@ git commit -m "feat(config): add walk-up finder and atomic file I/O (#13)"
 **Files:**
 - Modify: `src/utils/config.ts`
 
-- [ ] **Step 1: Append resolver**
+- [x] **Step 1: Append resolver**
 
 Append to `src/utils/config.ts`:
 
@@ -256,7 +256,7 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && npm run build
@@ -264,7 +264,7 @@ cd /home/mercer/projects/solid/solidactions-cli && npm run build
 
 Expected: exits 0.
 
-- [ ] **Step 3: Manually exercise `resolveConfig` against the existing global config**
+- [x] **Step 3: Manually exercise `resolveConfig` against the existing global config**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && node -e "
@@ -275,7 +275,7 @@ console.log(JSON.stringify(resolveConfig(), null, 2));
 
 Expected: prints `{ config: { host, apiKey, workspaceId? }, sources: { host: '<abs path to ~/.solidactions/config.json>', ... }, activePath: '<abs path>' }`. If no global config exists yet, prints `null`.
 
-- [ ] **Step 4: Exercise env override**
+- [x] **Step 4: Exercise env override**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && SOLIDACTIONS_HOST=https://override.test SOLIDACTIONS_WORKSPACE_ID=ws-from-env node -e "
@@ -290,7 +290,7 @@ Expected:
 - `host: https://override.test  source: env`
 - `workspaceId: ws-from-env  source: env`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/utils/config.ts
