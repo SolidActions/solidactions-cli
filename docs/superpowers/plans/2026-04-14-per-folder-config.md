@@ -1214,7 +1214,7 @@ git commit -m "feat(debug): add SOLIDACTIONS_DEBUG=1 resolution dump (#13)"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Add a "Configuration" section**
+- [x] **Step 1: Add a "Configuration" section**
 
 Locate the existing `init` documentation in `README.md` and add a new top-level `## Configuration` section near it (or replace the current init notes if they're minimal). The section should include the following content verbatim:
 
@@ -1262,7 +1262,7 @@ If you run multiple AI coding agents in different project folders simultaneously
 - Set `SOLIDACTIONS_API_KEY` / `SOLIDACTIONS_WORKSPACE_ID` in the environment each agent uses (no files to share or stomp).
 ````
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add README.md
@@ -1278,7 +1278,7 @@ The CLI repo has no test framework today. This task records what should be teste
 **Files:**
 - Create: `docs/test-todo.md`
 
-- [ ] **Step 1: Write the test notes**
+- [x] **Step 1: Write the test notes**
 
 Create `docs/test-todo.md` with this content:
 
@@ -1334,7 +1334,7 @@ When a test framework is introduced, cover the following for per-folder config (
 - Does not leak the API key (prints `<redacted>`).
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add docs/test-todo.md
