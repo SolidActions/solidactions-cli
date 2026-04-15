@@ -1,8 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
-import { saveConfig } from '../commands/init';
-import { Config, ResolvedConfig, resolveConfig } from './config';
+import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
 
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
     const headers: Record<string, string> = {
@@ -106,7 +105,8 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
     config.workspaceId = selected.id;
 
     if (workspaceSource !== 'env') {
-        saveConfig(config);
+        const targetPath = resolved?.activePath ?? getGlobalConfigPath();
+        writeConfigFile(targetPath, config);
     }
     console.log(chalk.green(`Workspace set: ${selected.name}`));
 
