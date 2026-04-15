@@ -99,3 +99,52 @@ export function removeConfigFile(filePath: string): boolean {
     fs.unlinkSync(filePath);
     return true;
 }
+
+function readEnvOverrides(): Partial<Config> {
+    const env: Partial<Config> = {};
+    if (process.env.SOLIDACTIONS_HOST) env.host = process.env.SOLIDACTIONS_HOST;
+    if (process.env.SOLIDACTIONS_API_KEY) env.apiKey = process.env.SOLIDACTIONS_API_KEY;
+    if (process.env.SOLIDACTIONS_WORKSPACE_ID) env.workspaceId = process.env.SOLIDACTIONS_WORKSPACE_ID;
+    return env;
+}
+
+/**
+ * Resolve config by merging three layers field-by-field (env > local > global).
+ * Returns null only when no source contributes an apiKey AND host (i.e. nothing usable).
+ * `activePath` is the file a write-mutating command should target: nearest local if present, else global.
+ */
+export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | null {
+    const env = readEnvOverrides();
+    const localPath = findLocalConfigPath(cwd);
+    const local = localPath ? readConfigFile(localPath) : null;
+    const global = readConfigFile(getGlobalConfigPath());
+
+    const pick = <K extends keyof Config>(key: K): { value: Config[K] | undefined; source: ConfigSource } => {
+        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env' };
+        if (local && local[key] !== undefined) return { value: local[key], source: localPath! };
+        if (global && global[key] !== undefined) return { value: global[key], source: getGlobalConfigPath() };
+        return { value: undefined, source: null };
+    };
+
+    const host = pick('host');
+    const apiKey = pick('apiKey');
+    const workspaceId = pick('workspaceId');
+
+    if (!host.value && !apiKey.value) {
+        return null;
+    }
+
+    return {
+        config: {
+            host: (host.value ?? '') as string,
+            apiKey: (apiKey.value ?? '') as string,
+            workspaceId: workspaceId.value as string | undefined,
+        },
+        sources: {
+            host: host.source,
+            apiKey: apiKey.source,
+            workspaceId: workspaceId.source,
+        },
+        activePath: localPath ?? getGlobalConfigPath(),
+    };
+}
