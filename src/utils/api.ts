@@ -1,40 +1,44 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
-import { getConfig, saveConfig, Config } from '../commands/init';
+import { saveConfig } from '../commands/init';
+import { Config, ResolvedConfig, resolveConfig } from './config';
 
-/**
- * Get standard API headers including X-Workspace-Id if configured.
- */
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
     const headers: Record<string, string> = {
         'Authorization': `Bearer ${config.apiKey}`,
         'Accept': 'application/json',
     };
-
-    if (contentType) {
-        headers['Content-Type'] = contentType;
-    }
-
-    if (config.workspaceId) {
-        headers['X-Workspace-Id'] = config.workspaceId;
-    }
-
+    if (contentType) headers['Content-Type'] = contentType;
+    if (config.workspaceId) headers['X-Workspace-Id'] = config.workspaceId;
     return headers;
 }
 
 /**
- * Ensure a workspace is selected. If not configured, fetches workspaces and auto-selects
- * (if only one) or prompts the user to choose.
- *
- * Returns the config with workspaceId set, or exits if no workspaces available.
+ * Get the full resolution (config + sources + activePath). Exits if nothing resolvable.
  */
+export function requireResolvedConfig(): ResolvedConfig {
+    const resolved = resolveConfig();
+    if (!resolved || !resolved.config.apiKey) {
+        console.error(chalk.red('Not initialized. Run `solidactions init <api-key>` first.'));
+        process.exit(1);
+    }
+    return resolved;
+}
+
+export function requireConfig(): Config {
+    return requireResolvedConfig().config;
+}
+
 export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
     if (config.workspaceId) {
         return config;
     }
 
-    // Fetch workspaces from API (this endpoint doesn't require X-Workspace-Id)
+    // Re-resolve so we know whether a save would be redundant (env-provided) or meaningful (file-backed).
+    const resolved = resolveConfig();
+    const workspaceSource = resolved?.sources.workspaceId ?? null;
+
     let workspaces: Array<{ id: string; name: string; org_name: string; role: string }>;
     try {
         const response = await axios.get(`${config.host}/api/v1/workspaces`, {
@@ -43,9 +47,6 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
                 'Accept': 'application/json',
             },
         });
-
-        // API returns { workspaces: { "Org Name": [{ id, name, role, tenant_name, ... }] } }
-        // Flatten the grouped structure into a flat array
         const grouped = response.data.workspaces || response.data.teams || response.data.data || response.data;
         if (typeof grouped === 'object' && !Array.isArray(grouped)) {
             workspaces = [];
@@ -82,7 +83,6 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         selected = workspaces[0];
         console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
     } else {
-        // Prompt user to select
         console.log(chalk.blue('\nSelect a workspace:\n'));
         workspaces.forEach((ws, i) => {
             console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`);
@@ -103,31 +103,17 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         selected = workspaces[index];
     }
 
-    // Save workspace selection to config
     config.workspaceId = selected.id;
-    saveConfig(config);
+
+    if (workspaceSource !== 'env') {
+        saveConfig(config);
+    }
     console.log(chalk.green(`Workspace set: ${selected.name}`));
 
     return config;
 }
 
-/**
- * Get config and ensure it's initialized. Exits if not.
- */
-export function requireConfig(): Config {
-    const config = getConfig();
-    if (!config?.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions init <api-key>` first.'));
-        process.exit(1);
-    }
-    return config;
-}
-
-/**
- * Get config with workspace selected. Use this for any command that needs workspace context.
- */
 export async function requireConfigWithWorkspace(): Promise<Config> {
     const config = requireConfig();
     return ensureWorkspaceSelected(config);
 }
-
