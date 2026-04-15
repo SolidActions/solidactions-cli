@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import chalk from 'chalk';
 import { Command } from 'commander';
 import { deploy } from './commands/deploy';
 import { init, logout, whoami } from './commands/init';
@@ -336,4 +337,7 @@ ai
     .option('--overwrite', 'Overwrite existing examples without warning')
     .action((names, options) => { aiExamples(names, options); });
 
-program.parse();
+program.parseAsync().catch((err) => {
+    console.error(chalk.red(err.message ?? String(err)));
+    process.exit(1);
+});

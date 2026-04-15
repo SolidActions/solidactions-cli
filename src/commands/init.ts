@@ -31,13 +31,19 @@ export function clearConfig(): void {
 
 async function promptLocation(): Promise<'local' | 'global'> {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise<string>((resolve) => {
-        rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
-    });
-    rl.close();
-    const normalized = answer.trim().toLowerCase();
-    if (normalized === 'local' || normalized === 'l') return 'local';
-    return 'global';
+    try {
+        while (true) {
+            const answer = await new Promise<string>((resolve) => {
+                rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
+            });
+            const normalized = answer.trim().toLowerCase();
+            if (normalized === '' || normalized === 'global' || normalized === 'g') return 'global';
+            if (normalized === 'local' || normalized === 'l') return 'local';
+            console.log(chalk.yellow("Please answer 'local' or 'global' (or press Enter for global)."));
+        }
+    } finally {
+        rl.close();
+    }
 }
 
 export async function init(
