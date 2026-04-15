@@ -797,7 +797,7 @@ cat .gitignore
 
 Expected: `.gitignore` contains `.solidactions/`.
 
-- [ ] **Step 5: Verify `--gitignore` skips prompt**
+- [x] **Step 5: Verify `--gitignore` skips prompt**
 
 ```bash
 rm -rf /tmp/solidactions-gi-auto-test && mkdir -p /tmp/solidactions-gi-auto-test && cd /tmp/solidactions-gi-auto-test && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy --local --gitignore --host https://example.test </dev/null 2>&1 | head -15
@@ -806,7 +806,7 @@ cat .gitignore
 
 Expected: no prompt in output; `.gitignore` contains `.solidactions/`. (Workspace step will fail in non-TTY; that's fine.)
 
-- [ ] **Step 6: Verify already-covered case is a no-op**
+- [x] **Step 6: Verify already-covered case is a no-op**
 
 ```bash
 rm -rf /tmp/solidactions-gi-skip-test && mkdir -p /tmp/solidactions-gi-skip-test && cd /tmp/solidactions-gi-skip-test && echo ".solidactions/" > .gitignore && node /home/mercer/projects/solid/solidactions-cli/dist/index.js init dummy --local --gitignore --host https://example.test </dev/null 2>&1 | head -15
@@ -815,7 +815,7 @@ cat .gitignore
 
 Expected: `.gitignore` still contains one line `.solidactions/`, not duplicated.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/mercer/projects/solid/solidactions-cli && git add src/commands/init.ts
