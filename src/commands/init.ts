@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import readline from 'readline';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
@@ -44,6 +46,42 @@ async function promptLocation(): Promise<'local' | 'global'> {
     } finally {
         rl.close();
     }
+}
+
+async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<void> {
+    const gitignorePath = path.join(targetDir, '.gitignore');
+    const patternToAdd = '.solidactions/';
+
+    let existing = '';
+    if (fs.existsSync(gitignorePath)) {
+        existing = fs.readFileSync(gitignorePath, 'utf-8');
+        const lines = existing.split('\n').map((l) => l.trim());
+        if (lines.includes('.solidactions/') || lines.includes('.solidactions') || lines.includes('/.solidactions/')) {
+            return; // already covered
+        }
+    }
+
+    let shouldAdd = auto;
+    if (!shouldAdd && process.stdin.isTTY) {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await new Promise<string>((resolve) => {
+            rl.question(
+                chalk.yellow(`Local config contains an API key. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
+                resolve,
+            );
+        });
+        rl.close();
+        shouldAdd = !(answer.trim().toLowerCase().startsWith('n'));
+    }
+
+    if (!shouldAdd) {
+        console.log(chalk.yellow(`Skipping .gitignore update. Remember: ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
+        return;
+    }
+
+    const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+    fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
+    console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
 }
 
 export async function init(
@@ -96,7 +134,9 @@ export async function init(
     };
     writeConfigFile(targetPath, config);
 
-    // TODO(chunk-d): call ensureGitignoreCovers here when target === 'local'
+    if (target === 'local') {
+        await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
+    }
 
     console.log(chalk.green('CLI initialized successfully!'));
     console.log(chalk.gray(`Configuration saved to ${targetPath}`));
