@@ -127,8 +127,16 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `ai init` | `--claude`, `--agents` | Install AI helper docs |
+| `ai init` | `--claude`, `--agents`, `--no-skills` | Install AI helper docs |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
+
+By default, `ai init` also installs three lazy-loaded SolidActions skills
+into `.claude/skills/`. These activate automatically when you scaffold a
+project, write workflow code, or deploy. The CLAUDE.md injection becomes
+a slim pointer to keep always-loaded context light.
+
+Pass `--no-skills` to skip the skill install and get the legacy full
+CLAUDE.md content instead.
 
 ## Development
 

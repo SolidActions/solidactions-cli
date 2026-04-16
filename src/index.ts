@@ -349,6 +349,7 @@ ai
     .description('Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development')
     .option('--claude', 'Use CLAUDE.md (for Claude Code)')
     .option('--agents', 'Use AGENTS.md (for Cursor, Windsurf, etc.)')
+    .option('--no-skills', 'Skip installing SolidActions skill files (uses legacy full CLAUDE.md injection)')
     .action((options) => { aiInit(options); });
 
 ai
