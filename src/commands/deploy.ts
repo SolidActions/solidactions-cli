@@ -138,12 +138,55 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     const config = await requireConfigWithWorkspace();
 
     const sourceDir = sourcePath ? path.resolve(sourcePath) : process.cwd();
-    const environment = options.env || 'dev';
+
+    // Capture whether -e was explicitly passed by the caller. Commander leaves
+    // options.env as undefined when no default is set and the flag is omitted.
+    const explicitEnv: string | undefined = options.env;
 
     if (!fs.existsSync(sourceDir)) {
         console.error(chalk.red(`Source directory not found: ${sourceDir}`));
         process.exit(1);
     }
+
+    // -------------------------------------------------------------------------
+    // Production-existence check — must happen BEFORE we apply any env default
+    // so that first-time deploys without -e get a helpful error instead of
+    // silently creating a dev-only project with no production root.
+    // -------------------------------------------------------------------------
+    let productionExists: boolean | null = null; // null = unknown (error path)
+    let productionSlug: string | null = null;
+
+    try {
+        const prodResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}`, {
+            headers: getApiHeaders(config),
+        });
+        productionExists = true;
+        productionSlug = prodResponse.data.slug || prodResponse.data.name;
+    } catch (error: any) {
+        if (error.response?.status === 404) {
+            productionExists = false;
+        } else {
+            // 5xx, network error, auth failure, etc. — fail conservatively rather
+            // than treating the project as non-existent and potentially creating it.
+            console.error(chalk.red('Failed to check project existence:'), error.response?.data?.message || error.message);
+            process.exit(1);
+        }
+    }
+
+    // Decision: if production does not exist and no -e flag was given, the user
+    // must pick an environment explicitly to avoid creating a broken dev-only project.
+    if (productionExists === false && explicitEnv === undefined) {
+        console.error(chalk.red(`\nThis is the first deploy of "${projectName}" — please pick an environment explicitly:\n`));
+        console.error(`  solidactions project deploy ${projectName} <path> -e production    # most projects start here`);
+        console.error(`  solidactions project deploy ${projectName} <path> -e dev            # dev-only (uncommon; no production root will exist)`);
+        console.error(`  solidactions project deploy ${projectName} <path> -e staging        # staging-only (uncommon)`);
+        console.error(chalk.gray('\nTip: most projects should start with `-e production`. A project needs a production root before dev/staging children can attach to it.'));
+        process.exit(1);
+    }
+
+    // Apply default: if production already exists and the user didn't pass -e,
+    // use 'dev' — this preserves existing behavior for mature projects.
+    const environment = explicitEnv ?? 'dev';
 
     const envLabel = environment !== 'production' ? ` (${environment})` : '';
     console.log(chalk.blue(`Deploying to project "${projectName}"${envLabel}...`));
@@ -180,24 +223,35 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     console.log(chalk.green('✓ Project structure validated'));
 
-    // Check if project exists, create if not
+    // Check if the target environment's project record exists; create if needed.
+    // For production deploys where we already confirmed existence above, reuse
+    // the cached slug to avoid a duplicate GET.
     let projectSlug = projectName;
     try {
-        // For non-production environments, append the environment to the slug for lookup
-        const lookupSlug = environment === 'production'
-            ? projectName
-            : `${projectName}-${environment}`;
+        if (environment === 'production' && productionExists === true && productionSlug !== null) {
+            // Already confirmed — skip the re-lookup.
+            projectSlug = productionSlug;
+        } else {
+            // For non-production environments, append the environment to the slug for lookup
+            const lookupSlug = environment === 'production'
+                ? projectName
+                : `${projectName}-${environment}`;
 
-        const checkResponse = await axios.get(`${config.host}/api/v1/projects/${lookupSlug}`, {
-            headers: getApiHeaders(config),
-        });
-        projectSlug = checkResponse.data.slug || checkResponse.data.name;
+            const checkResponse = await axios.get(`${config.host}/api/v1/projects/${lookupSlug}`, {
+                headers: getApiHeaders(config),
+            });
+            projectSlug = checkResponse.data.slug || checkResponse.data.name;
+        }
     } catch (error: any) {
         if (error.response?.status === 404) {
-            // For non-production environments, check if we should create
+            // For non-production environments, require --create or give a clear hint
             if (environment !== 'production' && !options.create) {
-                console.log(chalk.yellow(`Project "${projectName}" doesn't have a ${environment} environment.`));
-                console.log(chalk.gray('Use --create to create it, or deploy to production first.'));
+                console.error(chalk.red(`\nProject "${projectName}" doesn't have a ${environment} environment.\n`));
+                console.error(`  If production is the intended target:`);
+                console.error(`    solidactions project deploy ${projectName} <path> -e production`);
+                console.error('');
+                console.error(`  If you really want a new ${environment} environment:`);
+                console.error(`    solidactions project deploy ${projectName} <path> -e ${environment} --create`);
                 process.exit(1);
             }
 

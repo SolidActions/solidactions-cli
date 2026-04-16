@@ -108,7 +108,7 @@ project
     .description('Deploy a project to SolidActions')
     .argument('<project-name>', 'Project name (will be created if it doesn\'t exist)')
     .argument('[path]', 'Source directory to deploy (defaults to current directory)')
-    .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev). Required on first deploy of a new project.')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
     .action((projectName, path, options) => {
