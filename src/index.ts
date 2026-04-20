@@ -346,10 +346,9 @@ const ai = program.command('ai').description('AI helper tools');
 
 ai
     .command('init')
-    .description('Install AI helper documentation (CLAUDE.md or AGENTS.md) for AI-assisted workflow development')
+    .description('Install SolidActions AI skills and SDK reference for AI-assisted development')
     .option('--claude', 'Use CLAUDE.md (for Claude Code)')
-    .option('--agents', 'Use AGENTS.md (for Cursor, Windsurf, etc.)')
-    .option('--no-skills', 'Skip installing SolidActions skill files (uses legacy full CLAUDE.md injection)')
+    .option('--agents', 'Use AGENTS.md (for Codex, Cursor, Gemini, Windsurf, etc.)')
     .action((options) => { aiInit(options); });
 
 ai

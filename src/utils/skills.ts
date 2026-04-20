@@ -13,60 +13,50 @@ const EXAMPLES_OWNER = 'SolidActions';
 const EXAMPLES_REPO = 'solidactions-examples';
 const SKILLS_PATH_PREFIX = 'skills';
 
+export type AiHelperTarget = 'CLAUDE.md' | 'AGENTS.md';
+
 /**
- * Detect which AI-tool skill directories should receive skills.
- * Returns absolute paths to the target skills/ subdirectories.
+ * Resolve the skills directory for an AI helper target.
  *
- * v1 supports Claude Code only. Codex was resolved as user-global
- * (~/.codex/skills) with no project-local equivalent, so it is
- * intentionally NOT a target here.
+ * - `CLAUDE.md` → `<cwd>/.claude/skills/` (Claude Code convention)
+ * - `AGENTS.md` → `<cwd>/.agents/skills/` (Codex auto-discovers this path;
+ *   Cursor/Gemini read via AGENTS.md pointers)
  *
- * Detection rules:
- * - If `.claude/` exists in cwd → include `.claude/skills/`
- * - If neither exists → return empty (caller should prompt)
+ * The directory does not need to exist — the caller creates it.
  */
-export function detectSkillTargets(cwd: string = process.cwd()): string[] {
-    const targets: string[] = [];
-    if (fs.existsSync(path.join(cwd, '.claude'))) {
-        targets.push(path.join(cwd, '.claude', 'skills'));
+export function skillTargetDir(targetFile: AiHelperTarget, cwd: string = process.cwd()): string {
+    if (targetFile === 'CLAUDE.md') {
+        return path.join(cwd, '.claude', 'skills');
     }
-    return targets;
+    return path.join(cwd, '.agents', 'skills');
 }
 
 /**
  * Fetch all SolidActions skill files from the examples repo and write
- * them into each target directory. Overwrites existing files (skills
+ * them into the target directory. Overwrites existing files (skills
  * are versioned upstream).
  */
-export async function installSkills(targetDirs: string[]): Promise<{ written: string[] }> {
+export async function installSkills(targetDir: string): Promise<{ written: string[] }> {
     const written: string[] = [];
 
-    for (const dir of targetDirs) {
-        fsExtra.ensureDirSync(dir);
-    }
+    fsExtra.ensureDirSync(targetDir);
 
     for (const skillName of SKILL_NAMES) {
         const remotePath = `${SKILLS_PATH_PREFIX}/${skillName}.md`;
         const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
 
-        for (const dir of targetDirs) {
-            const filePath = path.join(dir, `${skillName}.md`);
-            fs.writeFileSync(filePath, content, 'utf8');
-            written.push(filePath);
-        }
+        const filePath = path.join(targetDir, `${skillName}.md`);
+        fs.writeFileSync(filePath, content, 'utf8');
+        written.push(filePath);
     }
 
     return { written };
 }
 
 /**
- * Pick the right CLAUDE.md content variant from the examples repo
- * based on whether skills are being installed.
- *
- * - skillsInstalled = true  → fetches CLAUDE-skills-pointer.md (slim)
- * - skillsInstalled = false → fetches CLAUDE.md (full, legacy)
+ * Fetch the slim AI-helper content for the target file from the examples
+ * repo. Single source per target — no legacy fallback.
  */
-export async function fetchClaudeMdContent(skillsInstalled: boolean): Promise<string> {
-    const file = skillsInstalled ? 'CLAUDE-skills-pointer.md' : 'CLAUDE.md';
-    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, file);
+export async function fetchAiHelperContent(targetFile: AiHelperTarget): Promise<string> {
+    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile);
 }

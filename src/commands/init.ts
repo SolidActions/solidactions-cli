@@ -167,6 +167,9 @@ export async function init(
     }
 
     console.log('');
+    console.log(chalk.blue('Next step — install AI helper docs and skills:'));
+    console.log(chalk.gray('  solidactions ai init                  Picks CLAUDE.md or AGENTS.md interactively'));
+    console.log('');
     console.log(chalk.blue('Quick start:'));
     console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
     console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
