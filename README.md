@@ -12,7 +12,7 @@ npm install -g @solidactions/cli
 
 ```bash
 solidactions init <api-key>                          # Initialize (prompts for workspace)
-solidactions init <api-key> --workspace <name>       # Initialize with workspace
+solidactions ai init                                  # Install AI skills and SDK reference (required for AI-assisted dev)
 solidactions project deploy <project> <path>         # Deploy a project
 solidactions run start <project> <workflow>           # Trigger a workflow
 solidactions run view <run-id>                        # Inspect a run
@@ -127,16 +127,20 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `ai init` | `--claude`, `--agents`, `--no-skills` | Install AI helper docs |
+| `ai init` | `--claude`, `--agents` | Install AI skills and SDK reference |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
-By default, `ai init` also installs three lazy-loaded SolidActions skills
-into `.claude/skills/`. These activate automatically when you scaffold a
-project, write workflow code, or deploy. The CLAUDE.md injection becomes
-a slim pointer to keep always-loaded context light.
+`ai init` installs three auto-activating SolidActions skills and a
+full SDK reference into your project:
 
-Pass `--no-skills` to skip the skill install and get the legacy full
-CLAUDE.md content instead.
+- Skills go to `.claude/skills/` (for `--claude` / Claude Code) or
+  `.agents/skills/` (for `--agents` / Codex, Cursor, Gemini, Windsurf).
+  Codex auto-discovers the `.agents/skills/` path — see
+  https://developers.openai.com/codex/skills.
+- The SDK reference is saved to `.solidactions/sdk-reference.md`.
+- A slim pointer section is injected into `CLAUDE.md` or `AGENTS.md`
+  listing the skills and inlining the highest-cost hard rules
+  (determinism, step discipline, messaging) as a safety net.
 
 ## Development
 
