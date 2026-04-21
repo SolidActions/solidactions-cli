@@ -11,10 +11,11 @@ npm install -g @solidactions/cli
 ## Quick Start
 
 ```bash
-solidactions init <api-key>                          # Initialize (prompts for workspace)
-solidactions ai init                                  # Install AI skills and SDK reference (required for AI-assisted dev)
-solidactions project deploy <project> <path>         # Deploy a project
-solidactions run start <project> <workflow>           # Trigger a workflow
+solidactions login <api-key>                          # Authenticate (prompts for workspace)
+solidactions init my-project                          # Scaffold a new project (files + AI skills)
+cd my-project
+solidactions project deploy my-project -e production  # Deploy it
+solidactions run start my-project <workflow>          # Trigger a workflow
 solidactions run view <run-id>                        # Inspect a run
 ```
 
@@ -35,13 +36,13 @@ For each field (`host`, `apiKey`, `workspaceId`), the CLI resolves independently
 
 You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while letting `host` and `apiKey` come from a file.
 
-### `solidactions init` flags
+### `solidactions login` flags
 
 - `--local` — write config to `./.solidactions/config.json` in the current folder.
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
 
-In interactive shells, `init` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
+In interactive shells, `login` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
 
 ### `solidactions logout` flags
 
@@ -57,7 +58,7 @@ Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration an
 
 If you run multiple AI coding agents in different project folders simultaneously, either:
 
-- Run `solidactions init <key> --local` in each folder so each has its own config, or
+- Run `solidactions login <key> --local` in each folder so each has its own config, or
 - Set `SOLIDACTIONS_API_KEY` / `SOLIDACTIONS_WORKSPACE_ID` in the environment each agent uses (no files to share or stomp).
 
 ## Commands
@@ -68,9 +69,10 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Description |
 |---------|-------------|
-| `init <api-key>` | Initialize CLI with API key |
+| `login <api-key>` | Authenticate CLI with API key |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
+| `init [directory]` | Scaffold a new project (files + AI skills) |
 | `dev <file>` | Run a workflow locally (no deploy needed) |
 
 ### project
@@ -127,7 +129,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `ai init` | `--claude`, `--agents` | Install AI skills and SDK reference |
+| `ai init` | `--claude`, `--agents` | Install AI skills and SDK reference into an **existing** project (use `init` for new projects) |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
 `ai init` installs three auto-activating SolidActions skills and a

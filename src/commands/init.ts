@@ -1,232 +1,97 @@
 import fs from 'fs';
 import path from 'path';
-import readline from 'readline';
 import chalk from 'chalk';
-import { ensureWorkspaceSelected } from '../utils/api';
-import { workspaceSet } from './workspaces';
-import {
-    Config,
-    ConfigSource,
-    resolveConfig,
-    readConfigFile,
-    writeConfigFile,
-    removeConfigFile,
-    findLocalConfigPath,
-    getGlobalConfigPath,
-    getLocalConfigPath,
-} from '../utils/config';
+import fsExtra from 'fs-extra';
+import { fetchRawFile } from '../utils/github';
+import { aiInit } from './ai-init';
 
-export type { Config };
-
-export function getConfig(): Config | null {
-    const resolved = resolveConfig();
-    return resolved ? resolved.config : null;
+interface InitOptions {
+    skills?: boolean;  // commander inverts --no-skills into skills: false
+    claude?: boolean;
+    agents?: boolean;
 }
 
-export function saveConfig(config: Config): void {
-    const resolved = resolveConfig();
-    const targetPath = resolved ? resolved.activePath : getGlobalConfigPath();
-    writeConfigFile(targetPath, config);
+const EXAMPLES_OWNER = 'SolidActions';
+const EXAMPLES_REPO = 'solidactions-examples';
+const TEMPLATE_PREFIX = 'templates/minimal';
+
+// Tuples of [remote-path-suffix-under-template-prefix, local-path-relative-to-target].
+const TEMPLATE_FILES: Array<[string, string]> = [
+    ['package.json', 'package.json'],
+    ['tsconfig.json', 'tsconfig.json'],
+    ['solidactions.yaml', 'solidactions.yaml'],
+    ['.env.example', '.env.example'],
+    ['src/hello.ts', 'src/hello.ts'],
+];
+
+function firstNonDotEntry(target: string): string | null {
+    if (!fs.existsSync(target)) return null;
+    const entries = fs.readdirSync(target);
+    for (const entry of entries) {
+        if (entry.startsWith('.')) continue;
+        return entry;
+    }
+    return null;
 }
 
-export function clearConfig(): void {
-    removeConfigFile(getGlobalConfigPath());
-}
-
-async function promptLocation(): Promise<'local' | 'global'> {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+export async function init(directory: string | undefined, options: InitOptions = {}) {
     try {
-        while (true) {
-            const answer = await new Promise<string>((resolve) => {
-                rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
-            });
-            const normalized = answer.trim().toLowerCase();
-            if (normalized === '' || normalized === 'global' || normalized === 'g') return 'global';
-            if (normalized === 'local' || normalized === 'l') return 'local';
-            console.log(chalk.yellow("Please answer 'local' or 'global' (or press Enter for global)."));
+        const cwd = process.cwd();
+        const installSkills = options.skills !== false;  // default true
+
+        const targetDir = directory ? path.resolve(cwd, directory) : cwd;
+        const projectName = path.basename(targetDir);
+
+        if (directory) {
+            fsExtra.ensureDirSync(targetDir);
         }
-    } finally {
-        rl.close();
-    }
-}
 
-async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<void> {
-    const gitignorePath = path.join(targetDir, '.gitignore');
-    const patternToAdd = '.solidactions/';
-
-    let existing = '';
-    if (fs.existsSync(gitignorePath)) {
-        existing = fs.readFileSync(gitignorePath, 'utf-8');
-        const lines = existing.split('\n').map((l) => l.trim());
-        const isCovered = lines.some((line) => {
-            const normalized = line
-                .replace(/^\*\*\//, '')
-                .replace(/^\//, '')
-                .replace(/\/(\*\*|\*)?$/, '');
-            return normalized === '.solidactions';
-        });
-        if (isCovered) {
-            return; // already covered
-        }
-    }
-
-    let shouldAdd = auto;
-    if (!shouldAdd && process.stdin.isTTY) {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-            rl.question(
-                chalk.yellow(`Local config contains an API key. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
-                resolve,
-            );
-        });
-        rl.close();
-        shouldAdd = !(answer.trim().toLowerCase().startsWith('n'));
-    }
-
-    if (!shouldAdd) {
-        console.log(chalk.yellow(`Skipping .gitignore update. Remember: ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
-        return;
-    }
-
-    const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-    try {
-        fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
-        console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
-    } catch (err: any) {
-        console.log(chalk.yellow(`Could not update ${gitignorePath}: ${err.message}. Add \`.solidactions/\` to it manually — ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
-    }
-}
-
-export async function init(
-    apiKey: string,
-    options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
-) {
-    let host: string;
-    if (options.host) {
-        host = options.host;
-    } else if (options.dev) {
-        host = 'http://localhost:8000';
-    } else {
-        host = 'https://app.solidactions.com';
-    }
-
-    if (!apiKey || apiKey.trim().length === 0) {
-        console.error(chalk.red('Error: API key is required.'));
-        console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
-        process.exit(1);
-    }
-
-    // Determine target location.
-    let target: 'local' | 'global';
-    if (options.local && options.global) {
-        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
-        process.exit(1);
-    } else if (options.local) {
-        target = 'local';
-    } else if (options.global) {
-        target = 'global';
-    } else if (process.stdin.isTTY) {
-        target = await promptLocation();
-    } else {
-        console.error(chalk.red('Refusing to init non-interactively. Pass --local or --global.'));
-        process.exit(1);
-    }
-
-    const targetPath = target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
-
-    console.log(chalk.blue(`Initializing SolidActions CLI...`));
-    console.log(chalk.gray(`Host: ${host}`));
-
-    if (readConfigFile(targetPath)) {
-        console.log(chalk.yellow(`Existing config at ${targetPath} will be overwritten.`));
-    }
-
-    const config: Config = {
-        host,
-        apiKey: apiKey.trim(),
-    };
-    writeConfigFile(targetPath, config);
-
-    if (target === 'local') {
-        await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
-    }
-
-    console.log(chalk.green('CLI initialized successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${targetPath}`));
-    console.log('');
-
-    // Workspace selection — ensureWorkspaceSelected writes to the right file via the resolver.
-    try {
-        if (options.workspace) {
-            await workspaceSet(options.workspace);
-        } else {
-            await ensureWorkspaceSelected(config);
-        }
-    } catch {
-        console.log(chalk.yellow('Could not set workspace. Run `solidactions workspace set` later.'));
-    }
-
-    console.log('');
-    console.log(chalk.blue('Next step — install AI helper docs and skills:'));
-    console.log(chalk.gray('  solidactions ai init                  Picks CLAUDE.md or AGENTS.md interactively'));
-    console.log('');
-    console.log(chalk.blue('Quick start:'));
-    console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
-    console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
-    console.log(chalk.gray('  solidactions run list                 List recent runs'));
-}
-
-export function logout(options: { local?: boolean; global?: boolean } = {}) {
-    if (options.local && options.global) {
-        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
-        process.exit(1);
-    }
-
-    const globalPath = getGlobalConfigPath();
-    const localPath = findLocalConfigPath(process.cwd());
-
-    let targetPath: string | null;
-    if (options.local) {
-        targetPath = localPath;
-        if (!targetPath) {
-            console.error(chalk.red(`No local config found in ${process.cwd()} or any parent directory.`));
+        const offender = firstNonDotEntry(targetDir);
+        if (offender) {
+            console.error(chalk.red(`Target directory "${targetDir}" is not empty (contains "${offender}").`));
+            console.error(chalk.gray('Run in a fresh directory, or use `solidactions ai init` to add AI tooling to an existing project.'));
             process.exit(1);
         }
-    } else if (options.global) {
-        targetPath = globalPath;
-    } else {
-        targetPath = localPath ?? globalPath;
-    }
 
-    const removed = removeConfigFile(targetPath);
-    if (removed) {
-        console.log(chalk.green(`Logged out. Removed ${targetPath}`));
-    } else {
-        console.log(chalk.gray(`Not logged in (no config at ${targetPath}).`));
-    }
-}
+        console.log(chalk.blue(`Scaffolding "${projectName}" in ${targetDir}...`));
 
-export function whoami() {
-    const resolved = resolveConfig();
-    if (!resolved || !resolved.config.apiKey) {
-        console.log(chalk.yellow('Not initialized.'));
-        console.log(chalk.gray('Run "solidactions init <api-key>" to configure.'));
+        for (const [remoteSuffix, localSuffix] of TEMPLATE_FILES) {
+            const remotePath = `${TEMPLATE_PREFIX}/${remoteSuffix}`;
+            let content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
+            content = content.replace(/__PROJECT_NAME__/g, projectName);
+
+            const outPath = path.join(targetDir, localSuffix);
+            fsExtra.ensureDirSync(path.dirname(outPath));
+            fs.writeFileSync(outPath, content, 'utf8');
+            console.log(chalk.green(`✓ ${path.relative(cwd, outPath)}`));
+        }
+
+        if (installSkills) {
+            console.log('');
+            process.chdir(targetDir);
+            await aiInit({ claude: options.claude, agents: options.agents });
+        }
+
+        console.log('');
+        console.log(chalk.green(`✓ Project "${projectName}" scaffolded.`));
+        console.log('');
+        console.log(chalk.blue('Next steps:'));
+        if (directory) {
+            console.log(chalk.gray(`  cd ${directory}`));
+        }
+        console.log(chalk.gray(`  # Fill in WEBHOOK_SECRET and any other env vars in solidactions.yaml:`));
+        console.log(chalk.gray(`  solidactions env set ${projectName} WEBHOOK_SECRET <your-secret> -e production`));
+        console.log(chalk.gray(`  solidactions project deploy ${projectName} -e production`));
+    } catch (err: any) {
+        if (err.message?.includes('rate limit')) {
+            console.error(chalk.red(err.message));
+        } else if (err.message?.includes('not found')) {
+            console.error(chalk.red(err.message));
+        } else if (err.message?.includes('Failed to fetch')) {
+            console.error(chalk.red('Network error: Could not reach GitHub to fetch the template. Check your internet connection.'));
+        } else {
+            console.error(chalk.red('Error:'), err.message);
+        }
         process.exit(1);
     }
-
-    const { config, sources } = resolved;
-    const maskedKey = config.apiKey.length > 12
-        ? `${config.apiKey.substring(0, 8)}...${config.apiKey.slice(-4)}`
-        : config.apiKey;
-
-    const fmt = (src: ConfigSource): string => {
-        if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
-        if (src === null) return chalk.gray('(unset)');
-        return chalk.gray(`(from ${src})`);
-    };
-
-    console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host:        ${config.host.padEnd(40)} ${fmt(sources.host)}`);
-    console.log(`  API Key:     ${maskedKey.padEnd(40)} ${fmt(sources.apiKey)}`);
-    console.log(`  Workspace:   ${(config.workspaceId ?? '').padEnd(40)} ${fmt(sources.workspaceId)}`);
 }

@@ -2,7 +2,8 @@
 import chalk from 'chalk';
 import { Command } from 'commander';
 import { deploy } from './commands/deploy';
-import { init, logout, whoami } from './commands/init';
+import { login, logout, whoami } from './commands/login';
+import { init } from './commands/init';
 import { pull } from './commands/pull';
 import { projectList } from './commands/project-list';
 import { logsBuild } from './commands/project-logs';
@@ -59,8 +60,8 @@ program
 // =============================================================================
 
 program
-    .command('init')
-    .description('Initialize the CLI with your API key')
+    .command('login')
+    .description('Authenticate the CLI with your API key')
     .argument('<api-key>', 'Your SolidActions API key')
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
@@ -69,7 +70,18 @@ program
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
     .action(async (apiKey, options) => {
-        await init(apiKey, options);
+        await login(apiKey, options);
+    });
+
+program
+    .command('init')
+    .description('Scaffold a new SolidActions project (files + AI skills)')
+    .argument('[directory]', 'Directory to create (omit to scaffold in the current empty directory)')
+    .option('--no-skills', 'Skip AI skills/SDK reference install (scaffold files only)')
+    .option('--claude', 'Use CLAUDE.md for the AI helper file')
+    .option('--agents', 'Use AGENTS.md for the AI helper file (Codex, Cursor, Gemini, Windsurf)')
+    .action(async (directory, options) => {
+        await init(directory, options);
     });
 
 program
