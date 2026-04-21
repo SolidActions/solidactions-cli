@@ -211,7 +211,7 @@ export function whoami() {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
-        console.log(chalk.gray('Run "solidactions init <api-key>" to configure.'));
+        console.log(chalk.gray('Run "solidactions login <api-key>" to configure.'));
         process.exit(1);
     }
 

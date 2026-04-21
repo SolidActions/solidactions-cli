@@ -19,7 +19,7 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
 export function requireResolvedConfig(): ResolvedConfig {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions init <api-key>` first.'));
+        console.error(chalk.red('Not initialized. Run `solidactions login <api-key>` first.'));
         process.exit(1);
     }
     return resolved;
@@ -64,7 +64,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run `solidactions init <api-key>` to reconfigure.'));
+            console.error(chalk.red('Authentication failed. Run `solidactions login <api-key>` to reconfigure.'));
         } else {
             console.error(chalk.red('Failed to fetch workspaces:'), error.response?.data?.message || error.message);
         }

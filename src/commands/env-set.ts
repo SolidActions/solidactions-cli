@@ -81,7 +81,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions init <api-key>" to re-configure.'));
+                    console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
                 } else if (error.response.status === 404) {
                     console.error(chalk.red(`Project "${projectSlug}" not found.`));
                 } else if (error.response.status === 422) {
@@ -189,7 +189,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions init <api-key>" to re-configure.'));
+                    console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
                 } else if (error.response.status === 422) {
                     console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
                 } else {

@@ -73,7 +73,7 @@ export async function run(projectName: string, workflowName: string, options: { 
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions init <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red('Project or workflow not found.'));
             } else if (error.response.status === 422) {
