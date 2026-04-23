@@ -23,6 +23,8 @@ import { webhookList } from './commands/webhook-list';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
+import { actionsSearch } from './commands/actions-search';
+import { actionsList } from './commands/actions-list';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -348,6 +350,27 @@ workspace
     .argument('<workspace-id>', 'Workspace ID, slug, or name')
     .action((workspaceId) => {
         workspaceSet(workspaceId);
+    });
+
+// =============================================================================
+// actions <subcommand>
+// =============================================================================
+
+const actionsCmd = program.command('actions').description('Work with the Pica action catalog');
+
+actionsCmd
+    .command('search <platform> [query]')
+    .description('Search available Pica actions for a platform')
+    .option('--method <method>', 'Filter by HTTP method (GET, POST, etc.)')
+    .action((platform, query, options) => {
+        actionsSearch(platform, query, options);
+    });
+
+actionsCmd
+    .command('list <platform>')
+    .description('List all Pica actions for a platform')
+    .action((platform) => {
+        actionsList(platform);
     });
 
 // =============================================================================
