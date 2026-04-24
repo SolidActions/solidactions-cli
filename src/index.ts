@@ -325,6 +325,7 @@ webhook
     .argument('<project>', 'Project name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)')
     .option('--show-secrets', 'Show webhook secrets')
+    .option('--format <format>', 'Output format: table or json', 'table')
     .action((projectName, options) => {
         webhookList(projectName, options);
     });
