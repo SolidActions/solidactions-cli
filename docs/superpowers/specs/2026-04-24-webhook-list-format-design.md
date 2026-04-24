@@ -172,9 +172,9 @@ Unchanged. All API errors go to stderr with chalk-colored messages; `process.exi
 | any        | any              | API error  | stderr chalk message, exit 1 (unchanged)       |
 | invalid    | any              | any        | stderr "Invalid --format" message, exit 1      |
 
-## Manual verification
+## Verification
 
-Pre-push:
+### Pre-push (unit-level)
 
 1. `npm run build` exits cleanly.
 2. Throwaway `verify-formatters.ts` (NOT committed) that imports both formatters, feeds them sample data including:
@@ -184,9 +184,24 @@ Pre-push:
    - Empty list
    - `showSecrets: true` and `showSecrets: false`
    Asserts expected substrings (e.g., for table mode with secrets, that `'  '` appears between URL tail and secret start on every row; for JSON mode, that `JSON.parse` succeeds and `secret` is absent when `showSecrets: false`). Run via `npx tsx verify-formatters.ts`; delete after running.
-3. If workspace credentials are reachable from the worktree, smoke-test the built CLI against a real project for each combination of `--format` and `--show-secrets`.
 
-Record the verification output in the PR description.
+### Post-CI-green (staging e2e against `e2e.formup.cc`)
+
+Required before marking the bead DEV-DONE. This is the explicit regression check — the bug was user-reported against a real webhook, and we need a real webhook in the fix verification.
+
+1. Build and link the local CLI build so the `solidactions` binary on `$PATH` is this branch:
+   - From the worktree: `npm run build && npm link` (or run the dist directly: `node dist/index.js ...`).
+2. Mint a staging token without polluting global config:
+   - From `solidactions-app`: `./scripts/e2e-init-cli`. The script runs `solidactions init --local`, writing credentials to a local `.solidactions/config.json` in the cwd — not `~/.solidactions/config.json`.
+3. From the same cwd (so the `--local` config is picked up), run against a staging project with at least one configured webhook:
+   - `solidactions webhook list <project> -e <env>` — confirm the table renders correctly (no regression in non-secret mode).
+   - `solidactions webhook list <project> -e <env> --show-secrets` — confirm URL and SECRET columns are visually separated by ≥2 spaces, URL is 32-hex-token-terminated, SECRET is a distinct 64-hex string.
+   - `solidactions webhook list <project> -e <env> --show-secrets --format json | jq '.[0] | {url, secret}'` — confirm `jq` parses successfully and both fields are present and have the expected lengths (url ends with 32-hex token, secret is 64 hex chars).
+   - `solidactions webhook list <project> -e <env> --format json | jq 'type'` — confirm `"array"`.
+4. If possible, also test the empty-list path: `solidactions webhook list <project-with-no-webhooks> -e <env> --format json` → expect `[]`.
+5. Capture the three invocation outputs (or a redacted transcript) and paste them into the PR description as evidence.
+
+Reference: `solidactions-app/CLAUDE.md` → "Staging e2e (`e2e.formup.cc`)" section.
 
 ## Follow-up recommendations (not in this PR)
 
