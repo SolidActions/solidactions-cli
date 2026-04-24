@@ -1,19 +1,29 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { formatTable, formatJson, type WebhookRow } from '../utils/webhook-formatters';
 
 interface WebhookListOptions {
     env?: string;
     showSecrets?: boolean;
+    format?: string;
 }
 
 export async function webhookList(projectName: string, options: WebhookListOptions = {}) {
+    const format = options.format ?? 'table';
+    if (format !== 'table' && format !== 'json') {
+        console.error(chalk.red(`Invalid --format: ${options.format}. Expected 'table' or 'json'.`));
+        process.exit(1);
+    }
+
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
     const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
-    console.log(chalk.blue(`Webhooks for project "${projectName}"${environment !== 'production' ? ` (${environment})` : ''}:`));
+    if (format === 'table') {
+        console.log(chalk.blue(`Webhooks for project "${projectName}"${environment !== 'production' ? ` (${environment})` : ''}:`));
+    }
 
     try {
         const params: Record<string, any> = {};
@@ -26,37 +36,24 @@ export async function webhookList(projectName: string, options: WebhookListOptio
             params,
         });
 
-        const webhooks = response.data.data || [];
+        const webhooks: WebhookRow[] = response.data.data || [];
+        const showSecrets = options.showSecrets === true;
 
+        if (format === 'json') {
+            console.log(formatJson(webhooks, { showSecrets }));
+            return;
+        }
+
+        // table mode
         if (webhooks.length === 0) {
             console.log(chalk.yellow('No webhooks found for project "' + projectName + '".'));
             return;
         }
 
         console.log('');
-
-        if (options.showSecrets) {
-            console.log(chalk.gray('WORKFLOW'.padEnd(30) + 'URL'.padEnd(60) + 'SECRET'));
-            console.log(chalk.gray('-'.repeat(120)));
-        } else {
-            console.log(chalk.gray('WORKFLOW'.padEnd(30) + 'URL'));
-            console.log(chalk.gray('-'.repeat(90)));
-        }
-
-        for (const webhook of webhooks) {
-            const name = webhook.workflow_name || webhook.workflow_slug || '?';
-            const url = webhook.webhook_path_url || webhook.webhook_url || '?';
-
-            let line = name.padEnd(30) + chalk.cyan(url.padEnd(60));
-
-            if (options.showSecrets) {
-                const secret = webhook.webhook_secret || '-';
-                line += chalk.gray(secret);
-            }
-
+        for (const line of formatTable(webhooks, { showSecrets })) {
             console.log(line);
         }
-
         console.log('');
         console.log(chalk.gray(`${webhooks.length} webhook(s)`));
     } catch (error: any) {
