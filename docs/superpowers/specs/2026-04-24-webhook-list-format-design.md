@@ -126,7 +126,7 @@ webhook
     });
 ```
 
-Validation via an explicit check in `webhookList` (commander 11's `.choices()` on options is awkward with default values; cleaner to validate in code):
+Validation via an explicit check in `webhookList`. Commander can enforce choices natively, but in-code validation keeps all format logic in one place and produces a clearer error message:
 
 ```ts
 if (options.format !== 'table' && options.format !== 'json') {
