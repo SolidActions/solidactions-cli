@@ -48,6 +48,16 @@ export function formatTable(webhooks: WebhookRow[], opts: FormatOptions): string
     return lines;
 }
 
-export function formatJson(_webhooks: WebhookRow[], _opts: FormatOptions): string {
-    throw new Error('formatJson: not implemented');
+export function formatJson(webhooks: WebhookRow[], opts: FormatOptions): string {
+    const rows = webhooks.map(w => {
+        const base: { workflow: string | null; url: string | null; secret?: string } = {
+            workflow: w.workflow_name ?? w.workflow_slug ?? null,
+            url: w.webhook_path_url ?? w.webhook_url ?? null,
+        };
+        if (opts.showSecrets) {
+            base.secret = w.webhook_secret ?? '';
+        }
+        return base;
+    });
+    return JSON.stringify(rows, null, 2);
 }
