@@ -110,6 +110,17 @@ function readEnvOverrides(): Partial<Config> {
     return env;
 }
 
+/**
+ * Pure merge of three config layers. Picks each Config field from the highest
+ * layer that defines it: env > local > global. Returns null only when no source
+ * contributes a host or apiKey (i.e. nothing usable).
+ *
+ * Invariant the caller must uphold: if `local` is non-null, `localPath` must
+ * also be non-null. (`local` is the parsed contents of a file at `localPath`;
+ * the path is required for source attribution.) `global` may be null even when
+ * `globalPath` is provided — `globalPath` is only used as a source label when
+ * `global` contributes a value.
+ */
 export function mergeConfigs(
     env: Partial<Config>,
     local: Partial<Config> | null,
@@ -160,14 +171,15 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
     const env = readEnvOverrides();
     const localPath = findLocalConfigPath(cwd);
     const local = localPath ? readConfigFile(localPath) : null;
-    const global = readConfigFile(getGlobalConfigPath());
+    const globalPath = getGlobalConfigPath();
+    const global = readConfigFile(globalPath);
 
-    const merged = mergeConfigs(env, local, localPath, global, getGlobalConfigPath());
+    const merged = mergeConfigs(env, local, localPath, global, globalPath);
     if (!merged) return null;
 
     return {
         config: merged.config,
         sources: merged.sources,
-        activePath: localPath ?? getGlobalConfigPath(),
+        activePath: localPath ?? globalPath,
     };
 }
