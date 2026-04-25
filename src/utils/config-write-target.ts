@@ -43,8 +43,8 @@ export async function decideWriteTarget(
     process.exit(1);
 }
 
-export function pathForTarget(target: WriteTarget, cwd: string = process.cwd()): string {
-    return target === 'local' ? getLocalConfigPath(cwd) : getGlobalConfigPath();
+export function pathForTarget(target: WriteTarget): string {
+    return target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
 }
 
 /**
@@ -72,13 +72,17 @@ export async function ensureGitignoreCovers(targetDir: string, auto: boolean): P
     let shouldAdd = auto;
     if (!shouldAdd && process.stdin.isTTY) {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-            rl.question(
-                chalk.yellow(`Local config directory may contain secrets. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
-                resolve,
-            );
-        });
-        rl.close();
+        let answer: string;
+        try {
+            answer = await new Promise<string>((resolve) => {
+                rl.question(
+                    chalk.yellow(`Local config directory may contain secrets. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
+                    resolve,
+                );
+            });
+        } finally {
+            rl.close();
+        }
         shouldAdd = !(answer.trim().toLowerCase().startsWith('n'));
     }
 
