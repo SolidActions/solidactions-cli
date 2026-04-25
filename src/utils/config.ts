@@ -109,13 +109,8 @@ export function writeConfigFile(filePath: string, config: Config): void {
  * writeConfigFile's atomic-write + 0o600 mode contract.
  */
 export function writeWorkspaceToFile(filePath: string, workspace: string, workspaceId: string): void {
-    const existing = readConfigFile(filePath) ?? ({} as Config);
-    const updated: Config = {
-        ...existing,
-        workspace,
-        workspaceId,
-    } as Config;
-    writeConfigFile(filePath, updated);
+    const existing: Partial<Config> = readConfigFile(filePath) ?? {};
+    writeConfigFile(filePath, { ...existing, workspace, workspaceId } as Config);
 }
 
 export function removeConfigFile(filePath: string): boolean {
