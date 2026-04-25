@@ -68,7 +68,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
         const isWorkspaceSet = fullName === 'set' && parentName === 'workspace';
         if (isWorkspaceSet) {
             console.error(
-                '\x1b[33mwarn:\x1b[0m -w/--workspace is ignored on `workspace set`; the positional argument is the new workspace.',
+                chalk.yellow('warn:') + ' -w/--workspace is ignored on `workspace set`; the positional argument is the new workspace.',
             );
             return;
         }
