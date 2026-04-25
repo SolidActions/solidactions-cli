@@ -6,7 +6,8 @@ import path from 'path';
 export interface Config {
     host: string;
     apiKey: string;
-    workspaceId?: string;
+    workspace?: string;     // human-readable slug; cosmetic
+    workspaceId?: string;   // canonical UUID used in API calls
 }
 
 export type ConfigSource = 'env' | string | null;
@@ -16,6 +17,7 @@ export interface ResolvedConfig {
     sources: {
         host: ConfigSource;
         apiKey: ConfigSource;
+        workspace: ConfigSource;
         workspaceId: ConfigSource;
     };
     activePath: string; // path write-mutating commands should target
@@ -108,6 +110,47 @@ function readEnvOverrides(): Partial<Config> {
     return env;
 }
 
+export function mergeConfigs(
+    env: Partial<Config>,
+    local: Partial<Config> | null,
+    localPath: string | null,
+    global: Partial<Config> | null,
+    globalPath: string,
+): { config: Config; sources: ResolvedConfig['sources'] } | null {
+    const pick = <K extends keyof Config>(
+        key: K,
+    ): { value: Config[K] | undefined; source: ConfigSource } => {
+        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env' };
+        if (local && local[key] !== undefined) return { value: local[key], source: localPath! };
+        if (global && global[key] !== undefined) return { value: global[key], source: globalPath };
+        return { value: undefined, source: null };
+    };
+
+    const host = pick('host');
+    const apiKey = pick('apiKey');
+    const workspace = pick('workspace');
+    const workspaceId = pick('workspaceId');
+
+    if (!host.value && !apiKey.value) {
+        return null;
+    }
+
+    return {
+        config: {
+            host: (host.value ?? '') as string,
+            apiKey: (apiKey.value ?? '') as string,
+            workspace: workspace.value as string | undefined,
+            workspaceId: workspaceId.value as string | undefined,
+        },
+        sources: {
+            host: host.source,
+            apiKey: apiKey.source,
+            workspace: workspace.source,
+            workspaceId: workspaceId.source,
+        },
+    };
+}
+
 /**
  * Resolve config by merging three layers field-by-field (env > local > global).
  * Returns null only when no source contributes an apiKey AND host (i.e. nothing usable).
@@ -119,32 +162,12 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
     const local = localPath ? readConfigFile(localPath) : null;
     const global = readConfigFile(getGlobalConfigPath());
 
-    const pick = <K extends keyof Config>(key: K): { value: Config[K] | undefined; source: ConfigSource } => {
-        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env' };
-        if (local && local[key] !== undefined) return { value: local[key], source: localPath! };
-        if (global && global[key] !== undefined) return { value: global[key], source: getGlobalConfigPath() };
-        return { value: undefined, source: null };
-    };
-
-    const host = pick('host');
-    const apiKey = pick('apiKey');
-    const workspaceId = pick('workspaceId');
-
-    if (!host.value && !apiKey.value) {
-        return null;
-    }
+    const merged = mergeConfigs(env, local, localPath, global, getGlobalConfigPath());
+    if (!merged) return null;
 
     return {
-        config: {
-            host: (host.value ?? '') as string,
-            apiKey: (apiKey.value ?? '') as string,
-            workspaceId: workspaceId.value as string | undefined,
-        },
-        sources: {
-            host: host.source,
-            apiKey: apiKey.source,
-            workspaceId: workspaceId.source,
-        },
+        config: merged.config,
+        sources: merged.sources,
         activePath: localPath ?? getGlobalConfigPath(),
     };
 }
