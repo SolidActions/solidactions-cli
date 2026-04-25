@@ -24,6 +24,7 @@ import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
 import { workspacesList, workspaceSet } from './commands/workspaces';
+import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -54,6 +55,26 @@ program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
     .version(pkg.version);
+
+program.option('-w, --workspace <id-or-slug-or-name>', 'override active workspace for this command');
+
+program.hook('preAction', (thisCommand, actionCommand) => {
+    const opts = thisCommand.opts();
+    const wsOverride: string | undefined = opts.workspace;
+    if (wsOverride) {
+        // workspace set is a write — -w is for read-paths only.
+        const fullName = actionCommand.name();
+        const parentName = actionCommand.parent?.name?.();
+        const isWorkspaceSet = fullName === 'set' && parentName === 'workspace';
+        if (isWorkspaceSet) {
+            console.error(
+                '\x1b[33mwarn:\x1b[0m -w/--workspace is ignored on `workspace set`; the positional argument is the new workspace.',
+            );
+            return;
+        }
+        setCliWorkspaceOverride(wsOverride);
+    }
+});
 
 // =============================================================================
 // Top-level commands
