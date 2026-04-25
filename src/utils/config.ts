@@ -23,13 +23,22 @@ export interface ResolvedConfig {
     activePath: string; // path write-mutating commands should target
 }
 
-const GLOBAL_DIR = path.join(os.homedir(), '.solidactions');
-const GLOBAL_FILE = path.join(GLOBAL_DIR, 'config.json');
 const LOCAL_DIR_NAME = '.solidactions';
 const LOCAL_FILE_NAME = 'config.json';
 
+let cliWorkspaceOverride: string | undefined = undefined;
+
+/**
+ * Set the workspace override from the top-level `-w/--workspace` CLI flag.
+ * Module-level state — set once at CLI startup before any subcommand runs.
+ * Pass `undefined` to clear (used in tests).
+ */
+export function setCliWorkspaceOverride(value: string | undefined): void {
+    cliWorkspaceOverride = value;
+}
+
 export function getGlobalConfigPath(): string {
-    return GLOBAL_FILE;
+    return path.join(os.homedir(), '.solidactions', 'config.json');
 }
 
 export function getLocalConfigPath(cwd: string = process.cwd()): string {
@@ -176,6 +185,13 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
 
     const merged = mergeConfigs(env, local, localPath, global, globalPath);
     if (!merged) return null;
+
+    if (cliWorkspaceOverride !== undefined) {
+        merged.config.workspace = cliWorkspaceOverride;
+        merged.config.workspaceId = undefined;
+        merged.sources.workspace = 'cli';
+        merged.sources.workspaceId = 'cli';
+    }
 
     return {
         config: merged.config,
