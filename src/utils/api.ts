@@ -3,7 +3,10 @@ import chalk from 'chalk';
 import readline from 'readline';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
 
-const NOT_FOUND_IN_WORKSPACE = /Project .+ not found in your active workspace/;
+// Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
+// We require the literal single-quotes around the slug so plausible future error messages
+// like "Project files not found ..." don't false-match.
+const NOT_FOUND_IN_WORKSPACE = /Project '.+' not found in your active workspace/;
 
 /**
  * Inspect an axios error and, if its response message matches the new
@@ -13,7 +16,11 @@ const NOT_FOUND_IN_WORKSPACE = /Project .+ not found in your active workspace/;
  */
 export function augmentNotFoundMessage(error: any): any {
     const msg = error?.response?.data?.message;
-    if (typeof msg === 'string' && NOT_FOUND_IN_WORKSPACE.test(msg)) {
+    if (
+        typeof msg === 'string'
+        && NOT_FOUND_IN_WORKSPACE.test(msg)
+        && !msg.includes('Did you mean to switch workspaces?')
+    ) {
         const hint = "Did you mean to switch workspaces? Run 'solidactions workspace set <name> --local' to pin this directory.";
         error.response.data.message = `${msg}\n\n${hint}`;
     }
