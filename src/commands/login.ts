@@ -142,12 +142,19 @@ export function whoami() {
 
     const fmt = (src: ConfigSource): string => {
         if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
+        if (src === 'cli') return chalk.gray('(from -w flag)');
         if (src === null) return chalk.gray('(unset)');
         return chalk.gray(`(from ${src})`);
     };
 
+    const workspaceLabel = config.workspace
+        ? `${config.workspace}${config.workspaceId ? ` (${config.workspaceId})` : ''}`
+        : config.workspaceId
+            ? `${config.workspaceId} (slug unknown — run 'workspace set <slug>' to populate)`
+            : '';
+
     console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host:        ${config.host.padEnd(40)} ${fmt(sources.host)}`);
-    console.log(`  API Key:     ${maskedKey.padEnd(40)} ${fmt(sources.apiKey)}`);
-    console.log(`  Workspace:   ${(config.workspaceId ?? '').padEnd(40)} ${fmt(sources.workspaceId)}`);
+    console.log(`  Host:        ${config.host.padEnd(50)} ${fmt(sources.host)}`);
+    console.log(`  API Key:     ${maskedKey.padEnd(50)} ${fmt(sources.apiKey)}`);
+    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}`);
 }
