@@ -345,10 +345,13 @@ workspace
 
 workspace
     .command('set')
-    .description('Set the active workspace for CLI operations')
-    .argument('<workspace-id>', 'Workspace ID, slug, or name')
-    .action((workspaceId) => {
-        workspaceSet(workspaceId);
+    .description('Set the active workspace and pin it')
+    .argument('<id-or-slug-or-name>', 'Workspace ID, slug, or name')
+    .option('--local', 'pin to ./.solidactions/config.json')
+    .option('--global', 'pin to ~/.solidactions/config.json')
+    .option('--gitignore', 'auto-add .solidactions/ to local .gitignore (skip prompt)')
+    .action(async (input, opts) => {
+        await workspaceSet(input, opts);
     });
 
 // =============================================================================
