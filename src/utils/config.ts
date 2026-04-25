@@ -103,6 +103,21 @@ export function writeConfigFile(filePath: string, config: Config): void {
     fs.renameSync(tmp, filePath);
 }
 
+/**
+ * Write a workspace pin to the given config file path. Shallow-merges over
+ * any existing keys (preserves host/apiKey if already present). Re-uses
+ * writeConfigFile's atomic-write + 0o600 mode contract.
+ */
+export function writeWorkspaceToFile(filePath: string, workspace: string, workspaceId: string): void {
+    const existing = readConfigFile(filePath) ?? ({} as Config);
+    const updated: Config = {
+        ...existing,
+        workspace,
+        workspaceId,
+    } as Config;
+    writeConfigFile(filePath, updated);
+}
+
 export function removeConfigFile(filePath: string): boolean {
     if (!fs.existsSync(filePath)) {
         return false;
