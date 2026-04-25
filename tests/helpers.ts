@@ -1,7 +1,6 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach } from 'vitest';
 
 const ENV_KEYS_TO_RESTORE = [
     'HOME',
@@ -53,9 +52,3 @@ export function writeLocal(cwd: string, body: object): string {
     return file;
 }
 
-export function withEachCleanup(state: { cleanup: (() => void) | null }) {
-    afterEach(() => {
-        state.cleanup?.();
-        state.cleanup = null;
-    });
-}

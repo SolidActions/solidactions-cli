@@ -13,7 +13,7 @@ describe('resolveConfig precedence chain', () => {
     });
     afterEach(() => {
         setCliWorkspaceOverride(undefined);
-        env.cleanup();
+        env?.cleanup();
     });
 
     it('returns null when no layer is set', () => {
@@ -31,6 +31,7 @@ describe('resolveConfig precedence chain', () => {
         const result = resolveConfig(env.cwd);
         expect(result?.config.workspaceId).toBe('global-uuid');
         expect(result?.config.workspace).toBe('global-ws');
+        expect(result?.sources.workspaceId).toMatch(/\.solidactions\/config\.json$/);
     });
 
     it('local overrides global per key', () => {
@@ -70,5 +71,6 @@ describe('resolveConfig precedence chain', () => {
         setCliWorkspaceOverride(undefined);
         const result = resolveConfig(env.cwd);
         expect(result?.config.workspaceId).toBe('g-uuid');
+        expect(result?.config.workspace).toBeUndefined();
     });
 });
