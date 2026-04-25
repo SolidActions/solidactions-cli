@@ -3,6 +3,28 @@ import chalk from 'chalk';
 import readline from 'readline';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
 
+const NOT_FOUND_IN_WORKSPACE = /Project .+ not found in your active workspace/;
+
+/**
+ * Inspect an axios error and, if its response message matches the new
+ * workspace-not-found 404 from solidactions-app PR #128, append a
+ * remediation hint. Exported for unit testing; the live interceptor
+ * below calls it.
+ */
+export function augmentNotFoundMessage(error: any): any {
+    const msg = error?.response?.data?.message;
+    if (typeof msg === 'string' && NOT_FOUND_IN_WORKSPACE.test(msg)) {
+        const hint = "Did you mean to switch workspaces? Run 'solidactions workspace set <name> --local' to pin this directory.";
+        error.response.data.message = `${msg}\n\n${hint}`;
+    }
+    return error;
+}
+
+axios.interceptors.response.use(
+    (response) => response,
+    (error) => Promise.reject(augmentNotFoundMessage(error)),
+);
+
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
     const headers: Record<string, string> = {
         'Authorization': `Bearer ${config.apiKey}`,
