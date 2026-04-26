@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { requireConfig, requireResolvedConfig } from '../utils/api';
 import { writeWorkspaceToFile } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
+import { resolveWorkspaceInput } from '../utils/workspace-lookup';
 
 export async function workspacesList() {
     const config = requireConfig();
@@ -68,34 +69,7 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
 
     const config = requireResolvedConfig().config;
 
-    let allWorkspaces: any[] = [];
-    try {
-        const response = await axios.get(`${config.host}/api/v1/workspaces`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
-        });
-        const grouped = response.data.workspaces || response.data.data || response.data;
-        if (typeof grouped === 'object' && !Array.isArray(grouped)) {
-            for (const orgWorkspaces of Object.values(grouped)) {
-                allWorkspaces.push(...(orgWorkspaces as any[]));
-            }
-        } else if (Array.isArray(grouped)) {
-            allWorkspaces = grouped;
-        }
-    } catch (error: any) {
-        console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
-        process.exit(1);
-    }
-
-    const workspace = allWorkspaces.find(
-        (w: any) => w.id === input || w.slug === input || w.name === input,
-    );
-    if (!workspace) {
-        console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
-        process.exit(1);
-    }
+    const workspace = await resolveWorkspaceInput(config, input);
 
     const target = await decideWriteTarget({ local: options.local, global: options.global });
     const targetPath = pathForTarget(target);
