@@ -23,15 +23,15 @@ Out of scope for this PR — affects display only on a rare upgrade path. Note f
 
 Out of scope; trivial follow-up patch.
 
-### Deploy prints the augmented hint twice
+### ~~Deploy prints the augmented hint twice~~ — FIXED in `351b1a1`
 
-`project deploy <missing-slug> -e production` triggers two `{project:slug}` lookups (the production-existence check and the env-specific lookup). With app#128 deployed, both 404 with the new message, and `deploy.ts` surfaces the augmented message on each — so the user sees the same `Did you mean to switch workspaces?` block twice before the create-project line. Cosmetic; the fix is to dedupe by tracking whether the hint has already been printed in this invocation. Five-line follow-up.
+`project deploy <missing-slug> -e production` triggers two `{project:slug}` lookups (the production-existence check and the env-specific lookup). Both used to print the augmented `Did you mean to switch workspaces?` block independently. Now hoisted a `workspaceMismatchPrinted` flag and a `printWorkspaceMismatchOnce` closure inside `deploy()` so the hint surfaces at most once per invocation. The closure captures the flag by reference; subsequent calls are silent even if the two 404s carry different message strings.
 
-Verified live via cross-workspace deploy battery on `e2e.formup.cc` (commits `fc862b0`, `3377d75`).
+Live re-verification deferred — `e2e.formup.cc` is shared across branches and currently has a baseline build deployed (see "shared env" note below). Unit-level guarantee comes from the per-call closure; the live pre-fix double-print was observed on 2026-04-25.
 
-### Test-fixture gotcha: HOME redirect is bypassed by `findLocalConfigPath` walk-up when cwd is under the real `/home/<user>`
+### ~~Test-fixture gotcha: HOME redirect is bypassed by `findLocalConfigPath` walk-up when cwd is under the real `/home/<user>`~~ — FIXED in `351b1a1`
 
-`findLocalConfigPath` skips `$HOME` (i.e. the redirected fake home in tests) but does NOT skip the real user home. If a test process's cwd lives under `/home/<user>/...`, the walk-up will hit the user's real `~/.solidactions/config.json` and treat it as a local config — bypassing the test's redirected `$HOME` global. Workaround: run smoke tests from `/tmp` (or any cwd outside the real user-home tree). Not a CLI bug — pre-existing assumption that `$HOME == os.homedir() == real user home`. Worth a one-line note in `docs/superpowers/notes/` for whoever writes the staging-e2e harness next.
+`findLocalConfigPath` now skips both `os.homedir()` (HOME-respecting) and `os.userInfo().homedir` (OS-level real home). Under HOME redirection the two paths differ and both are skipped; in normal runtime the `Set` collapses to one entry with no extra cost. HOME-redirected test fixtures are safe regardless of cwd.
 
 ### Most CLI commands do not surface the new `Project not found in active workspace` error
 
@@ -48,6 +48,27 @@ Mitigation considered out of scope: the API would need a `?tenant=<tenant-slug>`
 ### `e2e-init-cli` script in `solidactions-app` is broken
 
 The `solidactions-app/scripts/e2e-init-cli` script calls `solidactions init <token> --local --gitignore --host <host>`, but the current CLI uses `solidactions login` for auth — `init` is project scaffolding now. The script is dead until updated. Pre-existing tech debt; flag for the app dev to fix.
+
+### `e2e.formup.cc` is a shared env — confirm HEAD before smoking
+
+`e2e.formup.cc` is a single shared staging environment that gets torn down and redeployed by whichever GitHub Actions Tests workflow ran most recently — across all branches. Running a smoke battery against it tells you what the *last branch's CI run* deployed, NOT what your branch contains. Confirmed live: app#115 deployed #128's behavior on 2026-04-25; the next day branch `docs-pillar-spec` overwrote the env with a baseline build, taking the `Project::resolveRouteBinding` override with it. Source code at app `HEAD abba3fe` was unchanged — just not what was deployed.
+
+**Preflight before any future cross-branch smoke** — verify the deployed backend has the route-binding override before drawing conclusions:
+
+```bash
+TOKEN="<a valid token for e2e>"
+WS_ID="<a workspace UUID the token can see>"
+curl -s -X GET https://e2e.formup.cc/api/v1/projects/__preflight_marker__ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Workspace-Id: $WS_ID" \
+  -H "Accept: application/json" \
+  | jq -r '.message'
+```
+
+Expected output if app#128 is live:
+> `Project '__preflight_marker__' not found in your active workspace '<slug>'.`
+
+If you see `No query results for model [App\\Models\\Project] __preflight_marker__` instead, e2e is on a baseline build and the smoke will not exercise the new error path. Re-trigger the relevant branch's Tests workflow to refresh the env before continuing.
 
 ### CI ordering gotcha (memory note)
 
