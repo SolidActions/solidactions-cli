@@ -47,15 +47,26 @@ export function getLocalConfigPath(cwd: string = process.cwd()): string {
 
 /**
  * Walk up from startDir looking for `.solidactions/config.json`.
- * Stops at filesystem root. **Skips `$HOME` itself** so the global config
- * at `~/.solidactions/config.json` is never matched as a local hit.
+ * Stops at filesystem root.
+ *
+ * Skips both `os.homedir()` (HOME-respecting) and `os.userInfo().homedir`
+ * (OS-level real home) so the global config is never matched as a local hit,
+ * even when `$HOME` is redirected (test fixtures, sandboxes). In normal runtime
+ * the two paths are the same and the Set collapses to one entry.
+ *
  * Returns the absolute path of the nearest local config, or null.
  */
 export function findLocalConfigPath(startDir: string = process.cwd()): string | null {
-    const home = os.homedir();
+    const skip = new Set<string>([os.homedir()]);
+    try {
+        skip.add(os.userInfo().homedir);
+    } catch {
+        // os.userInfo() can throw on some platforms (e.g., uid not in /etc/passwd
+        // inside containers). Treat it as best-effort — fall back to just os.homedir().
+    }
     let dir = path.resolve(startDir);
     while (true) {
-        if (dir !== home) {
+        if (!skip.has(dir)) {
             const candidate = path.join(dir, LOCAL_DIR_NAME, LOCAL_FILE_NAME);
             if (fs.existsSync(candidate)) {
                 return candidate;
