@@ -137,6 +137,17 @@ async function pushYamlDeclarations(
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
+    let workspaceMismatchPrinted = false;
+    const printWorkspaceMismatchOnce = (error: any) => {
+        if (workspaceMismatchPrinted) return;
+        const msg = error.response?.data?.message;
+        if (typeof msg === 'string' && /Project .+ not found in your active workspace/.test(msg)) {
+            console.error(chalk.yellow(msg));
+            console.error('');
+            workspaceMismatchPrinted = true;
+        }
+    };
+
     const sourceDir = sourcePath ? path.resolve(sourcePath) : process.cwd();
 
     // Capture whether -e was explicitly passed by the caller. Commander leaves
@@ -165,6 +176,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     } catch (error: any) {
         if (error.response?.status === 404) {
             productionExists = false;
+            // App PR #128 returns "Project '<slug>' not found in your active workspace '<ws>'." on 404.
+            // The axios interceptor (utils/api.ts) already appended the "Did you mean to switch workspaces?"
+            // hint. Surface that augmented message so the user sees the hint before falling through to
+            // the first-deploy flow.
+            printWorkspaceMismatchOnce(error);
         } else {
             // 5xx, network error, auth failure, etc. — fail conservatively rather
             // than treating the project as non-existent and potentially creating it.
@@ -244,6 +260,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     } catch (error: any) {
         if (error.response?.status === 404) {
+            // App PR #128 returns "Project '<slug>' not found in your active workspace '<ws>'." on 404.
+            // Surface the augmented message (axios interceptor already appended the hint) before
+            // falling through to the --create / first-deploy flow.
+            printWorkspaceMismatchOnce(error);
+
             // For non-production environments, require --create or give a clear hint
             if (environment !== 'production' && !options.create) {
                 console.error(chalk.red(`\nProject "${projectName}" doesn't have a ${environment} environment.\n`));

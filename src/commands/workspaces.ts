@@ -1,7 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { requireConfig, requireResolvedConfig } from '../utils/api';
-import { Config, writeConfigFile } from '../utils/config';
+import { writeWorkspaceToFile } from '../utils/config';
+import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
+import { resolveWorkspaceInput } from '../utils/workspace-lookup';
 
 export async function workspacesList() {
     const config = requireConfig();
@@ -50,7 +52,13 @@ export async function workspacesList() {
     }
 }
 
-export async function workspaceSet(workspaceId: string) {
+interface WorkspaceSetOptions {
+    local?: boolean;
+    global?: boolean;
+    gitignore?: boolean;
+}
+
+export async function workspaceSet(input: string, options: WorkspaceSetOptions = {}) {
     if (process.env.SOLIDACTIONS_WORKSPACE_ID) {
         console.error(chalk.red(
             'SOLIDACTIONS_WORKSPACE_ID is set in the environment; the change would not take effect. ' +
@@ -59,41 +67,19 @@ export async function workspaceSet(workspaceId: string) {
         process.exit(1);
     }
 
-    const resolved = requireResolvedConfig();
-    const config = resolved.config;
+    const config = requireResolvedConfig().config;
 
-    try {
-        const response = await axios.get(`${config.host}/api/v1/workspaces`, {
-            headers: {
-                'Authorization': `Bearer ${config.apiKey}`,
-                'Accept': 'application/json',
-            },
-        });
+    const workspace = await resolveWorkspaceInput(config, input);
 
-        const grouped = response.data.workspaces || response.data.data || response.data;
-        let allWorkspaces: any[] = [];
-        if (typeof grouped === 'object' && !Array.isArray(grouped)) {
-            for (const orgWorkspaces of Object.values(grouped)) {
-                allWorkspaces.push(...(orgWorkspaces as any[]));
-            }
-        } else if (Array.isArray(grouped)) {
-            allWorkspaces = grouped;
-        }
-        const workspace = allWorkspaces.find(
-            (w: any) => w.id === workspaceId || w.slug === workspaceId || w.name === workspaceId,
-        );
+    const target = await decideWriteTarget({ local: options.local, global: options.global });
+    const targetPath = pathForTarget(target);
 
-        if (!workspace) {
-            console.error(chalk.red(`Workspace "${workspaceId}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
-            process.exit(1);
-        }
+    writeWorkspaceToFile(targetPath, workspace.slug ?? workspace.name, workspace.id);
 
-        const updated: Config = { ...config, workspaceId: workspace.id };
-        writeConfigFile(resolved.activePath, updated);
-        console.log(chalk.green(`Workspace set to: ${workspace.name} (${workspace.id})`));
-        console.log(chalk.gray(`Saved to ${resolved.activePath}`));
-    } catch (error: any) {
-        console.error(chalk.red('Failed to set workspace:'), error.response?.data?.message || error.message);
-        process.exit(1);
+    if (target === 'local') {
+        await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
     }
+
+    console.log(chalk.green(`Workspace set to: ${workspace.name} (${workspace.id})`));
+    console.log(chalk.gray(`Saved to ${targetPath}`));
 }

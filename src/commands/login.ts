@@ -1,6 +1,3 @@
-import fs from 'fs';
-import path from 'path';
-import readline from 'readline';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
@@ -13,8 +10,8 @@ import {
     removeConfigFile,
     findLocalConfigPath,
     getGlobalConfigPath,
-    getLocalConfigPath,
 } from '../utils/config';
+import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
 
 export type { Config };
 
@@ -33,69 +30,6 @@ export function clearConfig(): void {
     removeConfigFile(getGlobalConfigPath());
 }
 
-async function promptLocation(): Promise<'local' | 'global'> {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-        while (true) {
-            const answer = await new Promise<string>((resolve) => {
-                rl.question(chalk.blue('Save config locally (./.solidactions) or globally (~/.solidactions)? [global] '), resolve);
-            });
-            const normalized = answer.trim().toLowerCase();
-            if (normalized === '' || normalized === 'global' || normalized === 'g') return 'global';
-            if (normalized === 'local' || normalized === 'l') return 'local';
-            console.log(chalk.yellow("Please answer 'local' or 'global' (or press Enter for global)."));
-        }
-    } finally {
-        rl.close();
-    }
-}
-
-async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<void> {
-    const gitignorePath = path.join(targetDir, '.gitignore');
-    const patternToAdd = '.solidactions/';
-
-    let existing = '';
-    if (fs.existsSync(gitignorePath)) {
-        existing = fs.readFileSync(gitignorePath, 'utf-8');
-        const lines = existing.split('\n').map((l) => l.trim());
-        const isCovered = lines.some((line) => {
-            const normalized = line
-                .replace(/^\*\*\//, '')
-                .replace(/^\//, '')
-                .replace(/\/(\*\*|\*)?$/, '');
-            return normalized === '.solidactions';
-        });
-        if (isCovered) {
-            return; // already covered
-        }
-    }
-
-    let shouldAdd = auto;
-    if (!shouldAdd && process.stdin.isTTY) {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-            rl.question(
-                chalk.yellow(`Local config contains an API key. Add \`.solidactions/\` to ${gitignorePath}? [Y/n] `),
-                resolve,
-            );
-        });
-        rl.close();
-        shouldAdd = !(answer.trim().toLowerCase().startsWith('n'));
-    }
-
-    if (!shouldAdd) {
-        console.log(chalk.yellow(`Skipping .gitignore update. Remember: ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
-        return;
-    }
-
-    const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-    try {
-        fs.writeFileSync(gitignorePath, `${existing}${prefix}${patternToAdd}\n`);
-        console.log(chalk.green(`Added \`${patternToAdd}\` to ${gitignorePath}.`));
-    } catch (err: any) {
-        console.log(chalk.yellow(`Could not update ${gitignorePath}: ${err.message}. Add \`.solidactions/\` to it manually — ${path.join(targetDir, '.solidactions', 'config.json')} contains your API key.`));
-    }
-}
 
 export async function login(
     apiKey: string,
@@ -117,22 +51,8 @@ export async function login(
     }
 
     // Determine target location.
-    let target: 'local' | 'global';
-    if (options.local && options.global) {
-        console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
-        process.exit(1);
-    } else if (options.local) {
-        target = 'local';
-    } else if (options.global) {
-        target = 'global';
-    } else if (process.stdin.isTTY) {
-        target = await promptLocation();
-    } else {
-        console.error(chalk.red('Refusing to init non-interactively. Pass --local or --global.'));
-        process.exit(1);
-    }
-
-    const targetPath = target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
+    const target = await decideWriteTarget({ local: options.local, global: options.global });
+    const targetPath = pathForTarget(target);
 
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
     console.log(chalk.gray(`Host: ${host}`));
@@ -222,12 +142,19 @@ export function whoami() {
 
     const fmt = (src: ConfigSource): string => {
         if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
+        if (src === 'cli') return chalk.gray('(from -w flag)');
         if (src === null) return chalk.gray('(unset)');
         return chalk.gray(`(from ${src})`);
     };
 
+    const workspaceLabel = config.workspace
+        ? `${config.workspace}${config.workspaceId ? ` (${config.workspaceId})` : ''}`
+        : config.workspaceId
+            ? `${config.workspaceId} (slug unknown — run 'workspace set <slug>' to populate)`
+            : '';
+
     console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host:        ${config.host.padEnd(40)} ${fmt(sources.host)}`);
-    console.log(`  API Key:     ${maskedKey.padEnd(40)} ${fmt(sources.apiKey)}`);
-    console.log(`  Workspace:   ${(config.workspaceId ?? '').padEnd(40)} ${fmt(sources.workspaceId)}`);
+    console.log(`  Host:        ${config.host.padEnd(50)} ${fmt(sources.host)}`);
+    console.log(`  API Key:     ${maskedKey.padEnd(50)} ${fmt(sources.apiKey)}`);
+    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}`);
 }
