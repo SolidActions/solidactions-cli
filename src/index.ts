@@ -23,8 +23,9 @@ import { webhookList } from './commands/webhook-list';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
-import { actionsSearch } from './commands/actions-search';
-import { actionsList } from './commands/actions-list';
+import { oauthActionsSearch } from './commands/oauth-actions-search';
+import { oauthActionsList } from './commands/oauth-actions-list';
+import { oauthActionsShow } from './commands/oauth-actions-show';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -353,24 +354,36 @@ workspace
     });
 
 // =============================================================================
-// actions <subcommand>
+// oauth-actions <subcommand>
 // =============================================================================
 
-const actionsCmd = program.command('actions').description('Work with the Pica action catalog');
+const oauthActionsCmd = program.command('oauth-actions').description('Discover OAuth-backed API operations callable via the SA proxy');
 
-actionsCmd
+oauthActionsCmd
     .command('search <platform> [query]')
-    .description('Search available Pica actions for a platform')
+    .description('Search available actions for a connected platform')
     .option('--method <method>', 'Filter by HTTP method (GET, POST, etc.)')
+    .option('--limit <n>', 'Maximum results to return', (v) => parseInt(v, 10))
+    .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((platform, query, options) => {
-        actionsSearch(platform, query, options);
+        oauthActionsSearch(platform, query, options);
     });
 
-actionsCmd
+oauthActionsCmd
     .command('list <platform>')
-    .description('List all Pica actions for a platform')
-    .action((platform) => {
-        actionsList(platform);
+    .description('List actions for a connected platform')
+    .option('--limit <n>', 'Maximum results to return', (v) => parseInt(v, 10))
+    .option('--json', 'Emit raw JSON for AI/script consumption')
+    .action((platform, options) => {
+        oauthActionsList(platform, options);
+    });
+
+oauthActionsCmd
+    .command('show <platform> <action-id>')
+    .description('Show full schema, example body, and a paste-ready fetch snippet for one action')
+    .option('--json', 'Emit raw JSON for AI/script consumption')
+    .action((platform, actionId, options) => {
+        oauthActionsShow(platform, actionId, options);
     });
 
 // =============================================================================
