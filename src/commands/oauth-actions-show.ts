@@ -156,6 +156,9 @@ function buildSnippet(action: OAuthActionDetail): string {
             .split('\n')
             .map((l, i) => (i === 0 ? l : '    ' + l))
             .join('\n');
+        if (typeof example.body === 'object' && example.body !== null && 'connectionKey' in example.body) {
+            lines.push(`    // connectionKey: copy verbatim — the proxy rewrites it server-side from your X-SA-Connection header.`);
+        }
         lines.push(`    body: JSON.stringify(${bodyJson}),`);
     }
     lines.push('  }');
