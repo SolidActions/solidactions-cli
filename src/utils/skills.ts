@@ -7,6 +7,7 @@ const SKILL_NAMES = [
     'solidactions-getting-started',
     'solidactions-workflow-coding',
     'solidactions-deploy-and-config',
+    'solidactions-pica-actions',
 ] as const;
 
 const EXAMPLES_OWNER = 'SolidActions';
