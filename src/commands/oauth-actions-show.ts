@@ -128,7 +128,7 @@ function buildSnippet(action: OAuthActionDetail): string {
     };
     const exampleHeaders = example?.headers || {};
     for (const [k, v] of Object.entries(exampleHeaders)) {
-        if (k.toLowerCase() === 'authorization') continue;
+        if (isProxyManagedHeader(k)) continue;
         proxyHeaders[k] = v;
     }
     if (example?.body !== undefined && example.body !== null && !proxyHeaders['Content-Type']) {
@@ -166,4 +166,17 @@ function buildSnippet(action: OAuthActionDetail): string {
 
 function indent(text: string, prefix = '  '): string {
     return text.split('\n').map(line => prefix + line).join('\n');
+}
+
+/**
+ * Defense-in-depth: even though the SAA API sanitizes `Authorization`,
+ * `x-pica-*`, and `x-one-*` out of `ioExample.input.headers` before serving,
+ * filter them again here so any future drift can't leak Pica internals into
+ * a workflow's outbound request.
+ */
+function isProxyManagedHeader(name: string): boolean {
+    const lower = name.toLowerCase();
+    return lower === 'authorization'
+        || lower.startsWith('x-pica-')
+        || lower.startsWith('x-one-');
 }
