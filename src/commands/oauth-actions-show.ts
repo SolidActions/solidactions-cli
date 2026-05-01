@@ -119,7 +119,11 @@ function buildSnippet(action: OAuthActionDetail): string {
 
     const queryEntries = example?.query ? Object.entries(example.query) : [];
     const queryString = queryEntries.length
-        ? '?' + queryEntries.map(([k, v]) => `${encodeURIComponent(k)}=\${encodeURIComponent(${JSON.stringify(v)})}`).join('&')
+        ? '?' + queryEntries.flatMap(([k, v]) => {
+            const encodedKey = encodeURIComponent(k);
+            const items = Array.isArray(v) ? v : [v];
+            return items.map((item) => `${encodedKey}=\${encodeURIComponent(${JSON.stringify(item)})}`);
+        }).join('&')
         : '';
 
     const proxyHeaders: Record<string, string> = {
