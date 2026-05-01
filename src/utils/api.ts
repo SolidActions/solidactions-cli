@@ -2,6 +2,36 @@ import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
+import { resolveWorkspaceInput } from './workspace-lookup';
+
+// Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
+// We require the literal single-quotes around the slug so plausible future error messages
+// like "Project files not found ..." don't false-match.
+const NOT_FOUND_IN_WORKSPACE = /Project '.+' not found in your active workspace/;
+
+/**
+ * Inspect an axios error and, if its response message matches the new
+ * workspace-not-found 404 from solidactions-app PR #128, append a
+ * remediation hint. Exported for unit testing; the live interceptor
+ * below calls it.
+ */
+export function augmentNotFoundMessage(error: any): any {
+    const msg = error?.response?.data?.message;
+    if (
+        typeof msg === 'string'
+        && NOT_FOUND_IN_WORKSPACE.test(msg)
+        && !msg.includes('Did you mean to switch workspaces?')
+    ) {
+        const hint = "Did you mean to switch workspaces? Run 'solidactions workspace set <name> --local' to pin this directory.";
+        error.response.data.message = `${msg}\n\n${hint}`;
+    }
+    return error;
+}
+
+axios.interceptors.response.use(
+    (response) => response,
+    (error) => Promise.reject(augmentNotFoundMessage(error)),
+);
 
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
     const headers: Record<string, string> = {
@@ -114,6 +144,17 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
 }
 
 export async function requireConfigWithWorkspace(): Promise<Config> {
-    const config = requireConfig();
+    const resolved = requireResolvedConfig();
+    let config = resolved.config;
+
+    // -w override path: source label 'cli' on the workspace field means
+    // setCliWorkspaceOverride was called. workspaceId was cleared by resolveConfig
+    // because we don't yet know if the input was a slug or UUID. Resolve now.
+    if (resolved.sources.workspace === 'cli' && !config.workspaceId) {
+        const ws = await resolveWorkspaceInput(config, config.workspace!);
+        config = { ...config, workspace: ws.slug ?? ws.name, workspaceId: ws.id };
+        return config;
+    }
+
     return ensureWorkspaceSelected(config);
 }
