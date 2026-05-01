@@ -178,7 +178,7 @@ function indent(text: string, prefix = '  '): string {
 /**
  * Defense-in-depth: even though the SAA API sanitizes `Authorization`,
  * `x-pica-*`, and `x-one-*` out of `ioExample.input.headers` before serving,
- * filter them again here so any future drift can't leak Pica internals into
+ * filter them again here so any future drift can't leak proxy internals into
  * a workflow's outbound request.
  */
 function isProxyManagedHeader(name: string): boolean {
