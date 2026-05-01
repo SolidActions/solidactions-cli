@@ -277,15 +277,23 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             console.log(chalk.yellow(`Project "${projectName}"${envLabel} not found. Creating...`));
+            const requestedSlug = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-') + (environment !== 'production' ? `-${environment}` : '');
             try {
                 const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
                     name: projectName,
-                    slug: projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-') + (environment !== 'production' ? `-${environment}` : ''),
+                    slug: requestedSlug,
                     environment: environment,
                 }, {
                     headers: getApiHeaders(config, 'application/json'),
                 });
-                projectSlug = createResponse.data.slug || createResponse.data.name;
+                // Fallback chain: prefer the server-echoed slug; if absent, use the slug we
+                // *requested* in the POST body (server stored that value). Falling back to
+                // `name` strips the env suffix and causes the polling GET to 404 with
+                // "Project 'X' not found in your active workspace 'Y'.".
+                projectSlug = createResponse.data.slug || requestedSlug;
+                if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                    process.stderr.write(`[deploy-debug] requestedSlug=${requestedSlug} responseSlug=${createResponse.data.slug ?? '(missing)'} responseName=${createResponse.data.name ?? '(missing)'} resolvedSlug=${projectSlug}\n`);
+                }
                 console.log(chalk.green(`Project "${projectName}"${envLabel} created.`));
             } catch (createError: any) {
                 console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
@@ -321,6 +329,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             form.append('source', fs.createReadStream(archivePath));
 
             console.log(chalk.yellow('Uploading...'));
+            if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                process.stderr.write(`[deploy-debug] POST ${config.host}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
+            }
 
             await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
                 headers: {
@@ -333,6 +344,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
             console.log(chalk.green('Deployment successfully queued!'));
             console.log(chalk.yellow('Waiting for build to complete...\n'));
+            if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                process.stderr.write(`[deploy-debug] poll URL = ${config.host}/api/v1/projects/${projectSlug} (workspace=${config.workspaceId ?? '(none)'})\n`);
+            }
 
             // Poll for completion
             let attempts = 0;
