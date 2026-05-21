@@ -20,7 +20,7 @@ import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhook-list';
-import { dev, devWithEnv } from './commands/dev';
+import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
 import { oauthActionsSearch } from './commands/oauth-actions-search';
@@ -131,13 +131,10 @@ program
     .option('-i, --input <json>', 'JSON input for the workflow', '{}')
     .option('-e, --env <env>', 'Pull platform variables for this environment (e.g. dev, staging, production)')
     .action((file, options) => {
-        // --env runs the platform-var path (fetch declared vars, build ctx.vars,
-        // invoke locally). No --env keeps the legacy local-only mock-server UX.
-        if (options.env) {
-            devWithEnv(file, options);
-        } else {
-            dev(file, options);
-        }
+        // Unified in-process invoke path. With --env: fetch declared vars, build
+        // ctx.vars, invoke locally. Without --env: NO platform fetch, ctx.vars is
+        // empty {} (the host process.env is never leaked into the workflow).
+        dev(file, options);
     });
 
 // =============================================================================

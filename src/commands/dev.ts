@@ -1,8 +1,7 @@
-import { spawn, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import chalk from 'chalk';
-import dotenv from 'dotenv';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
@@ -56,11 +55,16 @@ export interface RunDevOptions {
     entry: string;
     /** JSON-serialised input for the workflow (e.g. '{"n":2}'). */
     input: string;
-    /** Environment name to resolve variables for (e.g. 'staging'). */
-    env: string;
     /**
-     * SA API client injection seam.  If omitted, runDev() builds a real client
-     * from the CLI's resolved config.
+     * Environment name to resolve platform variables for (e.g. 'staging').
+     * When omitted, NO platform fetch happens and `ctx.vars` starts empty `{}`
+     * (it is NOT populated from the host `process.env`). Use {@link varsOverride}
+     * to inject explicit local values in that case.
+     */
+    env?: string;
+    /**
+     * SA API client injection seam.  If omitted (and {@link env} is set),
+     * runDev() builds a real client from the CLI's resolved config.
      */
     api?: SaApiClient;
     /**
@@ -137,43 +141,52 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         stderrLines.push(msg);
     }
 
-    // 1. Determine the API client.
-    let apiClient: SaApiClient;
-    if (opts.api) {
-        apiClient = opts.api;
-    } else {
-        // Production path: build from CLI config.
-        // Lazy-import to keep tests fast (no config resolution needed).
-        const { requireConfigWithWorkspace } = await import('../utils/api');
-        const { getApiHeaders } = await import('../utils/api');
-        const axios = (await import('axios')).default;
-        const config = await requireConfigWithWorkspace();
-        // Real project resolution: read the project name from the workflow
-        // file's solidactions.yaml and apply the deploy env→slug rule.
-        const projectSlug = resolveProjectSlug(opts.entry, opts.env);
-        apiClient = {
-            projectSlug,
-            async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
-                const response = await axios.get(
-                    `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`,
-                    { headers: getApiHeaders(config) },
-                );
-                return response.data || [];
-            },
-        };
+    // 1. Determine the API client (only when an env was requested). With no
+    //    --env, we run fully locally: NO platform fetch, ctx.vars starts empty.
+    let apiClient: SaApiClient | undefined;
+    if (opts.env) {
+        if (opts.api) {
+            apiClient = opts.api;
+        } else {
+            // Production path: build from CLI config.
+            // Lazy-import to keep tests fast (no config resolution needed).
+            const { requireConfigWithWorkspace } = await import('../utils/api');
+            const { getApiHeaders } = await import('../utils/api');
+            const axios = (await import('axios')).default;
+            const config = await requireConfigWithWorkspace();
+            // Real project resolution: read the project name from the workflow
+            // file's solidactions.yaml and apply the deploy env→slug rule.
+            const projectSlug = resolveProjectSlug(opts.entry, opts.env);
+            apiClient = {
+                projectSlug,
+                async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
+                    const response = await axios.get(
+                        `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`,
+                        { headers: getApiHeaders(config) },
+                    );
+                    return response.data || [];
+                },
+            };
+        }
     }
 
-    // 2. Fetch vars from platform.
+    // 2. Fetch vars from platform (only when an env + client are present).
     let platformVars: PlatformVar[] = [];
-    try {
-        platformVars = await apiClient.fetchVarsAndConnections(opts.env);
-    } catch (e: any) {
-        err(`failed to fetch platform vars: ${e?.message ?? e}`);
+    if (apiClient && opts.env) {
+        try {
+            platformVars = await apiClient.fetchVarsAndConnections(opts.env);
+        } catch (e: any) {
+            err(`failed to fetch platform vars: ${e?.message ?? e}`);
+        }
     }
 
-    // 3. Build ctx.vars from platform vars.
+    // 3. Build ctx.vars from platform vars. A declared mapping is only readable
+    //    on ctx.vars when it is an OAuth connection (with proxy fields) OR has a
+    //    non-null resolved_value. Mappings with no value in this env are DROPPED
+    //    — and must NOT be counted in the summary (BUG #1).
     const vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }> = {};
     let connectionCount = 0;
+    let droppedCount = 0;
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -184,9 +197,10 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             connectionCount++;
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
+        } else {
+            droppedCount++;
         }
     }
-    const varCount = platformVars.length - connectionCount;
 
     // 4. Apply overrides, warning on shadows.
     if (opts.varsOverride) {
@@ -198,8 +212,19 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
     }
 
-    // 5. Print summary line.
-    out(`Loaded ${varCount} vars + ${connectionCount} connections from ${apiClient.projectSlug} / env ${opts.env}`);
+    // 5. Print summary line. Report what is ACTUALLY readable on ctx.vars — the
+    //    plain-var count is the number of plain vars actually placed in `vars`
+    //    (total keys minus connection entries), never the raw mapping count.
+    if (opts.env) {
+        const plainVarCount = Object.keys(vars).length - connectionCount;
+        let summary = `Loaded ${plainVarCount} vars + ${connectionCount} connections from ${apiClient!.projectSlug} / env ${opts.env}`;
+        if (droppedCount > 0) {
+            summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
+        }
+        out(summary);
+    } else {
+        out('Loaded 0 platform vars (no --env) — running locally');
+    }
 
     // 6. Spin up SDK mock backend.
     // Require createMockServer from the SDK's testing subpath.
@@ -356,18 +381,23 @@ function hasTsLoader(): boolean {
 /**
  * Re-exec the CLI under `npx tsx` so that `runDev`'s `await import()` of a
  * `.ts` workflow file resolves against tsx's TypeScript loader. The child runs
- * the SAME command (`dev <file> --env <env> --input <json>`) with the re-exec
+ * the SAME command (`dev <file> [--env <env>] --input <json>`) with the re-exec
  * guard set, so it falls straight through to {@link runDev}.
  *
- * tsx is resolved via `npx` (which the legacy `dev()` already relies on); the
- * child's cwd is the project root so its node_modules tsx is preferred.
+ * tsx is resolved via `npx`; the child's cwd is the project root so its
+ * node_modules tsx is preferred. `env` is optional — when omitted the child
+ * runs the bare local path (no platform fetch, empty ctx.vars).
  */
-function reexecUnderTsx(file: string, env: string, input: string, projectDir: string): number {
+function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string): number {
     // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
     const cliEntry = path.resolve(__dirname, '..', 'index.js');
+    const args = ['tsx', cliEntry, 'dev', file, '--input', input];
+    if (env) {
+        args.push('--env', env);
+    }
     const result = spawnSync(
         'npx',
-        ['tsx', cliEntry, 'dev', file, '--env', env, '--input', input],
+        args,
         {
             stdio: 'inherit',
             cwd: projectDir,
@@ -387,15 +417,17 @@ function reexecUnderTsx(file: string, env: string, input: string, projectDir: st
 }
 
 /**
- * Handler for `solidactions dev <file> --env <env>`: run the workflow LOCALLY
- * with platform-pulled variables for the chosen environment.
+ * Handler for `solidactions dev <file> [--env <env>]`: run the workflow LOCALLY
+ * through the in-process invoke() engine.
  *
- * Pulls declared variable-mappings from the SA API, builds `ctx.vars`, and runs
- * the workflow against the SDK mock backend via {@link runDev}. `.ts` entries
- * are loaded by re-exec'ing under `npx tsx` (the legacy `dev()` mechanism).
+ * With `--env`: pulls declared variable-mappings from the SA API and builds
+ * `ctx.vars` for the chosen environment. WITHOUT `--env`: NO platform fetch and
+ * `ctx.vars` starts empty `{}` — the host `process.env` is NEVER leaked into the
+ * workflow. Either way the workflow runs against the SDK mock backend via
+ * {@link runDev}. `.ts` entries are loaded by re-exec'ing under `npx tsx`.
  */
-export async function devWithEnv(file: string, options: DevOptions): Promise<void> {
-    const env = options.env!;
+export async function dev(file: string, options: DevOptions): Promise<void> {
+    const env = options.env;
     const input = options.input || '{}';
 
     const filePath = path.resolve(file);
@@ -415,12 +447,15 @@ export async function devWithEnv(file: string, options: DevOptions): Promise<voi
     if (!hasTsLoader() && /\.(ts|tsx|mts|cts)$/.test(filePath)) {
         const projectDir = findProjectRoot(filePath) ?? process.cwd();
         // Surface a clear slug-resolution error here (before forking) rather
-        // than letting the child fail with an opaque exit code.
-        try {
-            resolveProjectSlug(filePath, env);
-        } catch (err: any) {
-            console.error(chalk.red(`Failed: ${err.message}`));
-            process.exit(1);
+        // than letting the child fail with an opaque exit code. Only relevant
+        // when an env was requested (bare runs do no platform fetch).
+        if (env) {
+            try {
+                resolveProjectSlug(filePath, env);
+            } catch (err: any) {
+                console.error(chalk.red(`Failed: ${err.message}`));
+                process.exit(1);
+            }
         }
         process.exit(reexecUnderTsx(file, env, input, projectDir));
     }
@@ -462,166 +497,6 @@ export async function devWithEnv(file: string, options: DevOptions): Promise<voi
     process.exit(1);
 }
 
-export async function dev(file: string, options: DevOptions) {
-    // Resolve the workflow file path
-    const filePath = path.resolve(file);
-    if (!fs.existsSync(filePath)) {
-        console.error(chalk.red(`File not found: ${filePath}`));
-        process.exit(1);
-    }
-
-    // Find the project root (directory containing package.json)
-    const projectDir = findProjectRoot(filePath);
-    if (!projectDir) {
-        console.error(chalk.red('Could not find package.json in parent directories.'));
-        process.exit(1);
-    }
-
-    // Check that @solidactions/sdk is installed
-    const sdkPath = path.join(projectDir, 'node_modules', '@solidactions', 'sdk');
-    if (!fs.existsSync(sdkPath)) {
-        console.error(chalk.red('@solidactions/sdk is not installed in this project.'));
-        console.log(chalk.gray('Run: npm install @solidactions/sdk'));
-        process.exit(1);
-    }
-
-    // Check that the testing export exists
-    const testingPath = path.join(sdkPath, 'dist', 'src', 'testing');
-    if (!fs.existsSync(testingPath)) {
-        console.error(chalk.red('@solidactions/sdk version does not include testing utilities.'));
-        console.log(chalk.gray('Update to the latest SDK version: npm install @solidactions/sdk@latest'));
-        process.exit(1);
-    }
-
-    // Load .env file from project root
-    const envPath = path.join(projectDir, '.env');
-    if (fs.existsSync(envPath)) {
-        dotenv.config({ path: envPath });
-        console.log(chalk.gray(`Loaded .env from ${projectDir}`));
-    }
-
-    // Validate input JSON if provided
-    const input = options.input || '{}';
-    try {
-        JSON.parse(input);
-    } catch {
-        console.error(chalk.red('Invalid JSON input. Use -i \'{"key": "value"}\''));
-        process.exit(1);
-    }
-
-    // Write temp bootstrap file
-    const bootstrapPath = path.join(projectDir, '.solidactions-dev-bootstrap.mjs');
-    const bootstrapContent = generateBootstrap(filePath, input);
-
-    try {
-        fs.writeFileSync(bootstrapPath, bootstrapContent);
-
-        console.log(chalk.blue('SolidActions local dev mode'));
-        console.log(chalk.gray(`File:  ${path.relative(projectDir, filePath)}`));
-        console.log(chalk.gray(`Input: ${input}`));
-        console.log(chalk.gray('---'));
-
-        // Spawn npx tsx with the bootstrap file
-        const child = spawn('npx', ['tsx', bootstrapPath], {
-            stdio: 'inherit',
-            cwd: projectDir,
-        });
-
-        child.on('error', (err) => {
-            cleanup(bootstrapPath);
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-                console.error(chalk.red('npx not found. Make sure Node.js is installed.'));
-            } else {
-                console.error(chalk.red(`Failed to start: ${err.message}`));
-            }
-            process.exit(1);
-        });
-
-        child.on('exit', (code) => {
-            cleanup(bootstrapPath);
-            process.exit(code ?? 1);
-        });
-
-        // Also clean up on signals
-        process.on('SIGINT', () => {
-            cleanup(bootstrapPath);
-            child.kill('SIGINT');
-        });
-        process.on('SIGTERM', () => {
-            cleanup(bootstrapPath);
-            child.kill('SIGTERM');
-        });
-
-    } catch (err: any) {
-        cleanup(bootstrapPath);
-        console.error(chalk.red(`Failed: ${err.message}`));
-        process.exit(1);
-    }
-}
-
-function generateBootstrap(workflowFile: string, input: string): string {
-    // Use forward slashes for the import path (works cross-platform in ESM)
-    const importPath = workflowFile.replace(/\\/g, '/');
-
-    return `// Auto-generated by solidactions dev - do not commit
-import { createMockServer } from '@solidactions/sdk/testing';
-import { SolidActions } from '@solidactions/sdk';
-import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
-
-const server = await createMockServer();
-
-process.env.SOLIDACTIONS_API_URL = server.baseUrl;
-process.env.SOLIDACTIONS_API_KEY ??= 'local-dev';
-process.env.SOLIDACTIONS_RUN_ID ??= randomUUID();
-process.env.STEPS_TRIGGER_ID ??= 'local-dev';
-process.env.SOLIDACTIONS__APPID ??= 'local-dev';
-process.env.SOLIDACTIONS__APPVERSION ??= '0';
-process.env.WORKFLOW_INPUT = ${JSON.stringify(input)};
-
-// Import the workflow file — pure modules only populate the registry (no top-level run())
-await import(${JSON.stringify(importPath)});
-
-// Access the SDK-internal registry via createRequire (bypasses the exports map which
-// intentionally does not re-export __getRegisteredWorkflows as a public API — but the
-// bootstrap is a CLI-internal glue layer that IS allowed to use these internals).
-// The require() resolution path: find the @solidactions/sdk package root by resolving
-// the public entry point, then navigate to the registry sibling.
-const _require = createRequire(import.meta.url);
-const sdkMain = _require.resolve('@solidactions/sdk');
-// sdkMain = .../node_modules/@solidactions/sdk/dist/src/index.js
-// registry = .../node_modules/@solidactions/sdk/dist/src/invoke/registry.js
-const registryPath = resolve(sdkMain, '..', 'invoke', 'registry.js');
-const { __getRegisteredWorkflows, __getRegisteredWorkflow } = _require(registryPath);
-
-// Select and run: mirror the SDK launcher's selectWorkflow logic
-const all = __getRegisteredWorkflows();
-let descriptor;
-if (all.length === 1) {
-  descriptor = all[0];
-} else if (all.length === 0) {
-  console.error('solidactions dev: no workflows registered after importing the file.');
-  console.error('Make sure the file calls defineWorkflow(...) or SolidActions.registerWorkflow(...).');
-  process.exit(1);
-} else {
-  // Multiple registrations: use WORKFLOW_ID env or fall back to first
-  const workflowId = process.env.WORKFLOW_ID;
-  const hit = workflowId ? __getRegisteredWorkflow(workflowId) : undefined;
-  descriptor = hit ?? all[0];
-  if (workflowId && !hit) {
-    console.warn('solidactions dev: WORKFLOW_ID "' + workflowId + '" not found; running first registered workflow: ' + (all[0].name ?? '<unnamed>'));
-  } else if (!workflowId && all.length > 1) {
-    console.warn('solidactions dev: multiple workflows registered; running first: ' + (all[0].name ?? '<unnamed>') + '. Set WORKFLOW_ID env var to select a specific one.');
-  }
-}
-
-// SolidActions.run() executes the workflow body via the one-shot invoke() engine
-// and calls process.exit() when done.
-await SolidActions.run(descriptor);
-`;
-}
-
 function findProjectRoot(startPath: string): string | null {
     let dir = path.dirname(startPath);
     for (let i = 0; i < 10; i++) {
@@ -633,14 +508,4 @@ function findProjectRoot(startPath: string): string | null {
         dir = parent;
     }
     return null;
-}
-
-function cleanup(filePath: string) {
-    try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
-    } catch {
-        // Ignore cleanup errors
-    }
 }
