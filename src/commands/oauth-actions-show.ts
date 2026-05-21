@@ -4,6 +4,8 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface OAuthActionsShowOptions {
     json?: boolean;
+    var?: string;
+    legacyEnv?: boolean;
 }
 
 interface IoSchema {
@@ -45,7 +47,7 @@ export async function oauthActionsShow(platform: string, actionId: string, optio
             return;
         }
 
-        renderHumanReadable(action);
+        renderHumanReadable(action, options);
     } catch (error: any) {
         if (error.response?.status === 404) {
             console.error(chalk.red(`Action not found: ${platform}/${actionId}`));
@@ -60,7 +62,7 @@ export async function oauthActionsShow(platform: string, actionId: string, optio
     }
 }
 
-function renderHumanReadable(action: OAuthActionDetail) {
+function renderHumanReadable(action: OAuthActionDetail, options: OAuthActionsShowOptions) {
     const method = (action.method || 'GET').toUpperCase();
     const ioSchema = action.io_schema || {};
     const example = ioSchema.ioExample?.input;
@@ -100,16 +102,135 @@ function renderHumanReadable(action: OAuthActionDetail) {
     }
 
     console.log(chalk.bold('Paste-ready snippet:'));
-    console.log(chalk.gray(indent(buildSnippet(action))));
+    if (options.legacyEnv) {
+        console.log(chalk.yellow('  (--legacy-env: deprecated form, will be removed in a future release)'));
+    }
+    console.log(chalk.gray(indent(buildSnippet(action, options.var, options.legacyEnv))));
 }
 
 /**
- * Render a fetch() call against the SA proxy with `{{name}}` path placeholders
- * rewritten to `${name}` template-literal slots, query parameters appended,
- * and the example body inlined verbatim (so the AI substitutes values into the
- * known-good shape rather than inferring it from JSON Schema).
+ * Render a fetch() call against the SA proxy using the ctx.vars contract.
+ *
+ * The proxy requires:
+ *   - Authorization: Bearer <proxyToken>   (per-trigger scoped token from ctx.vars)
+ *   - X-OAuth-Connection-Key: <key>        (connection identifier from ctx.vars)
+ *   - X-OAuth-Action-Id: <action_id>       (the action being called)
+ *
+ * For modifier actions the body MUST include `connectionKey` alongside user params.
+ *
+ * Pass --var <NAME> to set the ctx.vars variable name (defaults to YOUR_CONNECTION).
+ * Pass --legacy-env to emit the old process.env form (deprecated, will be removed).
  */
-function buildSnippet(action: OAuthActionDetail): string {
+export function buildSnippet(action: OAuthActionDetail, varName?: string, legacyEnv?: boolean): string {
+    if (legacyEnv) {
+        return buildLegacySnippet(action);
+    }
+    return buildCtxVarsSnippet(action, varName);
+}
+
+/**
+ * New ctx.vars-based snippet (the live proxy contract).
+ *
+ * proxyUrl  — the SA proxy base URL injected by the runtime at workflow start
+ * proxyToken — a per-trigger scoped Bearer token, NOT a long-lived secret
+ * key        — the connection key used by the proxy to look up the OAuth credentials
+ *
+ * Headers sent to the proxy:
+ *   Authorization: Bearer ${ctx.vars.<VAR>.proxyToken}
+ *   X-OAuth-Connection-Key: ${ctx.vars.<VAR>.key}
+ *   X-OAuth-Action-Id: '<action_id>'
+ *
+ * Do NOT include X-SA-Connection — that header is stripped by the proxy (STRIPPED_INBOUND).
+ */
+function buildCtxVarsSnippet(action: OAuthActionDetail, varName?: string): string {
+    const method = (action.method || 'GET').toUpperCase();
+    const platform = action.platform;
+    const varRef = varName || 'YOUR_CONNECTION';
+    const example = action.io_schema?.ioExample?.input;
+
+    const pathTemplate = (action.path || '').replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, name) => '${' + name.trim() + '}');
+
+    const queryEntries = example?.query ? Object.entries(example.query) : [];
+    const queryString = queryEntries.length
+        ? '?' + queryEntries.flatMap(([k, v]) => {
+            const encodedKey = encodeURIComponent(k);
+            const items = Array.isArray(v) ? v : [v];
+            return items.map((item) => `${encodedKey}=\${encodeURIComponent(${JSON.stringify(item)})}`);
+        }).join('&')
+        : '';
+
+    // Build the headers block: Authorization, X-OAuth-Connection-Key, X-OAuth-Action-Id,
+    // then any non-proxy-managed example headers, then Content-Type if body is present.
+    const proxyHeaderLines: string[] = [
+        `      'Authorization': \`Bearer \${ctx.vars.${varRef}.proxyToken}\`,`,
+        `      'X-OAuth-Connection-Key': ctx.vars.${varRef}.key,`,
+        `      'X-OAuth-Action-Id': ${JSON.stringify(action.action_id)},`,
+    ];
+    const exampleHeaders = example?.headers || {};
+    for (const [k, v] of Object.entries(exampleHeaders)) {
+        if (isProxyManagedHeader(k)) continue;
+        proxyHeaderLines.push(`      ${JSON.stringify(k)}: ${JSON.stringify(v)},`);
+    }
+    if (example?.body !== undefined && example.body !== null) {
+        const hasContentType = Object.keys(exampleHeaders).some(k => k.toLowerCase() === 'content-type');
+        if (!hasContentType) {
+            proxyHeaderLines.push(`      'Content-Type': 'application/json',`);
+        }
+    }
+    const headersBlock = proxyHeaderLines.join('\n');
+
+    const lines: string[] = [];
+    lines.push('const res = await fetch(');
+    lines.push(`  \`\${ctx.vars.${varRef}.proxyUrl}/${platform}${pathTemplate}${queryString}\`,`);
+    lines.push('  {');
+    lines.push(`    method: '${method}',`);
+    lines.push('    headers: {');
+    lines.push(headersBlock);
+    lines.push('    },');
+
+    if (example?.body !== undefined && example.body !== null) {
+        // Modifier actions: body already contains connectionKey from the API example.
+        // In the new contract the proxy uses X-OAuth-Connection-Key for routing, but
+        // modifier actions additionally require connectionKey IN the body so the
+        // upstream provider receives it. Substitute with a live ctx.vars reference.
+        const bodyObj: any = example.body;
+        const isModifier = typeof bodyObj === 'object' && bodyObj !== null && 'connectionKey' in bodyObj;
+
+        let bodyExpr: string;
+        if (isModifier) {
+            // Build the body object manually so we can emit `ctx.vars.<VAR>.key`
+            // (an unquoted JS expression) as the connectionKey value rather than
+            // a string literal.
+            const otherFields = Object.entries(bodyObj)
+                .filter(([k]) => k !== 'connectionKey')
+                .map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)}`)
+                .join(',\n');
+            const otherPart = otherFields ? `,\n${otherFields}` : '';
+            bodyExpr = `{\n  connectionKey: ctx.vars.${varRef}.key${otherPart}\n}`;
+        } else {
+            bodyExpr = JSON.stringify(bodyObj, null, 2);
+        }
+
+        const bodyLines = bodyExpr
+            .split('\n')
+            .map((l, i) => (i === 0 ? l : '    ' + l))
+            .join('\n');
+
+        lines.push(`    body: JSON.stringify(${bodyLines}),`);
+    }
+
+    lines.push('  }');
+    lines.push(');');
+    lines.push('const data = await res.json();');
+    return lines.join('\n');
+}
+
+/**
+ * Legacy process.env-based snippet (deprecated).
+ * Emitted only when --legacy-env is passed.
+ * This form no longer matches the live proxy contract — use the ctx.vars form.
+ */
+function buildLegacySnippet(action: OAuthActionDetail): string {
     const method = (action.method || 'GET').toUpperCase();
     const platform = action.platform;
     const platformEnv = platform.toUpperCase().replace(/-/g, '_');
@@ -185,5 +306,8 @@ function isProxyManagedHeader(name: string): boolean {
     const lower = name.toLowerCase();
     return lower === 'authorization'
         || lower.startsWith('x-pica-')
-        || lower.startsWith('x-one-');
+        || lower.startsWith('x-one-')
+        || lower === 'x-sa-connection'
+        || lower === 'x-oauth-connection-key'
+        || lower === 'x-oauth-action-id';
 }

@@ -407,6 +407,8 @@ oauthActionsCmd
     .command('show <platform> <action-id>')
     .description('Show full schema, example body, and a paste-ready fetch snippet for one action')
     .option('--json', 'Emit raw JSON for AI/script consumption')
+    .option('--var <NAME>', 'ctx.vars variable name for the connection (default: YOUR_CONNECTION)')
+    .option('--legacy-env', 'Emit the deprecated process.env-based snippet (will be removed in a future release)')
     .action((platform, actionId, options) => {
         oauthActionsShow(platform, actionId, options);
     });
