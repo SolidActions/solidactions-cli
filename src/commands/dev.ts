@@ -1,10 +1,12 @@
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
+import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
+import { SolidActionsConfig } from '../utils/env';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -70,6 +72,50 @@ export interface RunDevOptions {
 }
 
 /**
+ * Resolve the SA project slug for a workflow entry file and a target env.
+ *
+ * Walks up from the entry file to the project root (the directory containing
+ * `solidactions.yaml`), reads the declared `project:` name, and applies the
+ * SAME env→slug rule used by `deploy`: production keeps the bare name, every
+ * other environment appends `-<env>` (e.g. `sdk-test` → `sdk-test-dev`).
+ *
+ * Throws when the project root or the `project:` field cannot be found, so the
+ * caller surfaces a clear error instead of fetching against a bogus slug.
+ */
+export function resolveProjectSlug(entryPath: string, env: string): string {
+    const root = findSolidActionsRoot(path.resolve(entryPath));
+    if (!root) {
+        throw new Error(`could not find solidactions.yaml in any parent of ${entryPath}`);
+    }
+    const configPath = path.join(root, 'solidactions.yaml');
+    const config = yaml.load(fs.readFileSync(configPath, 'utf8')) as SolidActionsConfig | null;
+    const projectName = config?.project;
+    if (!projectName || typeof projectName !== 'string') {
+        throw new Error(`solidactions.yaml at ${configPath} is missing a top-level "project:" name`);
+    }
+    return env === 'production' ? projectName : `${projectName}-${env}`;
+}
+
+/**
+ * Walk up from a starting path looking for the directory that holds
+ * `solidactions.yaml` (the project root). Returns null if none is found.
+ */
+function findSolidActionsRoot(startPath: string): string | null {
+    let dir = fs.existsSync(startPath) && fs.statSync(startPath).isDirectory()
+        ? startPath
+        : path.dirname(startPath);
+    for (let i = 0; i < 10; i++) {
+        if (fs.existsSync(path.join(dir, 'solidactions.yaml'))) {
+            return dir;
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    return null;
+}
+
+/**
  * Run a workflow entry file in local-dev mode:
  *   1. Fetch declared vars + connections from the platform (via api seam).
  *   2. Apply any varsOverride, warning when a key shadows a platform var.
@@ -102,13 +148,14 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         const { getApiHeaders } = await import('../utils/api');
         const axios = (await import('axios')).default;
         const config = await requireConfigWithWorkspace();
-        const projectSlug = opts.env === 'production' ? 'unknown' : `unknown-${opts.env}`;
+        // Real project resolution: read the project name from the workflow
+        // file's solidactions.yaml and apply the deploy env→slug rule.
+        const projectSlug = resolveProjectSlug(opts.entry, opts.env);
         apiClient = {
             projectSlug,
-            async fetchVarsAndConnections(env: string): Promise<PlatformVar[]> {
-                const slug = env === 'production' ? projectSlug : `${projectSlug}-${env}`;
+            async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
                 const response = await axios.get(
-                    `${config.host}/api/v1/projects/${slug}/variable-mappings?resolve_oauth=true`,
+                    `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`,
                     { headers: getApiHeaders(config) },
                 );
                 return response.data || [];
@@ -156,9 +203,16 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
 
     // 6. Spin up SDK mock backend.
     // Require createMockServer from the SDK's testing subpath.
-    // createRequire(__filename) works in CJS (the CLI target). In ESM this would
-    // use import.meta.url, but tsconfig compiles to CommonJS so __filename is available.
-    const _require = createRequire(__filename);
+    //
+    // CRITICAL: root the require at the ENTRY FILE, not at __filename. The
+    // workflow module's own `import '@solidactions/sdk'` resolves the SDK
+    // relative to the entry file's project (e.g. examples/sdk-test/sdk), and
+    // it registers its workflow into THAT copy's registry singleton. If we
+    // resolved the SDK from the CLI's own node_modules instead (a different,
+    // npm-linked copy), we'd read an empty registry. Resolving from the entry's
+    // directory guarantees we hit the same SDK instance the workflow used.
+    const entryPath = path.resolve(opts.entry);
+    const _require = createRequire(entryPath);
     // Resolve via the installed (or linked) @solidactions/sdk package.
     const sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,7 +226,6 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         //    runDev() calls in the same test process don't need to clear and
         //    re-register from a cached module (cached CJS modules don't re-run
         //    their top-level code). If no default export, fall back to the registry.
-        const entryPath = path.resolve(opts.entry);
         const mod = await import(entryPath);
         let descriptor: { name?: string; run: Function } | undefined;
 
@@ -222,8 +275,45 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             mode: 'local' as const,
         };
 
-        // 9. Invoke via internal SDK path (invoke() is not in the public index).
+        // 9. Create the run-row BEFORE invoking. invoke() itself never creates
+        //    the durable run record — the production launcher (SolidActions.run
+        //    → #initOneShotStatusRow) does that first, and step/sleep/recv
+        //    sub-routes (`/runs/status/<id>/...`) 404 ("Workflow not found")
+        //    against an absent row. A no-step workflow (the echo fixture) never
+        //    hits those routes so it survives without this; any workflow with a
+        //    runStep does not. Mirror #initOneShotStatusRow's CREATE shape.
         const sdkMainForInvoke = _require.resolve('@solidactions/sdk');
+        const httpClientPath = path.resolve(sdkMainForInvoke, '..', 'http_client.js');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { HttpClient } = _require(httpClientPath) as { HttpClient: new (cfg: { baseUrl: string; apiKey: string }, logger?: unknown) => { post: (path: string, body: unknown) => Promise<unknown> } };
+        try {
+            const client = new HttpClient({ baseUrl: ctx.api.url, apiKey: ctx.api.key });
+            await client.post('/runs/status', {
+                workflowUUID: ctx.run.runUuid,
+                status: 'PENDING',
+                workflowName: descriptor.name ?? '',
+                workflowClassName: '',
+                workflowConfigName: '',
+                output: null,
+                error: null,
+                authenticatedUser: '',
+                assumedRole: '',
+                authenticatedRoles: [],
+                request: {},
+                executorId: String(ctx.run.triggerId),
+                applicationVersion: ctx.app.appVersion,
+                applicationID: ctx.app.appId,
+                createdAt: Date.now(),
+                priority: 0,
+                ownerXid: randomUUID(),
+                options: {},
+            });
+        } catch (e: any) {
+            // Best-effort, symmetric with #initOneShotStatusRow's swallow.
+            err(`failed to create local run-row: ${e?.message ?? e}`);
+        }
+
+        // 10. Invoke via internal SDK path (invoke() is not in the public index).
         const invokePath = path.resolve(sdkMainForInvoke, '..', 'invoke', 'invoke.js');
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { invoke } = _require(invokePath) as { invoke: (wf: any, ctx: any) => Promise<any> };
@@ -241,6 +331,135 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
 
 interface DevOptions {
     input?: string;
+    env?: string;
+}
+
+/**
+ * Env var set on the tsx re-exec child so it does NOT re-exec again. Without
+ * this guard the `--env` path would fork itself forever.
+ */
+const TSX_REEXEC_GUARD = 'SOLIDACTIONS_DEV_TSX_REEXEC';
+
+/**
+ * Detect whether the current Node process already has a TypeScript loader
+ * registered (tsx / ts-node). When true, `await import('<file>.ts')` works
+ * in-process and we can run `runDev` directly without re-exec.
+ */
+function hasTsLoader(): boolean {
+    if (process.env[TSX_REEXEC_GUARD] === '1') {
+        return true;
+    }
+    const execArgv = process.execArgv.join(' ');
+    return /tsx|ts-node/.test(execArgv) || Boolean((process as { _preload_modules?: unknown })._preload_modules);
+}
+
+/**
+ * Re-exec the CLI under `npx tsx` so that `runDev`'s `await import()` of a
+ * `.ts` workflow file resolves against tsx's TypeScript loader. The child runs
+ * the SAME command (`dev <file> --env <env> --input <json>`) with the re-exec
+ * guard set, so it falls straight through to {@link runDev}.
+ *
+ * tsx is resolved via `npx` (which the legacy `dev()` already relies on); the
+ * child's cwd is the project root so its node_modules tsx is preferred.
+ */
+function reexecUnderTsx(file: string, env: string, input: string, projectDir: string): number {
+    // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
+    const cliEntry = path.resolve(__dirname, '..', 'index.js');
+    const result = spawnSync(
+        'npx',
+        ['tsx', cliEntry, 'dev', file, '--env', env, '--input', input],
+        {
+            stdio: 'inherit',
+            cwd: projectDir,
+            env: { ...process.env, [TSX_REEXEC_GUARD]: '1' },
+        },
+    );
+    if (result.error) {
+        const code = (result.error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+            console.error(chalk.red('npx not found. Make sure Node.js is installed.'));
+        } else {
+            console.error(chalk.red(`Failed to start tsx loader: ${result.error.message}`));
+        }
+        return 1;
+    }
+    return result.status ?? 1;
+}
+
+/**
+ * Handler for `solidactions dev <file> --env <env>`: run the workflow LOCALLY
+ * with platform-pulled variables for the chosen environment.
+ *
+ * Pulls declared variable-mappings from the SA API, builds `ctx.vars`, and runs
+ * the workflow against the SDK mock backend via {@link runDev}. `.ts` entries
+ * are loaded by re-exec'ing under `npx tsx` (the legacy `dev()` mechanism).
+ */
+export async function devWithEnv(file: string, options: DevOptions): Promise<void> {
+    const env = options.env!;
+    const input = options.input || '{}';
+
+    const filePath = path.resolve(file);
+    if (!fs.existsSync(filePath)) {
+        console.error(chalk.red(`File not found: ${filePath}`));
+        process.exit(1);
+    }
+
+    try {
+        JSON.parse(input);
+    } catch {
+        console.error(chalk.red('Invalid JSON input. Use -i \'{"key": "value"}\''));
+        process.exit(1);
+    }
+
+    // .ts entry under plain node has no loader — re-exec under tsx, then return.
+    if (!hasTsLoader() && /\.(ts|tsx|mts|cts)$/.test(filePath)) {
+        const projectDir = findProjectRoot(filePath) ?? process.cwd();
+        // Surface a clear slug-resolution error here (before forking) rather
+        // than letting the child fail with an opaque exit code.
+        try {
+            resolveProjectSlug(filePath, env);
+        } catch (err: any) {
+            console.error(chalk.red(`Failed: ${err.message}`));
+            process.exit(1);
+        }
+        process.exit(reexecUnderTsx(file, env, input, projectDir));
+    }
+
+    // In-process path (already under a TS loader, or a .js/.mjs entry).
+    let result;
+    try {
+        result = await runDev({ entry: filePath, input, env });
+    } catch (err: any) {
+        console.error(chalk.red(`Failed: ${err.message}`));
+        process.exit(1);
+    }
+
+    if (result.stdout) {
+        console.log(result.stdout);
+    }
+    if (result.stderr) {
+        console.error(chalk.yellow(result.stderr));
+    }
+
+    const r = result.result;
+    if (r.status === 'completed') {
+        console.log(chalk.green('✓ completed'));
+        console.log(chalk.gray('Output:'), JSON.stringify(r.output));
+        process.exit(0);
+    }
+
+    if (r.status === 'suspended') {
+        console.log(chalk.yellow(`Workflow suspended: ${r.reason ?? 'unknown'}`));
+        process.exit(0);
+    }
+    if (r.status === 'cancelled') {
+        console.log(chalk.yellow('Workflow cancelled'));
+        process.exit(1);
+    }
+
+    // failed
+    console.error(chalk.red(`✗ failed (${r.phase ?? 'run'}):`), r.error?.message ?? String(r.error));
+    process.exit(1);
 }
 
 export async function dev(file: string, options: DevOptions) {

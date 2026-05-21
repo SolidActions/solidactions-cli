@@ -20,7 +20,7 @@ import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhook-list';
-import { dev } from './commands/dev';
+import { dev, devWithEnv } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
 import { oauthActionsSearch } from './commands/oauth-actions-search';
@@ -129,8 +129,15 @@ program
     .description('Run a workflow locally using an in-memory mock server (no deploy needed)')
     .argument('<file>', 'Workflow file to run (e.g., src/simple-steps.ts)')
     .option('-i, --input <json>', 'JSON input for the workflow', '{}')
+    .option('-e, --env <env>', 'Pull platform variables for this environment (e.g. dev, staging, production)')
     .action((file, options) => {
-        dev(file, options);
+        // --env runs the platform-var path (fetch declared vars, build ctx.vars,
+        // invoke locally). No --env keeps the legacy local-only mock-server UX.
+        if (options.env) {
+            devWithEnv(file, options);
+        } else {
+            dev(file, options);
+        }
     });
 
 // =============================================================================
