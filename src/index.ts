@@ -129,7 +129,11 @@ program
     .description('Run a workflow locally using an in-memory mock server (no deploy needed)')
     .argument('<file>', 'Workflow file to run (e.g., src/simple-steps.ts)')
     .option('-i, --input <json>', 'JSON input for the workflow', '{}')
+    .option('-e, --env <env>', 'Pull platform variables for this environment (e.g. dev, staging, production)')
     .action((file, options) => {
+        // Unified in-process invoke path. With --env: fetch declared vars, build
+        // ctx.vars, invoke locally. Without --env: NO platform fetch, ctx.vars is
+        // empty {} (the host process.env is never leaked into the workflow).
         dev(file, options);
     });
 
@@ -407,6 +411,8 @@ oauthActionsCmd
     .command('show <platform> <action-id>')
     .description('Show full schema, example body, and a paste-ready fetch snippet for one action')
     .option('--json', 'Emit raw JSON for AI/script consumption')
+    .option('--var <NAME>', 'ctx.vars variable name for the connection (default: YOUR_CONNECTION)')
+    .option('--legacy-env', 'Emit the deprecated process.env-based snippet (will be removed in a future release)')
     .action((platform, actionId, options) => {
         oauthActionsShow(platform, actionId, options);
     });
