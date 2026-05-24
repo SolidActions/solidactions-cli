@@ -74,6 +74,32 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
 
 // ─── Display modes ─────────────────────────────────────────────────────────
 
+/**
+ * Summary-table status label for a run. Recovered/degraded runs share SUCCESS's
+ * execution_status, so without this they'd be indistinguishable from a clean success in
+ * the summary view. Returns the label to display and whether it's an "attention" outcome
+ * (rendered yellow). Falls back to the raw status for servers that don't send `outcome`.
+ */
+export function summaryStatusLabel(run: { outcome?: string; execution_status?: string; status?: string }): {
+    label: string;
+    attention: boolean;
+} {
+    if (run.outcome === 'recovered') return { label: 'recovered', attention: true };
+    if (run.outcome === 'degraded') return { label: 'degraded', attention: true };
+    return { label: run.execution_status || run.status || '?', attention: false };
+}
+
+/**
+ * Detailed-view tag appended to a run header ('' when none). Prefers the API `outcome`;
+ * falls back to the local hasRunErrors heuristic for servers that don't send `outcome`.
+ */
+export function detailedOutcomeTag(run: any): string {
+    if (run.outcome === 'recovered') return ' [RECOVERED]';
+    if (run.outcome === 'degraded') return ' [DEGRADED]';
+    if (hasRunErrors(run) && isSuccessStatus(run.execution_status || run.status || '')) return ' [DEGRADED]';
+    return '';
+}
+
 function displaySummaryTable(runsList: any[], projectName?: string) {
     const header = projectName ? `Recent runs for "${projectName}":` : 'Recent runs:';
     console.log(chalk.blue(header));
@@ -84,8 +110,8 @@ function displaySummaryTable(runsList: any[], projectName?: string) {
     for (const run of runsList) {
         const id = String(run.id || '?').padEnd(8);
         const workflow = truncate(run.workflow_name || '?', 24).padEnd(25);
-        const status = run.execution_status || run.status || '?';
-        const statusColor = getStatusColor(status);
+        const { label: status, attention } = summaryStatusLabel(run);
+        const statusColor = attention ? chalk.yellow : getStatusColor(status);
         const triggeredAt = run.triggered_at ? new Date(run.triggered_at).toLocaleString() : '-';
         const triggeredBy = run.triggered_by || '-';
 
@@ -110,10 +136,10 @@ function displayDetailedList(runsList: any[], projectName?: string) {
         const status = run.execution_status || run.status || '?';
         const statusColor = getStatusColor(status);
         const exitStr = run.exit_code !== null && run.exit_code !== undefined ? ` (exit ${run.exit_code})` : '';
-        const isSilentFailure = hasRunErrors(run) && isSuccessStatus(status);
 
         console.log('');
-        const silentTag = isSilentFailure ? chalk.yellow(' [DEGRADED]') : '';
+        const outcomeTag = detailedOutcomeTag(run);
+        const silentTag = outcomeTag ? chalk.yellow(outcomeTag) : '';
         console.log(chalk.bold(`  Run #${run.id}`) + chalk.gray(` — ${run.workflow_name || '?'} (${run.project_name || '?'})`) + silentTag);
         console.log(`    Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
         console.log(`    Trigger:   ${chalk.gray(run.triggered_by || '-')}`);
