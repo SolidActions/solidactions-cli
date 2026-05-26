@@ -11,7 +11,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { parseSkillFile, readTopLevelReferences, skillPushWithConfig } from '../src/commands/skill-push';
+import { parseSkillFile, readReferences, skillPushWithConfig } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
 
@@ -240,10 +240,10 @@ describe('parseSkillFile', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unit tests: readTopLevelReferences
+// Unit tests: readReferences
 // ---------------------------------------------------------------------------
 
-describe('readTopLevelReferences', () => {
+describe('readReferences', () => {
     it('reads top-level files and excludes SKILL.md', () => {
         const { dir, cleanup } = makeTmpSkillDir(
             '---\nname: S\ndescription: D\n---\nbody',
@@ -254,7 +254,7 @@ describe('readTopLevelReferences', () => {
         );
 
         try {
-            const refs = readTopLevelReferences(dir);
+            const refs = readReferences(dir);
             expect(refs).toEqual({
                 'example.ts': 'const x = 1;',
                 'notes.txt': 'some notes',
@@ -265,22 +265,45 @@ describe('readTopLevelReferences', () => {
         }
     });
 
-    it('does not recurse into subdirectories', () => {
+    it('recurses into subdirectories, keyed by relative path', () => {
         const { dir, cleanup } = makeTmpSkillDir(
             '---\nname: S\ndescription: D\n---\nbody',
             { 'top.ts': 'top' },
         );
 
         try {
-            // Create a subdirectory with a file
+            // Create a nested subdirectory with a file
             const sub = path.join(dir, 'subdir');
             fs.mkdirSync(sub);
             fs.writeFileSync(path.join(sub, 'nested.ts'), 'nested', 'utf8');
 
-            const refs = readTopLevelReferences(dir);
-            expect(refs).toHaveProperty('top.ts');
-            expect(refs).not.toHaveProperty('nested.ts');
-            expect(Object.keys(refs)).not.toContain('subdir');
+            const refs = readReferences(dir);
+            expect(refs).toHaveProperty('top.ts', 'top');
+            // nested file is included, keyed by its POSIX relative path
+            expect(refs).toHaveProperty('subdir/nested.ts', 'nested');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('recurses into a references/ subfolder, keyed by path relative to the skill dir (#247)', () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            '---\nname: S\ndescription: D\n---\nbody references references/member-roles.md',
+            { 'top.md': 'top content' },
+        );
+
+        try {
+            const sub = path.join(dir, 'references');
+            fs.mkdirSync(sub);
+            fs.writeFileSync(path.join(sub, 'member-roles.md'), 'roles content', 'utf8');
+
+            const refs = readReferences(dir);
+            // top-level files keep bare-filename keys (backward compatible)
+            expect(refs).toHaveProperty('top.md', 'top content');
+            // subfolder files are keyed by their POSIX path relative to the skill dir,
+            // matching how SKILL.md cites them (references/member-roles.md)
+            expect(refs).toHaveProperty('references/member-roles.md', 'roles content');
+            expect(refs).not.toHaveProperty('SKILL.md');
         } finally {
             cleanup();
         }
@@ -290,7 +313,7 @@ describe('readTopLevelReferences', () => {
         const { dir, cleanup } = makeTmpSkillDir('---\nname: S\ndescription: D\n---\nbody');
 
         try {
-            const refs = readTopLevelReferences(dir);
+            const refs = readReferences(dir);
             expect(refs).toEqual({});
         } finally {
             cleanup();
