@@ -27,6 +27,7 @@ import { oauthActionsSearch } from './commands/oauth-actions-search';
 import { oauthActionsList } from './commands/oauth-actions-list';
 import { oauthActionsShow } from './commands/oauth-actions-show';
 import { workspacesList, workspaceSet } from './commands/workspaces';
+import { skillPush } from './commands/skill-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -437,6 +438,22 @@ ai
     .option('--all', 'Install all available examples')
     .option('--overwrite', 'Overwrite existing examples without warning')
     .action((names, options) => { aiExamples(names, options); });
+
+// =============================================================================
+// skill <subcommand>  (SOP surface — flat top-level noun per cli#34)
+// =============================================================================
+
+const skill = program.command('skill').description('Manage agent skills (crews SOP surface)');
+
+skill
+    .command('push')
+    .description('Push a local skill folder into the library (create, or update if it already exists)')
+    .argument('<dir>', 'Path to the skill directory (must contain SKILL.md)')
+    .option('--role <name>', 'Scope the skill to a role instead of the shared library')
+    .option('--json', 'Output result as JSON')
+    .action(async (dir, options) => {
+        await skillPush(dir, options);
+    });
 
 program.parseAsync().catch((err) => {
     console.error(chalk.red(err.message ?? String(err)));
