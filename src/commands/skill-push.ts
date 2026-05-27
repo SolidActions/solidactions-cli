@@ -110,47 +110,56 @@ export function readReferences(dir: string): Record<string, string> {
     return references;
 }
 
+export interface SkillPayload {
+    name: string;
+    description: string;
+    properties: Record<string, unknown>;
+    body: string;
+    references: Record<string, string>;
+}
+
+export interface PushResult {
+    status: 'created' | 'updated';
+    name: string;
+    data: Record<string, unknown>;
+}
+
 /**
- * Core implementation — accepts an injected config so tests can point at a
- * stub server without touching the filesystem config.
+ * Read a skill directory: validates the dir exists, reads SKILL.md, parses it,
+ * and reads bundled reference files. Returns the full payload for pushParsedSkill.
+ *
+ * Throws with a descriptive message on any filesystem or parse error.
  */
-export async function skillPushWithConfig(
-    dir: string,
-    options: SkillPushOptions,
-    config: Config,
-): Promise<void> {
+export function readSkillDir(dir: string): SkillPayload {
     const absDir = path.resolve(dir);
 
-    // 1. Check directory exists
     if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
-        process.stderr.write(chalk.red(`error: "${dir}" is not a directory.\n`));
-        process.exit(1);
+        throw new Error(`"${dir}" is not a directory.`);
     }
 
-    // 2. Read SKILL.md
     const skillMdPath = path.join(absDir, 'SKILL.md');
     if (!fs.existsSync(skillMdPath)) {
-        process.stderr.write(chalk.red(`error: "${skillMdPath}" not found. The skill directory must contain a SKILL.md file.\n`));
-        process.exit(1);
+        throw new Error(`"${skillMdPath}" not found. The skill directory must contain a SKILL.md file.`);
     }
 
     const skillMdContent = fs.readFileSync(skillMdPath, 'utf8');
-
-    // 3. Parse frontmatter + body
-    let parsed: ReturnType<typeof parseSkillFile>;
-    try {
-        parsed = parseSkillFile(skillMdContent);
-    } catch (e: any) {
-        process.stderr.write(chalk.red(`error: ${e.message}\n`));
-        process.exit(1);
-    }
-
-    const { name, description, properties, body } = parsed;
-
-    // 4. Read bundled reference files (recursively, keyed by relative path)
+    const { name, description, properties, body } = parseSkillFile(skillMdContent);
     const references = readReferences(absDir);
 
-    // 5. Compose an idempotent upsert: try create; on name_collision, edit.
+    return { name, description, properties, body, references };
+}
+
+/**
+ * Core upsert: try create; on name_collision, switch to edit.
+ * Returns a result object — does NOT call process.exit and does NOT print.
+ * Throws on non-collision MCP errors.
+ */
+export async function pushParsedSkill(
+    payload: SkillPayload,
+    options: SkillPushOptions,
+    config: Config,
+): Promise<PushResult> {
+    const { name, description, properties, body, references } = payload;
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
 
@@ -162,13 +171,10 @@ export async function skillPushWithConfig(
     try {
         result = await callCrewsTool(config, tool, createArgs);
     } catch (e: any) {
-        process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
-        process.exit(1);
+        throw new Error(`MCP request failed — ${e.message}`);
     }
 
-    let didUpdate = false;
-
-    // 6. On name collision, switch to the edit path (the upsert). properties → properties_patch.
+    // On name collision, switch to the edit path. properties → properties_patch.
     if (!result.ok && result.data?.code === 'name_collision') {
         const editArgs: Record<string, unknown> = isRole
             ? { action: 'edit_skill', role: options.role, name, description, body, properties_patch: properties, references }
@@ -177,34 +183,70 @@ export async function skillPushWithConfig(
         try {
             result = await callCrewsTool(config, tool, editArgs);
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
-            process.exit(1);
+            throw new Error(`MCP request failed — ${e.message}`);
         }
-        didUpdate = true;
+
+        if (!result.ok) {
+            const errData = result.data;
+            const errCode = errData?.code ?? 'unknown_error';
+            const errMsg = errData?.message ?? 'MCP returned an error with no message';
+            throw new Error(`${errCode}: ${errMsg}`);
+        }
+
+        return { status: 'updated', name, data: result.data ?? {} };
     }
 
-    // 7. Handle result.
     if (!result.ok) {
         const errData = result.data;
         const errCode = errData?.code ?? 'unknown_error';
         const errMsg = errData?.message ?? 'MCP returned an error with no message';
-        process.stderr.write(chalk.red(`${errCode}: ${errMsg}\n`));
+        throw new Error(`${errCode}: ${errMsg}`);
+    }
+
+    return { status: 'created', name, data: result.data ?? {} };
+}
+
+/**
+ * Core implementation — accepts an injected config so tests can point at a
+ * stub server without touching the filesystem config.
+ */
+export async function skillPushWithConfig(
+    dir: string,
+    options: SkillPushOptions,
+    config: Config,
+): Promise<void> {
+    // 1. Read the skill directory (validate + parse + read refs)
+    let payload: SkillPayload;
+    try {
+        payload = readSkillDir(dir);
+    } catch (e: any) {
+        process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
     }
 
+    // 2. Push via the core (no exit, no print)
+    let pushResult: PushResult;
+    try {
+        pushResult = await pushParsedSkill(payload, options, config);
+    } catch (e: any) {
+        process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+        process.exit(1);
+    }
+
+    // 3. Print + exit
     if (options.json) {
-        console.log(JSON.stringify(result.data));
+        console.log(JSON.stringify(pushResult.data));
         process.exit(0);
     }
 
-    const data = result.data;
-    if (didUpdate) {
+    const { status, name, data } = pushResult;
+    if (status === 'updated') {
         // edit shape: {version_id, body_blob_sha}
         console.log(chalk.green(`updated skill '${name}' (version ${data.version_id ?? '?'})`));
     } else {
         // create shape: {skill_doc_id, folder_id, reference_doc_ids}
         const skillDocId = data.skill_doc_id ?? data.doc_id ?? data.id ?? '?';
-        const refCount = Object.keys(data.reference_doc_ids ?? {}).length;
+        const refCount = Object.keys((data.reference_doc_ids as Record<string, unknown>) ?? {}).length;
         console.log(chalk.green(`created skill '${name}' (doc ${skillDocId}, ${refCount} refs)`));
     }
     process.exit(0);

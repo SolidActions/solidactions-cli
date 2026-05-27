@@ -11,7 +11,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { parseSkillFile, readReferences, skillPushWithConfig } from '../src/commands/skill-push';
+import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
 
@@ -582,5 +582,138 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(logs.join('')).toContain('created skill');
             expect(logs.join('')).toContain('1 refs');
         } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// pushParsedSkill — core unit (no process.exit, no print, returns result)
+// ---------------------------------------------------------------------------
+
+describe('pushParsedSkill — core payload-based upsert', () => {
+    const basePayload = {
+        name: 'Core Skill',
+        description: 'A payload-based skill',
+        properties: { catalog_advertised: true },
+        body: 'The skill body',
+        references: { 'helper.ts': 'export const x = 1;' },
+    };
+
+    it('sends skills.create and returns {status:"created", name, data} without calling process.exit', async () => {
+        const createData = { skill_doc_id: 'doc-core-1', reference_doc_ids: { 'helper.ts': 99 } };
+        responseQueue = [makeMcpSuccess(createData)];
+
+        const restoreExit = patchProcessExit();
+        try {
+            // pushParsedSkill must NOT throw ProcessExitError — if it calls process.exit this will throw
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+
+            expect(result.status).toBe('created');
+            expect(result.name).toBe('Core Skill');
+            expect(result.data).toMatchObject(createData);
+
+            // Verify HTTP request shape
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(allCaptures[0].body.params.name).toBe('skills');
+            expect(args.action).toBe('create');
+            expect(args.name).toBe('Core Skill');
+            expect(args.description).toBe('A payload-based skill');
+            expect(args.properties).toMatchObject({ catalog_advertised: true });
+            expect(args.references).toHaveProperty('helper.ts', 'export const x = 1;');
+            expect(args.body).toBe('The skill body');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('on name_collision switches to skills.edit and returns {status:"updated", name, data}', async () => {
+        const editData = { version_id: 55, body_blob_sha: 'abcdef' };
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess(editData),
+        ];
+
+        const restoreExit = patchProcessExit();
+        try {
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+
+            expect(result.status).toBe('updated');
+            expect(result.name).toBe('Core Skill');
+            expect(result.data).toMatchObject(editData);
+
+            // Two HTTP requests: first create, then edit on collision
+            expect(allCaptures.length).toBe(2);
+
+            // First request: create
+            expect(allCaptures[0].body.params.arguments.action).toBe('create');
+
+            // Second request: edit with correct args
+            const editArgs = allCaptures[1].body.params.arguments;
+            expect(allCaptures[1].body.params.name).toBe('skills');
+            expect(editArgs.action).toBe('edit');
+            expect(editArgs.identifier).toBe('Core Skill');
+            expect(editArgs.description).toBe('A payload-based skill');
+            expect(editArgs).toHaveProperty('properties_patch');
+            expect(editArgs.properties_patch).toMatchObject({ catalog_advertised: true });
+            expect(editArgs.references).toHaveProperty('helper.ts');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('on name_collision with --role switches to roles.edit_skill and returns {status:"updated"}', async () => {
+        const editData = { version_id: 3, body_blob_sha: 'cafebabe' };
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess(editData),
+        ];
+
+        const restoreExit = patchProcessExit();
+        try {
+            const result = await pushParsedSkill(basePayload, { role: 'senior-dev' }, stubConfig());
+
+            expect(result.status).toBe('updated');
+
+            expect(allCaptures.length).toBe(2);
+            // First: roles.create_skill
+            expect(allCaptures[0].body.params.name).toBe('roles');
+            expect(allCaptures[0].body.params.arguments.action).toBe('create_skill');
+            expect(allCaptures[0].body.params.arguments.role).toBe('senior-dev');
+
+            // Second: roles.edit_skill
+            expect(allCaptures[1].body.params.name).toBe('roles');
+            expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
+            expect(allCaptures[1].body.params.arguments.role).toBe('senior-dev');
+            expect(allCaptures[1].body.params.arguments.name).toBe('Core Skill');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('throws on a non-collision MCP error without calling process.exit', async () => {
+        responseQueue = [makeMcpError('validation_failed', 'name must be kebab-case.')];
+
+        const restoreExit = patchProcessExit();
+        try {
+            // Must throw an Error (not ProcessExitError), propagating the MCP error
+            await expect(pushParsedSkill(basePayload, {}, stubConfig())).rejects.toThrow('validation_failed');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('does not call process.exit even when it returns a result', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-noexit', reference_doc_ids: {} })];
+
+        // patchProcessExit so that ANY call to process.exit throws ProcessExitError
+        const restoreExit = patchProcessExit();
+        try {
+            // If pushParsedSkill calls process.exit, this will throw ProcessExitError instead of resolving
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+            // Reaching here means process.exit was NOT called
+            expect(result.status).toBe('created');
+        } finally {
+            restoreExit();
+        }
     });
 });
