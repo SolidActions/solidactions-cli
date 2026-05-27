@@ -83,9 +83,9 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [x] Run green. Commit.
 
 ## Task 3: `--dry-run` on `skill push`
-- [ ] Tests: `skill push <dir> --dry-run` makes ZERO create/edit calls; performs a `read` per skill; prints `[dry-run] would create 'X'` (read→skill_not_found) / `would update 'X'` (read→found). Assert no create/edit in `allCaptures`.
-- [ ] Implement: `--dry-run` option; when set, `pushParsedSkill` pre-flights `skills.read` and prints intent instead of mutating.
-- [ ] Run green. Commit.
+- [x] Tests: `skill push <dir> --dry-run` makes ZERO create/edit calls; performs a `read` per skill; prints `[dry-run] would create 'X'` (read→skill_not_found) / `would update 'X'` (read→found). Assert no create/edit in `allCaptures`.
+- [x] Implement: `--dry-run` option; when set, `pushParsedSkill` pre-flights `skills.read` and prints intent instead of mutating.
+- [x] Run green. Commit.
 
 ## Task 4: `skill list`
 - [ ] Tests: `skill list` calls `skills.list`, prints a table of name/description; `--json` prints raw `{skills:[...]}`; empty → friendly "no skills" line (non-error). Stub `makeMcpSuccess({skills:[...]})`.
