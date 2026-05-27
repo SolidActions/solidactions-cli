@@ -28,6 +28,7 @@ import { oauthActionsList } from './commands/oauth-actions-list';
 import { oauthActionsShow } from './commands/oauth-actions-show';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
+import { skillPull } from './commands/skill-pull';
 import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
@@ -457,6 +458,16 @@ skill
     .option('--dry-run', 'Preview create vs update without writing')
     .action(async (dir, options) => {
         await skillPush(dir, options);
+    });
+
+skill
+    .command('pull')
+    .description('Fetch a skill from the library to a local folder for editing (inverse of push)')
+    .argument('<name>', 'Skill name or identifier')
+    .argument('[dest]', 'Destination directory (defaults to ./<name>/)')
+    .option('--json', 'Output raw read result as JSON (no file writes)')
+    .action(async (name, dest, options) => {
+        await skillPull(name, dest, options);
     });
 
 skill
