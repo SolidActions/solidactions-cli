@@ -46,6 +46,25 @@
 
 ---
 
+## #34 conformance check (explicit)
+
+Cross-checked against the #34 north-star's ratified decisions + target tree:
+
+- **Singular nouns** (#34 ratified #1): `skill`, `role` — singular. ✓
+- **`push`, not `add`** (#34 ratified #2): `skill push` (the `crews skill add` rename already shipped in #36/#247). ✓
+- **Flatten the SOP surface** (#34 ratified #3): `skill` and `role` are independent top-level nouns; no `crew(s)` umbrella; role-scoping stays a `--role <name>` flag (existing on `skill push`). ✓
+- **Verb canon** (#34 #6): commands use #34's vocabulary — `push`/`pull` (file-sync: local↔remote upsert/fetch), `list`/`view` (read), `delete` (NOT `rm` — #248 said `rm`, #34 verb-canon wins). `pull` = fetch-to-local-files; `view` = show-one-to-terminal. ✓
+- **`push` = idempotent upsert from files** (#34 forward-compat): create-or-update by identity. ✓
+
+**Deliberate divergences from #34's target-tree phasing (flagged for codex/user):**
+- #34 places `create/edit/delete` in the "(+ CRUD later)" phase and `push·pull·list·view` in the initial bridge. **#248 explicitly requests `skill rm`** (cleanup), so this plan pulls `delete` forward (named `delete` per verb-canon, not `rm`). The backend already supports it (`skills delete`, Admin-only).
+- #34's initial skill row includes **`view`** (show-one). #248 didn't request it, but it's cheap and in #34's initial set — **added as `skill view <name>`** (terminal display via `skills.read`) to match #34's initial surface, complementing `pull` (file-fetch). [If you'd rather not, drop Task 5b.]
+- `crew` noun and `role`'s `pull`/`list`/`view` are **out of scope** here (#248 only asks for `role push`; `crew` is a separate future conformer per #34). Names are chosen so they slot in later with zero restructuring.
+
+> Net skill surface after this plan: `skill push · pull · list · view · delete` + `role push` — matches #34's flat singular-noun SOP model.
+
+---
+
 ## File Structure
 **Modified:** `src/index.ts` (register `skill list/pull/delete`, `role push`; `--dry-run`/recursive on `skill push`); `src/commands/skill-push.ts` (recursion + command-file conversion + dry-run; refactor to a payload-based push).
 **Created:** `src/commands/skill-list.ts`, `src/commands/skill-pull.ts`, `src/commands/skill-delete.ts`, `src/commands/role-push.ts`; `tests/skill-list.test.ts`, `tests/skill-pull.test.ts`, `tests/skill-delete.test.ts`, `tests/role-push.test.ts`, plus additions to `tests/skill-push.test.ts`.
@@ -76,6 +95,11 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 ## Task 5: `skill pull <name> [dest]`
 - [ ] Tests: `skill pull foo` calls `skills.read` `{identifier:'foo'}`; writes `./foo/SKILL.md` (frontmatter has name+description; body matches) and each `reference` key as a file at its relative path (e.g. `./foo/references/x.md`); `skill_not_found` → error exit. Use a tmp dest dir; assert files on disk.
 - [ ] Implement: `src/commands/skill-pull.ts` (`skillPullWithConfig`): read → reconstruct SKILL.md (yaml.dump frontmatter {name,description,...properties} + body) + write references by relative path; register `skill pull <name> [dest]`.
+- [ ] Run green. Commit.
+
+## Task 5b: `skill view <name>` (#34 initial verb — show one)
+- [ ] Tests: `skill view foo` calls `skills.read` `{identifier:'foo'}`; prints the skill's name/description/body to terminal (NOT to files); `--json` prints raw read result; `skill_not_found` → error. (Reuses the `read` action; the only difference from `pull` is terminal display vs. writing files.)
+- [ ] Implement: `src/commands/skill-view.ts` (`skillViewWithConfig`); register `skill view <name>` (`--json`).
 - [ ] Run green. Commit.
 
 ## Task 6: `skill delete <name>`
