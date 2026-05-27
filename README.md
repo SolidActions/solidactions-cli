@@ -118,6 +118,24 @@ Use `solidactions <command> --help` for full flag details on any command.
 |---------|-----------|-------------|
 | `webhook list <project>` | `-e`, `--show-secrets` | List webhook URLs |
 
+### skill
+
+Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (create, or update on name collision).
+
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `skill push <dir>` | `--role <name>`, `--dry-run`, `--json` | Push a skill folder, or a whole plugin dir — recursive: pushes every `skills/*/SKILL.md`, converts `commands/*.md` → skills, and ingests each skill's `references/`. `--role` scopes to a role instead of the shared library |
+| `skill list` | `--json`, `--limit <n>` | List skills in the library |
+| `skill view <name>` | `--json` | Show one skill |
+| `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push) |
+| `skill delete <name>` | `--json` | Delete a skill (Admin only) |
+
+### role
+
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `role push <dir>` | `--dry-run`, `--json` | Push a role definition (create or update) |
+
 ### workspace
 
 | Command | Description |
