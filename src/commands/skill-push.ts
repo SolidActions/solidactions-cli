@@ -78,21 +78,35 @@ export function parseSkillFile(content: string): {
 }
 
 /**
- * Read top-level (non-recursive) files in dir, excluding SKILL.md.
- * Returns a map of filename → utf8 contents.
+ * Recursively read every bundled file under a skill dir, excluding the
+ * top-level SKILL.md. Returns a map of reference-key → utf8 contents.
+ *
+ * Keys are the file's POSIX path relative to the skill dir: top-level files
+ * keep a bare-filename key (e.g. "helper.py"), and files in subfolders keep
+ * their relative path (e.g. "references/member-roles.md") — matching how
+ * SKILL.md cites them, so bundled reference docs land complete (#247).
  */
-export function readTopLevelReferences(dir: string): Record<string, string> {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+export function readReferences(dir: string): Record<string, string> {
     const references: Record<string, string> = {};
 
-    for (const entry of entries) {
-        if (!entry.isFile()) continue;
-        if (entry.name === 'SKILL.md') continue;
+    const walk = (current: string): void => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            const abs = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(abs);
+                continue;
+            }
+            if (!entry.isFile()) continue;
 
-        const filePath = path.join(dir, entry.name);
-        references[entry.name] = fs.readFileSync(filePath, 'utf8');
-    }
+            // POSIX-normalised path relative to the skill dir, used as the key.
+            const key = path.relative(dir, abs).split(path.sep).join('/');
+            if (key === 'SKILL.md') continue; // exclude only the top-level skill file
 
+            references[key] = fs.readFileSync(abs, 'utf8');
+        }
+    };
+
+    walk(dir);
     return references;
 }
 
@@ -133,8 +147,8 @@ export async function skillPushWithConfig(
 
     const { name, description, properties, body } = parsed;
 
-    // 4. Read sibling reference files
-    const references = readTopLevelReferences(absDir);
+    // 4. Read bundled reference files (recursively, keyed by relative path)
+    const references = readReferences(absDir);
 
     // 5. Compose an idempotent upsert: try create; on name_collision, edit.
     const isRole = !!options.role;
