@@ -28,6 +28,11 @@ import { oauthActionsList } from './commands/oauth-actions-list';
 import { oauthActionsShow } from './commands/oauth-actions-show';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
+import { skillPull } from './commands/skill-pull';
+import { skillList } from './commands/skill-list';
+import { skillView } from './commands/skill-view';
+import { skillDelete } from './commands/skill-delete';
+import { rolePush } from './commands/role-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -451,8 +456,59 @@ skill
     .argument('<dir>', 'Path to the skill directory (must contain SKILL.md)')
     .option('--role <name>', 'Scope the skill to a role instead of the shared library')
     .option('--json', 'Output result as JSON')
+    .option('--dry-run', 'Preview create vs update without writing')
     .action(async (dir, options) => {
         await skillPush(dir, options);
+    });
+
+skill
+    .command('pull')
+    .description('Fetch a skill from the library to a local folder for editing (inverse of push)')
+    .argument('<name>', 'Skill name or identifier')
+    .argument('[dest]', 'Destination directory (defaults to ./<name>/)')
+    .option('--json', 'Output raw read result as JSON (no file writes)')
+    .action(async (name, dest, options) => {
+        await skillPull(name, dest, options);
+    });
+
+skill
+    .command('list')
+    .description('List skills in the library')
+    .option('--json', 'Output as JSON')
+    .option('--limit <n>', 'Maximum number of skills to return', (v) => parseInt(v, 10))
+    .action(async (options) => {
+        await skillList(options);
+    });
+
+skill
+    .command('view <name>')
+    .description('Show one skill')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await skillView(name, options);
+    });
+
+skill
+    .command('delete <name>')
+    .description('Delete a skill (Admin only)')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await skillDelete(name, options);
+    });
+
+// =============================================================================
+// role <subcommand>  (SOP surface — flat peer of skill, per cli#34)
+// =============================================================================
+
+const role = program.command('role').description('Manage roles (crews SOP surface)');
+
+role
+    .command('push <dir>')
+    .description('Push a role definition (create or update)')
+    .option('--dry-run', 'Preview create vs update without writing')
+    .option('--json', 'Output result as JSON')
+    .action(async (dir, options) => {
+        await rolePush(dir, options);
     });
 
 program.parseAsync().catch((err) => {
