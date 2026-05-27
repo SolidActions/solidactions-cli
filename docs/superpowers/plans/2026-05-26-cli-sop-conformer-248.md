@@ -108,9 +108,9 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [x] Run green. Commit.
 
 ## Task 7: `role push <dir>`
-- [ ] Tests: `role push <dir>` (dir has SKILL.md-shaped role def) calls `roles.create` `{name,description,body,properties?}`; on `name_collision` → `roles.edit`; `--dry-run` pre-flights; reports created/updated. (No references sent.)
-- [ ] Implement: `src/commands/role-push.ts` (`rolePushWithConfig`) reusing `parseSkillFile` + the upsert pattern (no references); register `role push <dir>` (+ `--dry-run`, `--json`). **CODEX-FLAGGED: keep the `SKILL.md` filename convention for the role def (so `parseSkillFile`'s SKILL.md-worded errors stay accurate — don't introduce `ROLE.md` unless you also generalise those messages). The role `--dry-run` pre-flight must use `roles.read {name}` (roles key on `name`, NOT `identifier` — `Roles.php:~683-695`).**
-- [ ] Run green. Commit.
+- [x] Tests: `role push <dir>` (dir has SKILL.md-shaped role def) calls `roles.create` `{name,description,body,properties?}`; on `name_collision` → `roles.edit`; `--dry-run` pre-flights; reports created/updated. (No references sent.)
+- [x] Implement: `src/commands/role-push.ts` (`rolePushWithConfig`) reusing `parseSkillFile` + the upsert pattern (no references); register `role push <dir>` (+ `--dry-run`, `--json`). **CODEX-FLAGGED: keep the `SKILL.md` filename convention for the role def (so `parseSkillFile`'s SKILL.md-worded errors stay accurate — don't introduce `ROLE.md` unless you also generalise those messages). The role `--dry-run` pre-flight must use `roles.read {name}` (roles key on `name`, NOT `identifier` — `Roles.php:~683-695`).**
+- [x] Run green. Commit.
 
 ## Phase boundary
 - [ ] `npx vitest run` (full suite) green; `npm run build` (tsc) clean.
