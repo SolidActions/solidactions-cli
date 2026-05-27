@@ -524,10 +524,11 @@ docs
     .argument('<dir>', 'Path to the directory containing markdown files')
     .option('--on-conflict <mode>', 'Conflict resolution: skip|overwrite|rename (default: skip)', 'skip')
     .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
+    .option('--folder <base>', 'Nest the whole upload under this base folder path in SA-Docs')
     .option('--dry-run', 'Preview what would be created without writing')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
-        await docsPush(dir, { onConflict: options.onConflict, type: options.type, dryRun: options.dryRun, json: options.json });
+        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
     });
 
 program.parseAsync().catch((err) => {

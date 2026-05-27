@@ -18,6 +18,8 @@ import { callDocsTool } from '../utils/mcp';
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
     type?: string;
+    /** Nest the whole upload under this base folder path in SA-Docs. */
+    folder?: string;
     dryRun?: boolean;
     json?: boolean;
 }
@@ -198,6 +200,10 @@ export async function docsPushWithConfig(
 
         if (options.type) {
             callArgs.type = options.type;
+        }
+        if (options.folder) {
+            // Top-level base for every item; each item's relative_folder_path nests under it.
+            callArgs.folder_path = options.folder;
         }
         if (options.dryRun) {
             callArgs.dry_run = true;

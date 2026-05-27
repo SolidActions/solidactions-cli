@@ -837,3 +837,58 @@ describe('docsPushWithConfig — error handling', () => {
         }
     });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: --folder <base> nests the whole upload under a base folder path
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — --folder base', () => {
+    it('forwards --folder as the top-level folder_path on every bulk_create call', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'root.md': '# Root',
+            'sub/nested.md': '# Nested',
+        });
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', folder: '4 MomentFactory' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(args.folder_path).toBe('4 MomentFactory');
+            // relative_folder_path on nested item is still relative to <dir> (server appends under base)
+            const nested = args.items.find((i: any) => i.title === 'nested');
+            expect(nested.relative_folder_path).toBe('sub');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('omits folder_path when --folder is not given', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'root.md': '# Root' });
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments).not.toHaveProperty('folder_path');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
