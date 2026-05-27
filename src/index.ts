@@ -32,6 +32,7 @@ import { skillPull } from './commands/skill-pull';
 import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
+import { rolePush } from './commands/role-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -493,6 +494,21 @@ skill
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
         await skillDelete(name, options);
+    });
+
+// =============================================================================
+// role <subcommand>  (SOP surface — flat peer of skill, per cli#34)
+// =============================================================================
+
+const role = program.command('role').description('Manage roles (crews SOP surface)');
+
+role
+    .command('push <dir>')
+    .description('Push a role definition (create or update)')
+    .option('--dry-run', 'Preview create vs update without writing')
+    .option('--json', 'Output result as JSON')
+    .action(async (dir, options) => {
+        await rolePush(dir, options);
     });
 
 program.parseAsync().catch((err) => {
