@@ -1,9 +1,9 @@
 /**
- * Minimal MCP client for the SolidActions crews MCP server.
+ * Minimal MCP client for the SolidActions in-app MCP servers.
  *
  * Sends a single stateless JSON-RPC tools/call POST.  No initialize handshake
- * required — the streamable-HTTP transport at /mcp/crews accepts single
- * stateless POSTs (confirmed live).
+ * required — the streamable-HTTP transport accepts single stateless POSTs
+ * (confirmed live).
  */
 
 import * as http from 'http';
@@ -18,11 +18,11 @@ export interface McpToolResult {
 }
 
 /**
- * Call a single MCP tool on /mcp/crews.
+ * Internal: call a single MCP tool on the given endpoint path.
  *
  * Returns { ok: true, data: <success shape> } or { ok: false, data: { code, message } }.
  */
-export async function callCrewsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
+async function callMcpTool(config: Config, endpointPath: string, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const baseHeaders = getApiHeaders(config, 'application/json');
     // Override Accept to include text/event-stream for streamable-HTTP transport
     const headers: Record<string, string> = {
@@ -40,7 +40,7 @@ export async function callCrewsTool(config: Config, toolName: string, args: Reco
         },
     });
 
-    const parsed = new URL(`${config.host}/mcp/crews`);
+    const parsed = new URL(`${config.host}${endpointPath}`);
     const isHttps = parsed.protocol === 'https:';
     const transport = isHttps ? https : http;
 
@@ -92,4 +92,18 @@ export async function callCrewsTool(config: Config, toolName: string, args: Reco
     }
 
     return { ok: !isError, data: toolData };
+}
+
+/**
+ * Call a single MCP tool on /mcp/crews.
+ */
+export async function callCrewsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
+    return callMcpTool(config, '/mcp/crews', toolName, args);
+}
+
+/**
+ * Call a single MCP tool on /mcp/docs.
+ */
+export async function callDocsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
+    return callMcpTool(config, '/mcp/docs', toolName, args);
 }
