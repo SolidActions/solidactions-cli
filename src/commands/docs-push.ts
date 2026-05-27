@@ -1,0 +1,286 @@
+/**
+ * solidactions docs push <dir>
+ *
+ * Recursively uploads a local markdown tree into SA-Docs via the docs MCP
+ * server's `docs_vault bulk_create` tool, mirroring folder structure.
+ *
+ * Prints a report distinguishing fully-published docs from "properties pending"
+ * ones (docs whose frontmatter properties couldn't be validated yet).
+ */
+
+import fs from 'fs';
+import path from 'path';
+import chalk from 'chalk';
+import { Config } from '../utils/config';
+import { requireConfigWithWorkspace } from '../utils/api';
+import { callDocsTool } from '../utils/mcp';
+
+export interface DocsPushOptions {
+    onConflict?: 'skip' | 'overwrite' | 'rename';
+    type?: string;
+    dryRun?: boolean;
+    json?: boolean;
+}
+
+const CHUNK_SIZE = 50;
+
+interface DocItem {
+    title: string;
+    body: string;
+    relative_folder_path?: string;
+    /** local file path for correlating results back to filenames */
+    _filePath: string;
+}
+
+interface BulkCreateResultRow {
+    index: number;
+    status: string;
+    id?: string;
+    folder_path?: string;
+    action?: string;
+    property_validation?: {
+        status: string;
+        missing: string[];
+        invalid: Array<{ key: string; reason: string }>;
+        schema: unknown[];
+    };
+}
+
+interface BulkCreateSummary {
+    created?: number;
+    overwritten?: number;
+    skipped?: number;
+    renamed?: number;
+    errors?: number;
+    folders_created?: number;
+    planned_create?: number;
+    planned_overwrite?: number;
+    planned_skip?: number;
+    planned_rename?: number;
+}
+
+interface PendingItem {
+    file: string;
+    missing: string[];
+    invalid: Array<{ key: string; reason: string }>;
+}
+
+interface ResultRow extends BulkCreateResultRow {
+    file: string;
+}
+
+/**
+ * Recursively walk `dir` and collect all *.md files.
+ * Returns a list of absolute paths.
+ */
+function walkMarkdownFiles(dir: string): string[] {
+    const results: string[] = [];
+
+    const walk = (current: string): void => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            const abs = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(abs);
+            } else if (entry.isFile() && entry.name.endsWith('.md')) {
+                results.push(abs);
+            }
+        }
+    };
+
+    walk(dir);
+    return results;
+}
+
+/**
+ * Convert an absolute file path to a bulk_create item, relative to `rootDir`.
+ */
+function fileToItem(absPath: string, rootDir: string): DocItem {
+    const title = path.basename(absPath, '.md');
+    const body = fs.readFileSync(absPath, 'utf8');
+    const relDir = path.relative(rootDir, path.dirname(absPath));
+    // Use POSIX separators; omit if file is in the root dir
+    const relative_folder_path = relDir === '' ? undefined : relDir.split(path.sep).join('/');
+
+    const item: DocItem = { title, body, _filePath: absPath };
+    if (relative_folder_path !== undefined) {
+        item.relative_folder_path = relative_folder_path;
+    }
+    return item;
+}
+
+/**
+ * Merge two BulkCreateSummary objects by summing all numeric fields.
+ */
+function mergeSummaries(a: BulkCreateSummary, b: BulkCreateSummary): BulkCreateSummary {
+    const keys: Array<keyof BulkCreateSummary> = [
+        'created', 'overwritten', 'skipped', 'renamed', 'errors', 'folders_created',
+        'planned_create', 'planned_overwrite', 'planned_skip', 'planned_rename',
+    ];
+    const result: BulkCreateSummary = {};
+    for (const key of keys) {
+        const aVal = a[key] ?? 0;
+        const bVal = b[key] ?? 0;
+        if (aVal !== 0 || bVal !== 0) {
+            (result as any)[key] = aVal + bVal;
+        }
+    }
+    return result;
+}
+
+/**
+ * Format the merged summary into human-readable totals line.
+ * Normal run: created/overwritten/skipped/renamed. Dry-run: planned_*.
+ */
+function formatSummaryLine(summary: BulkCreateSummary, dryRun: boolean): string {
+    const parts: string[] = [];
+    if (dryRun) {
+        if (summary.planned_create) parts.push(`${summary.planned_create} planned create`);
+        if (summary.planned_overwrite) parts.push(`${summary.planned_overwrite} planned overwrite`);
+        if (summary.planned_skip) parts.push(`${summary.planned_skip} planned skip`);
+        if (summary.planned_rename) parts.push(`${summary.planned_rename} planned rename`);
+    } else {
+        if (summary.created) parts.push(`${summary.created} created`);
+        if (summary.overwritten) parts.push(`${summary.overwritten} updated`);
+        if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+        if (summary.renamed) parts.push(`${summary.renamed} renamed`);
+        if (summary.errors) parts.push(`${summary.errors} errors`);
+    }
+    return parts.join(', ') || '0 docs';
+}
+
+/**
+ * Core implementation — accepts an injected config so tests can point at a
+ * stub server without touching the filesystem config.
+ */
+export async function docsPushWithConfig(
+    dir: string,
+    options: DocsPushOptions,
+    config: Config,
+): Promise<void> {
+    const absDir = path.resolve(dir);
+
+    if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
+        process.stderr.write(chalk.red(`error: "${dir}" is not a directory.\n`));
+        process.exit(1);
+    }
+
+    const allFiles = walkMarkdownFiles(absDir);
+
+    if (allFiles.length === 0) {
+        process.stderr.write(chalk.red(`error: no .md files found under "${dir}" — nothing to push.\n`));
+        process.exit(1);
+    }
+
+    const items: DocItem[] = allFiles.map((f) => fileToItem(f, absDir));
+
+    // Chunk into groups of CHUNK_SIZE
+    const chunks: DocItem[][] = [];
+    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        chunks.push(items.slice(i, i + CHUNK_SIZE));
+    }
+
+    const onConflict = options.onConflict ?? 'skip';
+    const allResultRows: ResultRow[] = [];
+    let mergedSummary: BulkCreateSummary = {};
+
+    for (const chunk of chunks) {
+        const callArgs: Record<string, unknown> = {
+            action: 'bulk_create',
+            on_conflict: onConflict,
+            items: chunk.map(({ title, body, relative_folder_path }) => {
+                const item: Record<string, unknown> = { title, body };
+                if (relative_folder_path !== undefined) {
+                    item.relative_folder_path = relative_folder_path;
+                }
+                return item;
+            }),
+        };
+
+        if (options.type) {
+            callArgs.type = options.type;
+        }
+        if (options.dryRun) {
+            callArgs.dry_run = true;
+        }
+
+        let mcpResult: Awaited<ReturnType<typeof callDocsTool>>;
+        try {
+            mcpResult = await callDocsTool(config, 'docs_vault', callArgs);
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+            process.exit(1);
+        }
+
+        if (!mcpResult.ok) {
+            const code = mcpResult.data?.code ?? 'unknown_error';
+            const message = mcpResult.data?.message ?? 'MCP returned an error with no message';
+            process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
+            process.exit(1);
+        }
+
+        const data = mcpResult.data;
+        const rows: BulkCreateResultRow[] = data?.results ?? [];
+        const summary: BulkCreateSummary = data?.summary ?? {};
+
+        // Correlate rows back to source files using chunk index
+        for (const row of rows) {
+            const sourceFile = chunk[row.index]?._filePath ?? '(unknown)';
+            allResultRows.push({
+                ...row,
+                file: path.relative(absDir, sourceFile),
+            });
+        }
+
+        mergedSummary = mergeSummaries(mergedSummary, summary);
+    }
+
+    // Collect pending items (results that have property_validation)
+    const pendingItems: PendingItem[] = allResultRows
+        .filter((r) => r.property_validation != null)
+        .map((r) => ({
+            file: r.file,
+            missing: r.property_validation!.missing ?? [],
+            invalid: r.property_validation!.invalid ?? [],
+        }));
+
+    // --json: output single JSON object
+    if (options.json) {
+        console.log(JSON.stringify({
+            summary: mergedSummary,
+            pending: pendingItems,
+            results: allResultRows,
+        }));
+        process.exit(0);
+    }
+
+    // Human-readable output
+    const summaryLine = formatSummaryLine(mergedSummary, !!options.dryRun);
+    if (options.dryRun) {
+        console.log(chalk.cyan(`[dry-run preview] ${summaryLine}`));
+    } else {
+        console.log(chalk.green(`done: ${summaryLine}`));
+    }
+
+    if (pendingItems.length > 0) {
+        console.log(chalk.yellow(`\nProperties pending (${pendingItems.length} doc${pendingItems.length === 1 ? '' : 's'}):`));
+        for (const item of pendingItems) {
+            console.log(chalk.yellow(`  ${item.file}`));
+            if (item.missing.length > 0) {
+                console.log(chalk.yellow(`    missing: ${item.missing.join(', ')}`));
+            }
+            for (const inv of item.invalid) {
+                console.log(chalk.yellow(`    invalid: ${inv.key} — ${inv.reason}`));
+            }
+        }
+    }
+
+    process.exit(0);
+}
+
+/**
+ * Entry point called from index.ts.
+ */
+export async function docsPush(dir: string, options: DocsPushOptions): Promise<void> {
+    const config = await requireConfigWithWorkspace();
+    await docsPushWithConfig(dir, options, config);
+}

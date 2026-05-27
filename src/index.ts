@@ -33,6 +33,7 @@ import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
 import { rolePush } from './commands/role-push';
+import { docsPush } from './commands/docs-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -509,6 +510,24 @@ role
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await rolePush(dir, options);
+    });
+
+// =============================================================================
+// docs <subcommand>  (SA-Docs surface)
+// =============================================================================
+
+const docs = program.command('docs').description('Manage docs in SA-Docs');
+
+docs
+    .command('push')
+    .description('Recursively upload a local markdown tree into SA-Docs')
+    .argument('<dir>', 'Path to the directory containing markdown files')
+    .option('--on-conflict <mode>', 'Conflict resolution: skip|overwrite|rename (default: skip)', 'skip')
+    .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
+    .option('--dry-run', 'Preview what would be created without writing')
+    .option('--json', 'Output result as JSON')
+    .action(async (dir, options) => {
+        await docsPush(dir, { onConflict: options.onConflict, type: options.type, dryRun: options.dryRun, json: options.json });
     });
 
 program.parseAsync().catch((err) => {
