@@ -28,6 +28,9 @@ import { oauthActionsList } from './commands/oauth-actions-list';
 import { oauthActionsShow } from './commands/oauth-actions-show';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
+import { skillList } from './commands/skill-list';
+import { skillView } from './commands/skill-view';
+import { skillDelete } from './commands/skill-delete';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -454,6 +457,31 @@ skill
     .option('--dry-run', 'Preview create vs update without writing')
     .action(async (dir, options) => {
         await skillPush(dir, options);
+    });
+
+skill
+    .command('list')
+    .description('List skills in the library')
+    .option('--json', 'Output as JSON')
+    .option('--limit <n>', 'Maximum number of skills to return', (v) => parseInt(v, 10))
+    .action(async (options) => {
+        await skillList(options);
+    });
+
+skill
+    .command('view <name>')
+    .description('Show one skill')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await skillView(name, options);
+    });
+
+skill
+    .command('delete <name>')
+    .description('Delete a skill (Admin only)')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await skillDelete(name, options);
     });
 
 program.parseAsync().catch((err) => {
