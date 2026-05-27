@@ -130,3 +130,18 @@ Codex validated the plan: **#34 conformance = PASS** (singular nouns, flat peers
 - **Task 7 (CODEX):** role `--dry-run` pre-flight uses `roles.read {name}` (roles key on `name`, not `identifier`); keep `SKILL.md` convention so `parseSkillFile`'s errors stay accurate.
 
 Q1/Q5 approved as written (one-level discovery; N pre-flight reads acceptable). Self-audit line corrected to include `view`.
+
+---
+
+## Live verification (2026-05-26) — PASS
+
+A Sonnet tmux agent drove the BUILT CLI (`node dist/index.js`) against the local crews MCP, with the crews MCP wired for independent read-back. All 8 steps PASS:
+1. `skill push myplugin` → pushed 2 skills: `sop-alpha-248` (from skills/) + `sop-triage-248` (converted from `commands/sop-triage-248.md`).
+2. crews MCP read-back: `sop-alpha-248`'s `reference` map contains `references/note.md`.
+3. `skill list` → both skills listed. 4. `skill view` → prints to terminal.
+5. `skill pull … /tmp/…/pulled-alpha` → SKILL.md (name+description, NO `type:`) + `references/note.md` written (clean round-trip).
+6. `skill push … --dry-run` → `[dry-run] would update` both, no mutation.
+7. `role push myrole-248` → created `sop-role-248`; `--dry-run` → `would update`.
+8. `skill delete sop-triage-248` → deleted with token (test user is Admin).
+
+No bugs found — the codex review pre-empted the wire-level classes (stringified scalars / shape mismatches) that surfaced live in #245/#251.
