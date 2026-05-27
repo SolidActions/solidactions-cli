@@ -73,13 +73,13 @@ Cross-checked against the #34 north-star's ratified decisions + target tree:
 
 ## Task 1: Refactor `skill push` to a payload-based push (prep for reuse)
 Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
-- [ ] Test: `pushParsedSkill({name,description,properties,body,references}, options, config)` creates then (on collision) edits — port existing skill-push assertions to the new entry.
-- [ ] Implement: split `skillPushWithConfig` into `readSkillDir(dir) → parsed payload` + `pushParsedSkill(payload, options, config)`. Keep `skillPushWithConfig` as a thin wrapper (read dir → push payload) so existing tests/behavior hold.
+- [ ] Test: `pushParsedSkill({name,description,properties,body,references}, options, config)` creates then (on collision) edits, and RETURNS a result (`{status:'created'|'updated', name, ...}`) — it must NOT call `process.exit`. Port existing skill-push assertions to the new entry.
+- [ ] Implement: split `skillPushWithConfig` into `readSkillDir(dir) → parsed payload` + `pushParsedSkill(payload, options, config)`. **CODEX-FLAGGED: remove the `process.exit(0)` from the per-item push core** (`skill-push.ts:~195-210`) — it must RETURN, not exit, or a recursive multi-skill push (Task 2) stops after the first item. The command-level wrapper (`skillPushWithConfig` / the index.ts action) prints output and calls `process.exit` ONCE after all items. Keep `skillPushWithConfig` as a thin wrapper (read dir → push payload → print → exit) so existing single-skill tests/behavior hold.
 - [ ] Run `npx vitest run tests/skill-push.test.ts` green. Commit.
 
 ## Task 2: Recursive `skill push <plugin-dir>` + `commands/` conversion
-- [ ] Tests: a `<dir>` with `skills/a/SKILL.md` + `skills/b/SKILL.md` + `commands/c.md` pushes 3 skills (assert 3 create calls with names a, b, c; c's name from filename, description from frontmatter); a `<dir>` that IS a single skill (`<dir>/SKILL.md`) still pushes one (back-comp). Stub multiple `responseQueue` successes; assert `allCaptures`.
-- [ ] Implement: `parseCommandFile(filename, content)`; in the `skill push` action, detect single-skill (`<dir>/SKILL.md` exists) vs plugin-dir; for plugin-dir, glob `skills/*/SKILL.md` + `commands/*.md`, build payloads, push each via `pushParsedSkill`; print one summary line per skill + a final tally. Ignore `agents/`,`hooks/`,`.mcp.json` etc. silently.
+- [ ] Tests: a `<dir>` with `skills/a/SKILL.md` + `skills/b/SKILL.md` + `commands/c.md` pushes 3 skills (assert 3 create calls with names a, b, c; c's name from filename, description from frontmatter); a `<dir>` that IS a single skill (`<dir>/SKILL.md`) still pushes one (back-comp); **a `<dir>` where a `commands/foo.md` and `skills/foo/SKILL.md` resolve to the SAME skill name → ERROR before any push (CODEX-FLAGGED: silent "second wins" would corrupt the first via edit), and assert ZERO create/edit calls.** Stub multiple `responseQueue` successes; assert `allCaptures`.
+- [ ] Implement: `parseCommandFile(filename, content)`; in the `skill push` action, detect single-skill (`<dir>/SKILL.md` exists) vs plugin-dir. **CODEX-FLAGGED: the current entry-point requires a top-level `SKILL.md` and exits otherwise (`skill-push.ts:~130-135`) — change that so a plugin-dir (no top-level SKILL.md) is valid.** For plugin-dir, glob ONE level only — `skills/*/SKILL.md` + `commands/*.md` (NOT `**/SKILL.md`: the reference reader recurses inside a skill dir, so a deep glob would mistake bundled reference files for sub-skills). Build all payloads, **detect duplicate generated skill names across the combined set and abort with an error listing the conflicts (no silent overwrite)**, then push each via `pushParsedSkill`; print one summary line per skill + a final tally. Ignore `agents/`,`hooks/`,`.mcp.json` etc. silently.
 - [ ] Run green. Commit.
 
 ## Task 3: `--dry-run` on `skill push`
@@ -93,8 +93,8 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [ ] Run green. Commit.
 
 ## Task 5: `skill pull <name> [dest]`
-- [ ] Tests: `skill pull foo` calls `skills.read` `{identifier:'foo'}`; writes `./foo/SKILL.md` (frontmatter has name+description; body matches) and each `reference` key as a file at its relative path (e.g. `./foo/references/x.md`); `skill_not_found` → error exit. Use a tmp dest dir; assert files on disk.
-- [ ] Implement: `src/commands/skill-pull.ts` (`skillPullWithConfig`): read → reconstruct SKILL.md (yaml.dump frontmatter {name,description,...properties} + body) + write references by relative path; register `skill pull <name> [dest]`.
+- [ ] Tests: `skill pull foo` calls `skills.read` `{identifier:'foo'}`; writes `./foo/SKILL.md` (frontmatter has name+description; body matches) and each `reference` key as a file at its relative path (e.g. `./foo/references/x.md`); `skill_not_found` → error exit. **Add a push→pull→push idempotency test (or assert the reconstructed SKILL.md has no `type` key).** Use a tmp dest dir; assert files on disk.
+- [ ] Implement: `src/commands/skill-pull.ts` (`skillPullWithConfig`). **CODEX-FLAGGED: `skills.read` returns `{identifier, doc_id, properties, body, reference}` where `name` and `description` live INSIDE `properties` (not top-level), and `properties` is returned WITHOUT stripping `type` (`Skills.php:~598-603`).** So reconstruct SKILL.md frontmatter from `properties` (it already contains name/description + the rest), and explicitly OMIT `type` (mirrors what push strips). Write each `reference` entry to its key path; **guard/normalise the output path** (reference keys come from doc titles — reject path-traversal/absolute keys before writing under `dest`). `register skill pull <name> [dest]`.
 - [ ] Run green. Commit.
 
 ## Task 5b: `skill view <name>` (#34 initial verb — show one)
@@ -109,7 +109,7 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 
 ## Task 7: `role push <dir>`
 - [ ] Tests: `role push <dir>` (dir has SKILL.md-shaped role def) calls `roles.create` `{name,description,body,properties?}`; on `name_collision` → `roles.edit`; `--dry-run` pre-flights; reports created/updated. (No references sent.)
-- [ ] Implement: `src/commands/role-push.ts` (`rolePushWithConfig`) reusing `parseSkillFile` + the upsert pattern (no references); register `role push <dir>` (+ `--dry-run`, `--json`).
+- [ ] Implement: `src/commands/role-push.ts` (`rolePushWithConfig`) reusing `parseSkillFile` + the upsert pattern (no references); register `role push <dir>` (+ `--dry-run`, `--json`). **CODEX-FLAGGED: keep the `SKILL.md` filename convention for the role def (so `parseSkillFile`'s SKILL.md-worded errors stay accurate — don't introduce `ROLE.md` unless you also generalise those messages). The role `--dry-run` pre-flight must use `roles.read {name}` (roles key on `name`, NOT `identifier` — `Roles.php:~683-695`).**
 - [ ] Run green. Commit.
 
 ## Phase boundary
@@ -117,8 +117,16 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [ ] Live verification: a Sonnet tmux MCP agent (crews MCP → local stack) runs `skill push <plugin-dir>` (multi-skill + commands), `skill list`, `skill pull`, `skill delete`, `role push`, and `--dry-run` — confirm end-to-end over the wire.
 
 ## Self-review
-- #248 coverage: item1 → Tasks 1,2; item3 → Tasks 4,5,6; item4 → Task 7; item5 → Task 3. item2 (doc push) explicitly deferred. ✓
-- #34 conformance: singular nouns (`skill`,`role`); verbs push/list/pull/delete; `push`=idempotent upsert; flat (no crew umbrella). ✓
+- #248 coverage: item1 → Tasks 1,2; item3 → Tasks 4,5,5b,6; item4 → Task 7; item5 → Task 3. item2 (doc push) explicitly deferred. ✓
+- #34 conformance: singular nouns (`skill`,`role`); verbs push/pull/list/view/delete; `push`=idempotent upsert; flat (no crew umbrella). ✓
 
-## Codex review outcome
-_(to be filled in; if Codex is unavailable, self-review + per-task subagent reviews stand in — see #251 precedent.)_
+## Codex review outcome (2026-05-26)
+
+Codex validated the plan: **#34 conformance = PASS** (singular nouns, flat peers, push-not-add, `--role` flag, `delete` verb-canon, `view` correctly in initial set; pulling `delete` forward per #248's explicit ask is acceptable). Four technical revisions were required and are now folded into the tasks:
+
+- **Task 1 (CODEX):** the per-item push core must RETURN, not `process.exit(0)` — else a recursive multi-skill push stops after item 1. Exit once at the command level.
+- **Task 2 (CODEX):** change the entry-point `SKILL.md`-required guard so a plugin-dir is valid; one-level glob only (deep `**/SKILL.md` would mistake a skill's bundled reference files for sub-skills); detect duplicate generated skill names across `skills/` + `commands/` and ERROR (silent "second wins" corrupts the first via `edit`).
+- **Task 5 (CODEX):** `skills.read` returns `name`/`description` INSIDE `properties` and does NOT strip `type` — pull reconstructs frontmatter from `properties`, omits `type`, and path-guards reference output (keys derive from doc titles).
+- **Task 7 (CODEX):** role `--dry-run` pre-flight uses `roles.read {name}` (roles key on `name`, not `identifier`); keep `SKILL.md` convention so `parseSkillFile`'s errors stay accurate.
+
+Q1/Q5 approved as written (one-level discovery; N pre-flight reads acceptable). Self-audit line corrected to include `view`.
