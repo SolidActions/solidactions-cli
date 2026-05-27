@@ -1011,3 +1011,168 @@ describe('recursive plugin push', () => {
         }
     });
 });
+
+// ---------------------------------------------------------------------------
+// skill push --dry-run
+// ---------------------------------------------------------------------------
+
+describe('skill push --dry-run', () => {
+    it('single-skill where skill does NOT exist: prints "[dry-run] would create" and makes only a read call', async () => {
+        // Queue a skill_not_found response for the read pre-flight
+        responseQueue = [makeMcpError('skill_not_found', 'No skill with that identifier exists.')];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-new-skill', 'description: A brand new skill', '---', 'skill body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            // Output must contain the dry-run would-create message
+            const allOutput = logs.join('');
+            expect(allOutput).toContain("[dry-run] would create 'my-new-skill'");
+
+            // Exactly ONE HTTP call (the read pre-flight), no create or edit
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.action).toBe('read');
+            expect(allCaptures[0].body.params.arguments.identifier).toBe('my-new-skill');
+
+            // Assert there are no create or edit calls anywhere
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('single-skill where skill EXISTS: prints "[dry-run] would update" and makes only a read call', async () => {
+        // Queue a success response for the read pre-flight (skill found)
+        responseQueue = [
+            makeMcpSuccess({
+                identifier: 'existing-skill',
+                doc_id: 'doc-abc',
+                properties: {},
+                body: 'old body',
+                reference: {},
+            }),
+        ];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: existing-skill', 'description: An existing skill', '---', 'new body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            // Output must contain the dry-run would-update message
+            const allOutput = logs.join('');
+            expect(allOutput).toContain("[dry-run] would update 'existing-skill'");
+
+            // Exactly ONE HTTP call (the read pre-flight), no create or edit
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.action).toBe('read');
+
+            // Assert there are no create or edit calls anywhere
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('plugin --dry-run with 2 skills: one not-found → would create, one found → would update, zero create/edit calls', async () => {
+        // First skill: not found → would create
+        // Second skill: found → would update
+        responseQueue = [
+            makeMcpError('skill_not_found', 'No skill with that identifier exists.'),
+            makeMcpSuccess({
+                identifier: 'beta-skill',
+                doc_id: 'doc-beta',
+                properties: {},
+                body: 'existing beta body',
+                reference: {},
+            }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'alpha-skill', description: 'Alpha — a new skill' },
+                { name: 'beta-skill', description: 'Beta — already exists' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            const allOutput = logs.join('');
+            // Both dry-run lines must appear
+            expect(allOutput).toContain("[dry-run] would create 'alpha-skill'");
+            expect(allOutput).toContain("[dry-run] would update 'beta-skill'");
+
+            // Exactly 2 HTTP calls (one read per skill), no create or edit
+            expect(allCaptures.length).toBe(2);
+            for (const cap of allCaptures) {
+                expect(cap.body.params.arguments.action).toBe('read');
+            }
+
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+});

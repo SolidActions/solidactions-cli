@@ -451,6 +451,7 @@ skill
     .argument('<dir>', 'Path to the skill directory (must contain SKILL.md)')
     .option('--role <name>', 'Scope the skill to a role instead of the shared library')
     .option('--json', 'Output result as JSON')
+    .option('--dry-run', 'Preview create vs update without writing')
     .action(async (dir, options) => {
         await skillPush(dir, options);
     });

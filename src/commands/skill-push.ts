@@ -20,6 +20,7 @@ import { callCrewsTool } from '../utils/mcp';
 export interface SkillPushOptions {
     role?: string;
     json?: boolean;
+    dryRun?: boolean;
 }
 
 /**
@@ -123,7 +124,7 @@ export interface SkillPayload {
 }
 
 export interface PushResult {
-    status: 'created' | 'updated';
+    status: 'created' | 'updated' | 'would-create' | 'would-update';
     name: string;
     data: Record<string, unknown>;
 }
@@ -209,6 +210,10 @@ export function parseCommandFile(filename: string, content: string): SkillPayloa
  * Core upsert: try create; on name_collision, switch to edit.
  * Returns a result object — does NOT call process.exit and does NOT print.
  * Throws on non-collision MCP errors.
+ *
+ * When options.dryRun is true, performs only a skills.read pre-flight and
+ * returns {status:'would-create'} or {status:'would-update'} without any
+ * create or edit call.
  */
 export async function pushParsedSkill(
     payload: SkillPayload,
@@ -218,6 +223,29 @@ export async function pushParsedSkill(
     const { name, description, properties, body, references } = payload;
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
+
+    // --dry-run: pre-flight a read to detect existence; make NO create/edit calls.
+    if (options.dryRun) {
+        let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
+        try {
+            readResult = await callCrewsTool(config, tool, { action: 'read', identifier: name });
+        } catch (e: any) {
+            throw new Error(`MCP request failed — ${e.message}`);
+        }
+
+        if (!readResult.ok) {
+            const code = readResult.data?.code;
+            if (code === 'skill_not_found') {
+                return { status: 'would-create', name, data: {} };
+            }
+            // Any other error is unexpected — surface it
+            const errMsg = readResult.data?.message ?? 'MCP returned an error with no message';
+            throw new Error(`${code ?? 'unknown_error'}: ${errMsg}`);
+        }
+
+        // Read succeeded → skill exists → would update
+        return { status: 'would-update', name, data: {} };
+    }
 
     const createArgs: Record<string, unknown> = isRole
         ? { action: 'create_skill', role: options.role, name, description, body, properties, references }
@@ -271,7 +299,11 @@ function printPushResult(result: PushResult, options: SkillPushOptions): void {
         return;
     }
     const { status, name, data } = result;
-    if (status === 'updated') {
+    if (status === 'would-create') {
+        console.log(chalk.cyan(`[dry-run] would create '${name}'`));
+    } else if (status === 'would-update') {
+        console.log(chalk.cyan(`[dry-run] would update '${name}'`));
+    } else if (status === 'updated') {
         console.log(chalk.green(`updated skill '${name}' (version ${data.version_id ?? '?'})`));
     } else {
         const skillDocId = data.skill_doc_id ?? data.doc_id ?? data.id ?? '?';
@@ -400,7 +432,7 @@ export async function skillPushWithConfig(
             process.exit(1);
         }
         printPushResult(pushResult, options);
-        if (pushResult.status === 'created') {
+        if (pushResult.status === 'created' || pushResult.status === 'would-create') {
             createdCount++;
         } else {
             updatedCount++;
@@ -410,9 +442,15 @@ export async function skillPushWithConfig(
     // Final tally
     if (!options.json) {
         const parts: string[] = [];
-        if (createdCount > 0) parts.push(`${createdCount} created`);
-        if (updatedCount > 0) parts.push(`${updatedCount} updated`);
-        console.log(chalk.cyan(`\ndone: ${payloads.length} skill(s) pushed (${parts.join(', ')})`));
+        if (options.dryRun) {
+            if (createdCount > 0) parts.push(`${createdCount} would create`);
+            if (updatedCount > 0) parts.push(`${updatedCount} would update`);
+            console.log(chalk.cyan(`\n[dry-run] ${payloads.length} skill(s) (${parts.join(', ')})`));
+        } else {
+            if (createdCount > 0) parts.push(`${createdCount} created`);
+            if (updatedCount > 0) parts.push(`${updatedCount} updated`);
+            console.log(chalk.cyan(`\ndone: ${payloads.length} skill(s) pushed (${parts.join(', ')})`));
+        }
     }
     process.exit(0);
 }
