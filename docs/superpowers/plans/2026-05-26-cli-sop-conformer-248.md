@@ -88,9 +88,9 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [x] Run green. Commit.
 
 ## Task 4: `skill list`
-- [ ] Tests: `skill list` calls `skills.list`, prints a table of name/description; `--json` prints raw `{skills:[...]}`; empty → friendly "no skills" line (non-error). Stub `makeMcpSuccess({skills:[...]})`.
-- [ ] Implement: `src/commands/skill-list.ts` (`skillListWithConfig`), register `skill list` in index.ts (`--json`, optional `--limit`).
-- [ ] Run green. Commit.
+- [x] Tests: `skill list` calls `skills.list`, prints a table of name/description; `--json` prints raw `{skills:[...]}`; empty → friendly "no skills" line (non-error). Stub `makeMcpSuccess({skills:[...]})`.
+- [x] Implement: `src/commands/skill-list.ts` (`skillListWithConfig`), register `skill list` in index.ts (`--json`, optional `--limit`).
+- [x] Run green. Commit.
 
 ## Task 5: `skill pull <name> [dest]`
 - [ ] Tests: `skill pull foo` calls `skills.read` `{identifier:'foo'}`; writes `./foo/SKILL.md` (frontmatter has name+description; body matches) and each `reference` key as a file at its relative path (e.g. `./foo/references/x.md`); `skill_not_found` → error exit. **Add a push→pull→push idempotency test (or assert the reconstructed SKILL.md has no `type` key).** Use a tmp dest dir; assert files on disk.
@@ -98,14 +98,14 @@ Extract the upsert core so both SKILL.md, command-files, and roles can drive it.
 - [ ] Run green. Commit.
 
 ## Task 5b: `skill view <name>` (#34 initial verb — show one)
-- [ ] Tests: `skill view foo` calls `skills.read` `{identifier:'foo'}`; prints the skill's name/description/body to terminal (NOT to files); `--json` prints raw read result; `skill_not_found` → error. (Reuses the `read` action; the only difference from `pull` is terminal display vs. writing files.)
-- [ ] Implement: `src/commands/skill-view.ts` (`skillViewWithConfig`); register `skill view <name>` (`--json`).
-- [ ] Run green. Commit.
+- [x] Tests: `skill view foo` calls `skills.read` `{identifier:'foo'}`; prints the skill's name/description/body to terminal (NOT to files); `--json` prints raw read result; `skill_not_found` → error. (Reuses the `read` action; the only difference from `pull` is terminal display vs. writing files.)
+- [x] Implement: `src/commands/skill-view.ts` (`skillViewWithConfig`); register `skill view <name>` (`--json`).
+- [x] Run green. Commit.
 
 ## Task 6: `skill delete <name>`
-- [ ] Tests: `skill delete foo` calls `skills.delete` `{identifier:'foo'}`, prints confirmation with delete_token; `permission_denied` (Admin-only) → clear error + non-zero exit; `skill_not_found` → error. (Consider a `--yes`/confirm guard — recommend no interactive prompt in v0; document that delete is immediate.)
-- [ ] Implement: `src/commands/skill-delete.ts` (`skillDeleteWithConfig`); register `skill delete <name>`.
-- [ ] Run green. Commit.
+- [x] Tests: `skill delete foo` calls `skills.delete` `{identifier:'foo'}`, prints confirmation with delete_token; `permission_denied` (Admin-only) → clear error + non-zero exit; `skill_not_found` → error. (Consider a `--yes`/confirm guard — recommend no interactive prompt in v0; document that delete is immediate.)
+- [x] Implement: `src/commands/skill-delete.ts` (`skillDeleteWithConfig`); register `skill delete <name>`.
+- [x] Run green. Commit.
 
 ## Task 7: `role push <dir>`
 - [ ] Tests: `role push <dir>` (dir has SKILL.md-shaped role def) calls `roles.create` `{name,description,body,properties?}`; on `name_collision` → `roles.edit`; `--dry-run` pre-flights; reports created/updated. (No references sent.)
