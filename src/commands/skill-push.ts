@@ -229,7 +229,8 @@ export async function skillPushWithConfig(
     try {
         pushResult = await pushParsedSkill(payload, options, config);
     } catch (e: any) {
-        process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+        // pushParsedSkill already prefixes MCP failures with "MCP request failed — "; don't double it.
+        process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
     }
 

@@ -495,6 +495,9 @@ describe('skillPushWithConfig — error cases', () => {
             const out = stderrLines.join('');
             expect(out).toContain('validation_failed');
             expect(out).toContain('name must be kebab-case.');
+            // Regression guard: a validation error must NOT be wrongly prefixed
+            // with the transport-failure phrase.
+            expect(out).not.toContain('MCP request failed');
         } finally {
             restoreExit();
             restoreStderr();
