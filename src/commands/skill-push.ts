@@ -226,9 +226,17 @@ export async function pushParsedSkill(
 
     // --dry-run: pre-flight a read to detect existence; make NO create/edit calls.
     if (options.dryRun) {
+        // Role-scoped skills are read via the roles tool's read_skill {role, name};
+        // shared skills via the skills tool's read {identifier}. Both return
+        // `skill_not_found` when absent. (read does NOT accept `identifier` on the
+        // roles tool, so the action/args must branch on isRole.)
+        const readArgs: Record<string, unknown> = isRole
+            ? { action: 'read_skill', role: options.role, name }
+            : { action: 'read', identifier: name };
+
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
         try {
-            readResult = await callCrewsTool(config, tool, { action: 'read', identifier: name });
+            readResult = await callCrewsTool(config, tool, readArgs);
         } catch (e: any) {
             throw new Error(`MCP request failed — ${e.message}`);
         }

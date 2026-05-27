@@ -1063,6 +1063,50 @@ describe('skill push --dry-run', () => {
         }
     });
 
+    it('--role + --dry-run pre-flights the roles tool read_skill {role,name} (not skills read {identifier})', async () => {
+        // role-scoped skill that does not exist yet → would create
+        responseQueue = [makeMcpError('skill_not_found', 'No skill with that name exists for this role.')];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: role-scoped-skill', 'description: A role-scoped skill', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { role: 'senior-engineer', dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(logs.join('')).toContain("[dry-run] would create 'role-scoped-skill'");
+
+            // Pre-flight must target the roles tool's read_skill with role+name, NOT skills read {identifier}
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(allCaptures[0].body.params.name).toBe('roles');
+            expect(args.action).toBe('read_skill');
+            expect(args.role).toBe('senior-engineer');
+            expect(args.name).toBe('role-scoped-skill');
+            expect(args).not.toHaveProperty('identifier');
+
+            // No create_skill / edit_skill calls
+            const mutated = allCaptures.some((c) => ['create_skill', 'edit_skill'].includes(c.body.params.arguments.action));
+            expect(mutated).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
     it('single-skill where skill EXISTS: prints "[dry-run] would update" and makes only a read call', async () => {
         // Queue a success response for the read pre-flight (skill found)
         responseQueue = [
