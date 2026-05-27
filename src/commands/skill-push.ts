@@ -3,6 +3,10 @@
  *
  * Pushes a local skill folder into the crews library via the crews MCP server.
  * Idempotent upsert: create, or update on name collision.
+ *
+ * Supports two modes:
+ *   - Single-skill: <dir>/SKILL.md exists → push that one skill.
+ *   - Plugin: <dir>/skills/<name>/SKILL.md and/or <dir>/commands/<name>.md → push all.
  */
 
 import fs from 'fs';
@@ -150,6 +154,58 @@ export function readSkillDir(dir: string): SkillPayload {
 }
 
 /**
+ * Parse a commands/<name>.md file (plugin command format).
+ *
+ * Derives the skill name from the filename (kebab-case: lowercase, spaces and
+ * underscores replaced with hyphens). The frontmatter must contain `description`;
+ * `name`, `allowed-tools`, and `argument-hint` are not carried forward.
+ *
+ * Returns a SkillPayload with properties={} and references={}.
+ * Throws with a descriptive message if description is missing or frontmatter malformed.
+ */
+export function parseCommandFile(filename: string, content: string): SkillPayload {
+    // Derive name from filename (basename without extension, converted to kebab-case)
+    const base = path.basename(filename, '.md');
+    const name = base.toLowerCase().replace(/[\s_]+/g, '-');
+
+    if (!content.startsWith('---')) {
+        throw new Error(`${filename}: command file must begin with a YAML frontmatter block (---).`);
+    }
+
+    const afterOpen = content.slice(3);
+    const closeIdx = afterOpen.indexOf('\n---');
+    if (closeIdx === -1) {
+        throw new Error(`${filename}: command file frontmatter is not closed (missing closing ---).`);
+    }
+
+    const yamlBlock = afterOpen.slice(0, closeIdx);
+    const body = afterOpen.slice(closeIdx + 4).replace(/^\n/, '');
+
+    let fm: any;
+    try {
+        fm = yaml.load(yamlBlock);
+    } catch (e: any) {
+        throw new Error(`${filename}: failed to parse command file frontmatter YAML: ${e.message}`);
+    }
+
+    if (!fm || typeof fm !== 'object') {
+        throw new Error(`${filename}: command file frontmatter is empty or not a YAML object.`);
+    }
+
+    if (!fm.description || typeof fm.description !== 'string') {
+        throw new Error(`${filename}: command file frontmatter must contain a "description" field (string).`);
+    }
+
+    return {
+        name,
+        description: fm.description,
+        properties: {},
+        body,
+        references: {},
+    };
+}
+
+/**
  * Core upsert: try create; on name_collision, switch to edit.
  * Returns a result object — does NOT call process.exit and does NOT print.
  * Throws on non-collision MCP errors.
@@ -207,48 +263,156 @@ export async function pushParsedSkill(
 }
 
 /**
+ * Print a single skill push result line (shared between single and plugin modes).
+ */
+function printPushResult(result: PushResult, options: SkillPushOptions): void {
+    if (options.json) {
+        console.log(JSON.stringify(result.data));
+        return;
+    }
+    const { status, name, data } = result;
+    if (status === 'updated') {
+        console.log(chalk.green(`updated skill '${name}' (version ${data.version_id ?? '?'})`));
+    } else {
+        const skillDocId = data.skill_doc_id ?? data.doc_id ?? data.id ?? '?';
+        const refCount = Object.keys((data.reference_doc_ids as Record<string, unknown>) ?? {}).length;
+        console.log(chalk.green(`created skill '${name}' (doc ${skillDocId}, ${refCount} refs)`));
+    }
+}
+
+/**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
+ *
+ * Routes between single-skill mode (top-level SKILL.md) and plugin mode
+ * (skills/ + commands/ subdirectories) based on directory structure.
  */
 export async function skillPushWithConfig(
     dir: string,
     options: SkillPushOptions,
     config: Config,
 ): Promise<void> {
-    // 1. Read the skill directory (validate + parse + read refs)
-    let payload: SkillPayload;
-    try {
-        payload = readSkillDir(dir);
-    } catch (e: any) {
-        process.stderr.write(chalk.red(`error: ${e.message}\n`));
+    const absDir = path.resolve(dir);
+
+    if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
+        process.stderr.write(chalk.red(`error: "${dir}" is not a directory.\n`));
         process.exit(1);
     }
 
-    // 2. Push via the core (no exit, no print)
-    let pushResult: PushResult;
-    try {
-        pushResult = await pushParsedSkill(payload, options, config);
-    } catch (e: any) {
-        // pushParsedSkill already prefixes MCP failures with "MCP request failed — "; don't double it.
-        process.stderr.write(chalk.red(`error: ${e.message}\n`));
-        process.exit(1);
-    }
+    const topLevelSkillMd = path.join(absDir, 'SKILL.md');
 
-    // 3. Print + exit
-    if (options.json) {
-        console.log(JSON.stringify(pushResult.data));
+    // -------------------------------------------------------------------------
+    // Single-skill mode: <dir>/SKILL.md exists
+    // -------------------------------------------------------------------------
+    if (fs.existsSync(topLevelSkillMd)) {
+        let payload: SkillPayload;
+        try {
+            payload = readSkillDir(dir);
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
+            process.exit(1);
+        }
+
+        let pushResult: PushResult;
+        try {
+            pushResult = await pushParsedSkill(payload, options, config);
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
+            process.exit(1);
+        }
+
+        if (options.json) {
+            console.log(JSON.stringify(pushResult.data));
+        } else {
+            printPushResult(pushResult, options);
+        }
         process.exit(0);
     }
 
-    const { status, name, data } = pushResult;
-    if (status === 'updated') {
-        // edit shape: {version_id, body_blob_sha}
-        console.log(chalk.green(`updated skill '${name}' (version ${data.version_id ?? '?'})`));
-    } else {
-        // create shape: {skill_doc_id, folder_id, reference_doc_ids}
-        const skillDocId = data.skill_doc_id ?? data.doc_id ?? data.id ?? '?';
-        const refCount = Object.keys((data.reference_doc_ids as Record<string, unknown>) ?? {}).length;
-        console.log(chalk.green(`created skill '${name}' (doc ${skillDocId}, ${refCount} refs)`));
+    // -------------------------------------------------------------------------
+    // Plugin mode: push skills/<name>/SKILL.md + commands/<name>.md
+    // -------------------------------------------------------------------------
+    const payloads: SkillPayload[] = [];
+
+    // One-level glob: skills/*/SKILL.md
+    const skillsDir = path.join(absDir, 'skills');
+    if (fs.existsSync(skillsDir) && fs.statSync(skillsDir).isDirectory()) {
+        for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const skillSubdir = path.join(skillsDir, entry.name);
+            const skillMd = path.join(skillSubdir, 'SKILL.md');
+            if (!fs.existsSync(skillMd)) continue;
+            try {
+                payloads.push(readSkillDir(skillSubdir));
+            } catch (e: any) {
+                process.stderr.write(chalk.red(`error: skills/${entry.name}/SKILL.md: ${e.message}\n`));
+                process.exit(1);
+            }
+        }
+    }
+
+    // One-level glob: commands/*.md
+    const commandsDir = path.join(absDir, 'commands');
+    if (fs.existsSync(commandsDir) && fs.statSync(commandsDir).isDirectory()) {
+        for (const entry of fs.readdirSync(commandsDir, { withFileTypes: true })) {
+            if (!entry.isFile()) continue;
+            if (!entry.name.endsWith('.md')) continue;
+            const cmdPath = path.join(commandsDir, entry.name);
+            const content = fs.readFileSync(cmdPath, 'utf8');
+            try {
+                payloads.push(parseCommandFile(entry.name, content));
+            } catch (e: any) {
+                process.stderr.write(chalk.red(`error: commands/${entry.name}: ${e.message}\n`));
+                process.exit(1);
+            }
+        }
+    }
+
+    if (payloads.length === 0) {
+        process.stderr.write(chalk.red(`error: no skills/ or commands/ under "${dir}" — nothing to push.\n`));
+        process.exit(1);
+    }
+
+    // Detect duplicate names BEFORE any push
+    const seen = new Map<string, number>();
+    for (const p of payloads) {
+        seen.set(p.name, (seen.get(p.name) ?? 0) + 1);
+    }
+    const conflicts = [...seen.entries()].filter(([, count]) => count > 1).map(([name]) => name);
+    if (conflicts.length > 0) {
+        process.stderr.write(
+            chalk.red(`error: duplicate skill names detected — aborting before any push.\n`) +
+            chalk.red(`  conflicts: ${conflicts.join(', ')}\n`) +
+            chalk.red(`  Rename the conflicting skills/commands so all names are unique.\n`),
+        );
+        process.exit(1);
+    }
+
+    // Push each skill, print a summary line per item
+    let createdCount = 0;
+    let updatedCount = 0;
+    for (const payload of payloads) {
+        let pushResult: PushResult;
+        try {
+            pushResult = await pushParsedSkill(payload, options, config);
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: ${payload.name}: ${e.message}\n`));
+            process.exit(1);
+        }
+        printPushResult(pushResult, options);
+        if (pushResult.status === 'created') {
+            createdCount++;
+        } else {
+            updatedCount++;
+        }
+    }
+
+    // Final tally
+    if (!options.json) {
+        const parts: string[] = [];
+        if (createdCount > 0) parts.push(`${createdCount} created`);
+        if (updatedCount > 0) parts.push(`${updatedCount} updated`);
+        console.log(chalk.cyan(`\ndone: ${payloads.length} skill(s) pushed (${parts.join(', ')})`));
     }
     process.exit(0);
 }

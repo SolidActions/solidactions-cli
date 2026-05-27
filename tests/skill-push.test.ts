@@ -11,7 +11,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill } from '../src/commands/skill-push';
+import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill, parseCommandFile } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
 
@@ -440,7 +440,7 @@ describe('skillPushWithConfig — with --role', () => {
 // ---------------------------------------------------------------------------
 
 describe('skillPushWithConfig — error cases', () => {
-    it('exits non-zero without making any HTTP request when SKILL.md is missing', async () => {
+    it('exits non-zero without making any HTTP request when directory has no SKILL.md, skills/, or commands/', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-crews-test-empty-'));
 
         const restoreExit = patchProcessExit();
@@ -465,8 +465,8 @@ describe('skillPushWithConfig — error cases', () => {
             expect(caughtExit).not.toBeNull();
             expect(caughtExit!.code).not.toBe(0);
 
-            // Error message should mention SKILL.md
-            expect(stderrLines.join('')).toMatch(/SKILL\.md/);
+            // Error message should mention that nothing was found to push
+            expect(stderrLines.join('')).toMatch(/no skills\/ or commands\//);
         } finally {
             restoreExit();
             restoreStderr();
@@ -717,6 +717,297 @@ describe('pushParsedSkill — core payload-based upsert', () => {
             expect(result.status).toBe('created');
         } finally {
             restoreExit();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests: parseCommandFile
+// ---------------------------------------------------------------------------
+
+describe('parseCommandFile', () => {
+    it('derives name from filename (basename without .md extension, kebab-cased)', () => {
+        const content = '---\ndescription: Does things\n---\nbody text';
+        const result = parseCommandFile('my_command.md', content);
+        expect(result.name).toBe('my-command');
+        expect(result.description).toBe('Does things');
+        expect(result.body).toBe('body text');
+        expect(result.properties).toEqual({});
+        expect(result.references).toEqual({});
+    });
+
+    it('converts spaces to hyphens in derived name', () => {
+        const content = '---\ndescription: A command\n---\nbody';
+        const result = parseCommandFile('my command.md', content);
+        expect(result.name).toBe('my-command');
+    });
+
+    it('lowercases the derived name', () => {
+        const content = '---\ndescription: Uppercase cmd\n---\nbody';
+        const result = parseCommandFile('MyCommand.md', content);
+        expect(result.name).toBe('mycommand');
+    });
+
+    it('does NOT carry allowed-tools or argument-hint into properties', () => {
+        const content = [
+            '---',
+            'description: A command with extras',
+            'allowed-tools: bash,grep',
+            'argument-hint: <filename>',
+            '---',
+            'body',
+        ].join('\n');
+        const result = parseCommandFile('cmd.md', content);
+        expect(result.properties).toEqual({});
+        expect(result.description).toBe('A command with extras');
+    });
+
+    it('throws when description is missing from frontmatter', () => {
+        const content = '---\nname: Something\n---\nbody';
+        expect(() => parseCommandFile('cmd.md', content)).toThrow(/"description"/);
+    });
+
+    it('throws when frontmatter opening marker is missing', () => {
+        expect(() => parseCommandFile('cmd.md', 'description: foo\nbody')).toThrow(/must begin with a YAML frontmatter/);
+    });
+
+    it('throws when frontmatter is not closed', () => {
+        expect(() => parseCommandFile('cmd.md', '---\ndescription: foo')).toThrow(/not closed/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Integration tests: recursive plugin push
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a plugin dir layout:
+ *   <dir>/skills/<name>/SKILL.md
+ *   <dir>/commands/<name>.md
+ *
+ * Returns dir path and cleanup fn.
+ */
+function makePluginDir(opts: {
+    skills?: Array<{ name: string; description: string; body?: string }>;
+    commands?: Array<{ filename: string; description: string; body?: string }>;
+    extras?: Record<string, string>; // other top-level entries (e.g. agents/foo, hooks/bar)
+}): { dir: string; cleanup: () => void } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-plugin-test-'));
+
+    if (opts.skills) {
+        const skillsDir = path.join(dir, 'skills');
+        fs.mkdirSync(skillsDir);
+        for (const skill of opts.skills) {
+            const skillDir = path.join(skillsDir, skill.name);
+            fs.mkdirSync(skillDir);
+            const content = [
+                '---',
+                `name: ${skill.name}`,
+                `description: ${skill.description}`,
+                '---',
+                skill.body ?? 'skill body',
+            ].join('\n');
+            fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+        }
+    }
+
+    if (opts.commands) {
+        const commandsDir = path.join(dir, 'commands');
+        fs.mkdirSync(commandsDir);
+        for (const cmd of opts.commands) {
+            const content = [
+                '---',
+                `description: ${cmd.description}`,
+                '---',
+                cmd.body ?? 'command body',
+            ].join('\n');
+            fs.writeFileSync(path.join(commandsDir, cmd.filename), content, 'utf8');
+        }
+    }
+
+    if (opts.extras) {
+        for (const [relPath, content] of Object.entries(opts.extras)) {
+            const abs = path.join(dir, relPath);
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, content, 'utf8');
+        }
+    }
+
+    return {
+        dir,
+        cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    };
+}
+
+describe('recursive plugin push', () => {
+    it('pushes 3 skills when plugin dir has skills/a, skills/b, and commands/c.md', async () => {
+        // Queue 3 success responses (one per skill push)
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 'doc-a', reference_doc_ids: {} }),
+            makeMcpSuccess({ skill_doc_id: 'doc-b', reference_doc_ids: {} }),
+            makeMcpSuccess({ skill_doc_id: 'doc-c', reference_doc_ids: {} }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'a', description: 'Skill A' },
+                { name: 'b', description: 'Skill B' },
+            ],
+            commands: [
+                { filename: 'c.md', description: 'Command C' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // Exactly 3 create calls were made
+            expect(allCaptures.length).toBe(3);
+
+            // Extract names from the 3 calls
+            const pushedNames = allCaptures.map((c) => c.body.params.arguments.name);
+            expect(pushedNames).toContain('a');
+            expect(pushedNames).toContain('b');
+            expect(pushedNames).toContain('c');
+
+            // All 3 are create actions
+            for (const cap of allCaptures) {
+                expect(cap.body.params.arguments.action).toBe('create');
+            }
+
+            // The command c should have description from its frontmatter
+            const cCapture = allCaptures.find((c) => c.body.params.arguments.name === 'c');
+            expect(cCapture!.body.params.arguments.description).toBe('Command C');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('single-skill back-compat: a dir with a top-level SKILL.md still pushes exactly 1 skill (one create call)', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-single', reference_doc_ids: {} })];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: solo-skill', 'description: A single skill', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            // Exactly 1 HTTP create call
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.name).toBe('solo-skill');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('aborts with an error (zero push calls) when skills/foo and commands/foo.md both resolve to name "foo"', async () => {
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'foo', description: 'Foo from skills' },
+            ],
+            commands: [
+                { filename: 'foo.md', description: 'Foo from commands' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit non-zero
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+
+            // Zero HTTP calls — aborted before any push
+            expect(allCaptures.length).toBe(0);
+
+            // Error message must mention the conflict
+            const stderr = stderrLines.join('');
+            expect(stderr).toMatch(/conflict/i);
+            expect(stderr).toContain('foo');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('ignores agents/, hooks/, .mcp.json alongside skills/ and commands/ — only pushes the skills/commands', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 'doc-alpha', reference_doc_ids: {} }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'alpha', description: 'Alpha skill' },
+            ],
+            extras: {
+                'agents/my-agent.md': '# Agent',
+                'hooks/pre-push': '#!/bin/sh\necho hi',
+                '.mcp.json': '{"mcpServers":{}}',
+            },
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            // Only 1 push call — agents/hooks/.mcp.json are ignored
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.name).toBe('alpha');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
         }
     });
 });
