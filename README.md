@@ -61,6 +61,24 @@ If you run multiple AI coding agents in different project folders simultaneously
 - Run `solidactions login <key> --local` in each folder so each has its own config, or
 - Set `SOLIDACTIONS_API_KEY` / `SOLIDACTIONS_WORKSPACE_ID` in the environment each agent uses (no files to share or stomp).
 
+### Deploy bundle exclusions (`solidactions.yaml`)
+
+When you run `solidactions project deploy`, the CLI bundles your project directory and uploads it. You can control what goes into that bundle with an optional `deploy:` block in `solidactions.yaml`:
+
+```yaml
+deploy:
+  exclude:            # additive, gitignore-style patterns
+    - web/            # a large local-only sub-app you don't deploy
+    - "*.tmp"
+  gitignore: true     # opt-in: also honor this project's .gitignore
+```
+
+- **`deploy.exclude`** — a list of gitignore-style patterns (anchoring, `*.log`-at-any-depth, and `!` negation all work). Use it to keep large local-only directories (e.g. a `.venv` or a legacy `web/` app) out of the upload — this avoids `413 Request Entity Too Large` failures. Additive on top of the always-excluded defaults: `node_modules/`, `.git/`, `dist/`, `vendor/`.
+- **`deploy.gitignore`** — `false` by default. Set to `true` to also apply your project's root `.gitignore` to the bundle. This is opt-in so deploys don't silently change behavior.
+- **`.env` and `.env.*` are always excluded**, regardless of config, and no `!` negation can re-include them. Secrets must come from `solidactions env set` (they are injected at runtime), and must never be baked into the deploy bundle.
+
+The CLI prints a one-line summary of what it bundled, e.g. `Bundling 312 files (.env excluded; .gitignore applied; 2 exclude rules)`, and warns about any symlinks it skipped.
+
 ## Commands
 
 Use `solidactions <command> --help` for full flag details on any command.

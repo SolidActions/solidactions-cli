@@ -227,7 +227,11 @@ gitignore parser). No `@types` needed — `ignore` ships its own types.
 - `deploy.exclude` additive (`web/`, `*.tmp`)
 - `deploy.gitignore: true` applies `.gitignore` entries; `false`/absent does not
 - nested-dir patterns and `*.log`-at-any-depth behave like gitignore
-- ordered negation works at Layer 2 (`dist/` default + `!dist/keep.js` → keep.js in)
+- ordered negation works at Layer 2 in the form gitignore actually supports
+  (`build/*` + `!build/keep.js` → keep.js re-included). NOTE: a `!dist/keep.js`
+  against the trailing-slash `dist/` default does NOT re-include — git itself
+  cannot re-include a file whose parent dir is excluded by a `dir/` pattern, and
+  the `ignore` package faithfully mirrors this. Test asserts the real behavior.
 - a normal source file (`src/index.ts`) is NOT excluded
 
 **Directory-pruning tests** (`isIgnoredDirectory`):
