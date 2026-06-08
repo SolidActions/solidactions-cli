@@ -2,7 +2,7 @@
 
 **Issue:** [#44](https://github.com/SolidActions/solidactions-cli/issues/44)
 **Date:** 2026-06-08
-**Status:** Approved (pending Codex review)
+**Status:** Approved; revised per Codex review (2026-06-08)
 
 ## Problem
 
@@ -73,43 +73,62 @@ export interface SolidActionsConfig {
 }
 ```
 
-### Ignore set (union, all gitignore-syntax)
+### Two-layer exclusion: hard deny + gitignore matcher
 
-The final matcher is the union of, in this order (order is immaterial — it is a
-union, not a precedence chain, and there are no negations in the defaults):
+Codex review (2026-06-08) flagged that feeding `.env` into the same ordered
+`ignore` matcher as user patterns lets a `!` negation re-include it, breaking the
+security guarantee. So exclusion is **two layers**:
 
-1. **Defaults (always):** `node_modules/`, `.git/`, `dist/`, `vendor/`,
-   `.steps-deploy.tar.gz`, `.steps-deploy.zip`.
-2. **`.env` safety (always):** `.env`, `.env.*`.
-3. **`deploy.exclude:`** entries, if present.
-4. **`.gitignore`** entries, only if `deploy.gitignore: true` and the file exists.
+**Layer 1 — hard deny (non-negotiable, checked first, no negation can override).**
+A path is dropped unconditionally if it matches:
+- `.env`, or any `.env.*` (secret-leak fix)
+- `.steps-deploy.tar.gz`, `.steps-deploy.zip` (our own deploy artifacts — the
+  live archive is being written into `sourceDir` *while we walk*, see Archiving
+  change; this guard prevents self-inclusion regardless of matcher state)
 
-All four are gitignore-syntax patterns fed into a single matcher built with the
-[`ignore`](https://www.npmjs.com/package/ignore) npm package, so `exclude:` and
-`.gitignore` share identical semantics (anchoring, `*.log` matching at any depth,
-negation with `!`).
+This layer is a plain predicate in the walker, **not** part of the `ignore`
+matcher, so user negations cannot defeat it.
 
-> Note on negation: a user `!keep.env` in `deploy.exclude` *would* re-include a
-> file that an earlier `.env.*` pattern excluded, because `ignore` applies
-> patterns in order and later patterns win. The defaults and `.env` rules are
-> added *first*, so a deliberate `!` override in `exclude`/`.gitignore` can
-> re-include them. This is acceptable and matches gitignore mental model; it is
-> an explicit opt-in, not an accident.
+**Layer 2 — the gitignore matcher (`ignore` package), ordered.**
+Patterns are added in this order; with negations, **later patterns win** (standard
+gitignore semantics — this is an *ordered* rule list, not an unordered union):
+
+1. **Defaults:** `node_modules/`, `.git/`, `dist/`, `vendor/`.
+2. **`deploy.exclude:`** entries, if present.
+3. **`.gitignore`** entries, only if `deploy.gitignore: true` and the file exists.
+
+So `.gitignore`/`deploy.exclude` may use `!` to re-include something a *default*
+or an earlier pattern excluded (e.g. `!dist/keep.js`) — matches the gitignore
+mental model and is a deliberate opt-in. They can **never** re-include a Layer-1
+path. `deploy.exclude` and `.gitignore` share identical semantics (anchoring,
+`*.log` at any depth, `!` negation) because both feed the one matcher.
 
 ### Archiving change
 
 Replace the single `archive.glob('**/*', { ignore })` call (deploy.ts ~line 438)
-with an explicit walk + per-file add:
+with an explicit walk + per-file add. **Crucially, do the walk BEFORE creating the
+archive write stream** (currently `fs.createWriteStream(archivePath)` at ~line 321):
 
-1. Build the matcher via `buildDeployMatcher(sourceDir, yamlConfig)`.
-2. Walk `sourceDir` with `collectDeployFiles(sourceDir, matcher)`, pruning any
-   directory the matcher ignores (so we never descend into a 400 MB `.venv`).
-3. Add each surviving file via
+1. Build the plan via `planDeployFiles(sourceDir, yamlConfig)` → `{ files, summary }`.
+   This runs the matcher + walk. If it throws (permission error, unreadable dir),
+   we have not yet created `.steps-deploy.tar.gz`, so the deploy aborts cleanly with
+   no orphan artifact to clean up. (Codex review: the old "archive not present yet"
+   reasoning was wrong — the write stream is opened before entries are added — so the
+   *real* fix is ordering the walk first, plus the Layer-1 hard deny on the artifact.)
+2. Log the summary line (see Logging).
+3. Create the write stream + archiver as today.
+4. In place of `archive.glob(...)`, loop `files` and add each via
    `archive.file(absPath, { name: 'tenantcode/' + relPosixPath })`.
 
 The Dockerfile-append (`archive.append(universalDockerfile, { name: 'Dockerfile' })`)
 and `archive.finalize()` stay exactly as today. The `tenantcode/` prefix is
 preserved.
+
+**Behavior change — empty directories.** `archive.glob('**/*', { dot: true })`
+adds empty directories as entries; the per-file walk does not (it adds files only).
+This is acceptable for a deploy bundle (the server runs `npm run build`; empty dirs
+carry nothing) and is called out here as an intentional, documented change. A test
+asserts the new behavior so it is not a silent surprise.
 
 ### New module: `src/utils/deploy-ignore.ts`
 
@@ -117,35 +136,59 @@ Pure, no archiver/network deps, unit-testable in isolation.
 
 ```ts
 import ignore, { Ignore } from 'ignore';
+import { SolidActionsConfig } from './env';
 
-// Always-excluded patterns (gitignore syntax).
-export const DEFAULT_DEPLOY_IGNORES: string[];   // node_modules/, .git/, dist/, vendor/, deploy artifacts
-export const ENV_DEPLOY_IGNORES: string[];       // .env, .env.*
+// Layer-2 matcher defaults (gitignore syntax).
+export const DEFAULT_DEPLOY_IGNORES: string[];   // node_modules/, .git/, dist/, vendor/
 
-/** Build the ignore matcher from defaults + .env + yaml exclude + optional .gitignore. */
+// Layer-1 hard deny — never re-includable by any negation.
+export const HARD_DENY_BASENAMES: RegExp;         // ^\.env($|\..*) , .steps-deploy.(tar.gz|zip)
+
+/** True if a path is hard-denied (Layer 1). Checked before the matcher. */
+export function isHardDenied(relPosixPath: string): boolean;
+
+/** Build the Layer-2 ignore matcher from defaults + deploy.exclude + optional .gitignore. */
 export function buildDeployMatcher(sourceDir: string, config: SolidActionsConfig | null): {
     matcher: Ignore;
     summary: { gitignoreApplied: boolean; excludeRuleCount: number };
 };
 
+/** True if a directory should be pruned (not descended into). */
+export function isIgnoredDirectory(relPosixDir: string, matcher: Ignore): boolean;
+
 /**
- * Walk sourceDir, returning relative POSIX paths of files to include.
- * Prunes ignored directories so we never read into them.
+ * Walk sourceDir, returning { files, summary }. files = relative POSIX paths to
+ * include, with Layer-1 hard deny + Layer-2 matcher applied and ignored
+ * directories pruned (so we never read into a 400 MB .venv).
  */
-export function collectDeployFiles(sourceDir: string, matcher: Ignore): string[];
+export function planDeployFiles(sourceDir: string, config: SolidActionsConfig | null): {
+    files: string[];
+    summary: { gitignoreApplied: boolean; excludeRuleCount: number; symlinksSkipped: string[] };
+};
 ```
 
-Key details:
-- Paths tested against `matcher` are **relative, POSIX-separated** (`ignore`
-  requires forward slashes). Convert on Windows.
-- Directories are tested with a trailing-context check so `node_modules/`
-  (dir pattern) prunes the directory before descent.
-- Symlinks: do not follow directory symlinks (avoid cycles / escaping the tree);
-  include symlinked files as-is (matches current archiver glob behavior closely
-  enough — confirm during review).
-- Never include the live archive file itself (`.steps-deploy.tar.gz`) — already
-  covered by defaults, but the walk runs before the archive is written so it is
-  not present yet anyway.
+Key details (each driven by a Codex finding):
+- **Paths are relative, POSIX-separated.** `ignore` requires forward slashes;
+  convert `path.sep` → `/` on Windows before every matcher call. Tested with a
+  Windows-style input.
+- **Directory pruning uses `isIgnoredDirectory`,** which tests the dir path
+  *with a trailing slash semantics* via the `ignore` package so trailing-slash
+  patterns (`node_modules/`) prune the directory before descent. The package's
+  `.ignores('node_modules')` handles dir patterns, but we test explicitly against
+  `node_modules`, `node_modules/`, `web/`, and a nested dir to lock the behavior.
+- **Layer-1 hard deny is applied in the walker** to both files and directory
+  pruning, independent of the matcher, so no `!` negation re-includes `.env*` or
+  the deploy artifact.
+- **Symlinks: skipped, not followed** (decision, replacing the old "confirm
+  during review" hand-wave). Directory symlinks are not descended (avoids cycles
+  and escaping `sourceDir`); file symlinks are skipped rather than dereferenced
+  (avoids reading content outside the tree). Skipped symlinks are collected into
+  `summary.symlinksSkipped` and surfaced as a one-line warning so the change from
+  archiver's behavior is visible, not silent. (If a real project needs symlinked
+  content deployed, that is a follow-up — out of scope here.)
+- **Walk errors** (EACCES, etc.) propagate out of `planDeployFiles`; the caller
+  in deploy.ts runs it before creating the archive, so the deploy aborts with a
+  clear `Deployment failed: <path>: <error>` and no artifact is left behind.
 
 ### Logging
 
@@ -158,7 +201,9 @@ Bundling 312 files (.env excluded; .gitignore applied; 2 exclude rules)
 
 Compose the parenthetical from `summary`: always mention `.env excluded`;
 add `.gitignore applied` when `gitignoreApplied`; add `N exclude rule(s)` when
-`excludeRuleCount > 0`.
+`excludeRuleCount > 0`. When `summary.symlinksSkipped` is non-empty, print a
+separate yellow warning line listing the skipped symlink paths so the change from
+archiver's behavior is visible.
 
 ### Dependency
 
@@ -169,22 +214,42 @@ gitignore parser). No `@types` needed — `ignore` ships its own types.
 
 `tests/deploy-ignore.test.ts` (vitest, mirrors existing pure-function test style):
 
-**Matcher unit tests** (`buildDeployMatcher` → assert `.ignores(path)`):
-- defaults always excluded (`node_modules/x`, `.git/HEAD`, `dist/a.js`, `vendor/x`)
-- `.env` and `.env.local` excluded with no config
-- `.env` excluded even when `deploy:` block present but empty
+**Layer-1 hard-deny tests** (`isHardDenied`):
+- `.env`, `.env.local`, `.env.production` → denied
+- `src/.env` (nested) → denied
+- `.steps-deploy.tar.gz`, `.steps-deploy.zip` → denied
+- `environment.ts`, `.envrc` → NOT denied (no false positives on `.env` prefix)
+- **negation cannot defeat it:** with `deploy.exclude: ["!.env"]`, `.env` is still
+  excluded by `planDeployFiles` (the Critical finding — security guarantee holds)
+
+**Layer-2 matcher tests** (`buildDeployMatcher` → assert `.ignores(path)`):
+- defaults excluded (`node_modules/x`, `.git/HEAD`, `dist/a.js`, `vendor/x`)
 - `deploy.exclude` additive (`web/`, `*.tmp`)
 - `deploy.gitignore: true` applies `.gitignore` entries; `false`/absent does not
 - nested-dir patterns and `*.log`-at-any-depth behave like gitignore
-- a non-`.env` file (`src/index.ts`) is NOT excluded
+- ordered negation works at Layer 2 (`dist/` default + `!dist/keep.js` → keep.js in)
+- a normal source file (`src/index.ts`) is NOT excluded
 
-**Walker tests** (`collectDeployFiles` over a temp dir tree):
-- returns expected surviving relative POSIX paths
-- prunes an ignored directory (assert no path under it is returned)
-- handles dotfiles (`.solidactions/` etc. per matcher)
+**Directory-pruning tests** (`isIgnoredDirectory`):
+- `node_modules`, `node_modules/`, `web/` (with `exclude: [web/]`), and a nested
+  ignored dir all return true (locks trailing-slash behavior)
+
+**Walker tests** (`planDeployFiles` over a temp dir tree):
+- returns expected surviving relative POSIX paths in `files`
+- prunes an ignored directory — assert NO path under it is returned AND (via a
+  large/decoy fixture) that descent did not happen
+- `.env` at root absent from `files` even with no `deploy:` config
+- empty directory present in tree → its (non-existent) entry is absent from `files`
+  (documents the intentional empty-dir behavior change)
+- a symlink (file and dir) → skipped, listed in `summary.symlinksSkipped`
+- `summary` reports `gitignoreApplied` / `excludeRuleCount` correctly
+- **Windows path handling:** a path constructed with `\\` separators is normalized
+  to `/` before matching (guard the separator conversion)
 
 Use a temp dir built in the test (see how other tests construct fixtures; reuse
-`tests/helpers.ts` if it offers a temp-dir helper).
+`tests/helpers.ts` if it offers a temp-dir helper). Skip the symlink test on
+platforms where symlink creation needs privileges (guard with a try/catch around
+`fs.symlinkSync`).
 
 ## Cross-repo updates
 
