@@ -19,6 +19,10 @@ export interface SolidActionsConfig {
     project?: string;
     workflows: { id?: string; name: string; command?: string; file?: string; enabled?: boolean }[];
     env?: (string | { [key: string]: string | { oauth: string } })[];
+    deploy?: {
+        exclude?: string[];
+        gitignore?: boolean;
+    };
 }
 
 /**

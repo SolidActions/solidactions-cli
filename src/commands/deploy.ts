@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { planDeployFiles } from '../utils/deploy-ignore';
 
 /**
  * Validate project structure before deployment.
@@ -318,6 +319,32 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     }
 
     const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');
+
+    // Plan the file list BEFORE creating the archive write stream so a walk error
+    // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
+    let plan: ReturnType<typeof planDeployFiles>;
+    try {
+        plan = planDeployFiles(sourceDir, yamlConfig);
+    } catch (error: any) {
+        console.error(chalk.red('Deployment failed:'));
+        console.error(error.message);
+        process.exit(1);
+    }
+
+    // Summary line so silent truncation never reads as "shipped everything".
+    const parts: string[] = ['.env excluded'];
+    if (plan.summary.gitignoreApplied) {
+        parts.push('.gitignore applied');
+    }
+    if (plan.summary.excludeRuleCount > 0) {
+        parts.push(`${plan.summary.excludeRuleCount} exclude rule${plan.summary.excludeRuleCount === 1 ? '' : 's'}`);
+    }
+    console.log(chalk.gray(`Bundling ${plan.files.length} files (${parts.join('; ')})`));
+
+    if (plan.summary.symlinksSkipped.length > 0) {
+        console.log(chalk.yellow(`⚠ Skipped ${plan.summary.symlinksSkipped.length} symlink(s) (not followed): ${plan.summary.symlinksSkipped.join(', ')}`));
+    }
+
     const output = fs.createWriteStream(archivePath);
     const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
 
@@ -431,17 +458,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     archive.pipe(output);
 
-    // Glob patterns to ignore
-    const ignore = ['node_modules/**', '.git/**', '.steps-deploy.tar.gz', '.steps-deploy.zip', 'dist/**', 'vendor/**', '**/node_modules/**'];
-
-    // User code goes under tenantcode/ so it never conflicts with our Dockerfile
-    archive.glob('**/*', {
-        cwd: sourceDir,
-        ignore: ignore,
-        dot: true
-    }, {
-        prefix: 'tenantcode'
-    });
+    // User code goes under tenantcode/ so it never conflicts with our Dockerfile.
+    // Add each planned file explicitly (per-file walk computed above).
+    for (const relPosixPath of plan.files) {
+        const absPath = path.join(sourceDir, relPosixPath);
+        archive.file(absPath, { name: 'tenantcode/' + relPosixPath });
+    }
 
     // Dockerfile always at archive root, referencing tenantcode/
     const universalDockerfile = [
