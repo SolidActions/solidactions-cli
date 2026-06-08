@@ -52,6 +52,22 @@ describe('buildDeployMatcher (Layer 2)', () => {
         expect(matcher.ignores('vendor/x')).toBe(true);
     });
 
+    it('anchors dist/ and vendor/ to the project root (keeps a vendored dep\'s dist/)', () => {
+        const { matcher } = buildDeployMatcher('/nonexistent', null);
+        // Root build output is still excluded.
+        expect(matcher.ignores('dist/a.js')).toBe(true);
+        expect(matcher.ignores('vendor/x')).toBe(true);
+        // But a vendored dependency that ships its own dist/ or vendor/ is kept.
+        // Regression: a `file:./sdk` dependency resolves through sdk/dist, which a
+        // bare (unanchored) `dist/` default would wrongly strip — breaking the build.
+        expect(matcher.ignores('sdk/dist/index.js')).toBe(false);
+        expect(matcher.ignores('packages/foo/vendor/autoload.php')).toBe(false);
+        // node_modules and .git stay excluded at ANY depth.
+        expect(matcher.ignores('node_modules/x')).toBe(true);
+        expect(matcher.ignores('packages/foo/node_modules/y')).toBe(true);
+        expect(matcher.ignores('sub/.git/HEAD')).toBe(true);
+    });
+
     it('does NOT exclude a normal source file', () => {
         const { matcher } = buildDeployMatcher('/nonexistent', null);
         expect(matcher.ignores('src/index.ts')).toBe(false);
@@ -218,6 +234,23 @@ describe('planDeployFiles (walker)', () => {
         expect(files).toContain('src/index.ts');
         expect(files.some(f => f.startsWith('node_modules/'))).toBe(false);
         expect(files).not.toContain('node_modules/pkg/deep/nested/decoy.js');
+    });
+
+    it('keeps a vendored dependency\'s nested dist/ (regression: file:./sdk -> sdk/dist)', () => {
+        writeFile(root, 'package.json', '{}');
+        writeFile(root, 'src/index.ts', '');
+        writeFile(root, 'sdk/package.json', '{}');
+        writeFile(root, 'sdk/dist/index.js', 'SDK');
+        writeFile(root, 'sdk/dist/schemas/a.json', '{}');
+        // Root build output and node_modules must still be pruned.
+        writeFile(root, 'dist/out.js', 'ROOT_BUILD');
+        writeFile(root, 'node_modules/pkg/index.js', 'DEP');
+
+        const { files } = planDeployFiles(root, { workflows: [] });
+        expect(files).toContain('sdk/dist/index.js');
+        expect(files).toContain('sdk/dist/schemas/a.json');
+        expect(files).not.toContain('dist/out.js');
+        expect(files.some(f => f.startsWith('node_modules/'))).toBe(false);
     });
 
     it('excludes .env at root even with no deploy config', () => {

@@ -6,12 +6,19 @@ import { SolidActionsConfig } from './env';
 /**
  * Layer-2 matcher defaults (gitignore syntax). These are excluded unless a later
  * pattern (deploy.exclude or .gitignore) re-includes them via a `!` negation.
+ *
+ * `dist/` and `vendor/` are anchored to the project root (`/dist/`, `/vendor/`)
+ * so they only strip the project's own build output. An unanchored `dist/` /
+ * `vendor/` matches at any depth and wrongly excludes a vendored dependency's
+ * own build output — e.g. a `"@solidactions/sdk": "file:./sdk"` dep whose code
+ * lives in `sdk/dist/`, which then fails to resolve at build time.
+ * `node_modules/` and `.git/` stay unanchored: those are never wanted at any depth.
  */
 export const DEFAULT_DEPLOY_IGNORES: string[] = [
     'node_modules/',
     '.git/',
-    'dist/',
-    'vendor/',
+    '/dist/',
+    '/vendor/',
 ];
 
 /**
