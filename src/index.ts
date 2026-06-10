@@ -6,6 +6,7 @@ import { login, logout, whoami } from './commands/login';
 import { init } from './commands/init';
 import { pull } from './commands/pull';
 import { projectList } from './commands/project-list';
+import { projectCreate } from './commands/project-create';
 import { logsBuild } from './commands/project-logs';
 import { run } from './commands/run-start';
 import { runs } from './commands/run-list';
@@ -149,6 +150,15 @@ program
 // =============================================================================
 
 const project = program.command('project').description('Manage projects');
+
+project
+    .command('create')
+    .description('Create an empty project (and environment) without deploying source')
+    .argument('<name>', 'Project name')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev). Defaults to production.')
+    .action(async (name, options) => {
+        await projectCreate(name, options);
+    });
 
 project
     .command('deploy')

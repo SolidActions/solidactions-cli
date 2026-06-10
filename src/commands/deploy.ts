@@ -8,6 +8,7 @@ import yaml from 'js-yaml';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { planDeployFiles } from '../utils/deploy-ignore';
+import { buildProjectSlug } from '../utils/slug';
 
 /**
  * Validate project structure before deployment.
@@ -278,7 +279,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             console.log(chalk.yellow(`Project "${projectName}"${envLabel} not found. Creating...`));
-            const requestedSlug = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-') + (environment !== 'production' ? `-${environment}` : '');
+            const requestedSlug = buildProjectSlug(projectName, environment);
             try {
                 const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
                     name: projectName,
