@@ -97,6 +97,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
+| `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
 | `project deploy <name> [path]` | `-e`, `--create`, `--config-only` | Deploy or sync config only |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
