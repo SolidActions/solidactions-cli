@@ -237,4 +237,21 @@ describe('projectCreateWithConfig', () => {
         expect(stderr.join('\n')).toContain('Connection failed');
         expect(allCaptures).toHaveLength(0);
     });
+
+    it('creates exactly one project for -e dev (no production shell)', async () => {
+        const { code, stdout } = await runCreate('foo', { env: 'dev' });
+
+        // Exactly one POST — no implicit production root created alongside it.
+        expect(allCaptures).toHaveLength(1);
+        expect(allCaptures[0].method).toBe('POST');
+        expect(allCaptures[0].path).toBe('/api/v1/projects');
+        expect(allCaptures[0].body.name).toBe('foo');
+        expect(allCaptures[0].body.environment).toBe('dev');
+
+        expect(code).toBe(0);
+        // Success message mentions the created project.
+        const text = stdout.join('\n');
+        expect(text.toLowerCase()).toContain('created');
+        expect(text).toContain('foo');
+    });
 });

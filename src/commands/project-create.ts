@@ -2,12 +2,12 @@
  * solidactions project create <name> [-e <environment>]
  *
  * Creates a project + environment via POST /api/v1/projects WITHOUT uploading
- * any source or triggering a build. This is the empty-project path that the web
- * UI already offers; `project deploy` creates-on-demand but always builds.
+ * any source or triggering a build. This is the empty-project path the web UI
+ * already offers; `project deploy` creates-on-demand but always builds.
  *
- * When -e is omitted we default to `production`: a project needs a production
- * root before dev/staging children can attach to it, so creating the root is
- * the sensible default (mirrors the guidance in `project deploy`).
+ * `-e` defaults to `production`. Non-production environments are created
+ * standalone — the server links to an existing production root if one exists
+ * but no longer auto-creates one (#312).
  */
 
 import axios from 'axios';
