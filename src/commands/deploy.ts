@@ -162,9 +162,10 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     }
 
     // -------------------------------------------------------------------------
-    // Production-existence check — must happen BEFORE we apply any env default
-    // so that first-time deploys without -e get a helpful error instead of
-    // silently creating a dev-only project with no production root.
+    // First-deploy check — must happen BEFORE we apply any env default so that
+    // first-time deploys without -e get a helpful error prompting a deliberate
+    // environment choice, instead of silently defaulting. (Any environment can
+    // stand alone — production is not required to exist first.)
     // -------------------------------------------------------------------------
     let productionExists: boolean | null = null; // null = unknown (error path)
     let productionSlug: string | null = null;
@@ -191,14 +192,15 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     }
 
-    // Decision: if production does not exist and no -e flag was given, the user
-    // must pick an environment explicitly to avoid creating a broken dev-only project.
+    // Decision: if this is the first deploy (project doesn't exist yet) and no -e
+    // flag was given, prompt the user to choose an environment explicitly so the
+    // first deploy is deliberate. Any environment can be the first one.
     if (productionExists === false && explicitEnv === undefined) {
         console.error(chalk.red(`\nThis is the first deploy of "${projectName}" — please pick an environment explicitly:\n`));
         console.error(`  solidactions project deploy ${projectName} <path> -e production    # most projects start here`);
-        console.error(`  solidactions project deploy ${projectName} <path> -e dev            # dev-only (uncommon; no production root will exist)`);
-        console.error(`  solidactions project deploy ${projectName} <path> -e staging        # staging-only (uncommon)`);
-        console.error(chalk.gray('\nTip: most projects should start with `-e production`. A project needs a production root before dev/staging children can attach to it.'));
+        console.error(`  solidactions project deploy ${projectName} <path> -e dev            # start in dev (no production required first)`);
+        console.error(`  solidactions project deploy ${projectName} <path> -e staging        # start in staging`);
+        console.error(chalk.gray('\nTip: production is the usual default, but any environment can stand alone — pick whichever you want this project to start with.'));
         process.exit(1);
     }
 
