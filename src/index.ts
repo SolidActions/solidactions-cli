@@ -169,8 +169,13 @@ project
     .option('-e, --env <environment>', 'Target environment (production/staging/dev). Required on first deploy of a new project.')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
+    .option('--no-cache', 'Force a fresh build, bypassing all build caches')
+    .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .action((projectName, path, options) => {
-        deploy(projectName, path, options);
+        // Commander's negation convention maps --no-cache to options.cache === false
+        // (NOT options.noCache). Normalize both flags to a single boolean.
+        const noCache = options.cache === false || options.forceRebuild === true;
+        deploy(projectName, path, { ...options, noCache });
     });
 
 project

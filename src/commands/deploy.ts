@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import archiver from 'archiver';
 import axios from 'axios';
 import FormData from 'form-data';
@@ -94,10 +95,27 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
 }
 
 
+/**
+ * When `noCache` is true, returns an archive entry with a unique name and
+ * random content that busts the build-layer content hash (Blaxel/Daytona S3
+ * MD5 and BuildKit COPY . layer). Returns null when noCache is false/undefined.
+ */
+export function cacheBusterEntry(noCache: boolean): { name: string; content: string } | null {
+    if (!noCache) {
+        return null;
+    }
+    const uuid = randomUUID();
+    return {
+        name: `tenantcode/sa-nocache-${uuid}`,
+        content: `force-rebuild ${uuid} ${Date.now()}`,
+    };
+}
+
 interface DeployOptions {
     env?: string;
     create?: boolean;
     configOnly?: boolean;
+    noCache?: boolean;
 }
 
 /**
@@ -491,6 +509,15 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     ].join('\n') + '\n';
 
     archive.append(universalDockerfile, { name: 'Dockerfile' });
+
+    // --no-cache / --force-rebuild: inject a unique random-content file so all
+    // cache layers (Blaxel content hash, S3 context.tar MD5, BuildKit COPY .)
+    // see a new directory fingerprint and are forced to rebuild from scratch.
+    const buster = cacheBusterEntry(options.noCache ?? false);
+    if (buster) {
+        console.log(chalk.yellow('🔄 --no-cache: injecting cache-buster, forcing a fresh build'));
+        archive.append(buster.content, { name: buster.name });
+    }
 
     await archive.finalize();
 }
