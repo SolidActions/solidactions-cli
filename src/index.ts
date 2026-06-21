@@ -185,9 +185,10 @@ project
 project
     .command('logs')
     .description('View build/deployment logs for a project')
-    .argument('<project>', 'Project name')
-    .action((projectName) => {
-        logsBuild(projectName);
+    .argument('<project>', 'Project name (or family name with -e)')
+    .option('-e, --environment <environment>', 'Environment to resolve (production/staging/dev)')
+    .action((projectName, options) => {
+        logsBuild(projectName, options.environment);
     });
 
 project
