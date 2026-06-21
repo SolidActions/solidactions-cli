@@ -80,7 +80,7 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         if (error.response) {
             // ambiguous_project is 422 — axios throws, so handle here
             if (error.response.status === 422 && error.response.data?.error === 'ambiguous_project') {
-                const envs = (error.response.data.environments as string[]).join(', ');
+                const envs = ((error.response.data.environments ?? []) as string[]).join(', ');
                 console.error(chalk.yellow(`Ambiguous project '${projectName}': found in environments: ${envs}.`));
                 console.error(chalk.yellow(`Pass -e <env> to disambiguate, e.g.: solidactions run list ${projectName} -e dev`));
             } else if (error.response.status === 401) {
