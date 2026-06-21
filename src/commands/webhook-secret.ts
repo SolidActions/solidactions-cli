@@ -37,7 +37,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
 
     const config = await requireConfigWithWorkspace();
 
-    const environment = options.env ?? 'production';
+    const environment = options.env || 'dev';
     const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     if (format === 'text') {

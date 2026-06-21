@@ -382,7 +382,7 @@ webhook
     .command('secret')
     .description('Print the webhook secret for a project (set this value in your sender)')
     .argument('<project>', 'Project name')
-    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'production')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)')
     .option('--workflow <name>', 'Filter to a specific workflow by name')
     .option('--format <format>', 'Output format: text or json', 'text')
     .action((projectName, options) => {
