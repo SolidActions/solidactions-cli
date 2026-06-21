@@ -421,6 +421,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             await pushYamlDeclarations(config, projectSlug, yamlConfig);
                         }
 
+                        if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
+                            console.log('');
+                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}\` to retrieve the generated secret.`));
+                            console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
+                        }
+
                         fs.unlinkSync(archivePath);
                         process.exit(0);
                     } else if (status === 'error') {
@@ -486,4 +492,21 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     archive.append(universalDockerfile, { name: 'Dockerfile' });
 
     await archive.finalize();
+}
+
+/**
+ * Returns true if any workflow in the project has a webhook trigger that
+ * uses HMAC or header authentication (i.e. requires a shared secret).
+ * Used to gate the post-deploy notice pointing authors to `webhook secret`.
+ */
+export function shouldPrintWebhookSecretNotice(
+    workflows: { trigger?: string; webhook?: { auth?: string } }[]
+): boolean {
+    return workflows.some(wf => {
+        if (wf.trigger !== 'webhook') {
+            return false;
+        }
+        const auth = wf.webhook?.auth ?? 'hmac';
+        return auth === 'hmac' || auth === 'header';
+    });
 }

@@ -17,7 +17,7 @@ export interface ParsedEnvVar {
 export interface SolidActionsConfig {
     /** Project name declared at the top of solidactions.yaml (e.g. "sdk-test"). */
     project?: string;
-    workflows: { id?: string; name: string; command?: string; file?: string; enabled?: boolean }[];
+    workflows: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
     env?: (string | { [key: string]: string | { oauth: string } })[];
     deploy?: {
         exclude?: string[];
