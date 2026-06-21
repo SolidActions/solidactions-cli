@@ -21,6 +21,7 @@ import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhook-list';
+import { webhookSecret } from './commands/webhook-secret';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
@@ -375,6 +376,17 @@ webhook
     .option('--format <format>', 'Output format: table or json', 'table')
     .action((projectName, options) => {
         webhookList(projectName, options);
+    });
+
+webhook
+    .command('secret')
+    .description('Print the webhook secret for a project (set this value in your sender)')
+    .argument('<project>', 'Project name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'production')
+    .option('--workflow <name>', 'Filter to a specific workflow by name')
+    .option('--format <format>', 'Output format: text or json', 'text')
+    .action((projectName, options) => {
+        webhookSecret(projectName, options);
     });
 
 // =============================================================================
