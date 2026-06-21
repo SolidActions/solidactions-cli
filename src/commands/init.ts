@@ -79,9 +79,10 @@ export async function init(directory: string | undefined, options: InitOptions =
         if (directory) {
             console.log(chalk.gray(`  cd ${directory}`));
         }
-        console.log(chalk.gray(`  # Fill in WEBHOOK_SECRET and any other env vars in solidactions.yaml:`));
-        console.log(chalk.gray(`  solidactions env set ${projectName} WEBHOOK_SECRET <your-secret> -e production`));
         console.log(chalk.gray(`  solidactions project deploy ${projectName} -e production`));
+        console.log(chalk.gray(`  # If your workflow uses a webhook, retrieve its auto-generated secret`));
+        console.log(chalk.gray(`  # and set that value in your sender (e.g. Telegram secret_token):`));
+        console.log(chalk.gray(`  solidactions webhook secret ${projectName} -e production`));
     } catch (err: any) {
         if (err.message?.includes('rate limit')) {
             console.error(chalk.red(err.message));

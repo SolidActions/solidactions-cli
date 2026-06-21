@@ -6,8 +6,10 @@
  * Matches the pattern used in proxy-contract.test.ts (Task 5.1).
  */
 
+import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
+import * as childProcess from 'child_process';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { runDev, type SaApiClient, type PlatformVar } from '../src/commands/dev';
 
@@ -165,4 +167,56 @@ describe('runDev', () => {
         expect(out.result.status).not.toBe('completed');
         expect(out.result.status).toBe('failed');
     }, 20_000);
+});
+
+// ---------------------------------------------------------------------------
+// Multi-file NodeNext fixture — .js-extension relative imports
+// ---------------------------------------------------------------------------
+
+const MULTI_FILE_FIXTURE = path.resolve(__dirname, '../fixtures/multi-file/entry.ts');
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+describe('solidactions dev — multi-file NodeNext project', () => {
+    beforeAll(() => {
+        if (!fs.existsSync(CLI_BINARY)) {
+            throw new Error(
+                `CLI not built — run \`npm run build\` first (expected: ${CLI_BINARY})`,
+            );
+        }
+    });
+
+    it('resolves .js-extension imports, exits 0, and prints correct output', () => {
+        // Spawn the built CLI binary under plain `node` (NOT tsx) to exercise the
+        // real code path. The bug manifests because hasTsLoader() returns true due
+        // to Boolean(process._preload_modules) being truthy for an empty array,
+        // so the re-exec under tsx is skipped and runDev() runs in-process in a
+        // plain CJS node process. When it calls await import(entry.ts), Node.js
+        // uses native ESM (because the fixture has "type":"module") and cannot
+        // remap the .js extension import to the real double.ts file.
+        //
+        // Spawning with `npx tsx` would mask the bug (tsx ESM loader remaps .js).
+        const result = childProcess.spawnSync(
+            process.execPath,
+            [CLI_BINARY, 'dev', MULTI_FILE_FIXTURE, '--input', '{"n":3}'],
+            {
+                encoding: 'utf8',
+                env: { ...process.env },
+                timeout: 30_000,
+            },
+        );
+
+        // Must NOT contain the module-resolution error.
+        expect(result.stderr ?? '').not.toMatch(/Cannot find module/);
+        expect(result.stderr ?? '').not.toMatch(/MODULE_NOT_FOUND/);
+
+        // Must exit 0 (workflow completed).
+        expect(result.status).toBe(0);
+
+        // Must print the completion line.
+        expect(result.stdout ?? '').toMatch(/completed/);
+
+        // Must print the correct output: double(3) = 6.
+        // The CLI prints: Output: <json>
+        expect(result.stdout ?? '').toMatch(/Output:.*6/);
+    }, 35_000);
 });

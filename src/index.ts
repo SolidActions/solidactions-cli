@@ -21,6 +21,7 @@ import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
 import { webhookList } from './commands/webhook-list';
+import { webhookSecret } from './commands/webhook-secret';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
@@ -168,8 +169,13 @@ project
     .option('-e, --env <environment>', 'Target environment (production/staging/dev). Required on first deploy of a new project.')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
+    .option('--no-cache', 'Force a fresh build, bypassing all build caches')
+    .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .action((projectName, path, options) => {
-        deploy(projectName, path, options);
+        // Commander's negation convention maps --no-cache to options.cache === false
+        // (NOT options.noCache). Normalize both flags to a single boolean.
+        const noCache = options.cache === false || options.forceRebuild === true;
+        deploy(projectName, path, { ...options, noCache });
     });
 
 project
@@ -185,9 +191,10 @@ project
 project
     .command('logs')
     .description('View build/deployment logs for a project')
-    .argument('<project>', 'Project name')
-    .action((projectName) => {
-        logsBuild(projectName);
+    .argument('<project>', 'Project name (or family name with -e)')
+    .option('-e, --environment <environment>', 'Environment to resolve (production/staging/dev)')
+    .action((projectName, options) => {
+        logsBuild(projectName, options.environment);
     });
 
 project
@@ -227,6 +234,7 @@ runCmd
     .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
     .option('--has-errors', 'Show only runs with errors (step errors, retries, or degraded results)')
     .option('--json', 'Output as JSON')
+    .option('-e, --environment <environment>', 'Environment to filter by (production/staging/dev)')
     .action((projectName, options) => {
         runs(projectName, options);
     });
@@ -373,6 +381,17 @@ webhook
     .option('--format <format>', 'Output format: table or json', 'table')
     .action((projectName, options) => {
         webhookList(projectName, options);
+    });
+
+webhook
+    .command('secret')
+    .description('Print the webhook secret for a project (set this value in your sender)')
+    .argument('<project>', 'Project name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev)')
+    .option('--workflow <name>', 'Filter to a specific workflow by name')
+    .option('--format <format>', 'Output format: text or json', 'text')
+    .action((projectName, options) => {
+        webhookSecret(projectName, options);
     });
 
 // =============================================================================

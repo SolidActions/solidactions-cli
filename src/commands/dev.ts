@@ -1,6 +1,7 @@
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
@@ -48,6 +49,35 @@ export interface RunDevResult {
     stderr: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     result: any; // InvokeResult from @solidactions/sdk
+}
+
+/**
+ * Context passed to dev-shim.mjs via SOLIDACTIONS_DEV_SHIM_CONTEXT env var
+ * as a JSON string. Every field must be JSON-serialisable.
+ */
+export interface DevShimContext {
+    /** Absolute path to the user's workflow entry file (.ts). */
+    entryPath: string;
+    /** JSON-serialised workflow input (e.g. '{"n":2}'). */
+    input: string;
+    /** ctx.vars built from platform vars + overrides. */
+    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>;
+    /** baseUrl of the mock server started by the parent. */
+    mockBaseUrl: string;
+    /** API key for the mock server. */
+    mockApiKey: string;
+    /** Pre-generated run UUID. */
+    runUuid: string;
+    /** workerSessionId for ctx.run. */
+    workerSessionId: string;
+    /** Path to the private temp file the shim writes its result JSON to. */
+    resultPath: string;
+}
+
+/** Result the shim writes to the result temp file. */
+export interface DevShimResult {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    result: any;
 }
 
 export interface RunDevOptions {
@@ -117,6 +147,140 @@ function findSolidActionsRoot(startPath: string): string | null {
         dir = parent;
     }
     return null;
+}
+
+/**
+ * Run the user workflow entry by spawning `npx tsx dist/commands/dev-shim.mjs`.
+ *
+ * WHY THE CHILD PROCESS (not in-process import):
+ *   The CLI tsconfig compiles "module": "commonjs", so tsc rewrites await import(x)
+ *   to require(x) in every .ts file it compiles. tsx's CJS hook does NOT remap
+ *   .js→.ts in require() calls. A hand-written .mjs shim bypasses tsc entirely,
+ *   so its import() stays a real ESM dynamic import. When tsx loads .mjs, it uses
+ *   the ESM loader, which DOES remap .js→.ts for all transitive imports.
+ *
+ * SECRETS: context is passed as a JSON env var — OAuth proxyToken values never
+ * touch disk. The result uses a private temp file (mode 0o600, UUID name).
+ */
+async function runDevViaShim(
+    entryPath: string,
+    input: string,
+    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>,
+    mockBaseUrl: string,
+    runUuid: string,
+    workerSessionId: string,
+    stdoutLines: string[],
+    stderrLines: string[],
+): Promise<{ result: any }> {
+    const shimPath = path.resolve(__dirname, 'dev-shim.mjs');
+
+    // Private temp file for the result (mode 0o600, UUID name).
+    const resultPath = path.join(os.tmpdir(), `sa-dev-result-${runUuid}-${randomUUID()}.json`);
+
+    // Write placeholder so the shim can overwrite it.
+    fs.writeFileSync(resultPath, '', { mode: 0o600 });
+
+    const shimCtx: DevShimContext = {
+        entryPath,
+        input,
+        vars,
+        mockBaseUrl,
+        mockApiKey: 'local-dev',
+        runUuid,
+        workerSessionId,
+        resultPath,
+    };
+
+    try {
+        // Use async spawn (NOT spawnSync): the SDK mock backend runs in THIS
+        // process's event loop, and the shim makes HTTP calls back to it
+        // (run-row creation, step/sleep/recv routes). spawnSync would block the
+        // parent's event loop, deadlocking the mock server — so we await an
+        // async child and pump its stdout/stderr while the loop stays live.
+        let timedOut = false;
+        const spawnError = await new Promise<NodeJS.ErrnoException | undefined>((resolve) => {
+            const child = spawn(
+                'npx',
+                ['tsx', shimPath],
+                {
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    env: {
+                        ...process.env,
+                        SOLIDACTIONS_DEV_SHIM_CONTEXT: JSON.stringify(shimCtx),
+                    },
+                },
+            );
+
+            let stdoutBuf = '';
+            let stderrBuf = '';
+            child.stdout.setEncoding('utf8');
+            child.stderr.setEncoding('utf8');
+            child.stdout.on('data', (chunk: string) => { stdoutBuf += chunk; });
+            child.stderr.on('data', (chunk: string) => { stderrBuf += chunk; });
+
+            const timer = setTimeout(() => {
+                timedOut = true;
+                child.kill('SIGKILL');
+            }, 120_000);
+
+            child.on('error', (e: NodeJS.ErrnoException) => {
+                clearTimeout(timer);
+                if (stdoutBuf.trim()) { stdoutLines.push(stdoutBuf.trimEnd()); }
+                if (stderrBuf.trim()) { stderrLines.push(stderrBuf.trimEnd()); }
+                resolve(e);
+            });
+
+            child.on('close', () => {
+                clearTimeout(timer);
+                if (stdoutBuf.trim()) { stdoutLines.push(stdoutBuf.trimEnd()); }
+                if (stderrBuf.trim()) { stderrLines.push(stderrBuf.trimEnd()); }
+                resolve(undefined);
+            });
+        });
+
+        if (spawnError) {
+            const code = spawnError.code;
+            const msg = code === 'ENOENT'
+                ? 'npx not found. Make sure Node.js is installed.'
+                : `Failed to spawn tsx shim: ${spawnError.message}`;
+            return {
+                result: { status: 'failed', error: { message: msg, name: 'Error' }, phase: 'run' },
+            };
+        }
+
+        let resultContent = '';
+        try {
+            resultContent = fs.readFileSync(resultPath, 'utf8');
+        } catch {
+            // shim crashed before writing — stderr already captured above
+            return {
+                result: {
+                    status: 'failed',
+                    error: { message: 'dev-shim did not write a result file (check stderr above)', name: 'Error' },
+                    phase: 'run',
+                },
+            };
+        }
+
+        if (!resultContent.trim()) {
+            const msg = timedOut
+                ? 'dev-shim timed out after 120s'
+                : 'dev-shim wrote an empty result file (check stderr above)';
+            return {
+                result: {
+                    status: 'failed',
+                    error: { message: msg, name: 'Error' },
+                    phase: 'run',
+                },
+            };
+        }
+
+        const shimResult: DevShimResult = JSON.parse(resultContent);
+        return { result: shimResult.result };
+    } finally {
+        // Clean up result temp file on all exit paths.
+        try { fs.unlinkSync(resultPath); } catch { /* ignore */ }
+    }
 }
 
 /**
@@ -245,8 +409,45 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
 
     const mockServer = await createMockServer();
 
+    // Pre-generate run IDs so they can be passed to the shim (for .ts entries)
+    // or used in-process (for .js/.mjs entries).
+    const runUuid = randomUUID();
+    const workerSessionId = randomUUID();
+
     try {
-        // 7. Import the workflow entry file. Prefer the module's default export
+        // 7. Load and invoke the workflow.
+        //
+        // For .ts entries: spawn `npx tsx dist/commands/dev-shim.mjs`. The .mjs shim
+        // is NOT compiled by tsc, so its import() stays a real ESM dynamic import.
+        // tsx's ESM loader remaps .js-extension imports to .ts files, fixing the
+        // Cannot-find-module bug on multi-file NodeNext projects.
+        //
+        // The shim creates the run-row (it has the descriptor name) and invokes.
+        // stdio: pipe — child stdout/stderr are captured into stdoutLines/stderrLines.
+        //
+        // For .js/.mjs entries: original in-process import path (no change).
+        const isTs = /\.(ts|tsx|mts|cts)$/.test(entryPath);
+
+        if (isTs) {
+            const shimInvokeResult = await runDevViaShim(
+                entryPath,
+                opts.input,
+                vars,
+                mockServer.baseUrl,
+                runUuid,
+                workerSessionId,
+                stdoutLines,
+                stderrLines,
+            );
+            return {
+                stdout: stdoutLines.join('\n'),
+                stderr: stderrLines.join('\n'),
+                result: shimInvokeResult.result,
+            };
+        }
+
+        // JS/MJS path: in-process import (original behaviour, no change).
+        // 8. Import the workflow entry file. Prefer the module's default export
         //    (a WorkflowDescriptor returned by defineWorkflow) so that repeated
         //    runDev() calls in the same test process don't need to clear and
         //    re-register from a cached module (cached CJS modules don't re-run
@@ -277,8 +478,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             };
         }
 
-        // 8. Build InvokeCtx.
-        const runUuid = randomUUID();
+        // 9. Build InvokeCtx.
         const ctx = {
             input: JSON.parse(opts.input || '{}'),
             vars: Object.freeze(vars),
@@ -286,7 +486,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
                 triggerId: 'local-dev',
                 runUuid,
                 runSecret: 'local-dev',
-                workerSessionId: randomUUID(),
+                workerSessionId,
             },
             app: {
                 appVersion: '0',
@@ -300,7 +500,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             mode: 'local' as const,
         };
 
-        // 9. Create the run-row BEFORE invoking. invoke() itself never creates
+        // 10. Create the run-row BEFORE invoking. invoke() itself never creates
         //    the durable run record — the production launcher (SolidActions.run
         //    → #initOneShotStatusRow) does that first, and step/sleep/recv
         //    sub-routes (`/runs/status/<id>/...`) 404 ("Workflow not found")
@@ -338,7 +538,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             err(`failed to create local run-row: ${e?.message ?? e}`);
         }
 
-        // 10. Invoke via internal SDK path (invoke() is not in the public index).
+        // 11. Invoke via internal SDK path (invoke() is not in the public index).
         const invokePath = path.resolve(sdkMainForInvoke, '..', 'invoke', 'invoke.js');
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { invoke } = _require(invokePath) as { invoke: (wf: any, ctx: any) => Promise<any> };
@@ -369,13 +569,25 @@ const TSX_REEXEC_GUARD = 'SOLIDACTIONS_DEV_TSX_REEXEC';
  * Detect whether the current Node process already has a TypeScript loader
  * registered (tsx / ts-node). When true, `await import('<file>.ts')` works
  * in-process and we can run `runDev` directly without re-exec.
+ *
+ * NOTE: Boolean(process._preload_modules) is intentionally NOT used here —
+ * an empty array is truthy, causing a false positive that always skips the
+ * re-exec path even when no TypeScript loader is active.
  */
 function hasTsLoader(): boolean {
     if (process.env[TSX_REEXEC_GUARD] === '1') {
         return true;
     }
     const execArgv = process.execArgv.join(' ');
-    return /tsx|ts-node/.test(execArgv) || Boolean((process as { _preload_modules?: unknown })._preload_modules);
+    if (/tsx|ts-node/.test(execArgv)) {
+        return true;
+    }
+    // Check _preload_modules for tsx/ts-node entries (non-empty array check).
+    const preload = (process as { _preload_modules?: unknown[] })._preload_modules;
+    if (Array.isArray(preload) && preload.length > 0) {
+        return preload.some((m) => typeof m === 'string' && /tsx|ts-node/i.test(m));
+    }
+    return false;
 }
 
 /**

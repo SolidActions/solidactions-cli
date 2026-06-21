@@ -1,6 +1,6 @@
 {
   "name": "@solidactions/cli",
-  "version": "1.20.0",
+  "version": "1.21.0",
   "description": "SolidActions CLI - Deploy and manage workflow automation",
   "main": "dist/index.js",
   "bin": {
@@ -32,7 +32,7 @@
     "deploy"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"

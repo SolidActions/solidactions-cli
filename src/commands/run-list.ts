@@ -11,25 +11,36 @@ interface RunListOptions {
     detailed?: boolean;
     hasErrors?: boolean;
     json?: boolean;
+    environment?: string;
+}
+
+/**
+ * Build the params object for GET /api/v1/runs.
+ * Extracted as a pure function so it can be unit-tested without mocking axios.
+ */
+export function buildRunListParams(projectName?: string, options: RunListOptions = {}): Record<string, any> {
+    const defaultLimit = options.detailed ? 5 : 20;
+    const limit = options.limit || defaultLimit;
+
+    const params: Record<string, any> = { limit };
+
+    if (projectName) params.project = projectName;
+    if (options.environment) params.environment = options.environment;
+    if (options.offset) params.offset = options.offset;
+    if (options.status) params.status = options.status;
+    if (options.since) params.since = parseSince(options.since);
+    if (options.workflow) params.workflow = options.workflow;
+    if (options.detailed) params.detailed = '1';
+    if (options.hasErrors) params.has_errors = '1';
+
+    return params;
 }
 
 export async function runs(projectName?: string, options: RunListOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
-    // Default limit is lower for --detailed (more data per run)
-    const defaultLimit = options.detailed ? 5 : 20;
-    const limit = options.limit || defaultLimit;
-
     try {
-        const params: Record<string, any> = { limit };
-
-        if (projectName) params.project = projectName;
-        if (options.offset) params.offset = options.offset;
-        if (options.status) params.status = options.status;
-        if (options.since) params.since = parseSince(options.since);
-        if (options.workflow) params.workflow = options.workflow;
-        if (options.detailed) params.detailed = '1';
-        if (options.hasErrors) params.has_errors = '1';
+        const params = buildRunListParams(projectName, options);
 
         const response = await axios.get(`${config.host}/api/v1/runs`, {
             headers: getApiHeaders(config),
@@ -37,6 +48,13 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         });
 
         const runsList = response.data.data || response.data;
+
+        // Check server-side error fields FIRST (project_not_found comes back as 200 with data:[])
+        const serverError = response.data.error;
+        if (serverError === 'project_not_found') {
+            console.error(chalk.red(response.data.message || `Project '${projectName}' not found.`));
+            process.exit(1);
+        }
 
         if (!runsList || runsList.length === 0) {
             if (options.json) {
@@ -60,7 +78,12 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         }
     } catch (error: any) {
         if (error.response) {
-            if (error.response.status === 401) {
+            // ambiguous_project is 422 — axios throws, so handle here
+            if (error.response.status === 422 && error.response.data?.error === 'ambiguous_project') {
+                const envs = ((error.response.data.environments ?? []) as string[]).join(', ');
+                console.error(chalk.yellow(`Ambiguous project '${projectName}': found in environments: ${envs}.`));
+                console.error(chalk.yellow(`Pass -e <env> to disambiguate, e.g.: solidactions run list ${projectName} -e dev`));
+            } else if (error.response.status === 401) {
                 console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
