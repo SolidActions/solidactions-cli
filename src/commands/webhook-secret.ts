@@ -40,6 +40,12 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
     const environment = options.env ?? 'production';
     const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
+    if (format === 'text') {
+        process.stderr.write(
+            chalk.dim(`(environment: ${environment} — pass -e <env> to change)\n`)
+        );
+    }
+
     try {
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/webhooks`, {
             headers: getApiHeaders(config),
