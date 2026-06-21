@@ -227,6 +227,7 @@ runCmd
     .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
     .option('--has-errors', 'Show only runs with errors (step errors, retries, or degraded results)')
     .option('--json', 'Output as JSON')
+    .option('-e, --environment <environment>', 'Environment to filter by (production/staging/dev)')
     .action((projectName, options) => {
         runs(projectName, options);
     });
