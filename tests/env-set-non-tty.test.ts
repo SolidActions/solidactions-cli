@@ -59,16 +59,10 @@ describe('envSet non-TTY fast-fail', () => {
                 throw new Error('unexpected GET: ' + url);
             };
 
-            let thrownFromExit = false;
             try {
                 await envSet('my-project', 'MY_KEY', 'new-value', { yes: false, env: 'dev' });
-            } catch (err: any) {
-                // The guard calls process.exit(1) which throws from our mock
-                if (err.message.includes('process.exit')) {
-                    thrownFromExit = true;
-                }
-                // The catch block in envSet also catches this and calls process.exit(1) again,
-                // so the outer try-catch may re-throw. Any path that sets exitCode to 1 is correct.
+            } catch {
+                // process.exit mock throws; any path that sets exitCode to 1 is correct.
             }
 
             expect(exitCode).toBe(1);

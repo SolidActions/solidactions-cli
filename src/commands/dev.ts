@@ -197,6 +197,7 @@ async function runDevViaShim(
         // (run-row creation, step/sleep/recv routes). spawnSync would block the
         // parent's event loop, deadlocking the mock server — so we await an
         // async child and pump its stdout/stderr while the loop stays live.
+        let timedOut = false;
         const spawnError = await new Promise<NodeJS.ErrnoException | undefined>((resolve) => {
             const child = spawn(
                 'npx',
@@ -218,6 +219,7 @@ async function runDevViaShim(
             child.stderr.on('data', (chunk: string) => { stderrBuf += chunk; });
 
             const timer = setTimeout(() => {
+                timedOut = true;
                 child.kill('SIGKILL');
             }, 120_000);
 
@@ -261,10 +263,13 @@ async function runDevViaShim(
         }
 
         if (!resultContent.trim()) {
+            const msg = timedOut
+                ? 'dev-shim timed out after 120s'
+                : 'dev-shim wrote an empty result file (check stderr above)';
             return {
                 result: {
                     status: 'failed',
-                    error: { message: 'dev-shim wrote an empty result file (check stderr above)', name: 'Error' },
+                    error: { message: msg, name: 'Error' },
                     phase: 'run',
                 },
             };

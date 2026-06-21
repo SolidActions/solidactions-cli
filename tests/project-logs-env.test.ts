@@ -14,11 +14,11 @@ describe('buildBuildLogUrl', () => {
 
 describe('buildBuildLogParams', () => {
     it('returns name+environment params when environment provided', () => {
-        const { url, params } = buildBuildLogRequest('http://localhost:8001', 'my-flow', 'dev');
+        const { params } = buildBuildLogRequest('http://localhost:8001', 'my-flow', 'dev');
         expect(params).toEqual({ name: 'my-flow', environment: 'dev' });
     });
     it('returns no params when slug route is used', () => {
-        const { url, params } = buildBuildLogRequest('http://localhost:8001', 'my-flow-dev', undefined);
+        const { params } = buildBuildLogRequest('http://localhost:8001', 'my-flow-dev', undefined);
         expect(params).toBeUndefined();
     });
 });

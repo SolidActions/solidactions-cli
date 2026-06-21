@@ -422,8 +422,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         }
 
                         if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
+                            const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
                             console.log('');
-                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}\` to retrieve the generated secret.`));
+                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}${envFlag}\` to retrieve the generated secret.`));
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                         }
 
