@@ -6,6 +6,7 @@
  * Matches the pattern used in proxy-contract.test.ts (Task 5.1).
  */
 
+import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
 import * as childProcess from 'child_process';
@@ -176,6 +177,14 @@ const MULTI_FILE_FIXTURE = path.resolve(__dirname, '../fixtures/multi-file/entry
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 
 describe('solidactions dev — multi-file NodeNext project', () => {
+    beforeAll(() => {
+        if (!fs.existsSync(CLI_BINARY)) {
+            throw new Error(
+                `CLI not built — run \`npm run build\` first (expected: ${CLI_BINARY})`,
+            );
+        }
+    });
+
     it('resolves .js-extension imports, exits 0, and prints correct output', () => {
         // Spawn the built CLI binary under plain `node` (NOT tsx) to exercise the
         // real code path. The bug manifests because hasTsLoader() returns true due
