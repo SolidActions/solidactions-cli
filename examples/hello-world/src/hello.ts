@@ -1,19 +1,20 @@
-import { SolidActions } from "@solidactions/sdk";
+import { SolidActions, defineWorkflow } from "@solidactions/sdk";
 
-async function greet() {
+async function greet(): Promise<{ message: string }> {
   SolidActions.logger.info("Hello from SolidActions!");
   return { message: "Hello, world!" };
 }
 
-async function farewell() {
+async function farewell(): Promise<{ message: string }> {
   SolidActions.logger.info("Goodbye from SolidActions!");
   return { message: "Goodbye!" };
 }
 
-async function helloWorkflow() {
-  const greeting = await SolidActions.runStep(() => greet());
-  const goodbye = await SolidActions.runStep(() => farewell());
-  return { greeting, goodbye };
-}
-
-export default SolidActions.registerWorkflow(helloWorkflow);
+export default defineWorkflow({
+  name: "hello",
+  async run(ctx) {
+    const greeting = await SolidActions.runStep(() => greet(), { name: "greet" });
+    const goodbye = await SolidActions.runStep(() => farewell(), { name: "farewell" });
+    return { greeting, goodbye };
+  },
+});
