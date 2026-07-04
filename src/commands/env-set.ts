@@ -2,11 +2,20 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
 export function isNonTty(): boolean {
     return !process.stdin.isTTY;
 }
+
+/** Printed before a 2-arg (global-scope) write — Jordan's runs 3-7 footgun. */
+export const GLOBAL_ENV_SCOPE_NOTE = [
+    'Note: no project specified — creating a GLOBAL variable.',
+    "  Global variables are NOT visible to a project's plain `env:` YAML declarations",
+    '  unless you map them (`solidactions env map …`).',
+    '  For a project variable, use: solidactions env set <project> KEY value',
+].join('\n');
 
 interface EnvSetOptions {
     secret?: boolean;
@@ -30,6 +39,12 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         const projectName = keyOrProject;
         const key = valueOrKey!;
         const value = valueIfProject;
+
+        if (isReservedEnvName(key)) {
+            console.error(chalk.red(reservedEnvNameError(key)));
+            process.exit(1);
+        }
+
         const environment = options.env || 'dev';
 
         // Build project slug
@@ -110,6 +125,14 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         // Global mode: solidactions env set <key> <value>
         const key = keyOrProject;
         const value = valueOrKey!;
+
+        if (isReservedEnvName(key)) {
+            console.error(chalk.red(reservedEnvNameError(key)));
+            process.exit(1);
+        }
+
+        console.log(chalk.yellow(GLOBAL_ENV_SCOPE_NOTE));
+
         const isSecret = options.secret || false;
 
         // Build the request body with per-environment values

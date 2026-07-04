@@ -20,13 +20,14 @@ export async function scheduleList(projectName: string) {
         }
 
         console.log('');
-        console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'CRON'.padEnd(18) + 'ENABLED'.padEnd(10) + 'NEXT RUN'));
-        console.log(chalk.gray('-'.repeat(95)));
+        console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'CRON'.padEnd(18) + 'TIMEZONE'.padEnd(20) + 'ENABLED'.padEnd(10) + 'NEXT RUN'));
+        console.log(chalk.gray('-'.repeat(105)));
 
         for (const schedule of schedules) {
             const id = schedule.id?.toString() || '?';
             const workflow = schedule.workflow_name || schedule.workflow_slug || '?';
             const cron = schedule.cron_expression || '?';
+            const timezone = schedule.timezone || 'UTC';
             const enabled = schedule.enabled;
             const nextRun = schedule.next_run_at ? formatRelativeTime(schedule.next_run_at) : '-';
 
@@ -36,6 +37,7 @@ export async function scheduleList(projectName: string) {
                 chalk.gray(id.padEnd(8)) +
                 workflow.padEnd(25) +
                 chalk.cyan(cron.padEnd(18)) +
+                chalk.gray(timezone.padEnd(20)) +
                 enabledColor((enabled ? 'yes' : 'no').padEnd(10)) +
                 chalk.gray(nextRun)
             );

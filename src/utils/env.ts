@@ -119,3 +119,22 @@ export function loadSolidActionsConfig(yamlPath: string): SolidActionsConfig {
     const content = fs.readFileSync(yamlPath, 'utf8');
     return yaml.load(content) as SolidActionsConfig;
 }
+
+/**
+ * Reserved runtime env-name prefix. SOLIDACTIONS_* names are set by the
+ * platform at dispatch time (SOLIDACTIONS_API_KEY, SOLIDACTIONS_API_URL, run
+ * context); a custom variable with such a name clobbers the platform
+ * credential — the field failure mode is a bare 401 out of
+ * InvokeSystemDatabase.init before any workflow code runs. Case-sensitive,
+ * matching the server-side rule (App\Support\ReservedEnvNames).
+ */
+export const RESERVED_ENV_PREFIX = 'SOLIDACTIONS_';
+
+export function isReservedEnvName(key: string): boolean {
+    return key.startsWith(RESERVED_ENV_PREFIX);
+}
+
+export function reservedEnvNameError(key: string): string {
+    const suggestion = key.replace(/^SOLIDACTIONS_/, 'MY_');
+    return `"${key}" uses the reserved ${RESERVED_ENV_PREFIX} prefix. These names are set by the platform at runtime (API credentials, run context) and a custom variable would clobber them, causing authentication failures. Choose a different name (e.g. "${suggestion}").`;
+}
