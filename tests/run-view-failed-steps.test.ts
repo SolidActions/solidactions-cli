@@ -25,6 +25,13 @@ const legacyPayload = {
         { steps: [{ name: 'legacy-step', started_at: '2026-07-01T00:00:00Z', completed_at: '2026-07-01T00:00:01Z', duration_ms: 1000, output: null }] },
     ],
 };
+// Stack-trace-style error: a newline lands well within the ~37-char truncation window.
+const MULTILINE_ERROR = 'Error: boom\n    at fetchData (/app/src/fetch.ts:42:11)\n    at process (/app/src/process.ts:10:3)';
+const multilineErrorPayload = {
+    workers: [
+        { steps: [{ name: 'fetch-data', started_at: '2026-07-01T00:00:01Z', completed_at: '2026-07-01T00:00:03Z', duration_ms: 2000, output: null, status: 'failed', error: MULTILINE_ERROR }] },
+    ],
+};
 
 describe('flattenSteps', () => {
     it('carries the server status and error through', () => {
@@ -81,5 +88,20 @@ describe('displayStepsTable', () => {
         expect(table).toContain('completed');
         expect(table).not.toContain('failed:');
         expect(lines.some((l) => l.includes('TypeError'))).toBe(false);
+    });
+
+    it('collapses a multiline stack-trace error to a single-line truncated table cell, while the block below the table keeps the real newlines', () => {
+        displayStepsTable(flattenSteps(multilineErrorPayload.workers));
+
+        // The table row itself: no raw newline, so column alignment for subsequent rows can't break.
+        const rowLine = lines.find((l) => l.includes('fetch-data'));
+        expect(rowLine).toBeDefined();
+        expect(rowLine).not.toContain('\n');
+
+        // The untruncated block below the table preserves the real multiline text
+        // (search for text past the table row's truncation point, so this only matches the full block).
+        const fullBlockLine = lines.find((l) => l.includes('process.ts:10:3'));
+        expect(fullBlockLine).toBeDefined();
+        expect(fullBlockLine).toContain('\n');
     });
 });

@@ -225,7 +225,7 @@ export function displayStepsTable(steps: any[], indent: string = '  ') {
         const duration = formatDuration(step.durationMs);
         // A failed step's error is more useful than its (null) output — show it, red.
         const output = step.error
-            ? chalk.red(truncate(String(step.error), 40))
+            ? chalk.red(truncate(String(step.error).replace(/\s+/g, ' ').trim(), 40))
             : chalk.gray(step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-');
 
         console.log(
