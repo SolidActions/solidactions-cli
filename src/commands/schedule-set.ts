@@ -3,7 +3,30 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; yes?: boolean }) {
+export function buildSchedulePayload(
+    cron: string,
+    options: { workflow?: string; input?: string; timezone?: string },
+    inputData?: Record<string, any>,
+): Record<string, any> {
+    const payload: Record<string, any> = { cron };
+    if (options.workflow) {
+        payload.workflow = options.workflow;
+    }
+    if (inputData) {
+        payload.input = inputData;
+    }
+    if (options.timezone) {
+        payload.timezone = options.timezone;
+    }
+    return payload;
+}
+
+/** True when the user asked for a timezone the server did not apply (pre-item-5-App server). */
+export function timezoneMismatch(requested: string | undefined, returned: string | undefined): boolean {
+    return requested !== undefined && returned !== requested;
+}
+
+export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; timezone?: string; yes?: boolean }) {
     const config = await requireConfigWithWorkspace();
 
     // Parse input JSON if provided
@@ -64,24 +87,26 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
     try {
-        const payload: Record<string, any> = {
-            cron,
-        };
+        const payload = buildSchedulePayload(cron, options, inputData);
 
-        if (options.workflow) {
-            payload.workflow = options.workflow;
-        }
-
-        if (inputData) {
-            payload.input = inputData;
-        }
-
-        await axios.post(`${config.host}/api/v1/projects/${projectName}/schedules`, payload, {
+        const response = await axios.post(`${config.host}/api/v1/projects/${projectName}/schedules`, payload, {
             headers: getApiHeaders(config, 'application/json'),
         });
 
+        // Verify, don't trust: a server predating timezone support silently
+        // strips the field and runs the schedule in UTC. Fail loudly instead.
+        const returnedTz: string | undefined = response.data?.schedule?.timezone;
+        if (timezoneMismatch(options.timezone, returnedTz)) {
+            console.error(chalk.red(`Server did not apply the requested timezone: sent "${options.timezone}", got "${returnedTz ?? 'none'}".`));
+            console.error(chalk.red('The schedule would silently run in UTC. This server likely predates --timezone support — upgrade it, or omit --timezone.'));
+            process.exit(1);
+        }
+
         console.log(chalk.green(`Schedule set successfully!`));
         console.log(chalk.gray(`  Cron: ${cron}`));
+        if (options.timezone) {
+            console.log(chalk.gray(`  Timezone: ${options.timezone}`));
+        }
         if (options.workflow) {
             console.log(chalk.gray(`  Workflow: ${options.workflow}`));
         }

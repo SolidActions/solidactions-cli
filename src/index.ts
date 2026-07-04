@@ -343,6 +343,7 @@ schedule
     .argument('<cron>', 'Cron expression (e.g., "0 9 * * *" for daily at 9am)')
     .option('-w, --workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
+    .option('-z, --timezone <iana>', 'IANA timezone the cron is evaluated in (e.g. America/Chicago); defaults to UTC')
     .option('-y, --yes', 'Skip confirmation if schedule already exists')
     .action((projectName, cron, options) => {
         scheduleSet(projectName, cron, options);
