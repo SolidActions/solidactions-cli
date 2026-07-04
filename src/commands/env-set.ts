@@ -9,6 +9,14 @@ export function isNonTty(): boolean {
     return !process.stdin.isTTY;
 }
 
+/** Printed before a 2-arg (global-scope) write — Jordan's runs 3-7 footgun. */
+export const GLOBAL_ENV_SCOPE_NOTE = [
+    'Note: no project specified — creating a GLOBAL variable.',
+    "  Global variables are NOT visible to a project's plain `env:` YAML declarations",
+    '  unless you map them (`solidactions env map …`).',
+    '  For a project variable, use: solidactions env set <project> KEY value',
+].join('\n');
+
 interface EnvSetOptions {
     secret?: boolean;
     env?: string;
@@ -122,6 +130,8 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
             console.error(chalk.red(reservedEnvNameError(key)));
             process.exit(1);
         }
+
+        console.log(chalk.yellow(GLOBAL_ENV_SCOPE_NOTE));
 
         const isSecret = options.secret || false;
 
