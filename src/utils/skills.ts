@@ -61,3 +61,22 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
 export async function fetchAiHelperContent(targetFile: AiHelperTarget): Promise<string> {
     return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile);
 }
+
+/**
+ * True when the project dir already has SolidActions skill files installed
+ * (either AI-helper convention). Used by `deploy` for a non-blocking tip —
+ * these files are how AI assistants self-rescue on env-scope/deploy traps.
+ */
+export function hasSolidActionsSkills(projectDir: string): boolean {
+    for (const target of ['CLAUDE.md', 'AGENTS.md'] as AiHelperTarget[]) {
+        const dir = skillTargetDir(target, projectDir);
+        if (!fs.existsSync(dir)) {
+            continue;
+        }
+        const entries = fs.readdirSync(dir);
+        if (entries.some((f) => f.startsWith('solidactions-') && f.endsWith('.md'))) {
+            return true;
+        }
+    }
+    return false;
+}

@@ -10,6 +10,7 @@ import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
+import { hasSolidActionsSkills } from '../utils/skills';
 
 /**
  * Validate project structure before deployment.
@@ -187,6 +188,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     if (!fs.existsSync(sourceDir)) {
         console.error(chalk.red(`Source directory not found: ${sourceDir}`));
         process.exit(1);
+    }
+
+    // Non-blocking: AI assistants work measurably better with the skill files
+    // (field report: a 600-line skill file cracked the env-scope bug).
+    if (!hasSolidActionsSkills(sourceDir)) {
+        console.log(chalk.yellow('Tip: no SolidActions skill files found (.claude/skills/solidactions-*). Your AI assistant'));
+        console.log(chalk.yellow('works much better with them — run `solidactions init --claude` in this directory, or'));
+        console.log(chalk.yellow('`solidactions skill push`.'));
     }
 
     // -------------------------------------------------------------------------
