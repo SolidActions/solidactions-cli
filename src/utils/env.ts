@@ -138,9 +138,3 @@ export function reservedEnvNameError(key: string): string {
     const suggestion = key.replace(/^SOLIDACTIONS_/, 'MY_');
     return `"${key}" uses the reserved ${RESERVED_ENV_PREFIX} prefix. These names are set by the platform at runtime (API credentials, run context) and a custom variable would clobber them, causing authentication failures. Choose a different name (e.g. "${suggestion}").`;
 }
-
-export function assertNotReservedEnvName(key: string): void {
-    if (isReservedEnvName(key)) {
-        throw new Error(reservedEnvNameError(key));
-    }
-}

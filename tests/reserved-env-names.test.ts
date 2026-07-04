@@ -4,7 +4,6 @@ import fs from 'fs';
 import path from 'path';
 import {
     RESERVED_ENV_PREFIX,
-    assertNotReservedEnvName,
     isReservedEnvName,
     reservedEnvNameError,
 } from '../src/utils/env';
@@ -16,13 +15,11 @@ import { makeTmpEnv, writeGlobal } from './helpers';
 describe('reserved env-name guard (unit)', () => {
     it('accepts ordinary names', () => {
         expect(isReservedEnvName('MY_API_KEY')).toBe(false);
-        expect(() => assertNotReservedEnvName('MY_API_KEY')).not.toThrow();
     });
 
     it('rejects SOLIDACTIONS_-prefixed names', () => {
         expect(isReservedEnvName('SOLIDACTIONS_API_KEY')).toBe(true);
         expect(isReservedEnvName('SOLIDACTIONS_ANYTHING')).toBe(true);
-        expect(() => assertNotReservedEnvName('SOLIDACTIONS_API_KEY')).toThrow(/SOLIDACTIONS_API_KEY/);
     });
 
     it('message names the key, explains the clobber, and suggests a rename', () => {

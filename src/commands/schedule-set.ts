@@ -26,6 +26,14 @@ export function timezoneMismatch(requested: string | undefined, returned: string
     return requested !== undefined && returned !== requested;
 }
 
+/**
+ * Remediation text for a timezoneMismatch. `schedule delete` takes a numeric
+ * <schedule-id>, not a workflow name — point at `schedule list` first to find it.
+ */
+export function timezoneMismatchRemedy(projectName: string): string {
+    return `Your server may not support schedule timezones yet; update the server, or run 'solidactions schedule list ${projectName}' to find the schedule ID and remove it with: solidactions schedule delete ${projectName} <schedule-id>`;
+}
+
 export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; timezone?: string; yes?: boolean }) {
     const config = await requireConfigWithWorkspace();
 
@@ -100,7 +108,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
         const returnedTz: string | undefined = response.data?.schedule?.timezone;
         if (timezoneMismatch(options.timezone, returnedTz)) {
             console.error(chalk.red(`A schedule was created but is running in ${returnedTz ?? 'UTC'} — not ${options.timezone} as requested.`));
-            console.error(chalk.red(`Your server may not support schedule timezones yet; update the server or delete the schedule with: solidactions schedule delete ${projectName} ${options.workflow ?? '<workflow>'}`));
+            console.error(chalk.red(timezoneMismatchRemedy(projectName)));
             process.exit(1);
         }
 

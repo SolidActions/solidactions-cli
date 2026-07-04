@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { hasSolidActionsSkills } from '../src/utils/skills';
+import { SKILLS_TIP_LINES } from '../src/commands/deploy';
 
 function tmpProject(): string {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'sa-skills-test-'));
@@ -36,5 +37,13 @@ describe('hasSolidActionsSkills', () => {
         fs.mkdirSync(skills, { recursive: true });
         fs.writeFileSync(path.join(skills, 'my-notes.md'), '# not ours');
         expect(hasSolidActionsSkills(dir)).toBe(false);
+    });
+});
+
+describe('SKILLS_TIP_LINES — remedy printed when skills are missing', () => {
+    it('points at `ai init`, not the non-empty-dir `init` or the unrelated `skill push`', () => {
+        const tip = SKILLS_TIP_LINES.join(' ');
+        expect(tip).toContain('ai init');
+        expect(tip).not.toContain('skill push');
     });
 });

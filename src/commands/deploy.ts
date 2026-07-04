@@ -12,6 +12,13 @@ import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
 
+/** Printed when a deploy target has no SolidActions skill files installed. */
+export const SKILLS_TIP_LINES = [
+    'Tip: no SolidActions skill files found (.claude/skills/solidactions-*). Your AI assistant',
+    'works much better with them — run `solidactions ai init --claude` (or --agents) in this',
+    'directory to add them.',
+];
+
 /**
  * Validate project structure before deployment.
  * Checks for required files and SDK dependency.
@@ -193,9 +200,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     // Non-blocking: AI assistants work measurably better with the skill files
     // (field report: a 600-line skill file cracked the env-scope bug).
     if (!hasSolidActionsSkills(sourceDir)) {
-        console.log(chalk.yellow('Tip: no SolidActions skill files found (.claude/skills/solidactions-*). Your AI assistant'));
-        console.log(chalk.yellow('works much better with them — run `solidactions init --claude` in this directory, or'));
-        console.log(chalk.yellow('`solidactions skill push`.'));
+        for (const line of SKILLS_TIP_LINES) {
+            console.log(chalk.yellow(line));
+        }
     }
 
     // -------------------------------------------------------------------------
