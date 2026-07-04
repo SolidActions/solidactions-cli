@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { displayStepsTable, flattenSteps, stepDisplayStatus } from '../src/commands/run-view';
+import { displayStepsTable, errorMessage, flattenSteps, stepDisplayStatus } from '../src/commands/run-view';
 
 // Fixture mirroring GET /api/v1/runs/{id}/steps (RunsApiController::deriveStepStatus
 // emits per-step status + error; timestamps are set on BOTH success and failure).
@@ -30,6 +30,17 @@ const MULTILINE_ERROR = 'Error: boom\n    at fetchData (/app/src/fetch.ts:42:11)
 const multilineErrorPayload = {
     workers: [
         { steps: [{ name: 'fetch-data', started_at: '2026-07-01T00:00:01Z', completed_at: '2026-07-01T00:00:03Z', duration_ms: 2000, output: null, status: 'failed', error: MULTILINE_ERROR }] },
+    ],
+};
+// Real server shape (confirmed live, GET /api/v1/runs/{id}/steps): a thrown
+// native Error is superjson-wrapped as an OBJECT, not a plain string.
+const SUPERJSON_ERROR_OBJECT = {
+    json: { name: 'TypeError', message: 'fetch failed', stack: 'TypeError: fetch failed' },
+    __solidactions_serializer: 'superjson',
+};
+const superjsonErrorPayload = {
+    workers: [
+        { steps: [{ name: 'fetch-unreachable', started_at: '2026-07-01T00:00:01Z', completed_at: '2026-07-01T00:00:03Z', duration_ms: 3, output: null, status: 'failed', error: SUPERJSON_ERROR_OBJECT }] },
     ],
 };
 
@@ -103,5 +114,32 @@ describe('displayStepsTable', () => {
         const fullBlockLine = lines.find((l) => l.includes('process.ts:10:3'));
         expect(fullBlockLine).toBeDefined();
         expect(fullBlockLine).toContain('\n');
+    });
+
+    it('unwraps a superjson-wrapped error object to "Name: message" instead of "[object Object]"', () => {
+        displayStepsTable(flattenSteps(superjsonErrorPayload.workers));
+        const table = lines.join('\n');
+
+        expect(table).not.toContain('[object Object]');
+        expect(lines.some((l) => l.includes('fetch-unreachable') && l.includes('TypeError: fetch failed'))).toBe(true);
+    });
+});
+
+describe('errorMessage', () => {
+    it('returns a plain string error unchanged', () => {
+        expect(errorMessage(FAILED_ERROR)).toBe(FAILED_ERROR);
+    });
+
+    it('unwraps a superjson-wrapped error object to "Name: message"', () => {
+        expect(errorMessage(SUPERJSON_ERROR_OBJECT)).toBe('TypeError: fetch failed');
+    });
+
+    it('unwraps a superjson-wrapped error that arrives pre-JSON.stringified (the run-level `error` field shape)', () => {
+        expect(errorMessage(JSON.stringify(SUPERJSON_ERROR_OBJECT))).toBe('TypeError: fetch failed');
+    });
+
+    it('returns an empty string for null/undefined', () => {
+        expect(errorMessage(null)).toBe('');
+        expect(errorMessage(undefined)).toBe('');
     });
 });
