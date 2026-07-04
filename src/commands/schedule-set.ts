@@ -94,11 +94,13 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
         });
 
         // Verify, don't trust: a server predating timezone support silently
-        // strips the field and runs the schedule in UTC. Fail loudly instead.
+        // strips the field, but the schedule is already persisted by this point —
+        // it's live and running in the wrong timezone. Report the persisted fact
+        // and the remedy, not a hypothetical.
         const returnedTz: string | undefined = response.data?.schedule?.timezone;
         if (timezoneMismatch(options.timezone, returnedTz)) {
-            console.error(chalk.red(`Server did not apply the requested timezone: sent "${options.timezone}", got "${returnedTz ?? 'none'}".`));
-            console.error(chalk.red('The schedule would silently run in UTC. This server likely predates --timezone support — upgrade it, or omit --timezone.'));
+            console.error(chalk.red(`A schedule was created but is running in ${returnedTz ?? 'UTC'} — not ${options.timezone} as requested.`));
+            console.error(chalk.red(`Your server may not support schedule timezones yet; update the server or delete the schedule with: solidactions schedule delete ${projectName} ${options.workflow ?? '<workflow>'}`));
             process.exit(1);
         }
 
