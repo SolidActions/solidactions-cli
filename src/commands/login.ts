@@ -31,18 +31,32 @@ export function clearConfig(): void {
 }
 
 
+export function resolveLoginHost(options: { dev?: boolean; host?: string }): { host: string; isDefault: boolean } {
+    if (options.host) {
+        return { host: options.host, isDefault: false };
+    }
+    if (options.dev) {
+        return { host: 'http://localhost:8000', isDefault: false };
+    }
+    return { host: 'https://app.solidactions.com', isDefault: true };
+}
+
+export function loginHostLines(resolved: { host: string; isDefault: boolean }): string[] {
+    if (resolved.isDefault) {
+        return [
+            `Logging into ${resolved.host} (SolidActions Cloud)`,
+            '  Self-hosted or local dev? Pass --host <url> (or --dev for http://localhost:8000)',
+        ];
+    }
+    return [`Host: ${resolved.host}`];
+}
+
 export async function login(
     apiKey: string,
     options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
 ) {
-    let host: string;
-    if (options.host) {
-        host = options.host;
-    } else if (options.dev) {
-        host = 'http://localhost:8000';
-    } else {
-        host = 'https://app.solidactions.com';
-    }
+    const resolved = resolveLoginHost(options);
+    const host = resolved.host;
 
     if (!apiKey || apiKey.trim().length === 0) {
         console.error(chalk.red('Error: API key is required.'));
@@ -55,7 +69,9 @@ export async function login(
     const targetPath = pathForTarget(target);
 
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
-    console.log(chalk.gray(`Host: ${host}`));
+    for (const line of loginHostLines(resolved)) {
+        console.log(resolved.isDefault ? chalk.yellow(line) : chalk.gray(line));
+    }
 
     if (readConfigFile(targetPath)) {
         console.log(chalk.yellow(`Existing config at ${targetPath} will be overwritten.`));
