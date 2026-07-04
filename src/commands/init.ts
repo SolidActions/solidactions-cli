@@ -16,8 +16,9 @@ const EXAMPLES_REPO = 'solidactions-examples';
 const TEMPLATE_PREFIX = 'templates/minimal';
 
 // Tuples of [remote-path-suffix-under-template-prefix, local-path-relative-to-target].
-const TEMPLATE_FILES: Array<[string, string]> = [
+export const TEMPLATE_FILES: Array<[string, string]> = [
     ['package.json', 'package.json'],
+    ['package-lock.json', 'package-lock.json'],
     ['tsconfig.json', 'tsconfig.json'],
     ['solidactions.yaml', 'solidactions.yaml'],
     ['.env.example', '.env.example'],
