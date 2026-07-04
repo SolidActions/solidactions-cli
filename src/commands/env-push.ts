@@ -4,7 +4,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig } from '../utils/env';
+import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig, isReservedEnvName, RESERVED_ENV_PREFIX } from '../utils/env';
 
 interface EnvPushOptions {
     env?: string;
@@ -82,6 +82,18 @@ export async function envPush(projectName: string, sourcePath: string, options: 
             console.log(chalk.gray('Your .env has variables not declared in solidactions.yaml. Use --include-undeclared to push them.'));
         }
         process.exit(0);
+    }
+
+    // Hard-reject reserved names among the keys that would actually be pushed
+    // (the server rejects them too — fail here, before any network call).
+    const reservedKeys = keysToProcess.filter(isReservedEnvName);
+    if (reservedKeys.length > 0) {
+        console.error(chalk.red(`Refusing to push — reserved ${RESERVED_ENV_PREFIX} names found: ${reservedKeys.join(', ')}`));
+        console.error(chalk.red(
+            'These names are set by the platform at runtime (API credentials, run context) and a custom variable would clobber them, causing authentication failures. ' +
+            `Rename them (e.g. "${reservedKeys[0].replace(/^SOLIDACTIONS_/, 'MY_')}") and retry. Nothing was pushed.`
+        ));
+        process.exit(1);
     }
 
     // Build project slug

@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
 export function isNonTty(): boolean {
@@ -30,6 +31,12 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         const projectName = keyOrProject;
         const key = valueOrKey!;
         const value = valueIfProject;
+
+        if (isReservedEnvName(key)) {
+            console.error(chalk.red(reservedEnvNameError(key)));
+            process.exit(1);
+        }
+
         const environment = options.env || 'dev';
 
         // Build project slug
@@ -110,6 +117,12 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         // Global mode: solidactions env set <key> <value>
         const key = keyOrProject;
         const value = valueOrKey!;
+
+        if (isReservedEnvName(key)) {
+            console.error(chalk.red(reservedEnvNameError(key)));
+            process.exit(1);
+        }
+
         const isSecret = options.secret || false;
 
         // Build the request body with per-environment values
