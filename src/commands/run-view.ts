@@ -209,7 +209,7 @@ function displayTimeline(runData: any, timeline: any, steps: any[] = []) {
     console.log(`  Duration:  ${chalk.gray(timeline.durationMs ? formatDuration(timeline.durationMs) : '-')}`);
 }
 
-function displayStepsTable(steps: any[], indent: string = '  ') {
+export function displayStepsTable(steps: any[], indent: string = '  ') {
     if (steps.length === 0) {
         console.log(chalk.gray(`${indent}(no steps)`));
         return;
@@ -220,20 +220,32 @@ function displayStepsTable(steps: any[], indent: string = '  ') {
 
     for (const step of steps) {
         const name = (step.name || '?').padEnd(24);
-        const status = step.completedAt ? 'completed' : step.startedAt ? 'running' : 'pending';
+        const status = stepDisplayStatus(step);
         const statusColor = getStatusColor(status);
         const duration = formatDuration(step.durationMs);
-        const output = step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-';
+        // A failed step's error is more useful than its (null) output — show it, red.
+        const output = step.error
+            ? chalk.red(truncate(String(step.error), 40))
+            : chalk.gray(step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-');
 
         console.log(
-            `${indent}${name}${statusColor(status.padEnd(12))}${chalk.gray(duration.padEnd(12))}${chalk.gray(output)}`
+            `${indent}${name}${statusColor(status.padEnd(12))}${chalk.gray(duration.padEnd(12))}${output}`
         );
+    }
+
+    // Untruncated first failure below the table: `run view` alone must be
+    // enough to diagnose (Wall #5 — failed steps used to render "completed").
+    const firstFailed = steps.find((s) => stepDisplayStatus(s).toLowerCase() === 'failed' && s.error);
+    if (firstFailed) {
+        console.log('');
+        console.log(chalk.bold.red(`${indent}Step "${firstFailed.name}" failed:`));
+        console.log(chalk.red(`${indent}  ${String(firstFailed.error)}`));
     }
 }
 
 // ─── Utility ───────────────────────────────────────────────────────────────
 
-function flattenSteps(workers: any[]): any[] {
+export function flattenSteps(workers: any[]): any[] {
     const steps: any[] = [];
     for (const worker of workers) {
         for (const step of worker.steps || []) {
@@ -243,10 +255,17 @@ function flattenSteps(workers: any[]): any[] {
                 completedAt: step.completed_at || null,
                 durationMs: step.duration_ms ?? null,
                 output: step.output ?? null,
+                status: step.status ?? null,
+                error: step.error ?? null,
             });
         }
     }
     return steps;
+}
+
+/** Server-derived status wins; timestamp heuristic only for pre-status API responses. */
+export function stepDisplayStatus(step: { status?: string | null; startedAt?: string | null; completedAt?: string | null }): string {
+    return step.status ?? (step.completedAt ? 'completed' : step.startedAt ? 'running' : 'pending');
 }
 
 function unwrapOutput(output: any): any {
