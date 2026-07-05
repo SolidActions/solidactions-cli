@@ -11,7 +11,7 @@ export function isNonTty(): boolean {
 
 /** Printed before a 2-arg (global-scope) write — Jordan's runs 3-7 footgun. */
 export const GLOBAL_ENV_SCOPE_NOTE = [
-    'Note: no project specified — creating a GLOBAL variable.',
+    'Note: --global specified — creating a GLOBAL variable.',
     "  Global variables are NOT visible to a project's plain `env:` YAML declarations",
     '  unless you map them (`solidactions env map …`).',
     '  For a project variable, use: solidactions env set <project> KEY value',
