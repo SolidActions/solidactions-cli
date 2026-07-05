@@ -44,6 +44,8 @@ You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while
 
 In interactive shells, `login` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
 
+If the target config file already exists and its contents would change, `login` writes a timestamped backup (e.g. `config.json.bak-2026-07-05T12-30-00Z`) alongside it before overwriting, and prints the backup path. Non-interactive runs proceed automatically (with the backup); an interactive TTY additionally asks a y/N confirmation first.
+
 ### `solidactions logout` flags
 
 - `--local` — remove only the nearest local config (walks up from cwd).
