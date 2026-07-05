@@ -65,7 +65,7 @@ describe('commands hard-reject reserved names before any HTTP request', () => {
     });
 
     it('env set (global mode) exits 1 with no HTTP', async () => {
-        try { await envSet('SOLIDACTIONS_API_KEY', 'foo', undefined, {}); } catch { /* exit throws */ }
+        try { await envSet('SOLIDACTIONS_API_KEY', 'foo', undefined, { global: true }); } catch { /* exit throws */ }
         expect(exitCode).toBe(1);
         expect(httpCalls).toEqual([]);
     });
