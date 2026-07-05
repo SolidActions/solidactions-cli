@@ -26,13 +26,38 @@ interface EnvSetOptions {
     stagingInherit?: boolean;
     devInherit?: boolean;
     devInheritStaging?: boolean;
+    global?: boolean;
 }
 
 export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfProject?: string, options: EnvSetOptions = {}): Promise<void> {
-    const config = await requireConfigWithWorkspace();
-
     // Detect mode based on arguments
     const isProjectMode = valueIfProject !== undefined;
+
+    // Jordan Wall #4 (Sweep C, → 1.23.0): a 2-positional-arg call used to fall
+    // through to GLOBAL scope silently, so a typo'd `env set KEY VALUE` (meant
+    // for a project) wrote a global var the workflow never reads. Global
+    // writes now require an explicit --global. Runs before any
+    // config/network work so a plain argument mistake never needs a login.
+    if (!isProjectMode && !options.global) {
+        process.stderr.write(chalk.red(
+            'env set needs either a project or --global — pick one:\n' +
+            '  solidactions env set KEY VALUE --global      (global variable)\n' +
+            '  solidactions env set <project> KEY VALUE     (project variable)\n'
+        ));
+        process.exit(1);
+    }
+
+    // --global never takes a project positional — reject the ambiguous combo too.
+    if (isProjectMode && options.global) {
+        process.stderr.write(chalk.red(
+            'env set: --global does not take a project argument — pick one:\n' +
+            '  solidactions env set KEY VALUE --global      (global variable)\n' +
+            '  solidactions env set <project> KEY VALUE     (project variable)\n'
+        ));
+        process.exit(1);
+    }
+
+    const config = await requireConfigWithWorkspace();
 
     if (isProjectMode) {
         // Project mode: solidactions env set <project> <key> <value>

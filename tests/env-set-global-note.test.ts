@@ -52,7 +52,7 @@ describe('envSet prints the note in global mode only, before the API call', () =
     });
 
     it('2-arg global form prints the note before any HTTP call and still succeeds', async () => {
-        await envSet('MY_GLOBAL', 'value', undefined, { yes: true });
+        await envSet('MY_GLOBAL', 'value', undefined, { yes: true, global: true });
 
         const noteIndex = lines.findIndex((l) => l.includes('creating a GLOBAL variable'));
         expect(noteIndex).toBeGreaterThanOrEqual(0);
