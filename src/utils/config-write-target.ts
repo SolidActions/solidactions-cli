@@ -17,6 +17,7 @@ export type WriteTarget = 'local' | 'global';
 export async function decideWriteTarget(
     options: { local?: boolean; global?: boolean },
     promptLabel = 'Save config locally (./.solidactions) or globally (~/.solidactions)? [global] ',
+    refusalMessage = 'Refusing to write config non-interactively. Pass --local or --global.',
 ): Promise<WriteTarget> {
     if (options.local && options.global) {
         console.error(chalk.red('Error: --local and --global are mutually exclusive.'));
@@ -39,12 +40,36 @@ export async function decideWriteTarget(
             rl.close();
         }
     }
-    console.error(chalk.red('Refusing to write config non-interactively. Pass --local or --global.'));
+    console.error(chalk.red(refusalMessage));
     process.exit(1);
 }
 
 export function pathForTarget(target: WriteTarget): string {
     return target === 'local' ? getLocalConfigPath() : getGlobalConfigPath();
+}
+
+/**
+ * Notify (and, on a TTY, confirm) that an existing config file is about to be
+ * overwritten. A backup will be written to `backupPath` regardless of mode —
+ * this always says so. Non-interactive callers (CI, agents) proceed
+ * automatically so they never wedge; an interactive TTY additionally asks a
+ * y/N confirm (default N).
+ */
+export async function confirmOverwrite(existingPath: string, backupPath: string): Promise<boolean> {
+    const notice = `Existing config at ${existingPath} will be overwritten (backup will be saved to ${backupPath}).`;
+
+    if (!process.stdin.isTTY) {
+        console.log(chalk.yellow(notice));
+        return true;
+    }
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        const answer = await new Promise<string>((resolve) => rl.question(chalk.yellow(`${notice} Continue? [y/N] `), resolve));
+        return answer.trim().toLowerCase().startsWith('y');
+    } finally {
+        rl.close();
+    }
 }
 
 /**

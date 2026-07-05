@@ -1,3 +1,4 @@
+import fs from 'fs';
 import chalk from 'chalk';
 import { ensureWorkspaceSelected } from '../utils/api';
 import { workspaceSet } from './workspaces';
@@ -5,13 +6,12 @@ import {
     Config,
     ConfigSource,
     resolveConfig,
-    readConfigFile,
     writeConfigFile,
     removeConfigFile,
     findLocalConfigPath,
     getGlobalConfigPath,
 } from '../utils/config';
-import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
+import { decideWriteTarget, pathForTarget, ensureGitignoreCovers, confirmOverwrite } from '../utils/config-write-target';
 
 export type { Config };
 
@@ -41,6 +41,21 @@ export function resolveLoginHost(options: { dev?: boolean; host?: string }): { h
     return { host: 'https://app.solidactions.com', isDefault: true };
 }
 
+/**
+ * Path for a timestamped backup of `targetPath`, e.g.
+ * `config.json.bak-2026-07-05T12-30-00Z`. Pure — takes `now` so tests are
+ * deterministic.
+ */
+export function backupPathFor(targetPath: string, now: Date = new Date()): string {
+    const timestamp = now.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/:/g, '-');
+    return `${targetPath}.bak-${timestamp}`;
+}
+
+const LOGIN_REFUSAL_MESSAGE =
+    'Refusing to write config non-interactively. Pass --global to update the machine-wide config ' +
+    'at ~/.solidactions/config.json (a backup is kept if one exists), or --local to write ' +
+    './.solidactions/config.json for just this directory.';
+
 export function loginHostLines(resolved: { host: string; isDefault: boolean }): string[] {
     if (resolved.isDefault) {
         return [
@@ -65,7 +80,7 @@ export async function login(
     }
 
     // Determine target location.
-    const target = await decideWriteTarget({ local: options.local, global: options.global });
+    const target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
     const targetPath = pathForTarget(target);
 
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
@@ -73,14 +88,25 @@ export async function login(
         console.log(resolved.isDefault ? chalk.yellow(line) : chalk.gray(line));
     }
 
-    if (readConfigFile(targetPath)) {
-        console.log(chalk.yellow(`Existing config at ${targetPath} will be overwritten.`));
-    }
-
     const config: Config = {
         host,
         apiKey: apiKey.trim(),
     };
+
+    const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
+    const wouldChange = existingRaw !== null && existingRaw.trim() !== JSON.stringify(config, null, 2).trim();
+
+    if (wouldChange) {
+        const backupPath = backupPathFor(targetPath);
+        const proceed = await confirmOverwrite(targetPath, backupPath);
+        if (!proceed) {
+            console.log(chalk.yellow('Aborted. No changes were made.'));
+            process.exit(0);
+        }
+        fs.copyFileSync(targetPath, backupPath);
+        console.log(chalk.gray(`Backup saved to ${backupPath}`));
+    }
+
     writeConfigFile(targetPath, config);
 
     if (target === 'local') {
