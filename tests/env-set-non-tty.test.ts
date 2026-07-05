@@ -91,7 +91,7 @@ describe('envSet non-TTY fast-fail', () => {
 
             try {
                 // Global mode: only two positional args (key, value), no third arg
-                await envSet('GLOBAL_KEY', 'new-value', undefined, { yes: false });
+                await envSet('GLOBAL_KEY', 'new-value', undefined, { yes: false, global: true });
             } catch (err: any) {
                 // Expected: process.exit mock throws, then caught by envSet's outer catch, may throw again
             }

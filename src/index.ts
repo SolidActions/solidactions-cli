@@ -265,6 +265,7 @@ env
     .argument('[value]', 'Variable value (when first arg is project)')
     .option('-s, --secret', 'Mark as encrypted secret')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('--global', 'Set a global variable (no project) — required for the 2-arg form')
     .option('--staging-value <value>', 'Staging environment value (global only)')
     .option('--dev-value <value>', 'Dev environment value (global only)')
     .option('--staging-inherit', 'Staging inherits from production (global only)')

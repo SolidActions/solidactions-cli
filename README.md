@@ -115,7 +115,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `env set <key> <value>` | `-s`, `-y`, `--staging-value`, `--dev-value` | Set global variable (warns before overwriting) |
+| `env set <key> <value> --global` | `-s`, `-y`, `--staging-value`, `--dev-value`, `--global` | Set global variable (warns before overwriting) |
 | `env set <project> <key> <value>` | `-e`, `-s`, `-y` | Set project variable (warns before overwriting) |
 | `env list [project]` | `-e` | List variables |
 | `env delete <key-or-project> [key]` | `-y` | Delete a variable |
