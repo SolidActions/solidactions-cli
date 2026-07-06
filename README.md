@@ -109,7 +109,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `run start <project> <workflow>` | `-e`, `-i`, `-w` | Trigger a workflow run |
+| `run start <project> <workflow>` | `-e`, `-i`, `--wait` | Trigger a workflow run |
 | `run list [project]` | `--json`, `--detailed`, `--status`, `--since`, `--workflow`, `--limit`, `--offset` | List and filter runs |
 | `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run |
 
@@ -129,7 +129,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `schedule set <project> <cron>` | `-w`, `-i`, `-y` | Set cron schedule (warns if exists) |
+| `schedule set <project> <cron>` | `--workflow`, `-i`, `-y` | Set cron schedule (warns if exists) |
 | `schedule list <project>` | | List schedules |
 | `schedule delete <project> <id>` | `-y` | Delete a schedule |
 
