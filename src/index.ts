@@ -68,11 +68,17 @@ program
     .description('SolidActions CLI - Deploy and manage workflow automation')
     .version(pkg.version);
 
-program.option('-w, --workspace <id-or-slug-or-name>', 'override active workspace for this command');
+// Long form is --workspace-override (NOT --workspace) — `login` already owns
+// `--workspace` for its own purpose (set the workspace at login time), and
+// commander silently drops a subcommand option whose long name collides with
+// a parent option of the same name, so `login --workspace <x>` was being
+// swallowed by this global flag instead of reaching login()'s own option.
+// The short form `-w` is unaffected and remains the primary way to use this.
+program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w)');
 
 program.hook('preAction', (thisCommand, actionCommand) => {
     const opts = thisCommand.opts();
-    const wsOverride: string | undefined = opts.workspace;
+    const wsOverride: string | undefined = opts.workspaceOverride;
     if (wsOverride) {
         // workspace set is a write — -w is for read-paths only.
         const fullName = actionCommand.name();
@@ -80,7 +86,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
         const isWorkspaceSet = fullName === 'set' && parentName === 'workspace';
         if (isWorkspaceSet) {
             console.error(
-                chalk.yellow('warn:') + ' -w/--workspace is ignored on `workspace set`; the positional argument is the new workspace.',
+                chalk.yellow('warn:') + ' -w/--workspace-override is ignored on `workspace set`; the positional argument is the new workspace.',
             );
             return;
         }

@@ -8,6 +8,12 @@
  *  - `schedule set` no longer registers a `-w` short flag for `--workflow`
  *    (it collided with the global `-w, --workspace` override).
  *  - `env delete` gains `-e, --env <environment>` (default: dev).
+ *  - `login --workspace` is no longer swallowed by the global `-w` override
+ *    (same class of bug: a subcommand option's long name collided with a
+ *    parent option's long name, so commander routed the value to the parent
+ *    instead — found live during the Task 10 smoke, not by the plan's
+ *    original spec; the global flag's long form was renamed to
+ *    `--workspace-override` to disambiguate, short form `-w` unaffected).
  *
  * Test-double policy: spawns the real built CLI binary (dist/index.js) as a
  * subprocess against a real in-process HTTP server (Node's http.createServer)
@@ -53,6 +59,8 @@ beforeAll(async () => {
                 res.end(JSON.stringify({ schedule: {} }));
             } else if (req.url?.includes('/variable-mappings')) {
                 res.end(JSON.stringify([]));
+            } else if (req.url?.includes('/api/v1/workspaces')) {
+                res.end(JSON.stringify({ data: [{ id: 'ws-login-1', name: 'Login Target', slug: 'login-target' }] }));
             } else {
                 res.end(JSON.stringify({}));
             }
@@ -196,5 +204,23 @@ describe('flag consistency (F-C4)', () => {
         await runCli(['env', 'delete', 'my-project', 'MY_KEY'], home);
 
         expect(lastCapture?.url).toContain('/api/v1/projects/my-project-dev/variable-mappings');
+    });
+
+    it('login --workspace is NOT swallowed by the global -w/--workspace-override flag (found live during Task 10 smoke)', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-cli-flag-login-test-'));
+        const home = path.join(root, 'home');
+        fs.mkdirSync(home, { recursive: true });
+        tmpHomes.push(home);
+
+        const result = await runCli(
+            ['login', 'some-token', '--global', '--host', `http://127.0.0.1:${stubPort}`, '--workspace', 'Login Target'],
+            home,
+        );
+
+        expect(result.stderr).not.toMatch(/unknown option/);
+        expect(result.status).toBe(0);
+
+        const config = JSON.parse(fs.readFileSync(path.join(home, '.solidactions', 'config.json'), 'utf8'));
+        expect(config.workspaceId).toBe('ws-login-1');
     });
 });
