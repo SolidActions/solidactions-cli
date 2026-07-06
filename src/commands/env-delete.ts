@@ -1,23 +1,25 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean } = {}) {
+export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
 
     // Determine mode: if keyIfProject is provided, it's project mapping delete
     const isProjectMode = keyIfProject !== undefined;
     const projectName = isProjectMode ? keyOrProject : undefined;
     const key = isProjectMode ? keyIfProject : keyOrProject;
+    const environment = options.env ?? 'dev';
+    const projectSlug = projectName && environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     try {
         if (isProjectMode) {
-            // Delete project variable mapping
-            console.log(chalk.blue(`Deleting variable mapping "${key}" from project "${projectName}"...`));
+            // Delete project variable
+            console.log(chalk.blue(`Deleting variable "${key}" from project "${projectName}" (${environment})...`));
 
-            // First, get the mapping to find its ID
-            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/variable-mappings`, {
+            // First, get the variable to find its ID
+            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: getApiHeaders(config),
             });
 
@@ -25,7 +27,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
             const mapping = mappings.find((m: any) => m.env_name === key);
 
             if (!mapping) {
-                console.error(chalk.red(`Variable mapping "${key}" not found in project "${projectName}".`));
+                console.error(chalk.red(`Variable "${key}" not found in project "${projectName}" (${environment}).`));
                 process.exit(1);
             }
 
@@ -36,7 +38,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
                     name: 'confirm',
                     message: mapping.is_yaml_declared
                         ? `Clear YAML-declared variable "${key}"? (The mapping will be preserved but value cleared)`
-                        : `Delete variable mapping "${key}" from project "${projectName}"?`,
+                        : `Delete variable "${key}" from project "${projectName}" (${environment})?`,
                     initial: false,
                 });
 
@@ -47,14 +49,14 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
             }
 
             // Delete the mapping
-            await axios.delete(`${config.host}/api/v1/projects/${projectName}/variable-mappings/${mapping.id}`, {
+            await axios.delete(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings/${mapping.id}`, {
                 headers: getApiHeaders(config),
             });
 
             if (mapping.is_yaml_declared) {
-                console.log(chalk.green(`Variable mapping "${key}" cleared successfully.`));
+                console.log(chalk.green(`Variable "${key}" cleared successfully.`));
             } else {
-                console.log(chalk.green(`Variable mapping "${key}" deleted successfully.`));
+                console.log(chalk.green(`Variable "${key}" deleted successfully.`));
             }
         } else {
             // Delete global variable
@@ -100,7 +102,12 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
             if (error.response.status === 401) {
                 console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
             } else if (error.response.status === 404) {
-                console.error(chalk.red(isProjectMode ? `Project "${projectName}" not found.` : `Variable "${key}" not found.`));
+                if (isProjectMode) {
+                    const envsList = await describeProjectEnvironments(config, projectName!);
+                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
+                } else {
+                    console.error(chalk.red(`Variable "${key}" not found.`));
+                }
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }

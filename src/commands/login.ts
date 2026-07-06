@@ -1,7 +1,6 @@
 import fs from 'fs';
+import readline from 'readline';
 import chalk from 'chalk';
-import { ensureWorkspaceSelected } from '../utils/api';
-import { workspaceSet } from './workspaces';
 import {
     Config,
     ConfigSource,
@@ -12,6 +11,7 @@ import {
     getGlobalConfigPath,
 } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers, confirmOverwrite } from '../utils/config-write-target';
+import { fetchWorkspaces, matchWorkspace, WorkspaceLookupRecord } from '../utils/workspace-lookup';
 
 export type { Config };
 
@@ -66,6 +66,42 @@ export function loginHostLines(resolved: { host: string; isDefault: boolean }): 
     return [`Host: ${resolved.host}`];
 }
 
+/**
+ * Prompt the user to pick a workspace from an already-fetched list. Auto-
+ * selects when there's exactly one. Returns undefined if none exist.
+ */
+async function selectWorkspaceInteractively(
+    workspaces: WorkspaceLookupRecord[],
+): Promise<WorkspaceLookupRecord | undefined> {
+    if (workspaces.length === 0) {
+        console.log(chalk.yellow('No workspaces found. Create one at your SolidActions dashboard, then run `solidactions workspace set <name>`.'));
+        return undefined;
+    }
+    if (workspaces.length === 1) {
+        console.log(chalk.gray(`Auto-selected workspace: ${workspaces[0].name}`));
+        return workspaces[0];
+    }
+
+    console.log(chalk.blue('\nSelect a workspace:\n'));
+    workspaces.forEach((ws, i) => {
+        console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name}`);
+    });
+    console.log('');
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((resolve) => {
+        rl.question(chalk.blue('Enter number: '), resolve);
+    });
+    rl.close();
+
+    const index = parseInt(answer, 10) - 1;
+    if (isNaN(index) || index < 0 || index >= workspaces.length) {
+        console.error(chalk.red('Invalid selection.'));
+        process.exit(1);
+    }
+    return workspaces[index];
+}
+
 export async function login(
     apiKey: string,
     options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
@@ -79,10 +115,6 @@ export async function login(
         process.exit(1);
     }
 
-    // Determine target location.
-    const target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
-    const targetPath = pathForTarget(target);
-
     console.log(chalk.blue(`Initializing SolidActions CLI...`));
     for (const line of loginHostLines(resolved)) {
         console.log(resolved.isDefault ? chalk.yellow(line) : chalk.gray(line));
@@ -92,6 +124,44 @@ export async function login(
         host,
         apiKey: apiKey.trim(),
     };
+
+    // 1. Validate the key BEFORE any disk write.
+    let workspaces: WorkspaceLookupRecord[];
+    try {
+        workspaces = await fetchWorkspaces(config);
+    } catch (e: any) {
+        if (e.response?.status === 401) {
+            console.error(chalk.red(`Invalid API key for ${host}.`));
+        } else {
+            console.error(chalk.red(`Could not reach ${host}: ${e.message}`));
+        }
+        process.exit(1);
+        return;
+    }
+
+    // 2. Resolve the workspace (still before writing).
+    if (options.workspace) {
+        const match = matchWorkspace(options.workspace, workspaces);
+        if (!match) {
+            console.error(chalk.red(`Workspace "${options.workspace}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+            process.exit(1);
+            return;
+        }
+        config.workspace = match.slug ?? match.name;
+        config.workspaceId = match.id;
+    } else if (process.stdin.isTTY) {
+        const selected = await selectWorkspaceInteractively(workspaces);
+        if (selected) {
+            config.workspace = selected.slug ?? selected.name;
+            config.workspaceId = selected.id;
+        }
+    } else {
+        console.log(chalk.yellow('No workspace set — run `solidactions workspace set <name>` later.'));
+    }
+
+    // 3. Determine target location, back up if needed, and write ONCE.
+    const target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
+    const targetPath = pathForTarget(target);
 
     const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
     const wouldChange = existingRaw !== null && existingRaw.trim() !== JSON.stringify(config, null, 2).trim();
@@ -115,19 +185,6 @@ export async function login(
 
     console.log(chalk.green('Logged in successfully!'));
     console.log(chalk.gray(`Configuration saved to ${targetPath}`));
-    console.log('');
-
-    // Workspace selection — ensureWorkspaceSelected writes to the right file via the resolver.
-    try {
-        if (options.workspace) {
-            await workspaceSet(options.workspace);
-        } else {
-            await ensureWorkspaceSelected(config);
-        }
-    } catch {
-        console.log(chalk.yellow('Could not set workspace. Run `solidactions workspace set` later.'));
-    }
-
     console.log('');
     console.log(chalk.blue('Next step — scaffold a new project (includes AI tooling):'));
     console.log(chalk.gray('  solidactions init <project-name>      Creates ./<project-name>/ with scaffold + AI skills'));
@@ -165,7 +222,8 @@ export function logout(options: { local?: boolean; global?: boolean } = {}) {
     if (removed) {
         console.log(chalk.green(`Logged out. Removed ${targetPath}`));
     } else {
-        console.log(chalk.gray(`Not logged in (no config at ${targetPath}).`));
+        console.log(chalk.gray(`Not logged in (no config at ${targetPath}) — nothing to remove.`));
+        process.exit(0);
     }
 }
 
@@ -195,8 +253,11 @@ export function whoami() {
             ? `${config.workspaceId} (slug unknown — run 'workspace set <slug>' to populate)`
             : '';
 
+    const isFileSource = (src: ConfigSource): boolean => src !== null && src !== 'env' && src !== 'cli';
+    const workspaceInheritedFromOtherFile = isFileSource(sources.workspaceId) && sources.workspaceId !== sources.apiKey;
+
     console.log(chalk.blue('Current configuration:'));
     console.log(`  Host:        ${config.host.padEnd(50)} ${fmt(sources.host)}`);
     console.log(`  API Key:     ${maskedKey.padEnd(50)} ${fmt(sources.apiKey)}`);
-    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}`);
+    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}${workspaceInheritedFromOtherFile ? chalk.yellow(' (inherited from a different config file)') : ''}`);
 }

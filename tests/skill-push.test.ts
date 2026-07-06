@@ -360,7 +360,7 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             // Assert HTTP request was made
             expect(lastCapture).not.toBeNull();
             expect(lastCapture!.method).toBe('POST');
-            expect(lastCapture!.path).toBe('/mcp/crews');
+            expect(lastCapture!.path).toBe('/mcp');
 
             // Assert X-Workspace-Id header
             expect(lastCapture!.headers['x-workspace-id']).toBe('ws-123');
@@ -372,7 +372,7 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             const body = lastCapture!.body;
             expect(body.jsonrpc).toBe('2.0');
             expect(body.method).toBe('tools/call');
-            expect(body.params.name).toBe('skills');
+            expect(body.params.name).toBe('crews_skills');
             expect(body.params.arguments.action).toBe('create');
             expect(body.params.arguments.name).toBe('My Cool Skill');
             expect(body.params.arguments.description).toBe('Does cool things');
@@ -422,7 +422,7 @@ describe('skillPushWithConfig — with --role', () => {
             expect(lastCapture).not.toBeNull();
 
             const body = lastCapture!.body;
-            expect(body.params.name).toBe('roles');
+            expect(body.params.name).toBe('crews_roles');
             expect(body.params.arguments.action).toBe('create_skill');
             expect(body.params.arguments.role).toBe('senior-engineer');
             expect(body.params.arguments.name).toBe('Role Skill');
@@ -531,7 +531,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
-            expect(allCaptures[1].body.params.name).toBe('skills');
+            expect(allCaptures[1].body.params.name).toBe('crews_skills');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit');
             expect(allCaptures[1].body.params.arguments.identifier).toBe('Existing Skill');
             expect(allCaptures[1].body.params.arguments).toHaveProperty('properties_patch');
@@ -558,7 +558,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
-            expect(allCaptures[1].body.params.name).toBe('roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
             expect(allCaptures[1].body.params.arguments.role).toBe('builder');
             expect(allCaptures[1].body.params.arguments.name).toBe('Role Skill');
@@ -617,7 +617,7 @@ describe('pushParsedSkill — core payload-based upsert', () => {
             // Verify HTTP request shape
             expect(allCaptures.length).toBe(1);
             const args = allCaptures[0].body.params.arguments;
-            expect(allCaptures[0].body.params.name).toBe('skills');
+            expect(allCaptures[0].body.params.name).toBe('crews_skills');
             expect(args.action).toBe('create');
             expect(args.name).toBe('Core Skill');
             expect(args.description).toBe('A payload-based skill');
@@ -652,7 +652,7 @@ describe('pushParsedSkill — core payload-based upsert', () => {
 
             // Second request: edit with correct args
             const editArgs = allCaptures[1].body.params.arguments;
-            expect(allCaptures[1].body.params.name).toBe('skills');
+            expect(allCaptures[1].body.params.name).toBe('crews_skills');
             expect(editArgs.action).toBe('edit');
             expect(editArgs.identifier).toBe('Core Skill');
             expect(editArgs.description).toBe('A payload-based skill');
@@ -679,12 +679,12 @@ describe('pushParsedSkill — core payload-based upsert', () => {
 
             expect(allCaptures.length).toBe(2);
             // First: roles.create_skill
-            expect(allCaptures[0].body.params.name).toBe('roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles');
             expect(allCaptures[0].body.params.arguments.action).toBe('create_skill');
             expect(allCaptures[0].body.params.arguments.role).toBe('senior-dev');
 
             // Second: roles.edit_skill
-            expect(allCaptures[1].body.params.name).toBe('roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
             expect(allCaptures[1].body.params.arguments.role).toBe('senior-dev');
             expect(allCaptures[1].body.params.arguments.name).toBe('Core Skill');
@@ -1091,7 +1091,7 @@ describe('skill push --dry-run', () => {
             // Pre-flight must target the roles tool's read_skill with role+name, NOT skills read {identifier}
             expect(allCaptures.length).toBe(1);
             const args = allCaptures[0].body.params.arguments;
-            expect(allCaptures[0].body.params.name).toBe('roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles');
             expect(args.action).toBe('read_skill');
             expect(args.role).toBe('senior-engineer');
             expect(args.name).toBe('role-scoped-skill');

@@ -238,7 +238,7 @@ export async function pushParsedSkill(
         try {
             readResult = await callCrewsTool(config, tool, readArgs);
         } catch (e: any) {
-            throw new Error(`MCP request failed — ${e.message}`);
+            throw new Error(`${e.message}`);
         }
 
         if (!readResult.ok) {
@@ -263,7 +263,7 @@ export async function pushParsedSkill(
     try {
         result = await callCrewsTool(config, tool, createArgs);
     } catch (e: any) {
-        throw new Error(`MCP request failed — ${e.message}`);
+        throw new Error(`${e.message}`);
     }
 
     // On name collision, switch to the edit path. properties → properties_patch.
@@ -275,7 +275,7 @@ export async function pushParsedSkill(
         try {
             result = await callCrewsTool(config, tool, editArgs);
         } catch (e: any) {
-            throw new Error(`MCP request failed — ${e.message}`);
+            throw new Error(`${e.message}`);
         }
 
         if (!result.ok) {

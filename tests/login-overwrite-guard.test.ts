@@ -10,24 +10,45 @@
  * backup so it never wedges; an interactive TTY additionally asks a y/N
  * confirm (default N).
  *
- * Test-double policy: real fs in tmp dirs (makeTmpEnv/writeGlobal), no
- * mock/spy/stub libraries. `--host` points at an unreachable local port so
- * the post-login workspace-selection network call fails fast and is
- * swallowed by login()'s own try/catch — it is not what these tests exercise.
+ * Test-double policy: real fs in tmp dirs (makeTmpEnv/writeGlobal); a real
+ * in-process HTTP server (Node's http.createServer) stubs GET
+ * /api/v1/workspaces so login()'s F-C2 pre-write validation succeeds — no
+ * mock/spy/stub libraries.
  */
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { login } from '../src/commands/login';
 import { makeTmpEnv, writeGlobal } from './helpers';
-
-const UNREACHABLE_HOST = 'http://127.0.0.1:1';
 
 class ProcessExitError extends Error {
     constructor(public readonly code: number | undefined) {
         super(`process.exit(${code})`);
     }
 }
+
+let stubServer: http.Server;
+let stubPort: number;
+
+beforeAll(async () => {
+    stubServer = http.createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [] }));
+    });
+    await new Promise<void>((resolve) => {
+        stubServer.listen(0, '127.0.0.1', () => {
+            stubPort = (stubServer.address() as { port: number }).port;
+            resolve();
+        });
+    });
+});
+
+afterAll(() => {
+    return new Promise<void>((resolve, reject) => {
+        stubServer.close((err) => (err ? reject(err) : resolve()));
+    });
+});
 
 describe('login — overwrite guard (cleanroom Sev-4)', () => {
     let originalIsTTY: boolean | undefined;
@@ -37,6 +58,8 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
     let logLines: string[];
     let errorLines: string[];
     let env: ReturnType<typeof makeTmpEnv>;
+
+    const HOST = () => `http://127.0.0.1:${stubPort}`;
 
     beforeEach(() => {
         env = makeTmpEnv();
@@ -68,7 +91,7 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
         const oldRaw = fs.readFileSync(globalPath, 'utf-8');
 
-        await login('new-api-key', { global: true, host: UNREACHABLE_HOST });
+        await login('new-api-key', { global: true, host: HOST() });
 
         const dir = path.dirname(globalPath);
         const entries = fs.readdirSync(dir);
@@ -81,7 +104,7 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         // New config was written to the original path.
         const newConfig = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
         expect(newConfig.apiKey).toBe('new-api-key');
-        expect(newConfig.host).toBe(UNREACHABLE_HOST);
+        expect(newConfig.host).toBe(HOST());
 
         // Backup path was printed plainly (no prompt in non-interactive mode).
         expect(logLines.some((l) => l.includes('Backup saved to') && l.includes(backupPath))).toBe(true);
@@ -93,7 +116,7 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         const globalPath = path.join(dir, 'config.json');
         expect(fs.existsSync(globalPath)).toBe(false);
 
-        await login('brand-new-key', { global: true, host: UNREACHABLE_HOST });
+        await login('brand-new-key', { global: true, host: HOST() });
 
         expect(fs.existsSync(dir)).toBe(true);
         const entries = fs.readdirSync(dir);
@@ -108,7 +131,7 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
     it('non-interactive refusal (neither --local nor --global) explains both options, including the backup guarantee', async () => {
         let caught: ProcessExitError | null = null;
         try {
-            await login('some-key', { host: UNREACHABLE_HOST });
+            await login('some-key', { host: HOST() });
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;

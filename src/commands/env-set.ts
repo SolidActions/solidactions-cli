@@ -1,8 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
+import { describeProjectEnvironments, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
 export function isNonTty(): boolean {
@@ -64,6 +64,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         const projectName = keyOrProject;
         const key = valueOrKey!;
         const value = valueIfProject;
+
+        if (!isValidEnvName(key)) {
+            console.error(chalk.red(envNameError(key)));
+            process.exit(1);
+        }
 
         if (isReservedEnvName(key)) {
             console.error(chalk.red(reservedEnvNameError(key)));
@@ -135,9 +140,10 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 if (error.response.status === 401) {
                     console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
                 } else if (error.response.status === 404) {
-                    console.error(chalk.red(`Project "${projectSlug}" not found.`));
+                    const envsList = await describeProjectEnvironments(config, projectName);
+                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
                 } else if (error.response.status === 422) {
-                    console.error(chalk.red('Validation error:'), error.response.data);
+                    console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
                     console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
                 }
@@ -150,6 +156,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         // Global mode: solidactions env set <key> <value>
         const key = keyOrProject;
         const value = valueOrKey!;
+
+        if (!isValidEnvName(key)) {
+            console.error(chalk.red(envNameError(key)));
+            process.exit(1);
+        }
 
         if (isReservedEnvName(key)) {
             console.error(chalk.red(reservedEnvNameError(key)));
@@ -258,7 +269,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 if (error.response.status === 401) {
                     console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
                 } else if (error.response.status === 422) {
-                    console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
+                    console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
                     console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
                 }

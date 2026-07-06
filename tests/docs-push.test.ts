@@ -216,7 +216,7 @@ describe('docsPushWithConfig — chunking', () => {
 
             // All calls go to /mcp/docs with tools/call method
             for (const cap of allCaptures) {
-                expect(cap.path).toBe('/mcp/docs');
+                expect(cap.path).toBe('/mcp');
                 expect(cap.body.method).toBe('tools/call');
                 expect(cap.body.params.name).toBe('docs_vault');
                 expect(cap.body.params.arguments.action).toBe('bulk_create');

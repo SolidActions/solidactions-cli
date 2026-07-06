@@ -46,7 +46,7 @@ export async function skillPullWithConfig(
     try {
         result = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
     } catch (e: any) {
-        process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+        process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
     }
 

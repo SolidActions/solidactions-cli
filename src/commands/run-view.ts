@@ -10,6 +10,12 @@ interface RunViewOptions {
 }
 
 export async function runView(runId: string, options: RunViewOptions) {
+    if (!/^\d+$/.test(runId)) {
+        console.error(chalk.red(`Invalid run id: "${runId}" (run ids are numeric — see \`solidactions run list\`).`));
+        process.exit(1);
+        return;
+    }
+
     const config = await requireConfigWithWorkspace();
 
     try {

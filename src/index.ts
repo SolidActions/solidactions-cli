@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import chalk from 'chalk';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { deploy } from './commands/deploy';
 import { login, logout, whoami } from './commands/login';
 import { init } from './commands/init';
@@ -68,11 +68,17 @@ program
     .description('SolidActions CLI - Deploy and manage workflow automation')
     .version(pkg.version);
 
-program.option('-w, --workspace <id-or-slug-or-name>', 'override active workspace for this command');
+// Long form is --workspace-override (NOT --workspace) — `login` already owns
+// `--workspace` for its own purpose (set the workspace at login time), and
+// commander silently drops a subcommand option whose long name collides with
+// a parent option of the same name, so `login --workspace <x>` was being
+// swallowed by this global flag instead of reaching login()'s own option.
+// The short form `-w` is unaffected and remains the primary way to use this.
+program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w)');
 
 program.hook('preAction', (thisCommand, actionCommand) => {
     const opts = thisCommand.opts();
-    const wsOverride: string | undefined = opts.workspace;
+    const wsOverride: string | undefined = opts.workspaceOverride;
     if (wsOverride) {
         // workspace set is a write — -w is for read-paths only.
         const fullName = actionCommand.name();
@@ -80,7 +86,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
         const isWorkspaceSet = fullName === 'set' && parentName === 'workspace';
         if (isWorkspaceSet) {
             console.error(
-                chalk.yellow('warn:') + ' -w/--workspace is ignored on `workspace set`; the positional argument is the new workspace.',
+                chalk.yellow('warn:') + ' -w/--workspace-override is ignored on `workspace set`; the positional argument is the new workspace.',
             );
             return;
         }
@@ -98,7 +104,7 @@ program
     .argument('<api-key>', 'Your SolidActions API key')
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
-    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt)')
+    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt). Non-interactive logins without this flag leave the workspace unset.')
     .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
@@ -192,16 +198,19 @@ project
     .command('logs')
     .description('View build/deployment logs for a project')
     .argument('<project>', 'Project name (or family name with -e)')
-    .option('-e, --environment <environment>', 'Environment to resolve (production/staging/dev)')
+    .option('-e, --env <environment>', 'Environment to resolve (production/staging/dev)')
+    .addOption(new Option('--environment <environment>', 'Alias of --env').hideHelp())
     .action((projectName, options) => {
-        logsBuild(projectName, options.environment);
+        const environment = options.env ?? options.environment;
+        logsBuild(projectName, environment);
     });
 
 project
     .command('list')
     .description('List all projects')
-    .action(() => {
-        projectList();
+    .option('--json', 'Output as JSON')
+    .action((options) => {
+        projectList(options);
     });
 
 // =============================================================================
@@ -234,8 +243,10 @@ runCmd
     .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
     .option('--has-errors', 'Show only runs with errors (step errors, retries, or degraded results)')
     .option('--json', 'Output as JSON')
-    .option('-e, --environment <environment>', 'Environment to filter by (production/staging/dev)')
+    .option('-e, --env <environment>', 'Environment to filter by (production/staging/dev)')
+    .addOption(new Option('--environment <environment>', 'Alias of --env').hideHelp())
     .action((projectName, options) => {
+        options.environment = options.env ?? options.environment;
         runs(projectName, options);
     });
 
@@ -255,11 +266,11 @@ runCmd
 // env <subcommand>
 // =============================================================================
 
-const env = program.command('env').description('Manage environment variables');
+const env = program.command('env').description('Manage variables');
 
 env
     .command('set')
-    .description('Set an environment variable (create or update, global or project)')
+    .description('Set a variable (create or update, global or project)')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('<value-or-key>', 'Variable value (global) or variable key (project)')
     .argument('[value]', 'Variable value (when first arg is project)')
@@ -278,18 +289,20 @@ env
 
 env
     .command('list')
-    .description('List environment variables')
+    .description('List variables')
     .argument('[project]', 'Project name (omit for global variables)')
     .option('-e, --env <environment>', 'Filter by environment (production/staging/dev)')
+    .option('--json', 'Output as JSON')
     .action((projectName, options) => {
         envList(projectName, options);
     });
 
 env
     .command('delete')
-    .description('Delete an environment variable')
+    .description('Delete a variable')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('[key]', 'Variable key (if first arg is project)')
+    .option('-e, --env <environment>', 'Environment to delete from', 'dev')
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((keyOrProject, key, options) => {
         envDelete(keyOrProject, key, options);
@@ -308,7 +321,7 @@ env
 
 env
     .command('pull')
-    .description('Pull resolved environment variables to a local file')
+    .description('Pull resolved variables to a local file')
     .argument('<project>', 'Project name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-o, --output <file>', 'Output file path (defaults to .env or .env.{environment})')
@@ -320,7 +333,7 @@ env
 
 env
     .command('push')
-    .description('Push environment variables from .env file to a project')
+    .description('Push variables from .env file to a project')
     .argument('<project>', 'Project name')
     .argument('[path]', 'Source directory with solidactions.yaml and .env file', '.')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
@@ -342,7 +355,7 @@ schedule
     .description('Set a cron schedule for a workflow')
     .argument('<project>', 'Project name')
     .argument('<cron>', 'Cron expression (e.g., "0 9 * * *" for daily at 9am)')
-    .option('-w, --workflow <name>', 'Workflow name (if project has multiple)')
+    .option('--workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
     .option('-z, --timezone <iana>', 'IANA timezone the cron is evaluated in (e.g. America/Chicago); defaults to UTC')
     .option('-y, --yes', 'Skip confirmation if schedule already exists')

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
 
 interface RunListOptions {
     limit?: number;
@@ -127,22 +128,35 @@ function displaySummaryTable(runsList: any[], projectName?: string) {
     const header = projectName ? `Recent runs for "${projectName}":` : 'Recent runs:';
     console.log(chalk.blue(header));
     console.log('');
-    console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'STATUS'.padEnd(12) + 'TRIGGERED'.padEnd(22) + 'TRIGGERED BY'));
-    console.log(chalk.gray('-'.repeat(90)));
 
-    for (const run of runsList) {
-        const id = String(run.id || '?').padEnd(8);
-        const workflow = truncate(run.workflow_name || '?', 24).padEnd(25);
-        const { label: status, attention } = summaryStatusLabel(run);
-        const statusColor = attention ? chalk.yellow : getStatusColor(status);
+    const headers = ['ID', 'WORKFLOW', 'STATUS', 'TRIGGERED', 'TRIGGERED BY'];
+    const rows = runsList.map((run) => {
+        const { label: status } = summaryStatusLabel(run);
         const triggeredAt = run.triggered_at ? new Date(run.triggered_at).toLocaleString() : '-';
-        const triggeredBy = run.triggered_by || '-';
+        return [
+            String(run.id || '?'),
+            sanitizeCell(truncateCell(run.workflow_name || '?', 24)),
+            status,
+            triggeredAt,
+            sanitizeCell(run.triggered_by || '-'),
+        ];
+    });
+    const widths = computeColumnWidths(headers, rows, { minWidths: [8, 25, 12, 22, 0] });
+
+    console.log(chalk.gray(headers.map((h, i) => h.padEnd(widths[i])).join('')));
+    console.log(chalk.gray('-'.repeat(widths.reduce((a, b) => a + b, 0))));
+
+    for (let i = 0; i < runsList.length; i++) {
+        const run = runsList[i];
+        const [id, workflow, status, triggeredAt, triggeredBy] = rows[i];
+        const { attention } = summaryStatusLabel(run);
+        const statusColor = attention ? chalk.yellow : getStatusColor(status);
 
         console.log(
-            chalk.gray(id) +
-            workflow +
-            statusColor(status.padEnd(12)) +
-            chalk.gray(triggeredAt.padEnd(22)) +
+            chalk.gray(id.padEnd(widths[0])) +
+            workflow.padEnd(widths[1]) +
+            statusColor(status.padEnd(widths[2])) +
+            chalk.gray(triggeredAt.padEnd(widths[3])) +
             chalk.gray(triggeredBy)
         );
     }

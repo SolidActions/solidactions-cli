@@ -450,7 +450,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         clearInterval(poll);
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
-                        // Always sync YAML declarations (registers env vars and their mappings)
+                        // Always sync YAML declarations (registers variables and their mappings)
                         if (yamlConfig) {
                             await pushYamlDeclarations(config, projectSlug, yamlConfig);
                         }

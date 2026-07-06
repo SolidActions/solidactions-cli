@@ -44,6 +44,63 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
 }
 
 /**
+ * Best-effort lookup of the environments a project family actually has
+ * (e.g. "production, dev"), for a friendlier 404 message. Returns null on
+ * any failure — callers should treat that as "no extra detail available."
+ */
+export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+    try {
+        const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
+        const rows = res.data?.data ?? res.data ?? [];
+        const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
+        const envs: string[] | undefined = hit?.environments;
+        return envs?.length ? envs.join(', ') : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Render a Laravel-style 422 validation error body as plain readable text —
+ * never a raw JSON dump. Prefers `data.errors` (flattened, one message per
+ * line, with the internal `variables.N.` index prefix stripped and the bare
+ * `key` attribute renamed to `variable key` for clarity); falls back to
+ * `data.message`.
+ */
+export function formatValidationError(data: unknown): string {
+    const errors = (data as any)?.errors;
+    let messages: string[] = [];
+
+    if (errors && typeof errors === 'object' && !Array.isArray(errors)) {
+        for (const value of Object.values(errors)) {
+            if (Array.isArray(value)) {
+                messages.push(...value.map((v) => String(v)));
+            } else if (value) {
+                messages.push(String(value));
+            }
+        }
+    }
+
+    if (messages.length === 0) {
+        const message = (data as any)?.message;
+        if (typeof message === 'string' && message) {
+            messages = [message];
+        }
+    }
+
+    if (messages.length === 0) {
+        return 'Validation failed.';
+    }
+
+    return messages
+        .map((msg) => msg
+            .replace(/variables\.\d+\.key/gi, 'variable key')
+            .replace(/variable key field/gi, 'variable key')
+            .replace(/variables\.\d+\.(\w+)/gi, '$1'))
+        .join('\n');
+}
+
+/**
  * Get the full resolution (config + sources + activePath). Exits if nothing resolvable.
  */
 export function requireResolvedConfig(): ResolvedConfig {
@@ -57,6 +114,16 @@ export function requireResolvedConfig(): ResolvedConfig {
 
 export function requireConfig(): Config {
     return requireResolvedConfig().config;
+}
+
+/**
+ * Contextual 401 message — names the host being called and where the (now
+ * apparently invalid/expired) API key came from, instead of a bare
+ * "Authentication failed" that gives no clue which config is at fault.
+ */
+export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
+    const keySource = sources?.apiKey ?? 'config';
+    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login <api-key>\` to re-configure.`;
 }
 
 export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
@@ -94,7 +161,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run `solidactions login <api-key>` to reconfigure.'));
+            console.error(chalk.red(authFailureMessage(config, resolved?.sources ?? null)));
         } else {
             console.error(chalk.red('Failed to fetch workspaces:'), error.response?.data?.message || error.message);
         }
@@ -154,6 +221,13 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
         const ws = await resolveWorkspaceInput(config, config.workspace!);
         config = { ...config, workspace: ws.slug ?? ws.name, workspaceId: ws.id };
         return config;
+    }
+
+    if (!config.workspaceId && !process.stdin.isTTY) {
+        console.error(chalk.red(
+            'No workspace set for this config. Run `solidactions workspace set <name-or-id> --local` (or --global).',
+        ));
+        process.exit(1);
     }
 
     return ensureWorkspaceSelected(config);

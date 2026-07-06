@@ -1,9 +1,11 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { renderTable } from '../utils/table';
 
 interface EnvListOptions {
     env?: string;
+    json?: boolean;
 }
 
 /**
@@ -29,15 +31,18 @@ function formatEnvValue(value: string | null, source: string | null, isSecret: b
 export async function envList(projectName?: string, options: EnvListOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
+    const environment = options.env || 'dev';
+
     try {
         if (projectName) {
             // List project variable mappings
-            const environment = options.env || 'dev';
             const projectSlug = environment === 'production'
                 ? projectName
                 : `${projectName}-${environment}`;
 
-            console.log(chalk.blue(`Environment variables for project "${projectName}" (${environment}):`));
+            if (!options.json) {
+                console.log(chalk.blue(`Variables for project "${projectName}" (${environment}):`));
+            }
 
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: getApiHeaders(config),
@@ -45,66 +50,70 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
 
             const mappings = response.data || [];
 
+            if (options.json) {
+                console.log(JSON.stringify(mappings, null, 2));
+                return;
+            }
+
             if (mappings.length === 0) {
                 console.log(chalk.gray('No variable mappings found.'));
                 return;
             }
 
             console.log('');
-            console.log(chalk.gray('KEY'.padEnd(28) + 'VALUE'.padEnd(24) + 'TYPE'.padEnd(14) + 'SOURCE'));
-            console.log(chalk.gray('-'.repeat(90)));
 
-            for (const mapping of mappings) {
+            const rows = mappings.map((mapping: any) => {
                 const key = mapping.env_name || '?';
 
                 // Value display (resolved_value includes global/oauth resolution)
                 const rawValue = mapping.resolved_value ?? mapping.value;
-                let value: string;
-                if (mapping.is_secret) {
-                    value = chalk.yellow('••••••');
-                } else if (rawValue) {
-                    value = rawValue.toString().substring(0, 22);
-                } else {
-                    value = chalk.gray('-');
-                }
+                const value = mapping.is_secret ? '••••••' : rawValue ? rawValue.toString() : '-';
 
                 // Type & source (mirrors UI getMappingType)
                 let type: string;
                 let source: string;
-
                 if (mapping.source_type === 'oauth_connection' && mapping.oauth_connection_id) {
-                    type = chalk.blue('oauth');
-                    source = chalk.blue(mapping.oauth_connection_name || 'OAuth');
+                    type = 'oauth';
+                    source = mapping.oauth_connection_name || 'OAuth';
                 } else if (mapping.global_variable_key) {
-                    type = chalk.green('global');
-                    source = chalk.green(mapping.global_variable_key);
+                    type = 'global';
+                    source = mapping.global_variable_key;
                 } else if (mapping.has_value) {
-                    type = chalk.gray('project var');
-                    source = chalk.gray('local');
+                    type = 'project var';
+                    source = 'local';
                 } else {
-                    type = chalk.gray('-');
-                    source = chalk.gray('-');
+                    type = '-';
+                    source = '-';
                 }
 
-                console.log(
-                    key.padEnd(28) +
-                    value.padEnd(24) +
-                    type.padEnd(14) +
-                    source
-                );
+                return [key, value, type, source];
+            });
+
+            const lines = renderTable(['KEY', 'VALUE', 'TYPE', 'SOURCE'], rows, { minWidths: [28, 24, 14, 0] });
+            console.log(chalk.gray(lines[0]));
+            console.log(chalk.gray(lines[1]));
+            for (const line of lines.slice(2)) {
+                console.log(line);
             }
 
             console.log('');
             console.log(chalk.gray(`${mappings.length} variable(s)`));
         } else {
             // List global variables with per-environment values
-            console.log(chalk.blue('Global environment variables:'));
+            if (!options.json) {
+                console.log(chalk.blue('Global variables:'));
+            }
 
             const response = await axios.get(`${config.host}/api/v1/variables`, {
                 headers: getApiHeaders(config),
             });
 
             const variables = response.data?.data || [];
+
+            if (options.json) {
+                console.log(JSON.stringify(variables, null, 2));
+                return;
+            }
 
             if (variables.length === 0) {
                 console.log(chalk.gray('No global variables found.'));
@@ -211,7 +220,12 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             if (error.response.status === 401) {
                 console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
             } else if (error.response.status === 404) {
-                console.error(chalk.red(projectName ? `Project "${projectName}" not found for the specified environment.` : 'Resource not found.'));
+                if (projectName) {
+                    const envsList = await describeProjectEnvironments(config, projectName);
+                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
+                } else {
+                    console.error(chalk.red('Resource not found.'));
+                }
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }

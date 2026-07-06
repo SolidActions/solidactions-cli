@@ -29,6 +29,8 @@ export interface PlatformVar {
     proxy_token?: string | null;
     /** Connection key (set when source_type === 'oauth_connection') */
     connection_key?: string | null;
+    /** Whether this mapping is a secret — a valueless secret is not fetchable locally, unlike a plain var. */
+    is_secret?: boolean;
 }
 
 /**
@@ -347,10 +349,13 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     // 3. Build ctx.vars from platform vars. A declared mapping is only readable
     //    on ctx.vars when it is an OAuth connection (with proxy fields) OR has a
     //    non-null resolved_value. Mappings with no value in this env are DROPPED
-    //    — and must NOT be counted in the summary (BUG #1).
+    //    — and must NOT be counted in the summary (BUG #1). A dropped SECRET is
+    //    reported separately (it's genuinely unavailable to local dev, not
+    //    merely "unset" — the platform never resolves secret values to the CLI).
     const vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }> = {};
     let connectionCount = 0;
     let droppedCount = 0;
+    let droppedSecretCount = 0;
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -361,6 +366,8 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             connectionCount++;
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
+        } else if (pv.is_secret) {
+            droppedSecretCount++;
         } else {
             droppedCount++;
         }
@@ -385,6 +392,9 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         if (droppedCount > 0) {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
         }
+        if (droppedSecretCount > 0) {
+            summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
+        }
         out(summary);
     } else {
         out('Loaded 0 platform vars (no --env) — running locally');
@@ -403,7 +413,20 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     const entryPath = path.resolve(opts.entry);
     const _require = createRequire(entryPath);
     // Resolve via the installed (or linked) @solidactions/sdk package.
-    const sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    let sdkTestingMain: string;
+    try {
+        sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    } catch (e: any) {
+        if (e.code === 'MODULE_NOT_FOUND') {
+            err('Dependencies not installed — run `npm install` in the project directory first.');
+            return {
+                stdout: stdoutLines.join('\n'),
+                stderr: stderrLines.join('\n'),
+                result: { status: 'failed', error: e, phase: 'setup' },
+            };
+        }
+        throw e;
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { createMockServer } = _require(sdkTestingMain) as { createMockServer: (port?: number) => Promise<{ baseUrl: string; stop: () => Promise<void> }> };
 
