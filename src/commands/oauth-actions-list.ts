@@ -47,7 +47,9 @@ export async function oauthActionsList(platform: string, options: OAuthActionsLi
         console.log('');
         console.log(chalk.gray(`${actions.length} action(s) — use "solidactions oauth-actions search ${platform} <query>" to narrow, or "oauth-actions show ${platform} <action_id>" for detail.`));
     } catch (error: any) {
-        if (error.response?.status === 401) {
+        if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
+            console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-actions platforms\` to see available platforms.`));
+        } else if (error.response?.status === 401) {
             console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>".'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
