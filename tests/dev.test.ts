@@ -173,27 +173,6 @@ describe('runDev', () => {
     // F-C6 — dev-mode composition
     // -----------------------------------------------------------------------
 
-    it('loads a local .env file into ctx.vars (override server values) and prints a notice', async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-cli-dev-envfile-'));
-        const envFilePath = path.join(tmpDir, '.env');
-        fs.writeFileSync(envFilePath, 'FROM_ENV_FILE=hello\n');
-
-        try {
-            const out = await runDev({
-                entry: ECHO_VARS_FIXTURE,
-                input: '{}',
-                envFile: envFilePath,
-            });
-
-            expect(out.stdout).toMatch(/Loaded 1 vars? from .*\.env \(override server values\)/);
-
-            const keys = out.result.output as string[];
-            expect(keys).toContain('FROM_ENV_FILE');
-        } finally {
-            fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
-    }, 20_000);
-
     it('reports a dropped secret var distinctly from a dropped plain var ("not available to local dev", not "had no value")', async () => {
         const out = await runDev({
             entry: ECHO_FIXTURE,

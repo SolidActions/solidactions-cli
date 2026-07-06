@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
-import { parseEnvFile, SolidActionsConfig } from '../utils/env';
+import { SolidActionsConfig } from '../utils/env';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -105,12 +105,6 @@ export interface RunDevOptions {
      *   "override shadows platform var: <KEY>"
      */
     varsOverride?: Record<string, string>;
-    /**
-     * Path to a local .env file to load into ctx.vars, overriding any server
-     * (platform) values for the same key. Defaults to `./.env` (relative to
-     * the CLI's cwd) when that file exists and no path is given.
-     */
-    envFile?: string;
 }
 
 /**
@@ -379,21 +373,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
     }
 
-    // 4. Load a local .env file (if any), overriding server values for the
-    //    same key. Runs before varsOverride so an explicit programmatic
-    //    override still wins over both the platform and the .env file.
-    const envFilePath = opts.envFile ?? (fs.existsSync(path.resolve('.env')) ? path.resolve('.env') : null);
-    if (envFilePath) {
-        const fileVars = parseEnvFile(envFilePath);
-        let n = 0;
-        for (const [k, v] of fileVars) {
-            vars[k] = v;
-            n++;
-        }
-        out(`Loaded ${n} vars from ${path.relative(process.cwd(), envFilePath)} (override server values)`);
-    }
-
-    // 5. Apply overrides, warning on shadows.
+    // 4. Apply overrides, warning on shadows.
     if (opts.varsOverride) {
         for (const [key, value] of Object.entries(opts.varsOverride)) {
             if (key in vars) {
@@ -403,7 +383,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
     }
 
-    // 6. Print summary line. Report what is ACTUALLY readable on ctx.vars — the
+    // 5. Print summary line. Report what is ACTUALLY readable on ctx.vars — the
     //    plain-var count is the number of plain vars actually placed in `vars`
     //    (total keys minus connection entries), never the raw mapping count.
     if (opts.env) {
@@ -413,7 +393,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
         }
         if (droppedSecretCount > 0) {
-            summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — use \`solidactions env pull\` + .env)`;
+            summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
         }
         out(summary);
     } else {
@@ -600,7 +580,6 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
 interface DevOptions {
     input?: string;
     env?: string;
-    envFile?: string;
 }
 
 /**
@@ -644,15 +623,12 @@ function hasTsLoader(): boolean {
  * node_modules tsx is preferred. `env` is optional — when omitted the child
  * runs the bare local path (no platform fetch, empty ctx.vars).
  */
-function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string, envFile?: string): number {
+function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string): number {
     // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
     const cliEntry = path.resolve(__dirname, '..', 'index.js');
     const args = ['tsx', cliEntry, 'dev', file, '--input', input];
     if (env) {
         args.push('--env', env);
-    }
-    if (envFile) {
-        args.push('--env-file', envFile);
     }
     const result = spawnSync(
         'npx',
@@ -688,10 +664,6 @@ function reexecUnderTsx(file: string, env: string | undefined, input: string, pr
 export async function dev(file: string, options: DevOptions): Promise<void> {
     const env = options.env;
     const input = options.input || '{}';
-    // Resolve relative to THIS process's cwd before any re-exec, since the
-    // tsx child's cwd is the project root (which may differ from where the
-    // user invoked the command).
-    const envFile = options.envFile ? path.resolve(options.envFile) : undefined;
 
     const filePath = path.resolve(file);
     if (!fs.existsSync(filePath)) {
@@ -720,13 +692,13 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
                 process.exit(1);
             }
         }
-        process.exit(reexecUnderTsx(file, env, input, projectDir, envFile));
+        process.exit(reexecUnderTsx(file, env, input, projectDir));
     }
 
     // In-process path (already under a TS loader, or a .js/.mjs entry).
     let result;
     try {
-        result = await runDev({ entry: filePath, input, env, envFile });
+        result = await runDev({ entry: filePath, input, env });
     } catch (err: any) {
         console.error(chalk.red(`Failed: ${err.message}`));
         process.exit(1);
