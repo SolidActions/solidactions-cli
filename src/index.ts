@@ -266,11 +266,11 @@ runCmd
 // env <subcommand>
 // =============================================================================
 
-const env = program.command('env').description('Manage environment variables');
+const env = program.command('env').description('Manage variables');
 
 env
     .command('set')
-    .description('Set an environment variable (create or update, global or project)')
+    .description('Set a variable (create or update, global or project)')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('<value-or-key>', 'Variable value (global) or variable key (project)')
     .argument('[value]', 'Variable value (when first arg is project)')
@@ -289,7 +289,7 @@ env
 
 env
     .command('list')
-    .description('List environment variables')
+    .description('List variables')
     .argument('[project]', 'Project name (omit for global variables)')
     .option('-e, --env <environment>', 'Filter by environment (production/staging/dev)')
     .option('--json', 'Output as JSON')
@@ -299,7 +299,7 @@ env
 
 env
     .command('delete')
-    .description('Delete an environment variable')
+    .description('Delete a variable')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('[key]', 'Variable key (if first arg is project)')
     .option('-e, --env <environment>', 'Environment to delete from', 'dev')
@@ -321,7 +321,7 @@ env
 
 env
     .command('pull')
-    .description('Pull resolved environment variables to a local file')
+    .description('Pull resolved variables to a local file')
     .argument('<project>', 'Project name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-o, --output <file>', 'Output file path (defaults to .env or .env.{environment})')
@@ -333,7 +333,7 @@ env
 
 env
     .command('push')
-    .description('Push environment variables from .env file to a project')
+    .description('Push variables from .env file to a project')
     .argument('<project>', 'Project name')
     .argument('[path]', 'Source directory with solidactions.yaml and .env file', '.')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')

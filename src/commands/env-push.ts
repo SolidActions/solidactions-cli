@@ -44,7 +44,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
 
     if (!fs.existsSync(envFilePath)) {
         console.error(chalk.red(`${envFileName} not found in ${sourceDir}`));
-        console.log(chalk.gray(`Create ${envFileName} with your environment variables, or use a different --env.`));
+        console.log(chalk.gray(`Create ${envFileName} with your variables, or use a different --env.`));
         process.exit(1);
     }
 
@@ -62,7 +62,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         keysToProcess = Array.from(envValues.keys());
     } else {
         if (declaredVars.size === 0) {
-            console.log(chalk.yellow('No environment variables declared in solidactions.yaml.'));
+            console.log(chalk.yellow('No variables declared in solidactions.yaml.'));
             console.log(chalk.gray('Use --include-undeclared to push all vars from the .env file.'));
             process.exit(0);
         }
@@ -101,7 +101,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         ? projectName
         : `${projectName}-${environment}`;
 
-    console.log(chalk.blue(`Pushing env vars to "${projectName}" (${environment})...`));
+    console.log(chalk.blue(`Pushing variables to "${projectName}" (${environment})...`));
 
     // Fetch current server state
     let serverMappings: any[] = [];
@@ -240,7 +240,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         console.log(chalk.green(`\n✓ Pushed ${toPush.length} variable(s) to ${projectSlug}`));
         console.log(chalk.gray(`  ${created} created, ${updated} updated` + (toSkip.length > 0 ? `, ${toSkip.length} skipped` : '')));
     } catch (error: any) {
-        console.error(chalk.red('Failed to push environment variables:'), error.response?.data?.message || error.message);
+        console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
         process.exit(1);
     }
 }

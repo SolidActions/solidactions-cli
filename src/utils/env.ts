@@ -2,7 +2,7 @@ import fs from 'fs';
 import yaml from 'js-yaml';
 
 /**
- * Parsed environment variable declaration from YAML.
+ * Parsed variable declaration from YAML.
  * New format examples:
  *   - TEST_ENV_VAR                    -> { key: "TEST_ENV_VAR", mappedTo: null }
  *   - MAPPED_SECRET: JIMBO            -> { key: "MAPPED_SECRET", mappedTo: "JIMBO" }
@@ -105,7 +105,7 @@ export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
 
 /**
  * Extract declared variable keys from solidactions.yaml env config.
- * Returns a set of env var keys that are declared in YAML.
+ * Returns a set of variable keys that are declared in YAML.
  */
 export function getYamlDeclaredVars(config: SolidActionsConfig): Set<string> {
     const parsedVars = parseYamlEnvVars(config);

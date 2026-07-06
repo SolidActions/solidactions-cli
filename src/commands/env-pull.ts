@@ -43,7 +43,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
     const outputFile = options.output || (environment === 'production' ? '.env' : `.env.${environment}`);
     const outputPath = path.resolve(outputFile);
 
-    console.log(chalk.blue(`Pulling environment variables from "${projectName}" (${environment})...`));
+    console.log(chalk.blue(`Pulling variables from "${projectName}" (${environment})...`));
 
     try {
         // First, check if there are any secrets
@@ -54,7 +54,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
         const mappings = checkResponse.data || [];
 
         if (mappings.length === 0) {
-            console.log(chalk.yellow('No environment variables found for this project.'));
+            console.log(chalk.yellow('No variables found for this project.'));
             process.exit(0);
         }
 
@@ -86,7 +86,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                 process.exit(0);
             }
 
-            // Build OAuth env var names set and their formatted lines
+            // Build OAuth variable names set and their formatted lines
             const oauthKeySet = new Set(oauthVars.map((v: any) => v.env_name));
             const oauthLines: string[] = [];
 

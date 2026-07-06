@@ -41,7 +41,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
                 : `${projectName}-${environment}`;
 
             if (!options.json) {
-                console.log(chalk.blue(`Environment variables for project "${projectName}" (${environment}):`));
+                console.log(chalk.blue(`Variables for project "${projectName}" (${environment}):`));
             }
 
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
@@ -101,7 +101,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
         } else {
             // List global variables with per-environment values
             if (!options.json) {
-                console.log(chalk.blue('Global environment variables:'));
+                console.log(chalk.blue('Global variables:'));
             }
 
             const response = await axios.get(`${config.host}/api/v1/variables`, {
