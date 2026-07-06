@@ -98,7 +98,7 @@ program
     .argument('<api-key>', 'Your SolidActions API key')
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
-    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt)')
+    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt). Non-interactive logins without this flag leave the workspace unset.')
     .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
