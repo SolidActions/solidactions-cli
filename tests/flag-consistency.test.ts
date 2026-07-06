@@ -34,11 +34,13 @@ interface CapturedRequest {
     method: string | undefined;
     url: string | undefined;
     body: string;
+    headers: http.IncomingHttpHeaders;
 }
 
 let stubServer: http.Server;
 let stubPort: number;
 let lastCapture: CapturedRequest | null = null;
+let allCaptures: CapturedRequest[] = [];
 
 beforeAll(async () => {
     if (!fs.existsSync(CLI_BINARY)) {
@@ -49,7 +51,8 @@ beforeAll(async () => {
         let body = '';
         req.on('data', (chunk) => { body += chunk; });
         req.on('end', () => {
-            lastCapture = { method: req.method, url: req.url, body };
+            lastCapture = { method: req.method, url: req.url, body, headers: req.headers };
+            allCaptures.push(lastCapture);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (req.url?.startsWith('/api/v1/projects/resolve/build-log') || req.url?.match(/\/build-log/)) {
                 res.end(JSON.stringify({ build_log: 'log output' }));
@@ -89,6 +92,7 @@ let tmpHomes: string[] = [];
 afterEach(() => {
     for (const home of tmpHomes) fs.rmSync(path.dirname(home), { recursive: true, force: true });
     tmpHomes = [];
+    allCaptures = [];
 });
 
 /** Fresh $HOME with a valid global config pointed at the stub server. */
@@ -179,6 +183,11 @@ describe('flag consistency (F-C4)', () => {
         expect(result.status).toBe(0);
     });
 
+    // This is the MUTATION GUARDIAN for FIX 2: restore `-w, --wait` on the
+    // run-start command and THIS test fails (verified by mutation). The two
+    // behavioral tests below cannot catch that mutation on their own — see the
+    // note on the `-w <value>` test for why the value-bearing path is identical
+    // under both spellings.
     it('run start: --help lists no -w short flag for --wait (freed up for the global -w/--workspace-override)', async () => {
         const result = await runCliHelp(['run', 'start', '--help']);
         expect(result.stdout).not.toMatch(/-w,\s*--wait/);
@@ -194,13 +203,33 @@ describe('flag consistency (F-C4)', () => {
         expect(result.status).toBe(0);
     });
 
-    it('run start: -w <value> is now the global workspace-override, not swallowed as an invalid --wait argument', async () => {
+    it('run start: -w <value> routes to the global workspace-override (resolves the workspace, does NOT engage --wait)', async () => {
+        // Locks in the end-to-end behavior of the value-bearing form: `-w
+        // login-target` resolves to ws-login-1 (via GET /api/v1/workspaces) and
+        // stamps it on the trigger request, and does NOT wait.
+        //
+        // NOTE: this is NOT the mutation guardian for FIX 2 — mutation-testing
+        // showed the value-bearing `-w <value>` path behaves IDENTICALLY under
+        // both `--wait` (fixed) and `-w, --wait` (old): commander's global
+        // `-w, --workspace-override <value>` always shadows the subcommand's
+        // boolean `-w`, so `-w login-target` routes to the override and never
+        // engages wait in either build. The `--help` test above is what pins
+        // the short-flag removal. This test guards the global-override
+        // integration path against unrelated regressions.
         const home = tmpHomeWithConfig();
         const result = await runCli(['run', 'start', 'my-project', 'my-workflow', '-w', 'login-target'], home);
 
         expect(result.stderr).not.toMatch(/unknown option/);
         expect(result.stderr).not.toMatch(/argument missing/);
         expect(result.status).toBe(0);
+
+        // --wait must NOT have engaged.
+        expect(result.stdout).not.toMatch(/Waiting for completion/);
+
+        // The trigger request must carry the RESOLVED override workspace, not the default.
+        const trigger = allCaptures.find((c) => c.method === 'POST' && /\/workflows\/.+\/trigger$/.test(c.url ?? ''));
+        expect(trigger).toBeDefined();
+        expect(trigger?.headers['x-workspace-id']).toBe('ws-login-1');
     });
 
     it('schedule set: --help lists no -w short flag (freed up for the global -w/--workspace override)', async () => {

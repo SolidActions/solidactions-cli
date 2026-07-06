@@ -138,13 +138,30 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
         expect(errLines.join('\n')).toContain('oauth-actions platforms');
     });
 
-    it('list/search: a genuine 404 that is NOT platform_unknown still falls through to the generic "Failed: 404" path', async () => {
+    it('list: a genuine 404 that is NOT platform_unknown still falls through to the generic "Failed: 404" path', async () => {
         nextStatus = 404;
         nextBody = { message: 'Not found.' };
 
         let caught: ProcessExitError | null = null;
         try {
             await oauthActionsList('gmail', {});
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(errLines.join('\n')).not.toContain('Unknown platform');
+        expect(errLines.join('\n')).toContain('Failed: 404');
+    });
+
+    it('search: a genuine 404 that is NOT platform_unknown still falls through to the generic "Failed: 404" path', async () => {
+        nextStatus = 404;
+        nextBody = { message: 'Not found.' };
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await oauthActionsSearch('gmail', 'send', {});
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;

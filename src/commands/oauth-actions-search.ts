@@ -39,7 +39,7 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         }
 
         if (actions.length === 0) {
-            console.log(`No actions found for "${platform}" — check the platform name and that a connection exists (\`solidactions env pull --update-oauth\` syncs connections).`);
+            console.log(`No actions found for platform "${platform}".`);
             return;
         }
 
