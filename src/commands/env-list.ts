@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface EnvListOptions {
     env?: string;
@@ -29,10 +29,11 @@ function formatEnvValue(value: string | null, source: string | null, isSecret: b
 export async function envList(projectName?: string, options: EnvListOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
+    const environment = options.env || 'dev';
+
     try {
         if (projectName) {
             // List project variable mappings
-            const environment = options.env || 'dev';
             const projectSlug = environment === 'production'
                 ? projectName
                 : `${projectName}-${environment}`;
@@ -211,7 +212,12 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             if (error.response.status === 401) {
                 console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
             } else if (error.response.status === 404) {
-                console.error(chalk.red(projectName ? `Project "${projectName}" not found for the specified environment.` : 'Resource not found.'));
+                if (projectName) {
+                    const envsList = await describeProjectEnvironments(config, projectName);
+                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
+                } else {
+                    console.error(chalk.red('Resource not found.'));
+                }
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }

@@ -44,6 +44,23 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
 }
 
 /**
+ * Best-effort lookup of the environments a project family actually has
+ * (e.g. "production, dev"), for a friendlier 404 message. Returns null on
+ * any failure — callers should treat that as "no extra detail available."
+ */
+export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+    try {
+        const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
+        const rows = res.data?.data ?? res.data ?? [];
+        const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
+        const envs: string[] | undefined = hit?.environments;
+        return envs?.length ? envs.join(', ') : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Get the full resolution (config + sources + activePath). Exits if nothing resolvable.
  */
 export function requireResolvedConfig(): ResolvedConfig {

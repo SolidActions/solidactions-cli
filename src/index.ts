@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import chalk from 'chalk';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { deploy } from './commands/deploy';
 import { login, logout, whoami } from './commands/login';
 import { init } from './commands/init';
@@ -192,9 +192,11 @@ project
     .command('logs')
     .description('View build/deployment logs for a project')
     .argument('<project>', 'Project name (or family name with -e)')
-    .option('-e, --environment <environment>', 'Environment to resolve (production/staging/dev)')
+    .option('-e, --env <environment>', 'Environment to resolve (production/staging/dev)')
+    .addOption(new Option('--environment <environment>', 'Alias of --env').hideHelp())
     .action((projectName, options) => {
-        logsBuild(projectName, options.environment);
+        const environment = options.env ?? options.environment;
+        logsBuild(projectName, environment);
     });
 
 project
@@ -234,8 +236,10 @@ runCmd
     .option('--detailed', 'Include timeline, steps, and logs per run (default limit: 5)')
     .option('--has-errors', 'Show only runs with errors (step errors, retries, or degraded results)')
     .option('--json', 'Output as JSON')
-    .option('-e, --environment <environment>', 'Environment to filter by (production/staging/dev)')
+    .option('-e, --env <environment>', 'Environment to filter by (production/staging/dev)')
+    .addOption(new Option('--environment <environment>', 'Alias of --env').hideHelp())
     .action((projectName, options) => {
+        options.environment = options.env ?? options.environment;
         runs(projectName, options);
     });
 
@@ -290,6 +294,7 @@ env
     .description('Delete an environment variable')
     .argument('<key-or-project>', 'Variable key (global) or project name')
     .argument('[key]', 'Variable key (if first arg is project)')
+    .option('-e, --env <environment>', 'Environment to delete from', 'dev')
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((keyOrProject, key, options) => {
         envDelete(keyOrProject, key, options);
@@ -342,7 +347,7 @@ schedule
     .description('Set a cron schedule for a workflow')
     .argument('<project>', 'Project name')
     .argument('<cron>', 'Cron expression (e.g., "0 9 * * *" for daily at 9am)')
-    .option('-w, --workflow <name>', 'Workflow name (if project has multiple)')
+    .option('--workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
     .option('-z, --timezone <iana>', 'IANA timezone the cron is evaluated in (e.g. America/Chicago); defaults to UTC')
     .option('-y, --yes', 'Skip confirmation if schedule already exists')

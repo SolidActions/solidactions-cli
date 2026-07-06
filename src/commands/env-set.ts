@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
@@ -135,7 +135,8 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 if (error.response.status === 401) {
                     console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
                 } else if (error.response.status === 404) {
-                    console.error(chalk.red(`Project "${projectSlug}" not found.`));
+                    const envsList = await describeProjectEnvironments(config, projectName);
+                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
                 } else if (error.response.status === 422) {
                     console.error(chalk.red('Validation error:'), error.response.data);
                 } else {
