@@ -3,7 +3,8 @@ import path from 'path';
 import chalk from 'chalk';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from '../utils/github';
-import { aiInit } from './ai-init';
+import { aiInit, resolveAiHelperTarget } from './ai-init';
+import type { AiHelperTarget } from '../utils/skills';
 
 interface InitOptions {
     skills?: boolean;  // commander inverts --no-skills into skills: false
@@ -62,6 +63,16 @@ export async function init(directory: string | undefined, options: InitOptions =
             process.exit(1);
         }
 
+        // Resolve the AI-helper target (CLAUDE.md vs AGENTS.md) UP FRONT, before
+        // writing any template file. Previously this decision was made inside
+        // aiInit(), AFTER the scaffold was already written — in a non-TTY shell
+        // with no --claude/--agents flag, the resulting unanswerable prompt left
+        // a half-scaffolded project (no CLAUDE.md/AGENTS.md, no .claude/skills/).
+        let aiHelperTarget: AiHelperTarget | undefined;
+        if (installSkills) {
+            aiHelperTarget = await resolveAiHelperTarget({ claude: options.claude, agents: options.agents });
+        }
+
         console.log(chalk.blue(`Scaffolding "${projectName}" in ${targetDir}...`));
 
         for (const [remoteSuffix, localSuffix] of TEMPLATE_FILES) {
@@ -78,7 +89,7 @@ export async function init(directory: string | undefined, options: InitOptions =
         if (installSkills) {
             console.log('');
             process.chdir(targetDir);
-            await aiInit({ claude: options.claude, agents: options.agents });
+            await aiInit({ claude: options.claude, agents: options.agents }, aiHelperTarget);
         }
 
         console.log('');
