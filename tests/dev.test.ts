@@ -8,6 +8,7 @@
 
 import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
 import * as path from 'path';
 import * as childProcess from 'child_process';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -166,6 +167,67 @@ describe('runDev', () => {
 
         expect(out.result.status).not.toBe('completed');
         expect(out.result.status).toBe('failed');
+    }, 20_000);
+
+    // -----------------------------------------------------------------------
+    // F-C6 — dev-mode composition
+    // -----------------------------------------------------------------------
+
+    it('loads a local .env file into ctx.vars (override server values) and prints a notice', async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-cli-dev-envfile-'));
+        const envFilePath = path.join(tmpDir, '.env');
+        fs.writeFileSync(envFilePath, 'FROM_ENV_FILE=hello\n');
+
+        try {
+            const out = await runDev({
+                entry: ECHO_VARS_FIXTURE,
+                input: '{}',
+                envFile: envFilePath,
+            });
+
+            expect(out.stdout).toMatch(/Loaded 1 vars? from .*\.env \(override server values\)/);
+
+            const keys = out.result.output as string[];
+            expect(keys).toContain('FROM_ENV_FILE');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    it('reports a dropped secret var distinctly from a dropped plain var ("not available to local dev", not "had no value")', async () => {
+        const out = await runDev({
+            entry: ECHO_FIXTURE,
+            input: '{"n":1}',
+            env: 'staging',
+            api: {
+                projectSlug: 'test-project-staging',
+                async fetchVarsAndConnections(): Promise<PlatformVar[]> {
+                    return [
+                        { env_name: 'SECRET_VAR', resolved_value: null, is_secret: true, source_type: 'plain' },
+                    ];
+                },
+            },
+        });
+
+        expect(out.stdout).toMatch(/1 secret var is not available to local dev/);
+        expect(out.stdout).not.toMatch(/had no value/);
+    }, 20_000);
+
+    it('prints an npm-install hint (not a raw stack trace) when the SDK cannot be resolved', async () => {
+        // A fixture entry OUTSIDE this repo's tree has no node_modules ancestor
+        // containing @solidactions/sdk, so require.resolve(...) genuinely fails —
+        // mirrors a freshly-scaffolded project before `npm install`.
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-cli-dev-no-modules-'));
+        const entry = path.join(tmpDir, 'entry.ts');
+        fs.writeFileSync(entry, 'export default {};');
+
+        try {
+            const out = await runDev({ entry, input: '{}' });
+            expect(out.stderr).toMatch(/npm install/);
+            expect(out.result.status).toBe('failed');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
     }, 20_000);
 });
 

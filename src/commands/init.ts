@@ -54,6 +54,14 @@ export async function init(directory: string | undefined, options: InitOptions =
             process.exit(1);
         }
 
+        // Validate flags BEFORE any network fetch/write — previously this check
+        // lived only inside aiInit(), which runs after the template files are
+        // already fetched and written.
+        if (installSkills && options.claude && options.agents) {
+            console.error(chalk.red('Please specify only one of --claude or --agents'));
+            process.exit(1);
+        }
+
         console.log(chalk.blue(`Scaffolding "${projectName}" in ${targetDir}...`));
 
         for (const [remoteSuffix, localSuffix] of TEMPLATE_FILES) {
@@ -80,6 +88,7 @@ export async function init(directory: string | undefined, options: InitOptions =
         if (directory) {
             console.log(chalk.gray(`  cd ${directory}`));
         }
+        console.log(chalk.gray('  npm install'));
         console.log(chalk.gray(`  solidactions project deploy ${projectName} -e production`));
         console.log(chalk.gray(`  # If your workflow uses a webhook, retrieve its auto-generated secret`));
         console.log(chalk.gray(`  # and set that value in your sender (e.g. Telegram secret_token):`));

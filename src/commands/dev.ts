@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
-import { SolidActionsConfig } from '../utils/env';
+import { parseEnvFile, SolidActionsConfig } from '../utils/env';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -29,6 +29,8 @@ export interface PlatformVar {
     proxy_token?: string | null;
     /** Connection key (set when source_type === 'oauth_connection') */
     connection_key?: string | null;
+    /** Whether this mapping is a secret — a valueless secret is not fetchable locally, unlike a plain var. */
+    is_secret?: boolean;
 }
 
 /**
@@ -103,6 +105,12 @@ export interface RunDevOptions {
      *   "override shadows platform var: <KEY>"
      */
     varsOverride?: Record<string, string>;
+    /**
+     * Path to a local .env file to load into ctx.vars, overriding any server
+     * (platform) values for the same key. Defaults to `./.env` (relative to
+     * the CLI's cwd) when that file exists and no path is given.
+     */
+    envFile?: string;
 }
 
 /**
@@ -347,10 +355,13 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     // 3. Build ctx.vars from platform vars. A declared mapping is only readable
     //    on ctx.vars when it is an OAuth connection (with proxy fields) OR has a
     //    non-null resolved_value. Mappings with no value in this env are DROPPED
-    //    — and must NOT be counted in the summary (BUG #1).
+    //    — and must NOT be counted in the summary (BUG #1). A dropped SECRET is
+    //    reported separately (it's genuinely unavailable to local dev, not
+    //    merely "unset" — the platform never resolves secret values to the CLI).
     const vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }> = {};
     let connectionCount = 0;
     let droppedCount = 0;
+    let droppedSecretCount = 0;
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -361,12 +372,28 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             connectionCount++;
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
+        } else if (pv.is_secret) {
+            droppedSecretCount++;
         } else {
             droppedCount++;
         }
     }
 
-    // 4. Apply overrides, warning on shadows.
+    // 4. Load a local .env file (if any), overriding server values for the
+    //    same key. Runs before varsOverride so an explicit programmatic
+    //    override still wins over both the platform and the .env file.
+    const envFilePath = opts.envFile ?? (fs.existsSync(path.resolve('.env')) ? path.resolve('.env') : null);
+    if (envFilePath) {
+        const fileVars = parseEnvFile(envFilePath);
+        let n = 0;
+        for (const [k, v] of fileVars) {
+            vars[k] = v;
+            n++;
+        }
+        out(`Loaded ${n} vars from ${path.relative(process.cwd(), envFilePath)} (override server values)`);
+    }
+
+    // 5. Apply overrides, warning on shadows.
     if (opts.varsOverride) {
         for (const [key, value] of Object.entries(opts.varsOverride)) {
             if (key in vars) {
@@ -376,7 +403,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
     }
 
-    // 5. Print summary line. Report what is ACTUALLY readable on ctx.vars — the
+    // 6. Print summary line. Report what is ACTUALLY readable on ctx.vars — the
     //    plain-var count is the number of plain vars actually placed in `vars`
     //    (total keys minus connection entries), never the raw mapping count.
     if (opts.env) {
@@ -384,6 +411,9 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         let summary = `Loaded ${plainVarCount} vars + ${connectionCount} connections from ${apiClient!.projectSlug} / env ${opts.env}`;
         if (droppedCount > 0) {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
+        }
+        if (droppedSecretCount > 0) {
+            summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — use \`solidactions env pull\` + .env)`;
         }
         out(summary);
     } else {
@@ -403,7 +433,20 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     const entryPath = path.resolve(opts.entry);
     const _require = createRequire(entryPath);
     // Resolve via the installed (or linked) @solidactions/sdk package.
-    const sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    let sdkTestingMain: string;
+    try {
+        sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    } catch (e: any) {
+        if (e.code === 'MODULE_NOT_FOUND') {
+            err('Dependencies not installed — run `npm install` in the project directory first.');
+            return {
+                stdout: stdoutLines.join('\n'),
+                stderr: stderrLines.join('\n'),
+                result: { status: 'failed', error: e, phase: 'setup' },
+            };
+        }
+        throw e;
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { createMockServer } = _require(sdkTestingMain) as { createMockServer: (port?: number) => Promise<{ baseUrl: string; stop: () => Promise<void> }> };
 
@@ -557,6 +600,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
 interface DevOptions {
     input?: string;
     env?: string;
+    envFile?: string;
 }
 
 /**
@@ -600,12 +644,15 @@ function hasTsLoader(): boolean {
  * node_modules tsx is preferred. `env` is optional — when omitted the child
  * runs the bare local path (no platform fetch, empty ctx.vars).
  */
-function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string): number {
+function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string, envFile?: string): number {
     // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
     const cliEntry = path.resolve(__dirname, '..', 'index.js');
     const args = ['tsx', cliEntry, 'dev', file, '--input', input];
     if (env) {
         args.push('--env', env);
+    }
+    if (envFile) {
+        args.push('--env-file', envFile);
     }
     const result = spawnSync(
         'npx',
@@ -641,6 +688,10 @@ function reexecUnderTsx(file: string, env: string | undefined, input: string, pr
 export async function dev(file: string, options: DevOptions): Promise<void> {
     const env = options.env;
     const input = options.input || '{}';
+    // Resolve relative to THIS process's cwd before any re-exec, since the
+    // tsx child's cwd is the project root (which may differ from where the
+    // user invoked the command).
+    const envFile = options.envFile ? path.resolve(options.envFile) : undefined;
 
     const filePath = path.resolve(file);
     if (!fs.existsSync(filePath)) {
@@ -669,13 +720,13 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
                 process.exit(1);
             }
         }
-        process.exit(reexecUnderTsx(file, env, input, projectDir));
+        process.exit(reexecUnderTsx(file, env, input, projectDir, envFile));
     }
 
     // In-process path (already under a TS loader, or a .js/.mjs entry).
     let result;
     try {
-        result = await runDev({ entry: filePath, input, env });
+        result = await runDev({ entry: filePath, input, env, envFile });
     } catch (err: any) {
         console.error(chalk.red(`Failed: ${err.message}`));
         process.exit(1);
