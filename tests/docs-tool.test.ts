@@ -97,11 +97,11 @@ function stubConfig(workspaceId = 'ws-docs-test'): Config {
 // ---------------------------------------------------------------------------
 
 describe('callDocsTool', () => {
-    it('POSTs to /mcp/docs (not /mcp/crews)', async () => {
+    it('POSTs docs_vault to the unified /mcp endpoint', async () => {
         await callDocsTool(stubConfig(), 'docs_vault', { action: 'list' });
 
         expect(lastCapture).not.toBeNull();
-        expect(lastCapture!.path).toBe('/mcp/docs');
+        expect(lastCapture!.path).toBe('/mcp');
     });
 
     it('sends the correct X-Workspace-Id header', async () => {

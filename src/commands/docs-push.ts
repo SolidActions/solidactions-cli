@@ -213,7 +213,7 @@ export async function docsPushWithConfig(
         try {
             mcpResult = await callDocsTool(config, 'docs_vault', callArgs);
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
         }
 

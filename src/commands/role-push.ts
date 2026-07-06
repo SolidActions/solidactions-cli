@@ -77,7 +77,7 @@ export async function rolePushWithConfig(
         try {
             readResult = await callCrewsTool(config, 'roles', { action: 'read', name });
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
         }
 
@@ -118,7 +118,7 @@ export async function rolePushWithConfig(
             properties,
         });
     } catch (e: any) {
-        process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+        process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
     }
 
@@ -134,7 +134,7 @@ export async function rolePushWithConfig(
                 properties_patch: properties,
             });
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: MCP request failed — ${e.message}\n`));
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
         }
 

@@ -12,6 +12,10 @@ import { URL } from 'url';
 import { Config } from './config';
 import { getApiHeaders } from './api';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pkg = require('../../package.json');
+const CLI_VERSION: string = pkg.version;
+
 export interface McpToolResult {
     ok: boolean;
     data: any;
@@ -60,7 +64,9 @@ async function callMcpTool(config: Config, endpointPath: string, toolName: strin
             let raw = '';
             res.on('data', (chunk) => { raw += chunk; });
             res.on('end', () => {
-                if (res.statusCode && res.statusCode >= 400) {
+                if (res.statusCode === 404) {
+                    reject(new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${raw}`));
+                } else if (res.statusCode && res.statusCode >= 400) {
                     reject(new Error(`MCP request failed with HTTP ${res.statusCode}: ${raw}`));
                 } else {
                     resolve(raw);
@@ -94,16 +100,22 @@ async function callMcpTool(config: Config, endpointPath: string, toolName: strin
     return { ok: !isError, data: toolData };
 }
 
+const UNIFIED_MCP_PATH = '/mcp';
+
+// Server consolidated per-domain MCP servers into one endpoint with namespaced tools.
+const CREWS_TOOL_NAMES: Record<string, string> = { skills: 'crews_skills', roles: 'crews_roles' };
+
 /**
- * Call a single MCP tool on /mcp/crews.
+ * Call a single MCP tool on the unified /mcp endpoint, mapping legacy crews
+ * tool names ('skills'/'roles') to their namespaced equivalents.
  */
 export async function callCrewsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    return callMcpTool(config, '/mcp/crews', toolName, args);
+    return callMcpTool(config, UNIFIED_MCP_PATH, CREWS_TOOL_NAMES[toolName] ?? toolName, args);
 }
 
 /**
- * Call a single MCP tool on /mcp/docs.
+ * Call a single MCP tool on the unified /mcp endpoint.
  */
 export async function callDocsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    return callMcpTool(config, '/mcp/docs', toolName, args);
+    return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
 }
