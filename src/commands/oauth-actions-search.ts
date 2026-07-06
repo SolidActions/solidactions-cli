@@ -39,7 +39,7 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         }
 
         if (actions.length === 0) {
-            console.log(`No actions found for "${platform}" — check the platform name and that a connection exists (\`solidactions env pull --update-oauth\` syncs connections).`);
+            console.log(`No actions found for platform "${platform}".`);
             return;
         }
 
@@ -58,7 +58,9 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         console.log(chalk.gray(`${actions.length} action(s) found.`));
         console.log(chalk.gray(`Run 'solidactions oauth-actions show ${platform} <action_id>' for full schema + paste-ready snippet.`));
     } catch (error: any) {
-        if (error.response?.status === 401) {
+        if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
+            console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-actions platforms\` to see available platforms.`));
+        } else if (error.response?.status === 401) {
             console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);

@@ -28,6 +28,7 @@ import { aiExamples } from './commands/ai-examples';
 import { oauthActionsSearch } from './commands/oauth-actions-search';
 import { oauthActionsList } from './commands/oauth-actions-list';
 import { oauthActionsShow } from './commands/oauth-actions-show';
+import { oauthActionsPlatforms } from './commands/oauth-actions-platforms';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
 import { skillPull } from './commands/skill-pull';
@@ -226,7 +227,7 @@ runCmd
     .argument('<workflow>', 'Workflow name')
     .option('-e, --env <environment>', 'Environment (production/staging/dev)', 'dev')
     .option('-i, --input <json>', 'JSON input for the workflow')
-    .option('-w, --wait', 'Wait for the workflow to complete')
+    .option('--wait', 'Wait for the workflow to complete')
     .action((projectName, workflow, options) => {
         run(projectName, workflow, options);
     });
@@ -466,6 +467,14 @@ oauthActionsCmd
     .option('--legacy-env', 'Emit the deprecated process.env-based snippet (will be removed in a future release)')
     .action((platform, actionId, options) => {
         oauthActionsShow(platform, actionId, options);
+    });
+
+oauthActionsCmd
+    .command('platforms')
+    .description('List available OAuth-backed platforms')
+    .option('--json', 'Emit raw JSON for AI/script consumption')
+    .action((options) => {
+        oauthActionsPlatforms(options);
     });
 
 // =============================================================================
