@@ -169,8 +169,24 @@ export function mergeConfigs(
 
     const host = pick('host');
     const apiKey = pick('apiKey');
-    const workspace = pick('workspace');
-    const workspaceId = pick('workspaceId');
+
+    // A local config that defines its own credentials (host or apiKey) is
+    // anchored to a different account/tenant than the global config — its
+    // workspace/workspaceId must never fall back to global (F-C3).
+    // Pure workspace-pin local files (no host/apiKey of their own) keep
+    // inheriting global credentials and so may still inherit the workspace.
+    const localDefinesCreds = !!(local && (local.host !== undefined || local.apiKey !== undefined));
+    const pickWorkspaceField = <K extends 'workspace' | 'workspaceId'>(
+        key: K,
+    ): { value: Config[K] | undefined; source: ConfigSource } => {
+        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env' };
+        if (local && local[key] !== undefined) return { value: local[key], source: localPath! };
+        if (!localDefinesCreds && global && global[key] !== undefined) return { value: global[key], source: globalPath };
+        return { value: undefined, source: null };
+    };
+
+    const workspace = pickWorkspaceField('workspace');
+    const workspaceId = pickWorkspaceField('workspaceId');
 
     if (!host.value && !apiKey.value) {
         return null;

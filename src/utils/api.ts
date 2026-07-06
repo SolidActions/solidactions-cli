@@ -156,5 +156,12 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
         return config;
     }
 
+    if (!config.workspaceId && !process.stdin.isTTY) {
+        console.error(chalk.red(
+            'No workspace set for this config. Run `solidactions workspace set <name-or-id> --local` (or --global).',
+        ));
+        process.exit(1);
+    }
+
     return ensureWorkspaceSelected(config);
 }
