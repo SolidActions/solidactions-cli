@@ -53,6 +53,9 @@ beforeAll(async () => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (req.url?.startsWith('/api/v1/projects/resolve/build-log') || req.url?.match(/\/build-log/)) {
                 res.end(JSON.stringify({ build_log: 'log output' }));
+            } else if (req.url?.match(/^\/api\/v1\/runs\/[^/]+$/)) {
+                // Single-run status lookup (used by `run start --wait` polling).
+                res.end(JSON.stringify({ status: 'completed' }));
             } else if (req.url?.startsWith('/api/v1/runs')) {
                 res.end(JSON.stringify({ data: [] }));
             } else if (req.url?.includes('/schedules')) {
@@ -173,6 +176,30 @@ describe('flag consistency (F-C4)', () => {
 
         expect(result.stderr).not.toMatch(/unknown option/);
         expect(lastCapture?.url).toContain('environment=dev');
+        expect(result.status).toBe(0);
+    });
+
+    it('run start: --help lists no -w short flag for --wait (freed up for the global -w/--workspace-override)', async () => {
+        const result = await runCliHelp(['run', 'start', '--help']);
+        expect(result.stdout).not.toMatch(/-w,\s*--wait/);
+        expect(result.stdout).toMatch(/--wait/);
+    });
+
+    it('run start: --wait (long form) waits for completion and reports success', async () => {
+        const home = tmpHomeWithConfig();
+        const result = await runCli(['run', 'start', 'my-project', 'my-workflow', '--wait'], home);
+
+        expect(result.stderr).not.toMatch(/unknown option/);
+        expect(result.stdout).toContain('Workflow completed successfully!');
+        expect(result.status).toBe(0);
+    });
+
+    it('run start: -w <value> is now the global workspace-override, not swallowed as an invalid --wait argument', async () => {
+        const home = tmpHomeWithConfig();
+        const result = await runCli(['run', 'start', 'my-project', 'my-workflow', '-w', 'login-target'], home);
+
+        expect(result.stderr).not.toMatch(/unknown option/);
+        expect(result.stderr).not.toMatch(/argument missing/);
         expect(result.status).toBe(0);
     });
 
