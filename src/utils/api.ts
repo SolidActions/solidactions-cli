@@ -61,6 +61,46 @@ export async function describeProjectEnvironments(config: Config, projectName: s
 }
 
 /**
+ * Render a Laravel-style 422 validation error body as plain readable text —
+ * never a raw JSON dump. Prefers `data.errors` (flattened, one message per
+ * line, with the internal `variables.N.` index prefix stripped and the bare
+ * `key` attribute renamed to `variable key` for clarity); falls back to
+ * `data.message`.
+ */
+export function formatValidationError(data: unknown): string {
+    const errors = (data as any)?.errors;
+    let messages: string[] = [];
+
+    if (errors && typeof errors === 'object' && !Array.isArray(errors)) {
+        for (const value of Object.values(errors)) {
+            if (Array.isArray(value)) {
+                messages.push(...value.map((v) => String(v)));
+            } else if (value) {
+                messages.push(String(value));
+            }
+        }
+    }
+
+    if (messages.length === 0) {
+        const message = (data as any)?.message;
+        if (typeof message === 'string' && message) {
+            messages = [message];
+        }
+    }
+
+    if (messages.length === 0) {
+        return 'Validation failed.';
+    }
+
+    return messages
+        .map((msg) => msg
+            .replace(/variables\.\d+\.key/gi, 'variable key')
+            .replace(/variable key field/gi, 'variable key')
+            .replace(/variables\.\d+\.(\w+)/gi, '$1'))
+        .join('\n');
+}
+
+/**
  * Get the full resolution (config + sources + activePath). Exits if nothing resolvable.
  */
 export function requireResolvedConfig(): ResolvedConfig {

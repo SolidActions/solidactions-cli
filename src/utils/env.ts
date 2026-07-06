@@ -130,11 +130,22 @@ export function loadSolidActionsConfig(yamlPath: string): SolidActionsConfig {
  */
 export const RESERVED_ENV_PREFIX = 'SOLIDACTIONS_';
 
+/** Case-insensitive: the server rejects any casing of the prefix, not just uppercase. */
 export function isReservedEnvName(key: string): boolean {
-    return key.startsWith(RESERVED_ENV_PREFIX);
+    return key.toUpperCase().startsWith(RESERVED_ENV_PREFIX);
 }
 
 export function reservedEnvNameError(key: string): string {
-    const suggestion = key.replace(/^SOLIDACTIONS_/, 'MY_');
+    const suggestion = key.replace(/^SOLIDACTIONS_/i, 'MY_');
     return `"${key}" uses the reserved ${RESERVED_ENV_PREFIX} prefix. These names are set by the platform at runtime (API credentials, run context) and a custom variable would clobber them, causing authentication failures. Choose a different name (e.g. "${suggestion}").`;
+}
+
+/** Env/variable key naming rule: letters, digits, underscore; no leading digit. */
+export function isValidEnvName(key: string): boolean {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
+export function envNameError(key: string): string {
+    if (key.trim() === '') return 'Variable key is required.';
+    return `Invalid variable name "${key}" — names must match [A-Za-z_][A-Za-z0-9_]* (letters, digits, underscore; no leading digit).`;
 }

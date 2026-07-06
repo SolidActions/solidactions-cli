@@ -36,7 +36,7 @@ export async function oauthActionsList(platform: string, options: OAuthActionsLi
         }
 
         if (actions.length === 0) {
-            console.log('No actions found.');
+            console.log(`No actions found for "${platform}" — check the platform name and that a connection exists (\`solidactions env pull --update-oauth\` syncs connections).`);
             return;
         }
 
