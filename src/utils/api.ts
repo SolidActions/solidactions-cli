@@ -116,6 +116,16 @@ export function requireConfig(): Config {
     return requireResolvedConfig().config;
 }
 
+/**
+ * Contextual 401 message — names the host being called and where the (now
+ * apparently invalid/expired) API key came from, instead of a bare
+ * "Authentication failed" that gives no clue which config is at fault.
+ */
+export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
+    const keySource = sources?.apiKey ?? 'config';
+    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login <api-key>\` to re-configure.`;
+}
+
 export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
     if (config.workspaceId) {
         return config;
@@ -151,7 +161,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run `solidactions login <api-key>` to reconfigure.'));
+            console.error(chalk.red(authFailureMessage(config, resolved?.sources ?? null)));
         } else {
             console.error(chalk.red('Failed to fetch workspaces:'), error.response?.data?.message || error.message);
         }

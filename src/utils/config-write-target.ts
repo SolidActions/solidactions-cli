@@ -76,7 +76,23 @@ export async function confirmOverwrite(existingPath: string, backupPath: string)
  * Ensure `.solidactions/` is in the target directory's `.gitignore`.
  * Idempotent. Skips silently if pattern is already covered.
  */
+/** Walk up from startDir looking for a `.git` directory. Stops at filesystem root. */
+function findGitRoot(startDir: string): string | null {
+    let dir = path.resolve(startDir);
+    while (true) {
+        if (fs.existsSync(path.join(dir, '.git'))) {
+            return dir;
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) return null;
+        dir = parent;
+    }
+}
+
 export async function ensureGitignoreCovers(targetDir: string, auto: boolean): Promise<void> {
+    // Not in a git repo — a .gitignore entry protects nothing here; skip silently.
+    if (!findGitRoot(targetDir)) return;
+
     const gitignorePath = path.join(targetDir, '.gitignore');
     const patternToAdd = '.solidactions/';
 

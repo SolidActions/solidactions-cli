@@ -222,7 +222,8 @@ export function logout(options: { local?: boolean; global?: boolean } = {}) {
     if (removed) {
         console.log(chalk.green(`Logged out. Removed ${targetPath}`));
     } else {
-        console.log(chalk.gray(`Not logged in (no config at ${targetPath}).`));
+        console.log(chalk.gray(`Not logged in (no config at ${targetPath}) — nothing to remove.`));
+        process.exit(0);
     }
 }
 

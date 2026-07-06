@@ -203,8 +203,9 @@ project
 project
     .command('list')
     .description('List all projects')
-    .action(() => {
-        projectList();
+    .option('--json', 'Output as JSON')
+    .action((options) => {
+        projectList(options);
     });
 
 // =============================================================================
@@ -286,6 +287,7 @@ env
     .description('List environment variables')
     .argument('[project]', 'Project name (omit for global variables)')
     .option('-e, --env <environment>', 'Filter by environment (production/staging/dev)')
+    .option('--json', 'Output as JSON')
     .action((projectName, options) => {
         envList(projectName, options);
     });
