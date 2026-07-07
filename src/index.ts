@@ -145,7 +145,7 @@ program
     .description('Run a workflow locally using an in-memory mock server (no deploy needed)')
     .argument('<file>', 'Workflow file to run (e.g., src/simple-steps.ts)')
     .option('-i, --input <json>', 'JSON input for the workflow', '{}')
-    .option('-e, --env <env>', 'Pull platform variables for this environment (e.g. dev, staging, production)')
+    .option('-e, --env <env>', 'Pull platform variables for this environment (e.g. production, staging, dev)')
     .action((file, options) => {
         // Unified in-process invoke path. With --env: fetch declared vars, build
         // ctx.vars, invoke locally. Without --env: NO platform fetch, ctx.vars is
