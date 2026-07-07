@@ -342,7 +342,11 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         try {
             platformVars = await apiClient.fetchVarsAndConnections(opts.env);
         } catch (e: any) {
-            err(`failed to fetch platform vars: ${e?.message ?? e}`);
+            let msg = `failed to fetch platform vars: ${e?.message ?? e}`;
+            if (e?.response?.status === 404 && opts.env !== 'production') {
+                msg += `\nThe '${opts.env}' environment project doesn't exist — staging/dev environments require a paid plan. On the free plan, use --env production.`;
+            }
+            err(msg);
         }
     }
 

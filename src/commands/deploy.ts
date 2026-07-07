@@ -6,6 +6,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
+import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { planDeployFiles } from '../utils/deploy-ignore';
@@ -172,6 +173,102 @@ export function shouldPrintWorkspaceMismatch(environment: string, willCreate: bo
     return environment !== 'production' && !willCreate;
 }
 
+/**
+ * Printed (after the server's own message) when a free-plan tenant hits the
+ * dev/staging environment gate in a non-interactive context, or declines the
+ * interactive fallback prompt.
+ */
+export const PLAN_LIMIT_NON_INTERACTIVE_HINT = 'Hint: pass -e production, or upgrade your plan for dev/staging environments.';
+
+/**
+ * True when `error` is the app's 422 response for a free-plan tenant hitting
+ * the multi-environment gate on project auto-create:
+ * `{ error: { code: 'plan_limit_reached', limit: 'multi_env', plan, max } }`.
+ */
+export function isPlanLimitReachedError(error: any): boolean {
+    const data = error?.response?.data;
+    return error?.response?.status === 422
+        && data?.error?.code === 'plan_limit_reached'
+        && data?.error?.limit === 'multi_env';
+}
+
+/**
+ * POST /api/v1/projects to create a new environment-project record. Returns
+ * the resolved slug (server-echoed slug, falling back to the requested one).
+ * Throws the raw axios error on failure — callers decide how to handle it.
+ */
+async function createEnvironmentProject(
+    config: { host: string; apiKey: string; workspaceId?: string },
+    projectName: string,
+    environment: string
+): Promise<string> {
+    const requestedSlug = buildProjectSlug(projectName, environment);
+    const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
+        name: projectName,
+        slug: requestedSlug,
+        environment: environment,
+    }, {
+        headers: getApiHeaders(config, 'application/json'),
+    });
+    const slug = createResponse.data.slug || requestedSlug;
+    if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+        process.stderr.write(`[deploy-debug] requestedSlug=${requestedSlug} responseSlug=${createResponse.data.slug ?? '(missing)'} responseName=${createResponse.data.name ?? '(missing)'} resolvedSlug=${slug}\n`);
+    }
+    return slug;
+}
+
+/**
+ * Handles a 422 plan_limit_reached/multi_env error from the env-project
+ * auto-create call (billing v0.5: free-plan tenants only get production).
+ *
+ * Interactive TTYs are offered a y/N fallback to production; declining exits
+ * 1 with an upgrade hint. Non-interactive callers (CI, agents) never see a
+ * prompt — they get the same hint and exit 1 immediately, so the command
+ * never hangs waiting for input that will never arrive.
+ *
+ * On confirmed fallback, resolves (and creates if necessary) the production
+ * project and returns its slug. Every other path calls process.exit(1) and
+ * never returns.
+ */
+export async function handlePlanLimitReached(
+    config: { host: string; apiKey: string; workspaceId?: string },
+    projectName: string,
+    error: any,
+    productionExists: boolean | null,
+    productionSlug: string | null
+): Promise<string> {
+    const serverMessage: string = error.response?.data?.message || 'Your plan does not support additional environments.';
+    console.error(chalk.red(serverMessage));
+
+    if (!process.stdin.isTTY) {
+        console.error(chalk.yellow(PLAN_LIMIT_NON_INTERACTIVE_HINT));
+        process.exit(1);
+    }
+
+    const response = await prompts({
+        type: 'confirm',
+        name: 'proceed',
+        message: 'Your plan has a single production environment — deploy to production instead?',
+        initial: false,
+    });
+
+    if (!response.proceed) {
+        console.error(chalk.yellow(PLAN_LIMIT_NON_INTERACTIVE_HINT));
+        process.exit(1);
+    }
+
+    if (productionExists === true && productionSlug !== null) {
+        return productionSlug;
+    }
+
+    try {
+        return await createEnvironmentProject(config, projectName, 'production');
+    } catch (prodError: any) {
+        console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
+        process.exit(1);
+    }
+}
+
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -247,9 +344,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     // Apply default: if production already exists and the user didn't pass -e,
     // use 'dev' — this preserves existing behavior for mature projects.
-    const environment = explicitEnv ?? 'dev';
+    // `let`, not `const`: a free-plan 422 (plan_limit_reached/multi_env) on the
+    // env-project auto-create below can fall the deploy back to production.
+    let environment = explicitEnv ?? 'dev';
 
-    const envLabel = environment !== 'production' ? ` (${environment})` : '';
+    let envLabel = environment !== 'production' ? ` (${environment})` : '';
     console.log(chalk.blue(`Deploying to project "${projectName}"${envLabel}...`));
     console.log(chalk.gray(`Source: ${sourceDir}`));
 
@@ -320,27 +419,21 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             console.log(chalk.yellow(`Project "${projectName}"${envLabel} not found. Creating...`));
-            const requestedSlug = buildProjectSlug(projectName, environment);
             try {
-                const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
-                    name: projectName,
-                    slug: requestedSlug,
-                    environment: environment,
-                }, {
-                    headers: getApiHeaders(config, 'application/json'),
-                });
-                // Fallback chain: prefer the server-echoed slug; if absent, use the slug we
-                // *requested* in the POST body (server stored that value). Falling back to
-                // `name` strips the env suffix and causes the polling GET to 404 with
-                // "Project 'X' not found in your active workspace 'Y'.".
-                projectSlug = createResponse.data.slug || requestedSlug;
-                if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
-                    process.stderr.write(`[deploy-debug] requestedSlug=${requestedSlug} responseSlug=${createResponse.data.slug ?? '(missing)'} responseName=${createResponse.data.name ?? '(missing)'} resolvedSlug=${projectSlug}\n`);
-                }
+                projectSlug = await createEnvironmentProject(config, projectName, environment);
                 console.log(chalk.green(`Project "${projectName}"${envLabel} created.`));
             } catch (createError: any) {
-                console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
-                process.exit(1);
+                if (isPlanLimitReachedError(createError)) {
+                    // Free-plan tenant hit the multi_env gate. handlePlanLimitReached()
+                    // exits(1) on every path except a confirmed fallback to production.
+                    projectSlug = await handlePlanLimitReached(config, projectName, createError, productionExists, productionSlug);
+                    environment = 'production';
+                    envLabel = '';
+                    console.log(chalk.blue(`Deploying to project "${projectName}" (production) instead.`));
+                } else {
+                    console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
+                    process.exit(1);
+                }
             }
         } else {
             console.error(chalk.red('Failed to check project:'), error.response?.data?.message || error.message);
