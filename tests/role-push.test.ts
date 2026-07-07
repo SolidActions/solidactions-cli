@@ -288,7 +288,7 @@ describe('role push — create success', () => {
 // ---------------------------------------------------------------------------
 
 describe('role push — collision → edit (upsert)', () => {
-    it('on name_collision switches to roles.edit and reports "updated role", sends name + properties_patch, NO references', async () => {
+    it('on name_collision switches to roles.edit and reports "updated role", sends name + top-level extras, NO properties_patch, NO references', async () => {
         responseQueue = [
             makeMcpError('name_collision', 'A role with this name already exists.'),
             makeMcpSuccess({ version_id: 5, body_blob_sha: 'abc' }),
@@ -299,7 +299,7 @@ describe('role push — collision → edit (upsert)', () => {
                 '---',
                 'name: existing-role',
                 'description: Updated description',
-                'catalog_advertised: true',
+                'inherits_from: some-parent',
                 '---',
                 'Updated body',
             ].join('\n'),
@@ -327,6 +327,8 @@ describe('role push — collision → edit (upsert)', () => {
             // First call: create
             expect(allCaptures[0].body.params.name).toBe('crews_roles');
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
+            // inherits_from (frontmatter extra) sent top-level on create too
+            expect(allCaptures[0].body.params.arguments.inherits_from).toBe('some-parent');
 
             // Second call: edit
             const editArgs = allCaptures[1].body.params.arguments;
@@ -334,8 +336,8 @@ describe('role push — collision → edit (upsert)', () => {
             expect(editArgs.action).toBe('edit');
             // roles edit uses 'name', NOT 'identifier'
             expect(editArgs.name).toBe('existing-role');
-            // catalog_advertised (frontmatter extra) sent top-level, no wrapper key
-            expect(editArgs.catalog_advertised).toBe(true);
+            // inherits_from (frontmatter extra) sent top-level, no wrapper key
+            expect(editArgs.inherits_from).toBe('some-parent');
             expect(editArgs).not.toHaveProperty('properties_patch');
             expect(editArgs).not.toHaveProperty('properties');
             // NO references key on roles edit
