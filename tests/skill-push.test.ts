@@ -377,14 +377,53 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             expect(body.params.arguments.name).toBe('My Cool Skill');
             expect(body.params.arguments.description).toBe('Does cool things');
 
-            // catalog_advertised should be in properties
-            expect(body.params.arguments.properties).toMatchObject({ catalog_advertised: false });
+            // catalog_advertised should be sent top-level, not wrapped in properties
+            expect(body.params.arguments.catalog_advertised).toBe(false);
+            expect(body.params.arguments).not.toHaveProperty('properties');
 
             // references should include the sibling file
             expect(body.params.arguments.references).toHaveProperty('usage.ts', 'export const usage = "example";');
 
             // SKILL.md should NOT be in references
             expect(body.params.arguments.references).not.toHaveProperty('SKILL.md');
+        } finally {
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('sends license and allowed-tools frontmatter extras top-level on create, with no properties wrapper', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            [
+                '---',
+                'name: Licensed Skill',
+                'description: Has license and allowed-tools extras',
+                'license: MIT',
+                'allowed-tools: Read',
+                '---',
+                '',
+                'body content',
+            ].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(lastCapture).not.toBeNull();
+
+            const args = lastCapture!.body.params.arguments;
+            expect(args.license).toBe('MIT');
+            expect(args['allowed-tools']).toBe('Read');
+            expect(args).not.toHaveProperty('properties');
         } finally {
             restoreExit();
             cleanup();
@@ -504,6 +543,34 @@ describe('skillPushWithConfig — error cases', () => {
             cleanup();
         }
     });
+
+    it('fails with a clear error before any HTTP call when frontmatter contains a reserved key (e.g. identifier)', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: Hijack Skill', 'description: nope', 'identifier: hijack', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e; else throw e;
+            }
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+            expect(stderrLines.join('')).toContain('identifier');
+
+            // No HTTP call was made — the guard fired before any create attempt.
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -517,7 +584,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             makeMcpSuccess({ version_id: 42, body_blob_sha: 'deadbeef' }),
         ];
         const { dir, cleanup } = makeTmpSkillDir(
-            ['---', 'name: Existing Skill', 'description: updated desc', '---', 'new body'].join('\n'),
+            ['---', 'name: Existing Skill', 'description: updated desc', 'catalog_advertised: true', '---', 'new body'].join('\n'),
             { 'ref.ts': 'export const x = 1;' },
         );
         const restoreExit = patchProcessExit();
@@ -534,7 +601,8 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(allCaptures[1].body.params.name).toBe('crews_skills');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit');
             expect(allCaptures[1].body.params.arguments.identifier).toBe('Existing Skill');
-            expect(allCaptures[1].body.params.arguments).toHaveProperty('properties_patch');
+            expect(allCaptures[1].body.params.arguments.catalog_advertised).toBe(true);
+            expect(allCaptures[1].body.params.arguments).not.toHaveProperty('properties_patch');
             expect(allCaptures[1].body.params.arguments.references).toHaveProperty('ref.ts');
             expect(logs.join('')).toContain('updated skill');
         } finally { console.log = origLog; restoreExit(); cleanup(); }
@@ -621,7 +689,8 @@ describe('pushParsedSkill — core payload-based upsert', () => {
             expect(args.action).toBe('create');
             expect(args.name).toBe('Core Skill');
             expect(args.description).toBe('A payload-based skill');
-            expect(args.properties).toMatchObject({ catalog_advertised: true });
+            expect(args.catalog_advertised).toBe(true);
+            expect(args).not.toHaveProperty('properties');
             expect(args.references).toHaveProperty('helper.ts', 'export const x = 1;');
             expect(args.body).toBe('The skill body');
         } finally {
@@ -656,8 +725,8 @@ describe('pushParsedSkill — core payload-based upsert', () => {
             expect(editArgs.action).toBe('edit');
             expect(editArgs.identifier).toBe('Core Skill');
             expect(editArgs.description).toBe('A payload-based skill');
-            expect(editArgs).toHaveProperty('properties_patch');
-            expect(editArgs.properties_patch).toMatchObject({ catalog_advertised: true });
+            expect(editArgs.catalog_advertised).toBe(true);
+            expect(editArgs).not.toHaveProperty('properties_patch');
             expect(editArgs.references).toHaveProperty('helper.ts');
         } finally {
             restoreExit();

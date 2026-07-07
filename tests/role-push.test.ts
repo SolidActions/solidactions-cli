@@ -216,6 +216,71 @@ describe('role push — create success', () => {
             cleanup();
         }
     });
+
+    it('sends frontmatter extras (e.g. inherits_from) top-level on create, with no properties wrapper', async () => {
+        responseQueue = [makeMcpSuccess({ role_doc_id: 1, folder_id: 2 })];
+
+        const { dir, cleanup } = makeTmpRoleDir(
+            [
+                '---',
+                'name: extras-role',
+                'description: A role with extras',
+                'inherits_from: base-role',
+                '---',
+                'body',
+            ].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await rolePushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            const args = lastCapture!.body.params.arguments;
+            expect(args.inherits_from).toBe('base-role');
+            expect(args).not.toHaveProperty('properties');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('fails with a clear error before any HTTP call when frontmatter contains a reserved key (e.g. name)', async () => {
+        const { dir, cleanup } = makeTmpRoleDir(
+            ['---', 'name: hijack-role', 'description: nope', 'action: delete', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await rolePushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e; else throw e;
+            }
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+            expect(stderrLines.join('')).toContain('action');
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -269,8 +334,10 @@ describe('role push — collision → edit (upsert)', () => {
             expect(editArgs.action).toBe('edit');
             // roles edit uses 'name', NOT 'identifier'
             expect(editArgs.name).toBe('existing-role');
-            // properties_patch must be present (not properties)
-            expect(editArgs).toHaveProperty('properties_patch');
+            // catalog_advertised (frontmatter extra) sent top-level, no wrapper key
+            expect(editArgs.catalog_advertised).toBe(true);
+            expect(editArgs).not.toHaveProperty('properties_patch');
+            expect(editArgs).not.toHaveProperty('properties');
             // NO references key on roles edit
             expect(editArgs).not.toHaveProperty('references');
 

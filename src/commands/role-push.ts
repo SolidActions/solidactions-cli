@@ -20,7 +20,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
-import { parseSkillFile } from './skill-push';
+import { parseSkillFile, assertNoReservedFrontmatterKeys } from './skill-push';
 
 export interface RolePushOptions {
     json?: boolean;
@@ -65,6 +65,7 @@ export async function rolePushWithConfig(
 
     try {
         ({ name, description, properties, body } = parseSkillFile(skillMdContent));
+        assertNoReservedFrontmatterKeys(properties);
     } catch (e: any) {
         process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
@@ -108,14 +109,15 @@ export async function rolePushWithConfig(
 
     // Upsert: try create first; on name_collision switch to edit.
     // Roles carry NO references — do not send references key.
+    // Frontmatter extras are spread FIRST so the fixed protocol keys always win.
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
         result = await callCrewsTool(config, 'roles', {
+            ...properties,
             action: 'create',
             name,
             description,
             body,
-            properties,
         });
     } catch (e: any) {
         process.stderr.write(chalk.red(`error: ${e.message}\n`));
@@ -123,15 +125,15 @@ export async function rolePushWithConfig(
     }
 
     // On name collision, switch to the edit path.
-    // Roles edit uses 'name' (NOT 'identifier'), and properties → properties_patch.
+    // Roles edit uses 'name' (NOT 'identifier').
     if (!result.ok && result.data?.code === 'name_collision') {
         try {
             result = await callCrewsTool(config, 'roles', {
+                ...properties,
                 action: 'edit',
                 name,
                 description,
                 body,
-                properties_patch: properties,
             });
         } catch (e: any) {
             process.stderr.write(chalk.red(`error: ${e.message}\n`));
