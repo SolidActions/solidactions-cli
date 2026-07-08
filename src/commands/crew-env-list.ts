@@ -1,0 +1,95 @@
+import axios from 'axios';
+import chalk from 'chalk';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveCrewId } from '../utils/crew';
+
+export interface CrewEnvListOptions {
+    json?: boolean;
+}
+
+interface CrewVariable {
+    id: number | string;
+    env_name: string;
+    is_secret: boolean;
+    production_value: string | null;
+    staging_value: string | null;
+    dev_value: string | null;
+}
+
+/**
+ * Format a value for display. Secrets are ALWAYS masked with a fixed
+ * placeholder — regardless of what the server sent — so a server-side
+ * masking bug can never leak a raw secret into stdout.
+ */
+function formatValue(value: string | null, isSecret: boolean): string {
+    if (isSecret) {
+        return chalk.yellow('••••••');
+    }
+    if (value === null || value === undefined) {
+        return chalk.gray('-');
+    }
+    return value.substring(0, 18);
+}
+
+export async function crewEnvList(crewArg: string, options: CrewEnvListOptions = {}): Promise<void> {
+    const config = await requireConfigWithWorkspace();
+    const crew = await resolveCrewId(config, crewArg);
+
+    try {
+        const response = await axios.get(`${config.host}/api/v1/crews/${crew.id}/variables`, {
+            headers: getApiHeaders(config),
+        });
+        const variables: CrewVariable[] = response.data?.data ?? [];
+
+        if (options.json) {
+            console.log(JSON.stringify(variables, null, 2));
+            return;
+        }
+
+        console.log(chalk.blue(`Variables for crew "${crew.name}":`));
+
+        if (variables.length === 0) {
+            console.log(chalk.gray('No variables found.'));
+            return;
+        }
+
+        console.log('');
+        console.log(chalk.gray(
+            'KEY'.padEnd(24) +
+            chalk.green('PRODUCTION').padEnd(20) +
+            chalk.yellow('STAGING').padEnd(20) +
+            chalk.blue('DEV').padEnd(20) +
+            'TYPE'
+        ));
+        console.log(chalk.gray('-'.repeat(100)));
+
+        for (const variable of variables) {
+            const key = variable.env_name || '?';
+            const type = variable.is_secret ? chalk.yellow('secret') : chalk.gray('plain');
+
+            console.log(
+                key.substring(0, 22).padEnd(24) +
+                formatValue(variable.production_value, variable.is_secret).padEnd(20) +
+                formatValue(variable.staging_value, variable.is_secret).padEnd(20) +
+                formatValue(variable.dev_value, variable.is_secret).padEnd(20) +
+                type
+            );
+        }
+
+        console.log('');
+        console.log(chalk.gray(`${variables.length} variable(s)`));
+    } catch (error: any) {
+        if (error.response) {
+            if (error.response.status === 401) {
+                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            } else if (error.response.status === 404) {
+                console.error(chalk.red(error.response.data?.message || `Crew "${crewArg}" not found.`));
+            } else {
+                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+            }
+        } else {
+            console.error(chalk.red('Connection failed:'), error.message);
+        }
+        process.exit(1);
+    }
+}
