@@ -512,6 +512,7 @@ skill
     .option('--role <name>', 'Scope the skill to a role instead of the shared library')
     .option('--json', 'Output result as JSON')
     .option('--dry-run', 'Preview create vs update without writing')
+    .option('--publish', 'Publish (snapshot) the skill after pushing, making it live for agents')
     .action(async (dir, options) => {
         await skillPush(dir, options);
     });

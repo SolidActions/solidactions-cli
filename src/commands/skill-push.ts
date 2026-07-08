@@ -16,11 +16,13 @@ import yaml from 'js-yaml';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
+import { publishSkillByName, publishSkillByDocId, emitPublishOutcome, PublishOutcome } from '../utils/skill-snapshot';
 
 export interface SkillPushOptions {
     role?: string;
     json?: boolean;
     dryRun?: boolean;
+    publish?: boolean;
 }
 
 /**
@@ -394,6 +396,11 @@ export async function skillPushWithConfig(
         process.exit(1);
     }
 
+    if (options.publish && options.role) {
+        process.stderr.write(chalk.red('error: --publish is not supported with --role yet; publish the role-scoped skill via the MCP take_snapshot tool.\n'));
+        process.exit(1);
+    }
+
     const topLevelSkillMd = path.join(absDir, 'SKILL.md');
 
     // -------------------------------------------------------------------------
@@ -416,14 +423,30 @@ export async function skillPushWithConfig(
             process.exit(1);
         }
 
-        if (options.json) {
-            console.log(JSON.stringify(pushResult.data));
-        } else {
-            printPushResult(pushResult, options);
-            const warning = stagedPushWarning(pushResult, !!options.role);
-            if (warning) {
-                process.stderr.write(chalk.yellow(warning));
+        // Optionally publish (snapshot) the just-pushed revision (single-skill mode).
+        let publishOutcome: PublishOutcome | null = null;
+        if (options.publish && !options.dryRun) {
+            if (pushResult.status === 'created') {
+                const createdDocId = (pushResult.data.skill_doc_id ?? pushResult.data.doc_id ?? pushResult.data.id) as number | string;
+                publishOutcome = await publishSkillByDocId(config, createdDocId);
+            } else {
+                publishOutcome = await publishSkillByName(config, pushResult.name);
             }
+        }
+
+        if (options.json) {
+            const payload = publishOutcome ? { ...pushResult.data, publish: publishOutcome } : pushResult.data;
+            console.log(JSON.stringify(payload));
+            process.exit(publishOutcome?.status === 'error' ? 1 : 0);
+        }
+
+        printPushResult(pushResult, options);
+        if (publishOutcome) {
+            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true });
+        }
+        const warning = stagedPushWarning(pushResult, !!options.role);
+        if (warning) {
+            process.stderr.write(chalk.yellow(warning));
         }
         process.exit(0);
     }
@@ -431,6 +454,11 @@ export async function skillPushWithConfig(
     // -------------------------------------------------------------------------
     // Plugin mode: push skills/<name>/SKILL.md + commands/<name>.md
     // -------------------------------------------------------------------------
+    if (options.publish) {
+        process.stderr.write(chalk.red('error: --publish is not supported when pushing a plugin bundle (multiple skills); publish each with "solidactions skill publish <name>".\n'));
+        process.exit(1);
+    }
+
     const payloads: SkillPayload[] = [];
 
     // One-level glob: skills/*/SKILL.md

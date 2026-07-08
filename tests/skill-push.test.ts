@@ -1363,3 +1363,99 @@ describe('skillPushWithConfig — staged-not-published warning (single-skill)', 
         } finally { cleanup(); }
     });
 });
+
+describe('skillPushWithConfig — --publish (single-skill)', () => {
+    it('rejects --publish combined with --role BEFORE any HTTP request', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines, restore } = captureStderr();
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { role: 'builder', publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(1);
+            expect(lastCapture).toBeNull();
+            expect(lines.join('')).toContain('--publish is not supported with --role');
+        } finally { restore(); restoreExit(); cleanup(); }
+    });
+
+    it('after a create push, snapshots by skill_doc_id and prints published (no warning)', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 200, reference_doc_ids: {}, snapshot_hint: 'no snapshot yet' }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 950 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreErr } = captureStderr();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.name).toBe('crews_versions');
+            expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 200 });
+            expect(logs.join('')).toContain("published 'my-skill'");
+            expect(errLines.join('')).not.toContain('Not yet published');
+        } finally { console.log = origLog; restoreErr(); restoreExit(); cleanup(); }
+    });
+
+    it('after an edit push, resolves by name then snapshots and prints published', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 51, has_unpublished_revisions: true }),
+            makeMcpSuccess({ doc_id: 201, has_unpublished_revisions: true }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 951 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(4); // create(collision) → edit → read → take_snapshot
+            expect(allCaptures[2].body.params.arguments).toEqual({ action: 'read', identifier: 'my-skill' });
+            expect(allCaptures[3].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 201 });
+            expect(logs.join('')).toContain("published 'my-skill'");
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('under --json, still performs the publish and emits combined JSON', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 202, reference_doc_ids: {}, snapshot_hint: 'x' }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 952 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true, json: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            const printed = JSON.parse(logs.join(''));
+            expect(printed.publish).toEqual({ status: 'published', snapshotId: 952 });
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('rejects --publish in plugin mode (no top-level SKILL.md) before pushing', async () => {
+        // Plugin dir: skills/<name>/SKILL.md, no top-level SKILL.md.
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-plugin-'));
+        fs.mkdirSync(path.join(root, 'skills', 'alpha'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'skills', 'alpha', 'SKILL.md'), ['---', 'name: alpha', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines, restore } = captureStderr();
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(root, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(1);
+            expect(lastCapture).toBeNull();
+            expect(lines.join('')).toMatch(/--publish is not supported.*plugin|multiple skills/i);
+        } finally { restore(); restoreExit(); fs.rmSync(root, { recursive: true, force: true }); }
+    });
+});
