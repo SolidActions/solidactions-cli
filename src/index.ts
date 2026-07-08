@@ -37,6 +37,7 @@ import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
+import { docsUpload } from './commands/docs-upload';
 import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
 import { crewEnvDelete } from './commands/crew-env-delete';
@@ -636,6 +637,15 @@ docs
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
+    });
+
+docs
+    .command('upload <files...>')
+    .description('Upload one or more media files to SA-Docs (requires a token with the "docs" ability)')
+    .option('--folder <path>', 'Folder path to upload into (auto-created if missing)')
+    .option('--title <title>', 'Title for the uploaded doc (only valid with a single file)')
+    .action(async (files, options) => {
+        await docsUpload(files, { folder: options.folder, title: options.title });
     });
 
 program.parseAsync().catch((err) => {
