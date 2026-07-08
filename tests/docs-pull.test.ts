@@ -361,14 +361,14 @@ describe('docsPullWithConfig — title collisions', () => {
             const code = await runExpectingExit(() => docsPullWithConfig('root', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
-            // Same-folder collision: "Same.md" and "Same -2.md"
+            // Same-folder collision: "Same.md" and "Same-2.md"
             expect(fs.readFileSync(path.join(dest, 'Same.md'), 'utf8')).toBe('one');
-            expect(fs.readFileSync(path.join(dest, 'Same -2.md'), 'utf8')).toBe('two');
+            expect(fs.readFileSync(path.join(dest, 'Same-2.md'), 'utf8')).toBe('two');
             // Different folder: no suffix needed
             expect(fs.readFileSync(path.join(dest, 'sub', 'Same.md'), 'utf8')).toBe('three');
 
             const manifest = readManifest(dest);
-            expect(Object.keys(manifest.docs).sort()).toEqual(['Same -2.md', 'Same.md', 'sub/Same.md'].sort());
+            expect(Object.keys(manifest.docs).sort()).toEqual(['Same-2.md', 'Same.md', 'sub/Same.md'].sort());
         } finally {
             restoreExit();
             restoreStdout();

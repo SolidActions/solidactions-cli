@@ -143,7 +143,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]
 
 /**
  * Write every fetched doc to disk under `destination`, tracking sanitized
- * filename collisions per directory (suffix " -2", " -3", ... before the
+ * filename collisions per directory (suffix "-2", "-3", ... before the
  * extension). Returns the manifest docs map and the ordered list of written
  * files (for --json output).
  */
@@ -167,7 +167,7 @@ function writeDocs(destination: string, docs: FetchedDoc[]): { manifestDocs: Doc
         let candidate = sanitized;
         let suffix = 2;
         while (used.has(candidate)) {
-            candidate = `${sanitized} -${suffix}`;
+            candidate = `${sanitized}-${suffix}`;
             suffix++;
         }
         used.add(candidate);
