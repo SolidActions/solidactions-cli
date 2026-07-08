@@ -157,6 +157,16 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 |---------|-----------|-------------|
 | `role push <dir>` | `--dry-run`, `--json` | Push a role definition (create or update) |
 
+### docs
+
+Manage docs in SA-Docs (the app's built-in documentation vault). `push` is drift-guarded for files previously pulled: a tracked file whose server revision has moved since the pull fails with `re-pull to merge, or pass --force to overwrite` rather than silently clobbering it; untracked files always go through the existing bulk-create path.
+
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `docs pull <folder> [dest]` | `-y`, `--json` | Download a Docs folder tree (markdown + media) to `dest` (defaults to `./<last-segment>/`); writes a `.solidactions-docs.json` revision manifest used by `push`'s drift guard. Falls back to fetching a single doc if `folder` is a doc path, not a folder |
+| `docs push <dir>` | `--on-conflict`, `--type`, `--folder`, `--dry-run`, `--force`, `--json` | Recursively upload a local markdown tree. Manifest-tracked files (from a prior `pull`) are written with a `base_revision` guard and reported separately as written/drifted; `--force` skips the guard. `--dry-run` previews without writing |
+| `docs upload <files...>` | `--folder`, `--title` | Upload one or more media files to SA-Docs (requires a token with the "docs" ability); `--title` only valid for a single file |
+
 ### workspace
 
 | Command | Description |
