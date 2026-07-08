@@ -1289,3 +1289,77 @@ describe('skill push --dry-run', () => {
         }
     });
 });
+
+describe('skillPushWithConfig — staged-not-published warning (single-skill)', () => {
+    async function run(dir: string, options: SkillPushOptions) {
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreErr } = captureStderr();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            try { await skillPushWithConfig(dir, options, stubConfig()); }
+            catch (e) { if (!(e instanceof ProcessExitError)) throw e; }
+        } finally {
+            console.log = origLog; restoreErr(); restoreExit();
+        }
+        return { err: errLines.join(''), out: logs.join('') };
+    }
+
+    it('warns (edit path) when has_unpublished_revisions is true', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 42, has_unpublished_revisions: true }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).toContain('Staged, not published');
+            expect(err).toContain('solidactions skill publish my-skill');
+        } finally { cleanup(); }
+    });
+
+    it('does NOT warn (edit path) when has_unpublished_revisions is false', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 43, has_unpublished_revisions: false }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).not.toContain('Staged, not published');
+        } finally { cleanup(); }
+    });
+
+    it('warns (create path, draft wording) when snapshot_hint is truthy', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 118, reference_doc_ids: {}, snapshot_hint: 'no snapshot yet' })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).toContain('unversioned draft');
+            expect(err).toContain('solidactions skill publish my-skill');
+        } finally { cleanup(); }
+    });
+
+    it('does NOT warn (create path) when snapshot_hint is null (live-mode skill)', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 119, reference_doc_ids: {}, snapshot_hint: null })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).not.toContain('published');
+        } finally { cleanup(); }
+    });
+
+    it('warns with MCP-hint wording (not the publish command) on a --role push', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 5, has_unpublished_revisions: true }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, { role: 'builder' });
+            expect(err).toContain('crews_versions take_snapshot');
+            expect(err).not.toContain('skill publish');
+        } finally { cleanup(); }
+    });
+});

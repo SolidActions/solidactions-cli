@@ -341,6 +341,41 @@ function printPushResult(result: PushResult, options: SkillPushOptions): void {
 }
 
 /**
+ * Build the "staged, not published" warning for a successful single-skill push,
+ * or null when nothing needs publishing.
+ *
+ * Edit path (status 'updated'): default reads return the active snapshot, so a
+ * new revision is dark to agents until published — warn when the server reports
+ * has_unpublished_revisions === true.
+ * Create path (status 'created'): a brand-new skill has no snapshot, so reads
+ * fall back to the unversioned draft (it runs, just isn't pinned) — warn on a
+ * truthy snapshot_hint (null when the skill is version_mode=live).
+ * Dry-run statuses never warn.
+ */
+export function stagedPushWarning(result: PushResult, isRole: boolean): string | null {
+    const { status, name, data } = result;
+    if (status === 'created') {
+        if (!data.snapshot_hint) {
+            return null;
+        }
+    } else if (status === 'updated') {
+        if (data.has_unpublished_revisions !== true) {
+            return null;
+        }
+    } else {
+        return null;
+    }
+
+    const publishLine = isRole
+        ? `  Publish this role-scoped skill via the MCP crews_versions take_snapshot tool.\n`
+        : `  Run: solidactions skill publish ${name}\n`;
+    const headline = status === 'updated'
+        ? `⚠ Staged, not published. This revision won't run for agents until you publish it.\n`
+        : `⚠ Not yet published. Agents read the unversioned draft until you publish to pin a version.\n`;
+    return headline + publishLine;
+}
+
+/**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
  *
@@ -385,6 +420,10 @@ export async function skillPushWithConfig(
             console.log(JSON.stringify(pushResult.data));
         } else {
             printPushResult(pushResult, options);
+            const warning = stagedPushWarning(pushResult, !!options.role);
+            if (warning) {
+                process.stderr.write(chalk.yellow(warning));
+            }
         }
         process.exit(0);
     }
