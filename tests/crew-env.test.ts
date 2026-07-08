@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
+import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { crewEnvSet, buildVariableBody } from '../src/commands/crew-env-set';
 import { crewEnvList } from '../src/commands/crew-env-list';
@@ -529,6 +530,27 @@ describe('crewEnvDelete', () => {
             cleanup();
         }
     });
+
+    it('interactive decline (prompts.inject false): prints Cancelled and issues NO DELETE request', async () => {
+        const { cleanup } = setupConfig();
+        const { logs, restore } = captureConsole();
+        try {
+            queue(200, { data: [{ id: 5, name: 'Ops' }] });
+            prompts.inject([false]);
+
+            const code = await runExpectingExit(() => crewEnvDelete('Ops', 'OLD_KEY', {}));
+            expect(code).toBeUndefined();
+
+            // Only the crew name-lookup GET — the DELETE was never sent.
+            expect(allCaptures).toHaveLength(1);
+            expect(allCaptures[0].method).toBe('GET');
+            expect(allCaptures[0].path).toBe('/api/v1/crews');
+            expect(logs.join('\n')).toContain('Cancelled.');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -632,6 +654,69 @@ describe('crewEnvPush', () => {
             expect(allCaptures).toHaveLength(2); // GET variables, then PUT — no crews list lookup
             expect(allCaptures[0].path).toBe('/api/v1/crews/77/variables');
             expect(allCaptures[1].path).toBe('/api/v1/crews/77/variables/K');
+        } finally {
+            restore();
+            cleanupEnvFile();
+            cleanup();
+        }
+    });
+
+    it('interactive accept (prompts.inject true): summary counts line appears in stdout and the PUTs fire', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupEnvFile } = writeTmpEnvFile('NEW_KEY=super-secret-value\nOLD_KEY=changed-value\n');
+        const { logs, restore } = captureConsole();
+        try {
+            queue(200, { data: [{ id: 9, name: 'MyCrew' }] });
+            queue(200, {
+                data: [{
+                    id: 2, env_name: 'OLD_KEY', is_secret: false,
+                    production_value: 'stale', staging_value: 'stale', staging_source: 'value',
+                    dev_value: 'stale', dev_source: 'value',
+                }],
+            });
+            queue(201, { id: 1, env_name: 'NEW_KEY', is_secret: false, message: 'created' });
+            queue(200, { id: 2, env_name: 'OLD_KEY', is_secret: false, message: 'updated' });
+            prompts.inject([true]);
+
+            const code = await runExpectingExit(() => crewEnvPush('MyCrew', file, { secret: false }));
+            expect(code).toBeUndefined();
+
+            // GET crews, GET variables, then one PUT per pushed key.
+            expect(allCaptures).toHaveLength(4);
+            expect(allCaptures[2].method).toBe('PUT');
+            expect(allCaptures[2].path).toBe('/api/v1/crews/9/variables/NEW_KEY');
+            expect(allCaptures[3].method).toBe('PUT');
+            expect(allCaptures[3].path).toBe('/api/v1/crews/9/variables/OLD_KEY');
+
+            // The create/update/skip summary counts are printed to stdout.
+            expect(logs.join('\n')).toContain('1 create, 1 update');
+        } finally {
+            restore();
+            cleanupEnvFile();
+            cleanup();
+        }
+    });
+
+    it('interactive decline (prompts.inject false): prints Cancelled and issues NO PUT requests', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupEnvFile } = writeTmpEnvFile('NEW_KEY=super-secret-value\n');
+        const { logs, restore } = captureConsole();
+        try {
+            queue(200, { data: [{ id: 9, name: 'MyCrew' }] });
+            queue(200, { data: [] });
+            prompts.inject([false]);
+
+            const code = await runExpectingExit(() => crewEnvPush('MyCrew', file, {}));
+            expect(code).toBeUndefined();
+
+            // Only the two GETs — no PUT was ever sent.
+            expect(allCaptures).toHaveLength(2);
+            expect(allCaptures.every((c) => c.method === 'GET')).toBe(true);
+
+            const out = logs.join('\n');
+            expect(out).toContain('1 create');
+            expect(out).toContain('Cancelled.');
+            expect(out).not.toContain('super-secret-value');
         } finally {
             restore();
             cleanupEnvFile();

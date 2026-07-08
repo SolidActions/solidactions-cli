@@ -158,6 +158,16 @@ export async function crewEnvPush(crewArg: string, filePath: string = '.env', op
 
         console.log(keyCol + actionCol + chalk.yellow('••••••').padEnd(12) + notesCol);
     }
+
+    // Printed unconditionally (not just inside the prompt message) so the
+    // counts are visible with --yes and in captured/injected-prompt output.
+    const summary = [];
+    if (toCreate.length > 0) summary.push(`${toCreate.length} create`);
+    if (toUpdate.length > 0) summary.push(`${toUpdate.length} update`);
+    if (toSkip.length > 0) summary.push(`${toSkip.length} skip`);
+
+    console.log('');
+    console.log(chalk.gray(summary.join(', ')));
     console.log('');
 
     if (toPush.length === 0) {
@@ -166,11 +176,6 @@ export async function crewEnvPush(crewArg: string, filePath: string = '.env', op
     }
 
     if (!options.yes) {
-        const summary = [];
-        if (toCreate.length > 0) summary.push(`${toCreate.length} create`);
-        if (toUpdate.length > 0) summary.push(`${toUpdate.length} update`);
-        if (toSkip.length > 0) summary.push(`${toSkip.length} skip`);
-
         const response = await prompts({
             type: 'confirm',
             name: 'confirm',
