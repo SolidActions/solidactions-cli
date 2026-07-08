@@ -38,6 +38,7 @@ import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
+import { docsPull } from './commands/docs-pull';
 import { docsUpload } from './commands/docs-upload';
 import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
@@ -648,6 +649,17 @@ docs
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
+    });
+
+docs
+    .command('pull')
+    .description('Download a Docs folder tree to a local directory for editing (inverse of push)')
+    .argument('<folder>', 'Docs folder path (or a single doc path)')
+    .argument('[dest]', 'Destination directory (defaults to ./<last-segment>/)')
+    .option('-y, --yes', 'Overwrite a non-empty destination without confirmation')
+    .option('--json', 'Machine-readable output')
+    .action(async (folder, dest, options) => {
+        await docsPull(folder, dest, options);
     });
 
 docs
