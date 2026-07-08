@@ -192,6 +192,26 @@ describe('runDev', () => {
         expect(out.stdout).not.toMatch(/had no value/);
     }, 20_000);
 
+    it('reports secrets withheld for lacking env:reveal distinctly from a genuinely unset secret', async () => {
+        const out = await runDev({
+            entry: ECHO_FIXTURE,
+            input: '{"n":1}',
+            env: 'staging',
+            api: {
+                projectSlug: 'test-project-staging',
+                revealDenied: true,
+                async fetchVarsAndConnections(): Promise<PlatformVar[]> {
+                    return [
+                        { env_name: 'SECRET_VAR', resolved_value: null, is_secret: true, source_type: 'plain' },
+                    ];
+                },
+            },
+        });
+
+        expect(out.stdout).toMatch(/1 secret var unavailable: your API key lacks the 'env:reveal' ability/);
+        expect(out.stdout).not.toMatch(/not available to local dev/);
+    }, 20_000);
+
     it('prints an npm-install hint (not a raw stack trace) when the SDK cannot be resolved', async () => {
         // A fixture entry OUTSIDE this repo's tree has no node_modules ancestor
         // containing @solidactions/sdk, so require.resolve(...) genuinely fails —

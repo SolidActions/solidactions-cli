@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { SolidActionsConfig } from '../utils/env';
+import { Config } from '../utils/config';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -43,6 +44,39 @@ export interface SaApiClient {
     projectSlug: string;
     /** Fetch declared variable-mappings for the given env from the SA API. */
     fetchVarsAndConnections(env: string): Promise<PlatformVar[]>;
+    /** Set true when the API token lacks `env:reveal` and the reveal request had to fall back. */
+    revealDenied?: boolean;
+}
+
+/**
+ * Build the production `SaApiClient`: fetches `variable-mappings` with
+ * `reveal=true` so secret values are populated on `ctx.vars`. When the token
+ * lacks the `env:reveal` ability, the API responds 403
+ * `{ code: 'token_missing_ability' }` — retry once without `reveal` and mark
+ * `revealDenied` so the caller can tell the user secrets were withheld.
+ */
+export function buildSaApiClient(config: Config, projectSlug: string): SaApiClient {
+    const client: SaApiClient = {
+        projectSlug,
+        revealDenied: false,
+        async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
+            const axios = (await import('axios')).default;
+            const { getApiHeaders } = await import('../utils/api');
+            const base = `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`;
+            try {
+                const response = await axios.get(`${base}&reveal=true`, { headers: getApiHeaders(config) });
+                return response.data || [];
+            } catch (e: any) {
+                if (e?.response?.status === 403 && e.response.data?.code === 'token_missing_ability') {
+                    client.revealDenied = true;
+                    const response = await axios.get(base, { headers: getApiHeaders(config) });
+                    return response.data || [];
+                }
+                throw e;
+            }
+        },
+    };
+    return client;
 }
 
 /** Structured return value of runDev — never calls process.exit. */
@@ -317,22 +351,11 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             // Production path: build from CLI config.
             // Lazy-import to keep tests fast (no config resolution needed).
             const { requireConfigWithWorkspace } = await import('../utils/api');
-            const { getApiHeaders } = await import('../utils/api');
-            const axios = (await import('axios')).default;
             const config = await requireConfigWithWorkspace();
             // Real project resolution: read the project name from the workflow
             // file's solidactions.yaml and apply the deploy env→slug rule.
             const projectSlug = resolveProjectSlug(opts.entry, opts.env);
-            apiClient = {
-                projectSlug,
-                async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
-                    const response = await axios.get(
-                        `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`,
-                        { headers: getApiHeaders(config) },
-                    );
-                    return response.data || [];
-                },
-            };
+            apiClient = buildSaApiClient(config, projectSlug);
         }
     }
 
@@ -397,7 +420,11 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
         }
         if (droppedSecretCount > 0) {
-            summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
+            if (apiClient!.revealDenied) {
+                summary += ` — ${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var' : 'vars'} unavailable: your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, or set a test value with \`solidactions env set\`.`;
+            } else {
+                summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
+            }
         }
         out(summary);
     } else {
