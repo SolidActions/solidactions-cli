@@ -38,6 +38,11 @@ import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
+import { docsUpload } from './commands/docs-upload';
+import { crewEnvSet } from './commands/crew-env-set';
+import { crewEnvList } from './commands/crew-env-list';
+import { crewEnvDelete } from './commands/crew-env-delete';
+import { crewEnvPush } from './commands/crew-env-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -347,6 +352,56 @@ env
     });
 
 // =============================================================================
+// crew env <subcommand>
+// =============================================================================
+
+const crew = program.command('crew').description('Manage crews');
+const crewEnv = crew.command('env').description('Manage crew variables');
+
+crewEnv
+    .command('set')
+    .description('Set a crew variable (create or update)')
+    .argument('<crew>', 'Crew name or id')
+    .argument('<key>', 'Variable key')
+    .argument('<value>', 'Variable value')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev/all)', 'all')
+    .option('--no-secret', 'Do not mark as secret — crew variables are secret by default (unlike `env set`)')
+    .action((crewArg, key, value, options) => {
+        crewEnvSet(crewArg, key, value, options);
+    });
+
+crewEnv
+    .command('list')
+    .description('List crew variables')
+    .argument('<crew>', 'Crew name or id')
+    .option('--json', 'Output as JSON')
+    .action((crewArg, options) => {
+        crewEnvList(crewArg, options);
+    });
+
+crewEnv
+    .command('delete')
+    .description('Delete a crew variable')
+    .argument('<crew>', 'Crew name or id')
+    .argument('<key>', 'Variable key')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action((crewArg, key, options) => {
+        crewEnvDelete(crewArg, key, options);
+    });
+
+crewEnv
+    .command('push')
+    .description('Push variables from a .env file to a crew')
+    .argument('<crew>', 'Crew name or id')
+    .argument('[file]', 'Source .env file', '.env')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev/all)', 'all')
+    .option('--no-secret', 'Do not mark pushed variables as secret — secret by default (unlike `env push`)')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action((crewArg, file, options) => {
+        crewEnvPush(crewArg, file, options);
+    });
+
+// =============================================================================
 // schedule <subcommand>
 // =============================================================================
 
@@ -593,6 +648,15 @@ docs
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
+    });
+
+docs
+    .command('upload <files...>')
+    .description('Upload one or more media files to SA-Docs (requires a token with the "docs" ability)')
+    .option('--folder <path>', 'Folder path to upload into (auto-created if missing)')
+    .option('--title <title>', 'Title for the uploaded doc (only valid with a single file)')
+    .action(async (files, options) => {
+        await docsUpload(files, { folder: options.folder, title: options.title });
     });
 
 program.parseAsync().catch((err) => {
