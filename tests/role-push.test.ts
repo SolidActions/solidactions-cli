@@ -216,6 +216,71 @@ describe('role push — create success', () => {
             cleanup();
         }
     });
+
+    it('sends frontmatter extras (e.g. inherits_from) top-level on create, with no properties wrapper', async () => {
+        responseQueue = [makeMcpSuccess({ role_doc_id: 1, folder_id: 2 })];
+
+        const { dir, cleanup } = makeTmpRoleDir(
+            [
+                '---',
+                'name: extras-role',
+                'description: A role with extras',
+                'inherits_from: base-role',
+                '---',
+                'body',
+            ].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await rolePushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            const args = lastCapture!.body.params.arguments;
+            expect(args.inherits_from).toBe('base-role');
+            expect(args).not.toHaveProperty('properties');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('fails with a clear error before any HTTP call when frontmatter contains a reserved key (e.g. name)', async () => {
+        const { dir, cleanup } = makeTmpRoleDir(
+            ['---', 'name: hijack-role', 'description: nope', 'action: delete', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await rolePushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e; else throw e;
+            }
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+            expect(stderrLines.join('')).toContain('action');
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -223,7 +288,7 @@ describe('role push — create success', () => {
 // ---------------------------------------------------------------------------
 
 describe('role push — collision → edit (upsert)', () => {
-    it('on name_collision switches to roles.edit and reports "updated role", sends name + properties_patch, NO references', async () => {
+    it('on name_collision switches to roles.edit and reports "updated role", sends name + top-level extras, NO properties_patch, NO references', async () => {
         responseQueue = [
             makeMcpError('name_collision', 'A role with this name already exists.'),
             makeMcpSuccess({ version_id: 5, body_blob_sha: 'abc' }),
@@ -234,7 +299,7 @@ describe('role push — collision → edit (upsert)', () => {
                 '---',
                 'name: existing-role',
                 'description: Updated description',
-                'catalog_advertised: true',
+                'inherits_from: some-parent',
                 '---',
                 'Updated body',
             ].join('\n'),
@@ -262,6 +327,8 @@ describe('role push — collision → edit (upsert)', () => {
             // First call: create
             expect(allCaptures[0].body.params.name).toBe('crews_roles');
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
+            // inherits_from (frontmatter extra) sent top-level on create too
+            expect(allCaptures[0].body.params.arguments.inherits_from).toBe('some-parent');
 
             // Second call: edit
             const editArgs = allCaptures[1].body.params.arguments;
@@ -269,8 +336,10 @@ describe('role push — collision → edit (upsert)', () => {
             expect(editArgs.action).toBe('edit');
             // roles edit uses 'name', NOT 'identifier'
             expect(editArgs.name).toBe('existing-role');
-            // properties_patch must be present (not properties)
-            expect(editArgs).toHaveProperty('properties_patch');
+            // inherits_from (frontmatter extra) sent top-level, no wrapper key
+            expect(editArgs.inherits_from).toBe('some-parent');
+            expect(editArgs).not.toHaveProperty('properties_patch');
+            expect(editArgs).not.toHaveProperty('properties');
             // NO references key on roles edit
             expect(editArgs).not.toHaveProperty('references');
 

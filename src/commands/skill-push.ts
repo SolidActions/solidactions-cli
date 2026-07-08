@@ -24,6 +24,24 @@ export interface SkillPushOptions {
 }
 
 /**
+ * Protocol param names reserved by the skills/roles MCP tool actions. Frontmatter
+ * keys that collide with these would silently corrupt the request once spread
+ * top-level into the call arguments.
+ */
+export const RESERVED_PARAM_KEYS = ['action', 'identifier', 'role', 'name', 'description', 'body', 'references', 'base_version_id'];
+
+/**
+ * Throws if any frontmatter-derived property key collides with a reserved
+ * protocol param name.
+ */
+export function assertNoReservedFrontmatterKeys(properties: Record<string, unknown>): void {
+    const offending = Object.keys(properties).filter((key) => RESERVED_PARAM_KEYS.includes(key));
+    if (offending.length > 0) {
+        throw new Error(`SKILL.md frontmatter contains reserved key(s) that would collide with protocol params: ${offending.join(', ')}`);
+    }
+}
+
+/**
  * Parse a SKILL.md file that begins with a YAML frontmatter block.
  *
  * Returns { name, description, properties, body } where:
@@ -221,6 +239,7 @@ export async function pushParsedSkill(
     config: Config,
 ): Promise<PushResult> {
     const { name, description, properties, body, references } = payload;
+    assertNoReservedFrontmatterKeys(properties);
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
 
@@ -255,9 +274,10 @@ export async function pushParsedSkill(
         return { status: 'would-update', name, data: {} };
     }
 
+    // Spread frontmatter extras FIRST so the fixed protocol keys always win.
     const createArgs: Record<string, unknown> = isRole
-        ? { action: 'create_skill', role: options.role, name, description, body, properties, references }
-        : { action: 'create', name, description, body, properties, references };
+        ? { ...properties, action: 'create_skill', role: options.role, name, description, body, references }
+        : { ...properties, action: 'create', name, description, body, references };
 
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
@@ -266,11 +286,11 @@ export async function pushParsedSkill(
         throw new Error(`${e.message}`);
     }
 
-    // On name collision, switch to the edit path. properties → properties_patch.
+    // On name collision, switch to the edit path.
     if (!result.ok && result.data?.code === 'name_collision') {
         const editArgs: Record<string, unknown> = isRole
-            ? { action: 'edit_skill', role: options.role, name, description, body, properties_patch: properties, references }
-            : { action: 'edit', identifier: name, description, body, properties_patch: properties, references };
+            ? { ...properties, action: 'edit_skill', role: options.role, name, description, body, references }
+            : { ...properties, action: 'edit', identifier: name, description, body, references };
 
         try {
             result = await callCrewsTool(config, tool, editArgs);
