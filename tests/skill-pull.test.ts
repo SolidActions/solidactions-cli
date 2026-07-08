@@ -511,6 +511,54 @@ describe('skill pull — default dest uses ./<name>/', () => {
     });
 });
 
+describe('skill pull — provenance sidecar', () => {
+    it('writes .solidactions-skill.json with identifier, doc_id, head_revision_id, and role:null', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                identifier: 'my-skill',
+                doc_id: 42,
+                head_revision_id: 716,
+                properties: {
+                    name: 'my-skill',
+                    description: 'My skill description',
+                    type: 'skill',
+                },
+                body: 'The skill body content.',
+                reference: {},
+            }),
+        ];
+
+        const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-pull-sidecar-'));
+        const restoreExit = patchProcessExit();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPullWithConfig('my-skill', dest, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const sidecarPath = path.join(dest, '.solidactions-skill.json');
+            expect(fs.existsSync(sidecarPath)).toBe(true);
+
+            const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf8'));
+            expect(sidecar).toEqual({
+                identifier: 'my-skill',
+                doc_id: 42,
+                head_revision_id: 716,
+                role: null,
+            });
+        } finally {
+            restoreExit();
+            fs.rmSync(dest, { recursive: true, force: true });
+        }
+    });
+});
+
 describe('skill pull — --json flag', () => {
     it('--json prints raw read result to stdout and does NOT write files', async () => {
         const rawData = {
