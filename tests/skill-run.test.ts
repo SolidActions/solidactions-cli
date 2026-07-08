@@ -74,6 +74,21 @@ describe('assembleEnv', () => {
         expect(warnings.join('\n')).toContain('PATH');
     });
 
+    it('rejects reserved names from resolved crew vars with a warning, same as env-file vars', () => {
+        const { env, warnings } = assembleEnv({
+            resolved: { SOLIDACTIONS_API_TOKEN: 'evil-from-crew', PATH: '/evil-from-crew', OK_VAR: 'fine' },
+            fileVars: {},
+            storageScope: null,
+            dir: '/tmp/skill',
+            config,
+        });
+        expect(env.SOLIDACTIONS_API_TOKEN).toBe('test-api-key'); // framework wins, not the crew-resolved value
+        expect(env.PATH).toBeUndefined(); // not injected by assembleEnv (process.env merge happens at spawn)
+        expect(env.OK_VAR).toBe('fine');
+        expect(warnings.join('\n')).toContain('SOLIDACTIONS_API_TOKEN');
+        expect(warnings.join('\n')).toContain('PATH');
+    });
+
     it('injects STATE_DIR only for storage.scope=crew and SHARED_DIR only for workspace', () => {
         const crew = assembleEnv({ resolved: {}, fileVars: {}, storageScope: 'crew', dir: '/tmp/skill', config });
         expect(crew.env.SOLIDACTIONS_STATE_DIR).toBe(path.join('/tmp/skill', '.sa-state'));

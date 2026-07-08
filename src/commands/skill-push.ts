@@ -112,6 +112,11 @@ export function parseSkillFile(content: string): {
  * keep a bare-filename key (e.g. "helper.py"), and files in subfolders keep
  * their relative path (e.g. "references/member-roles.md") — matching how
  * SKILL.md cites them, so bundled reference docs land complete (#247).
+ *
+ * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR) and
+ * `skill run`'s local runtime-state dir (.sa-state/) — neither is skill
+ * content, and uploading them would leak local revision bookkeeping / state
+ * into the remote library and agent sandboxes.
  */
 export function readReferences(dir: string): Record<string, string> {
     const references: Record<string, string> = {};
@@ -120,6 +125,7 @@ export function readReferences(dir: string): Record<string, string> {
         for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
+                if (entry.name === '.sa-state') continue; // skill run's local runtime-state dir
                 walk(abs);
                 continue;
             }
@@ -128,6 +134,7 @@ export function readReferences(dir: string): Record<string, string> {
             // POSIX-normalised path relative to the skill dir, used as the key.
             const key = path.relative(dir, abs).split(path.sep).join('/');
             if (key === 'SKILL.md') continue; // exclude only the top-level skill file
+            if (key === SKILL_SIDECAR) continue; // exclude the skill pull provenance sidecar
 
             references[key] = fs.readFileSync(abs, 'utf8');
         }
@@ -411,12 +418,21 @@ function readSidecar(dir: string): Record<string, unknown> | null {
 }
 
 /**
- * After a successful guarded edit, refresh the local sidecar's head_revision_id
- * so the *next* push's drift check is against the version we just wrote, not the
- * stale one from the original pull. Prefers the revision id carried on the edit
- * response; falls back to one skills.read (or roles.read_skill for --role) when
- * the response doesn't carry one. Best-effort: a failed lookup just leaves the
- * sidecar as-is rather than failing the push (which already succeeded).
+ * After a successful guarded edit or a create, refresh the local sidecar's
+ * head_revision_id so the *next* push's drift check is against the version we
+ * just wrote, not a stale one from the original pull. Prefers the revision id
+ * carried on the response; falls back to one skills.read (or roles.read_skill
+ * for --role) when the response doesn't carry one.
+ *
+ * On 'created' specifically, a lookup miss clears head_revision_id to null
+ * rather than leaving the sidecar's old value in place: 'created' means the
+ * name didn't collide, so this is either a brand-new skill or a remote
+ * delete+recreate — either way the old revision id belongs to a different
+ * (possibly now-deleted) document, and sending it as base_version_id on a
+ * future edit would false-positive the concurrent_edit drift guard.
+ *
+ * Best-effort otherwise: a failed lookup on the 'updated' path just leaves
+ * the sidecar as-is rather than failing the push (which already succeeded).
  */
 async function refreshSidecarRevision(
     dir: string,
@@ -443,7 +459,7 @@ async function refreshSidecarRevision(
         }
     }
 
-    if (headRevisionId === null) {
+    if (headRevisionId === null && pushResult.status !== 'created') {
         return;
     }
 
@@ -500,7 +516,7 @@ export async function skillPushWithConfig(
             process.exit(1);
         }
 
-        if (sidecar && pushResult.status === 'updated') {
+        if (sidecar && (pushResult.status === 'updated' || pushResult.status === 'created')) {
             await refreshSidecarRevision(absDir, sidecar, pushResult, options, config);
         }
 

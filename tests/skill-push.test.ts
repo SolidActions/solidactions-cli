@@ -320,6 +320,29 @@ describe('readReferences', () => {
             cleanup();
         }
     });
+
+    it('excludes the skill-pull provenance sidecar and the skill-run .sa-state/ runtime dir', () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            '---\nname: S\ndescription: D\n---\nbody',
+            {
+                'real-reference.md': 'a real reference',
+                [SKILL_SIDECAR]: JSON.stringify({ identifier: 'S', doc_id: 1, head_revision_id: 1, role: null }),
+            },
+        );
+
+        try {
+            const stateDir = path.join(dir, '.sa-state');
+            fs.mkdirSync(stateDir);
+            fs.writeFileSync(path.join(stateDir, 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const refs = readReferences(dir);
+            expect(refs).toEqual({ 'real-reference.md': 'a real reference' });
+            expect(refs).not.toHaveProperty(SKILL_SIDECAR);
+            expect(refs).not.toHaveProperty('.sa-state/cache.json');
+        } finally {
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -427,6 +450,41 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             expect(args).not.toHaveProperty('properties');
         } finally {
             restoreExit();
+            cleanup();
+        }
+    });
+
+    it('sends only the real reference — excludes the pull sidecar and .sa-state runtime dir from the wire payload', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            {
+                'real-reference.md': 'a real reference',
+                [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }),
+            },
+        );
+
+        try {
+            fs.mkdirSync(path.join(dir, '.sa-state'));
+            fs.writeFileSync(path.join(dir, '.sa-state', 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const restoreExit = patchProcessExit();
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            restoreExit();
+
+            expect(caughtExit?.code).toBe(0);
+            // A sidecar is present, so a successful "created" push (no collision) also triggers the
+            // best-effort sidecar-revision refresh (item 2), which may issue a follow-up read call —
+            // find the create call specifically rather than assuming it's the last one captured.
+            const createCapture = allCaptures.find((c) => c.body.params.arguments.action === 'create');
+            expect(createCapture).toBeDefined();
+            expect(createCapture!.body.params.arguments.references).toEqual({ 'real-reference.md': 'a real reference' });
+        } finally {
             cleanup();
         }
     });
@@ -744,6 +802,50 @@ describe('skillPushWithConfig — drift guard via base_version_id', () => {
             expect(sidecar.doc_id).toBe(42);
         } finally { restoreExit(); cleanup(); }
     });
+
+    it('refreshes the sidecar head_revision_id from the create response on a "created" push (remote delete+recreate)', async () => {
+        // No name_collision this time — the remote skill was deleted and this push recreates it under the
+        // same name, so the create call succeeds directly with a fresh revision.
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-99', reference_doc_ids: {}, head_revision_id: 5 })];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            // Refreshed to the new doc's revision — NOT left at the stale 716 from the deleted doc.
+            expect(sidecar.head_revision_id).toBe(5);
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('clears a stale sidecar head_revision_id to null on "created" when the new revision cannot be determined', async () => {
+        responseQueue = [
+            // create succeeds but the response carries no head_revision_id/version_id
+            makeMcpSuccess({ skill_doc_id: 'doc-99', reference_doc_ids: {} }),
+            // the best-effort fallback read also fails to produce one
+            makeMcpError('skill_not_found', 'not found'),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            // Cleared, not left at the stale 716 — a future edit must not send it as base_version_id.
+            expect(sidecar.head_revision_id).toBeNull();
+        } finally { restoreExit(); cleanup(); }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1155,38 @@ describe('recursive plugin push', () => {
         } finally {
             console.log = origLog;
             restoreExit();
+            cleanup();
+        }
+    });
+
+    it('plugin mode: excludes a sidecar/.sa-state nested inside a per-skill dir (skills/<name>/) from that skill\'s references', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-a', reference_doc_ids: {} })];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [{ name: 'a', description: 'Skill A' }],
+        });
+
+        try {
+            const skillDir = path.join(dir, 'skills', 'a');
+            fs.writeFileSync(path.join(skillDir, 'real-reference.md'), 'a real reference', 'utf8');
+            fs.writeFileSync(path.join(skillDir, SKILL_SIDECAR), JSON.stringify({ identifier: 'a', doc_id: 1, head_revision_id: 1, role: null }), 'utf8');
+            fs.mkdirSync(path.join(skillDir, '.sa-state'));
+            fs.writeFileSync(path.join(skillDir, '.sa-state', 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const restoreExit = patchProcessExit();
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            restoreExit();
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.references).toEqual({ 'real-reference.md': 'a real reference' });
+        } finally {
             cleanup();
         }
     });

@@ -63,7 +63,7 @@ export async function skillPullWithConfig(
     const data = result.data as {
         identifier: string;
         doc_id: number | string;
-        head_revision_id?: number;
+        head_revision_id?: number | string;
         properties: Record<string, unknown>;
         body: string;
         reference: Record<string, string>;
@@ -145,7 +145,7 @@ export async function skillPullWithConfig(
     const sidecar = {
         identifier: data.identifier,
         doc_id: typeof data.doc_id === 'string' ? parseInt(data.doc_id, 10) : data.doc_id,
-        head_revision_id: data.head_revision_id ?? null,
+        head_revision_id: typeof data.head_revision_id === 'string' ? parseInt(data.head_revision_id, 10) : (data.head_revision_id ?? null),
         role: null as string | null,
     };
     fs.writeFileSync(path.join(absOut, SKILL_SIDECAR), JSON.stringify(sidecar, null, 2) + '\n', 'utf8');

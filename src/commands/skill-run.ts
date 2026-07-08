@@ -65,7 +65,15 @@ export function assembleEnv(opts: {
     config: Config;
 }): { env: Record<string, string>; warnings: string[] } {
     const warnings: string[] = [];
-    const env: Record<string, string> = { ...opts.resolved };
+    const env: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(opts.resolved)) {
+        if (isReservedEnvName(key)) {
+            warnings.push(`crew variable '${key}' is reserved (set by the platform at runtime) — ignored`);
+            continue;
+        }
+        env[key] = value;
+    }
 
     for (const [key, value] of Object.entries(opts.fileVars)) {
         if (isReservedEnvName(key)) {
@@ -95,7 +103,7 @@ function readStorageScope(dir: string): string | null {
     const skillMd = path.join(dir, 'SKILL.md');
     if (!fs.existsSync(skillMd)) return null;
     const content = fs.readFileSync(skillMd, 'utf8');
-    const match = content.match(/^---\n([\s\S]*?)\n---/);
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!match) return null;
     const fm = yaml.load(match[1]) as Record<string, any> | null;
     const scope = fm?.storage?.scope ?? fm?.['storage.scope'] ?? null;
@@ -133,7 +141,7 @@ export async function skillRunWithConfig(
         const crew = await resolveCrewId(config, options.crew);
         try {
             const response = await axios.get(
-                `${config.host}/api/v1/crews/${crew.id}/variables/resolve?environment=${environment}`,
+                `${config.host}/api/v1/crews/${crew.id}/variables/resolve?environment=${encodeURIComponent(environment)}`,
                 { headers: getApiHeaders(config) },
             );
             resolved = response.data?.env ?? {};

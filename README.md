@@ -153,6 +153,8 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 | `skill run <dir> -- <command...>` | `--crew <nameOrId>`, `--environment <env>` (default `dev`), `--env-file <path>` | Run a skill script LOCALLY with crew variables fetched from the platform (dev loop). Secret values need a token with `env:reveal`; see `skill exec` for the remote/deployed counterpart |
 | `skill exec <name> -- <command...>` | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Run a command against the DEPLOYED skill in its real sandbox runtime (post-push smoke); see `skill run` for the local dev-loop counterpart |
 
+For `skill run` / `skill exec`, pass the command as separate words after `--` (e.g. `-- python script.py --flag`); to run a single preformed shell string, wrap it explicitly with `sh -c '...'`.
+
 ### role
 
 | Command | Key Flags | Description |
