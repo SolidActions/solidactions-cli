@@ -37,6 +37,7 @@ import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
 import { skillRun } from './commands/skill-run';
+import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
 import { docsUpload } from './commands/docs-upload';
@@ -620,7 +621,7 @@ skill
 
 skill
     .command('run')
-    .description('Run a skill script LOCALLY with crew variables fetched from the platform (dev loop; secrets need env:reveal)')
+    .description('Run a skill script LOCALLY with crew variables fetched from the platform (dev loop; default env dev; secrets need env:reveal; see `skill exec` for the remote/deployed counterpart, default env production)')
     .argument('<dir>', 'Local skill directory (must contain SKILL.md)')
     .argument('<command...>', 'Command to run (after --), e.g. -- node scripts/q.js')
     .option('--crew <nameOrId>', 'Crew whose variables to fetch (omit for shared skills)')
@@ -628,6 +629,18 @@ skill
     .option('--env-file <path>', 'Local KEY=VALUE overrides (reserved names ignored)')
     .action(async (dir, commandParts, options) => {
         await skillRun(dir, commandParts, options);
+    });
+
+skill
+    .command('exec')
+    .description('Run a command against the DEPLOYED skill in its real sandbox runtime (post-push smoke; default env production; see `skill run` for the local dev-loop counterpart, default env dev)')
+    .argument('<name>', 'Skill name or identifier')
+    .argument('<command...>', 'Command to run remotely (after --), e.g. -- node scripts/q.js')
+    .option('--role <name>', 'Role-scoped skill (uses roles.exec_skill)')
+    .option('--in-crew <crew>', 'Disambiguate when the role name exists in multiple crews')
+    .option('--environment <env>', 'Sandbox environment: production|staging|dev (default production)')
+    .action(async (name, commandParts, options) => {
+        await skillExec(name, commandParts, options);
     });
 
 // =============================================================================
