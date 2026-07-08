@@ -1458,4 +1458,35 @@ describe('skillPushWithConfig — --publish (single-skill)', () => {
             expect(lines.join('')).toMatch(/--publish is not supported.*plugin|multiple skills/i);
         } finally { restore(); restoreExit(); fs.rmSync(root, { recursive: true, force: true }); }
     });
+
+    it('create push --publish of a live-mode skill (null snapshot_hint) makes NO take_snapshot call and reports live-mode', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 300, reference_doc_ids: {}, snapshot_hint: null })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(1); // create only, no take_snapshot
+            expect(logs.join('')).toContain('live-mode skill');
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('--publish combined with --dry-run performs NO publish call', async () => {
+        // dry-run does a single read pre-flight (skill_not_found → would-create), no create/edit/snapshot.
+        responseQueue = [makeMcpError('skill_not_found', 'absent')];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true, dryRun: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(1); // dry-run read pre-flight only, no take_snapshot
+            expect(allCaptures.every((c) => c.body.params.arguments.action !== 'take_snapshot')).toBe(true);
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
 });

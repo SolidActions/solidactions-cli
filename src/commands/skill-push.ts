@@ -427,8 +427,13 @@ export async function skillPushWithConfig(
         let publishOutcome: PublishOutcome | null = null;
         if (options.publish && !options.dryRun) {
             if (pushResult.status === 'created') {
-                const createdDocId = (pushResult.data.skill_doc_id ?? pushResult.data.doc_id ?? pushResult.data.id) as number | string;
-                publishOutcome = await publishSkillByDocId(config, createdDocId);
+                if (!pushResult.data.snapshot_hint) {
+                    // Live-mode (version_mode=live) skill: no snapshot to take — already live.
+                    publishOutcome = { status: 'live_mode' };
+                } else {
+                    const createdDocId = (pushResult.data.skill_doc_id ?? pushResult.data.doc_id ?? pushResult.data.id) as number | string;
+                    publishOutcome = await publishSkillByDocId(config, createdDocId);
+                }
             } else {
                 publishOutcome = await publishSkillByName(config, pushResult.name);
             }
