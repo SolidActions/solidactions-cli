@@ -81,7 +81,7 @@ export function assembleEnv(opts: {
             continue;
         }
         if (key in env) {
-            warnings.push(`env-file override shadows platform var: ${key}`);
+            warnings.push(`env-file override shadows crew variable: ${key}`);
         }
         env[key] = value;
     }
@@ -144,7 +144,7 @@ export async function skillRunWithConfig(
                 `${config.host}/api/v1/crews/${crew.id}/variables/resolve?environment=${encodeURIComponent(environment)}`,
                 { headers: getApiHeaders(config) },
             );
-            resolved = response.data?.env ?? {};
+            resolved = response.data?.variables ?? {};
             skippedSecrets = response.data?.skipped_secrets ?? [];
         } catch (e: any) {
             process.stderr.write(chalk.red(`error: failed to resolve crew variables: ${e?.response?.data?.message ?? e.message}\n`));

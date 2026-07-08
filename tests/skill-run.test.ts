@@ -128,7 +128,7 @@ describe('solidactions skill run — integration', () => {
             }
             if (req.url?.startsWith('/api/v1/crews/7/variables/resolve')) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ env: { PROBE: 'resolved' }, skipped_secrets: ['HIDDEN'] }));
+                res.end(JSON.stringify({ variables: { PROBE: 'resolved' }, skipped_secrets: ['HIDDEN'] }));
                 return;
             }
             res.writeHead(404, { 'Content-Type': 'application/json' });
