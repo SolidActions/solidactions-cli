@@ -31,6 +31,7 @@ import { oauthActionsShow } from './commands/oauth-actions-show';
 import { oauthActionsPlatforms } from './commands/oauth-actions-platforms';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
+import { skillPublish } from './commands/skill-publish';
 import { skillPull } from './commands/skill-pull';
 import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
@@ -513,6 +514,15 @@ skill
     .option('--dry-run', 'Preview create vs update without writing')
     .action(async (dir, options) => {
         await skillPush(dir, options);
+    });
+
+skill
+    .command('publish')
+    .description('Publish (snapshot) a skill so its latest pushed revision goes live for agents')
+    .argument('<name>', 'Skill name/identifier (e.g. "my-skill" or "shared/my-skill")')
+    .option('--json', 'Output result as JSON')
+    .action(async (name, options) => {
+        await skillPublish(name, options);
     });
 
 skill
