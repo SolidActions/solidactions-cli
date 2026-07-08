@@ -14,6 +14,7 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill, parseCommandFile } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
+import { SKILL_SIDECAR } from '../src/commands/skill-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server — records the last request and returns a canned response
@@ -653,6 +654,95 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(logs.join('')).toContain('created skill');
             expect(logs.join('')).toContain('1 refs');
         } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Drift guard: base_version_id (task B3)
+// ---------------------------------------------------------------------------
+
+describe('skillPushWithConfig — drift guard via base_version_id', () => {
+    it('sends the sidecar head_revision_id as base_version_id on the edit request', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 717, head_revision_id: 717, body_blob_sha: 'cafe' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.arguments.base_version_id).toBe(716);
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('on concurrent_edit, exits 1 and prints a drift message naming --force', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpError('concurrent_edit', 'The document was modified by another write since your base_version_id. Re-read the document and retry.'),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(1);
+            const out = stderrLines.join('');
+            expect(out).toContain('--force');
+        } finally { restoreStderr(); restoreExit(); cleanup(); }
+    });
+
+    it('--force skips sending base_version_id and pushes through even when the sidecar is behind', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 900, head_revision_id: 900, body_blob_sha: 'beef' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, { force: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.arguments).not.toHaveProperty('base_version_id');
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('refreshes the sidecar head_revision_id from the edit response after a successful guarded edit', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 717, head_revision_id: 717, body_blob_sha: 'cafe' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            expect(sidecar.head_revision_id).toBe(717);
+            expect(sidecar.identifier).toBe('my-skill');
+            expect(sidecar.doc_id).toBe(42);
+        } finally { restoreExit(); cleanup(); }
     });
 });
 

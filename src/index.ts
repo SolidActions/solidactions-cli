@@ -568,6 +568,7 @@ skill
     .option('--json', 'Output result as JSON')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--publish', 'Publish (snapshot) the skill after pushing, making it live for agents')
+    .option('--force', 'Skip the drift guard: push without checking the remote against your local sidecar revision')
     .action(async (dir, options) => {
         await skillPush(dir, options);
     });
