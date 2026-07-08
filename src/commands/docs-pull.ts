@@ -8,18 +8,30 @@
  * (<dest>/.solidactions-docs.json) recording id/title/current_revision_id
  * per file for later diffing.
  *
- * Media handling (docs whose body references binary assets) arrives in a
- * later task — every doc here is written as markdown with manifest
- * `media: false`.
+ * Media docs (blob-backed, empty body) are two-stage classified: a
+ * candidate filter on the bulk_read row's properties, then an authoritative
+ * confirm against `GET /api/v1/docs/{id}/media` — a 404 `media_not_found`
+ * means the candidate was a false positive and it's written as markdown
+ * like any other doc.
  */
 
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { Config } from '../utils/config';
-import { requireConfigWithWorkspace } from '../utils/api';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
+
+/** Extension appended to a media file's sanitized title when the title itself has none. */
+const MIME_EXTENSIONS: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'application/pdf': '.pdf',
+};
 
 export const DOCS_MANIFEST = '.solidactions-docs.json';
 
@@ -64,6 +76,59 @@ interface DocRow {
 interface FetchedDoc extends DocRow {
     body: string;
     current_revision_id: number | null;
+    properties: Record<string, unknown>;
+}
+
+/**
+ * A doc is a media *candidate* when the bulk_read row carries blob metadata
+ * and an empty body. This is a cheap pre-filter, not authoritative — the
+ * media endpoint confirm can still return a false positive (see
+ * `resolveMedia`).
+ */
+function isMediaCandidate(doc: FetchedDoc): boolean {
+    const props = doc.properties;
+    return Boolean(props.blob_sha && props.mime && props.size) && doc.body === '';
+}
+
+interface MediaResolution {
+    isMedia: boolean;
+    mime?: string;
+    /** Downloaded bytes, or null if the signed-URL download failed (still `media: true`). */
+    bytes?: Buffer | null;
+    warning?: string;
+}
+
+/**
+ * Authoritatively confirm a media candidate against `GET /api/v1/docs/{id}/media`
+ * and, if confirmed, download the returned signed URL (no auth headers — it's
+ * a pre-signed R2 URL). Returns `{ isMedia: false }` for the false-positive
+ * 404 `media_not_found` case, in which the caller falls back to the D1
+ * markdown write path.
+ */
+async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResolution> {
+    const confirm = await axios.get(`${config.host}/api/v1/docs/${doc.id}/media`, {
+        headers: getApiHeaders(config),
+        validateStatus: () => true,
+    });
+
+    if (confirm.status === 404 && confirm.data?.code === 'media_not_found') {
+        return { isMedia: false };
+    }
+
+    if (confirm.status !== 200) {
+        const code = confirm.data?.code ?? 'unknown_error';
+        const message = confirm.data?.message ?? 'media confirm request failed';
+        process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
+        process.exit(1);
+    }
+
+    const { url, mime } = confirm.data;
+    const download = await axios.get(url, { responseType: 'arraybuffer', validateStatus: () => true });
+    if (download.status !== 200) {
+        return { isMedia: true, mime, bytes: null, warning: `warn: failed to download media for doc ${doc.id} (${doc.title}): HTTP ${download.status}` };
+    }
+
+    return { isMedia: true, mime, bytes: Buffer.from(download.data) };
 }
 
 /** The last non-empty path segment of a '/'-separated folder path. */
@@ -134,6 +199,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]
                 ...original,
                 body: row.body ?? '',
                 current_revision_id: row.current_revision_id ?? null,
+                properties: row.properties ?? {},
             });
         }
     }
@@ -144,12 +210,14 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]
 /**
  * Write every fetched doc to disk under `destination`, tracking sanitized
  * filename collisions per directory (suffix "-2", "-3", ... before the
- * extension). Returns the manifest docs map and the ordered list of written
- * files (for --json output).
+ * extension). Returns the manifest docs map, the ordered list of written
+ * files (for --json output), and any non-fatal warnings (e.g. a media
+ * signed-URL download that failed).
  */
-function writeDocs(destination: string, docs: FetchedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
+async function writeDocs(destination: string, docs: FetchedDoc[], config: Config): Promise<{ manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }>; warnings: string[] }> {
     const manifestDocs: DocsManifest['docs'] = {};
     const files: Array<{ path: string; action: 'written' }> = [];
+    const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
 
     for (const doc of docs) {
@@ -163,30 +231,55 @@ function writeDocs(destination: string, docs: FetchedDoc[]): { manifestDocs: Doc
             usedNamesByDir.set(dirRel, used);
         }
 
+        const media = isMediaCandidate(doc) ? await resolveMedia(config, doc) : { isMedia: false as const };
+        if (media.warning) warnings.push(media.warning);
+
         const sanitized = sanitizeTitle(doc.title);
-        let candidate = sanitized;
+        let base = sanitized;
+        let ext = '.md';
+        if (media.isMedia) {
+            const titleExt = path.extname(sanitized);
+            if (titleExt) {
+                base = sanitized.slice(0, -titleExt.length);
+                ext = titleExt;
+            } else {
+                base = sanitized;
+                ext = (media.mime && MIME_EXTENSIONS[media.mime]) ?? '';
+            }
+        }
+
+        let candidate = base;
         let suffix = 2;
-        while (used.has(candidate)) {
-            candidate = `${sanitized}-${suffix}`;
+        while (used.has(`${candidate}${ext}`)) {
+            candidate = `${base}-${suffix}`;
             suffix++;
         }
-        used.add(candidate);
+        used.add(`${candidate}${ext}`);
 
-        const fileName = `${candidate}.md`;
+        const fileName = `${candidate}${ext}`;
         const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
-        fs.writeFileSync(path.join(dirAbs, fileName), doc.body, 'utf8');
+        if (media.isMedia) {
+            if (media.bytes) {
+                fs.writeFileSync(path.join(dirAbs, fileName), media.bytes);
+                files.push({ path: relPath, action: 'written' });
+            }
+            // Download failure: warning already recorded above; skip the write but
+            // still record the manifest entry below so the doc isn't silently lost.
+        } else {
+            fs.writeFileSync(path.join(dirAbs, fileName), doc.body, 'utf8');
+            files.push({ path: relPath, action: 'written' });
+        }
 
         manifestDocs[relPath] = {
             id: doc.id,
             title: doc.title,
             current_revision_id: doc.current_revision_id,
-            media: false,
+            media: media.isMedia,
         };
-        files.push({ path: relPath, action: 'written' });
     }
 
-    return { manifestDocs, files };
+    return { manifestDocs, files, warnings };
 }
 
 /**
@@ -248,9 +341,10 @@ export async function docsPullWithConfig(
             relative: '',
             body: data.body ?? '',
             current_revision_id: data.current_revision_id ?? null,
+            properties: data.properties ?? {},
         }];
 
-        report(destination, folderPath, fetched, options);
+        await report(destination, folderPath, fetched, options, config);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -259,16 +353,20 @@ export async function docsPullWithConfig(
     }
 
     const fetched = await fetchBodies(config, rows);
-    report(destination, folderPath, fetched, options);
+    await report(destination, folderPath, fetched, options, config);
 }
 
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
-function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions): void {
+async function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions, config: Config): Promise<void> {
     fs.mkdirSync(destination, { recursive: true });
-    const { manifestDocs, files } = writeDocs(destination, fetched);
+    const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
 
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
     fs.writeFileSync(path.join(destination, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+    for (const warning of warnings) {
+        process.stderr.write(chalk.yellow(`${warning}\n`));
+    }
 
     if (options.json) {
         console.log(JSON.stringify({ manifest, files }));

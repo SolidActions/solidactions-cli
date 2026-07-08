@@ -67,11 +67,18 @@ function nextResponseBody(body: any): string {
     return entry;
 }
 
+/** Queue of canned responses for `GET /api/v1/docs/{id}/media`. */
+let mediaResponseQueue: Array<{ status: number; body: object }> = [];
+
+/** Queue of canned responses for the plain `GET /blob/...` signed-URL stand-in. */
+let blobResponseQueue: Array<{ status: number; bytes: Buffer }> = [];
+
 beforeAll(async () => {
     stubServer = http.createServer((req, res) => {
-        let rawBody = '';
-        req.on('data', (chunk) => { rawBody += chunk; });
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk) => { chunks.push(chunk); });
         req.on('end', () => {
+            const rawBody = Buffer.concat(chunks).toString('utf8');
             let parsedBody: any = null;
             try { parsedBody = JSON.parse(rawBody); } catch { /* ignore */ }
 
@@ -83,6 +90,20 @@ beforeAll(async () => {
             };
 
             allCaptures.push(capture);
+
+            if (req.url?.startsWith('/blob/')) {
+                const entry = blobResponseQueue.shift() ?? { status: 200, bytes: Buffer.alloc(0) };
+                res.writeHead(entry.status, { 'Content-Type': 'application/octet-stream' });
+                res.end(entry.bytes);
+                return;
+            }
+
+            if (req.url?.startsWith('/api/v1/docs/') && req.url.endsWith('/media')) {
+                const entry = mediaResponseQueue.shift() ?? { status: 404, body: { code: 'media_not_found', message: 'no media' } };
+                res.writeHead(entry.status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(entry.body));
+                return;
+            }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(nextResponseBody(parsedBody));
@@ -106,6 +127,8 @@ afterAll(() => {
 beforeEach(() => {
     allCaptures = [];
     responseQueue = [];
+    mediaResponseQueue = [];
+    blobResponseQueue = [];
 });
 
 // ---------------------------------------------------------------------------
@@ -632,6 +655,170 @@ describe('docsPullWithConfig — default destination', () => {
             process.chdir(originalCwd);
             restoreExit();
             restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Media docs
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — media docs', () => {
+    it('downloads a media candidate confirmed by the media endpoint: bytes on disk, media: true, auth on confirm only', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 7, title: 'hero.png', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'ok', id: 7, title: 'hero.png', folder_path: '', current_revision_id: 9,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 3 } },
+        ];
+        const stubBytes = Buffer.from([1, 2, 3]);
+        blobResponseQueue = [{ status: 200, bytes: stubBytes }];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(stubBytes);
+
+            const manifest = readManifest(dest);
+            expect(manifest.docs['hero.png']).toEqual({ id: 7, title: 'hero.png', current_revision_id: 9, media: true });
+
+            const confirmCall = allCaptures.find((c) => c.path === '/api/v1/docs/7/media');
+            expect(confirmCall).toBeDefined();
+            expect(confirmCall!.headers.authorization).toBe('Bearer test-api-key');
+
+            const blobCall = allCaptures.find((c) => c.path === '/blob/7');
+            expect(blobCall).toBeDefined();
+            expect(blobCall!.headers.authorization).toBeUndefined();
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('false positive: candidate properties but media endpoint 404s media_not_found — falls back to writing the body as .md, media: false', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 8, title: 'fake', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'ok', id: 8, title: 'fake', folder_path: '', current_revision_id: 11,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 404, body: { code: 'media_not_found', message: 'no media for this doc' } },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'fake.md'), 'utf8')).toBe('');
+
+            const manifest = readManifest(dest);
+            expect(manifest.docs['fake.md']).toEqual({ id: 8, title: 'fake', current_revision_id: 11, media: false });
+
+            // No signed-URL download was attempted.
+            expect(allCaptures.find((c) => c.path?.startsWith('/blob/'))).toBeUndefined();
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('derives the file extension from mime when the title has none', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 9, title: 'hero', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'ok', id: 9, title: 'hero', folder_path: '', current_revision_id: 12,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/9`, mime: 'image/png', size: 3 } },
+        ];
+        blobResponseQueue = [{ status: 200, bytes: Buffer.from([9, 9, 9]) }];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'hero.png'))).toBe(true);
+            const manifest = readManifest(dest);
+            expect(manifest.docs['hero.png']).toEqual({ id: 9, title: 'hero', current_revision_id: 12, media: true });
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('exits 1 on an unexpected media-confirm error (not the documented 404 media_not_found false positive)', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 10, title: 'broken', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'ok', id: 10, title: 'broken', folder_path: '', current_revision_id: 13,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 500, body: { code: 'internal_error', message: 'boom' } },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            expect(code).toBe(1);
+            expect(stderrLines.join('')).toContain('internal_error');
+            expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStderr();
             cleanup();
         }
     });
