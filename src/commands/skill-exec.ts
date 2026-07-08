@@ -11,6 +11,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
+import { shellQuoteArg } from './skill-run';
 
 export interface SkillExecOptions {
     role?: string;
@@ -28,7 +29,7 @@ export async function skillExecWithConfig(
         process.stderr.write(chalk.red('error: no command given — usage: skill exec <name> -- <command...>\n'));
         process.exit(1);
     }
-    const command = commandParts.join(' ');
+    const command = commandParts.map(shellQuoteArg).join(' ');
 
     const isRole = Boolean(options.role);
     const tool = isRole ? 'roles' : 'skills';

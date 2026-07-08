@@ -36,7 +36,7 @@ function isReservedEnvName(name: string): boolean {
  * each word individually keeps it intact as a single shell token, while
  * still letting `shell: true` run multi-word commands.
  */
-function shellQuoteArg(arg: string): string {
+export function shellQuoteArg(arg: string): string {
     return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 

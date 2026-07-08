@@ -163,7 +163,7 @@ describe('skillExecWithConfig — shared skill (no --role)', () => {
         expect(body.params.name).toBe('crews_skills');
         expect(body.params.arguments.action).toBe('exec_skill');
         expect(body.params.arguments.identifier).toBe('my-skill');
-        expect(body.params.arguments.command).toBe('node scripts/q.js');
+        expect(body.params.arguments.command).toBe("'node' 'scripts/q.js'");
     });
 });
 
@@ -209,6 +209,17 @@ describe('skillExecWithConfig — options passthrough', () => {
     it('does not send in_crew when --role is absent, even if inCrew is set', async () => {
         await run('my-skill', ['echo', 'hi'], { inCrew: 'crew-a' });
         expect(lastCapture!.body.params.arguments).not.toHaveProperty('in_crew');
+    });
+});
+
+describe('skillExecWithConfig — command quoting', () => {
+    it('shell-quotes each command word before joining into params.arguments.command, so shell metacharacters in an argv word (e.g. parens in a `node -e` script) survive the remote shell unmangled', async () => {
+        const { code } = await run('my-skill', ['node', '-e', 'console.log(42)'], {});
+
+        expect(code).toBe(0);
+        // Matches shellQuoteArg's single-quote-every-word behavior in skill-run.ts:
+        // each word wrapped in '...', embedded single quotes escaped as '\''.
+        expect(lastCapture!.body.params.arguments.command).toBe("'node' '-e' 'console.log(42)'");
     });
 });
 
