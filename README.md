@@ -145,11 +145,13 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `skill push <dir>` | `--role <name>`, `--dry-run`, `--json` | Push a skill folder, or a whole plugin dir — recursive: pushes every `skills/*/SKILL.md`, converts `commands/*.md` → skills, and ingests each skill's `references/`. `--role` scopes to a role instead of the shared library |
+| `skill push <dir>` | `--role <name>`, `--dry-run`, `--json`, `--force` | Push a skill folder, or a whole plugin dir — recursive: pushes every `skills/*/SKILL.md`, converts `commands/*.md` → skills, and ingests each skill's `references/`. `--role` scopes to a role instead of the shared library. Drift-guarded against the local `.solidactions-skill.json` sidecar revision; `--force` skips the guard |
 | `skill list` | `--json`, `--limit <n>` | List skills in the library |
 | `skill view <name>` | `--json` | Show one skill |
-| `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push) |
+| `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push); writes a `.solidactions-skill.json` provenance sidecar used by `push`'s drift guard |
 | `skill delete <name>` | `--json` | Delete a skill (Admin only) |
+| `skill run <dir> -- <command...>` | `--crew <nameOrId>`, `--environment <env>` (default `dev`), `--env-file <path>` | Run a skill script LOCALLY with crew variables fetched from the platform (dev loop). Secret values need a token with `env:reveal`; see `skill exec` for the remote/deployed counterpart |
+| `skill exec <name> -- <command...>` | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Run a command against the DEPLOYED skill in its real sandbox runtime (post-push smoke); see `skill run` for the local dev-loop counterpart |
 
 ### role
 
