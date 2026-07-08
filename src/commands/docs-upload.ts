@@ -50,9 +50,10 @@ export async function docsUpload(files: string[], options: DocsUploadOptions = {
                 maxBodyLength: Infinity,
             });
 
-            const doc = response.data;
-            const location = doc.folder_path || '/';
-            console.log(chalk.green(`✓ ${displayName} → ${location} (doc ${doc.id})`));
+            // The 201 body nests the created doc under a `doc` key.
+            const doc = response.data?.doc;
+            const location = doc?.folder_path || '/';
+            console.log(chalk.green(`✓ ${displayName} → ${location} (doc ${doc?.id})`));
         } catch (error: any) {
             hadError = true;
 

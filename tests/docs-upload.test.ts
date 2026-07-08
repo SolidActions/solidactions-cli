@@ -185,7 +185,7 @@ describe('docsUpload', () => {
         const { file, cleanup: cleanupFile } = writeTmpFile('chart.png', 'binary-ish content');
         const { logs, restore } = captureConsole();
         try {
-            queue(201, { id: 42, title: 'chart.png', folder_path: 'LOD/Reports' });
+            queue(201, { doc: { id: 42, title: 'chart.png', folder_path: 'LOD/Reports' } });
 
             const code = await runExpectingExit(() => docsUpload([file], { folder: 'LOD/Reports' }));
             expect(code).toBeUndefined();
@@ -218,17 +218,18 @@ describe('docsUpload', () => {
         }
     });
 
-    it('single file with --title: sends the title field', async () => {
+    it('single file with --title: sends the title field; empty folder_path renders as /', async () => {
         const { cleanup } = setupConfig();
         const { file, cleanup: cleanupFile } = writeTmpFile('report.pdf', 'pdf content');
-        const { restore } = captureConsole();
+        const { logs, restore } = captureConsole();
         try {
-            queue(201, { id: 7, title: 'Quarterly Report', folder_path: '' });
+            queue(201, { doc: { id: 7, title: 'Quarterly Report', folder_path: '' } });
 
             await runExpectingExit(() => docsUpload([file], { title: 'Quarterly Report' }));
 
             const titlePart = allCaptures[0].parts.find((p) => p.name === 'title');
             expect(titlePart?.value).toBe('Quarterly Report');
+            expect(logs.join('\n')).toContain('✓ report.pdf → / (doc 7)');
         } finally {
             restore();
             cleanupFile();
@@ -242,8 +243,8 @@ describe('docsUpload', () => {
         const { file: file2, cleanup: cleanup2 } = writeTmpFile('b.txt', 'bbb');
         const { logs, restore } = captureConsole();
         try {
-            queue(201, { id: 1, title: 'a.txt', folder_path: 'Notes' });
-            queue(201, { id: 2, title: 'b.txt', folder_path: 'Notes' });
+            queue(201, { doc: { id: 1, title: 'a.txt', folder_path: 'Notes' } });
+            queue(201, { doc: { id: 2, title: 'b.txt', folder_path: 'Notes' } });
 
             const code = await runExpectingExit(() => docsUpload([file1, file2], { folder: 'Notes' }));
             expect(code).toBeUndefined();
@@ -311,7 +312,7 @@ describe('docsUpload', () => {
         const { file: file2, cleanup: cleanup2 } = writeTmpFile('bad.txt', 'nope');
         const { logs, errors, restore } = captureConsole();
         try {
-            queue(201, { id: 5, title: 'good.txt', folder_path: '' });
+            queue(201, { doc: { id: 5, title: 'good.txt', folder_path: '' } });
             queue(500, { message: 'Internal server error.' });
 
             const code = await runExpectingExit(() => docsUpload([file1, file2], {}));
@@ -334,7 +335,7 @@ describe('docsUpload', () => {
         const missingFile = path.join(path.dirname(goodFile), 'missing.txt');
         const { logs, errors, restore } = captureConsole();
         try {
-            queue(201, { id: 9, title: 'exists.txt', folder_path: '' });
+            queue(201, { doc: { id: 9, title: 'exists.txt', folder_path: '' } });
 
             const code = await runExpectingExit(() => docsUpload([missingFile, goodFile], {}));
 
