@@ -36,6 +36,7 @@ import { skillPull } from './commands/skill-pull';
 import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
+import { skillRun } from './commands/skill-run';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
 import { docsUpload } from './commands/docs-upload';
@@ -615,6 +616,18 @@ skill
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
         await skillDelete(name, options);
+    });
+
+skill
+    .command('run')
+    .description('Run a skill script LOCALLY with crew variables fetched from the platform (dev loop; secrets need env:reveal)')
+    .argument('<dir>', 'Local skill directory (must contain SKILL.md)')
+    .argument('<command...>', 'Command to run (after --), e.g. -- node scripts/q.js')
+    .option('--crew <nameOrId>', 'Crew whose variables to fetch (omit for shared skills)')
+    .option('--environment <env>', 'Variable environment: production|staging|dev', 'dev')
+    .option('--env-file <path>', 'Local KEY=VALUE overrides (reserved names ignored)')
+    .action(async (dir, commandParts, options) => {
+        await skillRun(dir, commandParts, options);
     });
 
 // =============================================================================
