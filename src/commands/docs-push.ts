@@ -88,6 +88,11 @@ interface TrackedDrifted {
     base: number | null;
 }
 
+interface TrackedPlanned {
+    file: string;
+    id: number;
+}
+
 /**
  * Read `<absDir>/.solidactions-docs.json`. Absent or unparseable → null,
  * meaning nothing under `absDir` is guarded (sidecar convention from D1/D2).
@@ -223,10 +228,18 @@ export async function docsPushWithConfig(
 
     const trackedWritten: TrackedWritten[] = [];
     const trackedDrifted: TrackedDrifted[] = [];
+    const trackedPlanned: TrackedPlanned[] = [];
     let manifestChanged = false;
 
     for (const { absPath, relPath } of trackedFiles) {
         const entry = manifest!.docs[relPath];
+
+        // --dry-run must never live-write: preview the tracked doc instead of calling docs_edit.
+        if (options.dryRun) {
+            trackedPlanned.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
         const body = fs.readFileSync(absPath, 'utf8');
 
         const editArgs: Record<string, unknown> = { action: 'write', id: entry.id, body };
@@ -349,13 +362,20 @@ export async function docsPushWithConfig(
             summary: mergedSummary,
             pending: pendingItems,
             results: allResultRows,
-            tracked: { written: trackedWritten, drifted: trackedDrifted },
+            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned },
         }));
         process.exit(exitCode);
     }
 
     // Human-readable output
-    if (trackedWritten.length > 0 || trackedDrifted.length > 0) {
+    if (options.dryRun) {
+        if (trackedPlanned.length > 0) {
+            console.log(chalk.cyan(`tracked: ${trackedPlanned.length} planned write`));
+            for (const p of trackedPlanned) {
+                console.log(chalk.gray(`  ${p.file}`));
+            }
+        }
+    } else if (trackedWritten.length > 0 || trackedDrifted.length > 0) {
         console.log(chalk.green(`tracked: ${trackedWritten.length} written, ${trackedDrifted.length} drifted`));
         for (const w of trackedWritten) {
             console.log(chalk.gray(`  ${w.file}`));

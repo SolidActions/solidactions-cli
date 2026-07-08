@@ -1052,4 +1052,70 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
             cleanup();
         }
     });
+
+    it('--dry-run never calls docs_edit for tracked files; only bulk_create (dry_run: true) runs for untracked, tracked file reported as planned, exits 0, manifest untouched', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A\n\nTracked content.',
+            'b.md': '# B\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+        const manifestBefore = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+
+        responseQueue = [(body: any) => {
+            const items = body?.params?.arguments?.items ?? [];
+            const results = items.map((_: any, i: number) => ({ index: i, status: 'planned', action: 'create' }));
+            return makeMcpSuccess({
+                results,
+                summary: { planned_create: items.length, planned_overwrite: 0, planned_skip: 0, planned_rename: 0, errors: 0, folders_created: 0 },
+            });
+        }];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // No docs_edit call was ever made for the tracked file.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+
+            // Only the untracked file went through bulk_create, with dry_run threaded.
+            const bulkCalls = allCaptures.filter(
+                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+            );
+            expect(bulkCalls.length).toBe(1);
+            expect(bulkCalls[0].body.params.arguments.dry_run).toBe(true);
+            const items = bulkCalls[0].body.params.arguments.items;
+            expect(items.length).toBe(1);
+            expect(items[0].title).toBe('b');
+
+            // The tracked file is reported as a planned write in the JSON payload.
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            expect(jsonLine).toBeDefined();
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked).toHaveProperty('planned');
+            expect(parsed.tracked.planned).toEqual([{ file: 'a.md', id: 1 }]);
+            expect(parsed.tracked.written).toEqual([]);
+            expect(parsed.tracked.drifted).toEqual([]);
+
+            // The manifest file on disk is untouched.
+            const manifestAfter = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+            expect(manifestAfter).toBe(manifestBefore);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
 });
