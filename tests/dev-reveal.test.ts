@@ -1,8 +1,11 @@
 import http from 'http';
+import * as path from 'path';
 import { AddressInfo } from 'net';
 import { describe, it, expect, afterEach } from 'vitest';
-import { buildSaApiClient } from '../src/commands/dev';
+import { buildSaApiClient, runDev, type PlatformVar } from '../src/commands/dev';
 import { Config } from '../src/utils/config';
+
+const ECHO_FIXTURE = path.resolve(__dirname, '../fixtures/echo.ts');
 
 let server: http.Server | null = null;
 afterEach(() => new Promise<void>((r) => (server ? server.close(() => r()) : r())));
@@ -73,4 +76,26 @@ describe('buildSaApiClient reveal behavior', () => {
         const client = buildSaApiClient(cfg(host), 'my-proj');
         await expect(client.fetchVarsAndConnections('dev')).rejects.toThrow();
     });
+});
+
+describe('runDev', () => {
+    it('reports secrets withheld for lacking env:reveal distinctly from a genuinely unset secret', async () => {
+        const out = await runDev({
+            entry: ECHO_FIXTURE,
+            input: '{"n":1}',
+            env: 'staging',
+            api: {
+                projectSlug: 'test-project-staging',
+                revealDenied: true,
+                async fetchVarsAndConnections(): Promise<PlatformVar[]> {
+                    return [
+                        { env_name: 'SECRET_VAR', resolved_value: null, is_secret: true, source_type: 'plain' },
+                    ];
+                },
+            },
+        });
+
+        expect(out.stdout).toMatch(/1 secret var unavailable: your API key lacks the 'env:reveal' ability/);
+        expect(out.stdout).not.toMatch(/not available to local dev/);
+    }, 20_000);
 });
