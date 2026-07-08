@@ -44,6 +44,18 @@ function makeMcpSuccess(toolData: object): string {
     });
 }
 
+/** Build a canned MCP error response (isError envelope). */
+function makeMcpError(code: string, message: string): string {
+    return JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+            isError: true,
+            content: [{ type: 'text', text: JSON.stringify({ code, message }) }],
+        },
+    });
+}
+
 // Server state — a FIFO queue of canned responses; falls back to a default bulk_create success.
 function makeDefaultBulkSuccess(count: number): string {
     const results = Array.from({ length: count }, (_, i) => ({
@@ -1115,6 +1127,117 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
         } finally {
             restoreExit();
             restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: incremental manifest refresh — a later failure must not lose an
+// earlier tracked write's already-persisted revision.
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — incremental manifest refresh', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('persists the manifest after each successful tracked write, so a later write failure does not lose an earlier one', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            'b.md': '# B',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+                'b.md': { id: 2, title: 'b', current_revision_id: 20, media: false },
+            }),
+        });
+
+        // First docs_edit call succeeds (bumping that doc's revision), the second
+        // fails with an MCP error — regardless of which tracked file (a or b) is
+        // processed first, since directory read order isn't guaranteed.
+        let callCount = 0;
+        const respond = (body: any) => {
+            callCount++;
+            if (callCount === 1) {
+                const id = body.params.arguments.id;
+                return makeMcpSuccess({ id, current_revision_id: id * 10 + 1 });
+            }
+            return makeMcpError('internal_error', 'boom');
+        };
+        responseQueue = [respond, respond];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(1);
+
+            const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            const revisions = {
+                'a.md': manifest.docs['a.md'].current_revision_id,
+                'b.md': manifest.docs['b.md'].current_revision_id,
+            };
+
+            // Exactly one tracked file's revision advanced (the one written first,
+            // and persisted to disk immediately); the other's manifest entry is
+            // untouched at its original value.
+            const advanced = Object.entries(revisions).filter(([file, rev]) => {
+                const original = file === 'a.md' ? 10 : 20;
+                return rev !== original;
+            });
+            expect(advanced.length).toBe(1);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: unparseable manifest warns once, downgrades everything to untracked
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — unparseable manifest', () => {
+    it('warns on stderr when the manifest exists but fails to parse, and treats all files as untracked', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: '{ not valid json',
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(stderrLines.join('')).toMatch(/could not be parsed/i);
+
+            // Everything went through bulk_create as untracked — no docs_edit call.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
             cleanup();
         }
     });

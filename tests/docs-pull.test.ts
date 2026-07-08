@@ -247,8 +247,8 @@ describe('docsPullWithConfig — folder tree', () => {
                 expect(ids).toEqual([1, 2]);
                 return makeMcpSuccess({
                     results: [
-                        { index: 0, status: 'ok', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' },
-                        { index: 1, status: 'ok', id: 2, title: 'ad-a', folder_path: 'marketing/fb-campaign/ads', current_revision_id: 20, properties: {}, body: '# Ad A' },
+                        { index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' },
+                        { index: 1, status: 'found', id: 2, title: 'ad-a', folder_path: 'marketing/fb-campaign/ads', current_revision_id: 20, properties: {}, body: '# Ad A' },
                     ],
                 });
             },
@@ -300,7 +300,7 @@ describe('docsPullWithConfig — folder tree', () => {
                 expect(items.length).toBeLessThanOrEqual(50);
                 return makeMcpSuccess({
                     results: items.map((it: any, i: number) => ({
-                        index: i, status: 'ok', id: it.id, title: `doc-${it.id}`,
+                        index: i, status: 'found', id: it.id, title: `doc-${it.id}`,
                         folder_path: 'many', current_revision_id: it.id * 10, properties: {}, body: `body-${it.id}`,
                     })),
                 });
@@ -309,7 +309,7 @@ describe('docsPullWithConfig — folder tree', () => {
                 const items = body.params.arguments.items;
                 return makeMcpSuccess({
                     results: items.map((it: any, i: number) => ({
-                        index: i, status: 'ok', id: it.id, title: `doc-${it.id}`,
+                        index: i, status: 'found', id: it.id, title: `doc-${it.id}`,
                         folder_path: 'many', current_revision_id: it.id * 10, properties: {}, body: `body-${it.id}`,
                     })),
                 });
@@ -367,9 +367,9 @@ describe('docsPullWithConfig — title collisions', () => {
                 expect(ids).toEqual([1, 2, 3]);
                 return makeMcpSuccess({
                     results: [
-                        { index: 0, status: 'ok', id: 1, title: 'Same', folder_path: 'root', current_revision_id: 1, properties: {}, body: 'one' },
-                        { index: 1, status: 'ok', id: 2, title: 'Same', folder_path: 'root', current_revision_id: 2, properties: {}, body: 'two' },
-                        { index: 2, status: 'ok', id: 3, title: 'Same', folder_path: 'root/sub', current_revision_id: 3, properties: {}, body: 'three' },
+                        { index: 0, status: 'found', id: 1, title: 'Same', folder_path: 'root', current_revision_id: 1, properties: {}, body: 'one' },
+                        { index: 1, status: 'found', id: 2, title: 'Same', folder_path: 'root', current_revision_id: 2, properties: {}, body: 'two' },
+                        { index: 2, status: 'found', id: 3, title: 'Same', folder_path: 'root/sub', current_revision_id: 3, properties: {}, body: 'three' },
                     ],
                 });
             },
@@ -566,7 +566,7 @@ describe('docsPullWithConfig — overwrite confirm', () => {
         responseQueue = [
             makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
             makeMcpSuccess({
-                results: [{ index: 0, status: 'ok', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
+                results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
         ];
 
@@ -596,7 +596,7 @@ describe('docsPullWithConfig — --json', () => {
         responseQueue = [
             makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
             makeMcpSuccess({
-                results: [{ index: 0, status: 'ok', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
+                results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
         ];
 
@@ -635,7 +635,7 @@ describe('docsPullWithConfig — default destination', () => {
         responseQueue = [
             makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
             makeMcpSuccess({
-                results: [{ index: 0, status: 'ok', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
+                results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
         ];
 
@@ -673,7 +673,7 @@ describe('docsPullWithConfig — media docs', () => {
             }),
             makeMcpSuccess({
                 results: [{
-                    index: 0, status: 'ok', id: 7, title: 'hero.png', folder_path: '', current_revision_id: 9,
+                    index: 0, status: 'found', id: 7, title: 'hero.png', folder_path: '', current_revision_id: 9,
                     properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
                 }],
             }),
@@ -720,7 +720,7 @@ describe('docsPullWithConfig — media docs', () => {
             }),
             makeMcpSuccess({
                 results: [{
-                    index: 0, status: 'ok', id: 8, title: 'fake', folder_path: '', current_revision_id: 11,
+                    index: 0, status: 'found', id: 8, title: 'fake', folder_path: '', current_revision_id: 11,
                     properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
                 }],
             }),
@@ -760,7 +760,7 @@ describe('docsPullWithConfig — media docs', () => {
             }),
             makeMcpSuccess({
                 results: [{
-                    index: 0, status: 'ok', id: 9, title: 'hero', folder_path: '', current_revision_id: 12,
+                    index: 0, status: 'found', id: 9, title: 'hero', folder_path: '', current_revision_id: 12,
                     properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
                 }],
             }),
@@ -797,7 +797,7 @@ describe('docsPullWithConfig — media docs', () => {
             }),
             makeMcpSuccess({
                 results: [{
-                    index: 0, status: 'ok', id: 11, title: 'lost.png', folder_path: '', current_revision_id: 14,
+                    index: 0, status: 'found', id: 11, title: 'lost.png', folder_path: '', current_revision_id: 14,
                     properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
                 }],
             }),
@@ -839,7 +839,7 @@ describe('docsPullWithConfig — media docs', () => {
             }),
             makeMcpSuccess({
                 results: [{
-                    index: 0, status: 'ok', id: 10, title: 'broken', folder_path: '', current_revision_id: 13,
+                    index: 0, status: 'found', id: 10, title: 'broken', folder_path: '', current_revision_id: 13,
                     properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
                 }],
             }),
@@ -858,6 +858,139 @@ describe('docsPullWithConfig — media docs', () => {
             expect(code).toBe(1);
             expect(stderrLines.join('')).toContain('internal_error');
             expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// bulk_read row-status guard
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — bulk_read row-status guard', () => {
+    it('a non-ok status row and a row missing from results are both warned + skipped; the ok row still pulls', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [
+                    { id: 1, title: 'good', properties: {} },
+                    { id: 2, title: 'broken', properties: {} },
+                    { id: 3, title: 'ghost', properties: {} },
+                ],
+            }),
+            (body: any) => {
+                const ids = body.params.arguments.items.map((i: any) => i.id);
+                expect(ids).toEqual([1, 2, 3]);
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 1, title: 'good', folder_path: 'root', current_revision_id: 1, properties: {}, body: 'ok body' },
+                        { index: 1, status: 'error', id: 2, title: 'broken', folder_path: 'root', error: 'boom' },
+                        // id 3 ("ghost") is entirely absent from results.
+                    ],
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('root', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'good.md'), 'utf8')).toBe('ok body');
+            expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
+            expect(fs.existsSync(path.join(dest, 'ghost.md'))).toBe(false);
+
+            const manifest = readManifest(dest);
+            expect(Object.keys(manifest.docs)).toEqual(['good.md']);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('broken');
+            expect(err).toContain('ghost');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Folder-name path traversal (sanitizeSegment)
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — folder-name path traversal', () => {
+    it('a folder named ".." is sanitized so the doc inside it lands under the destination', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [{ id: 100, name: '..', parent_folder_id: 1, folder_path: 'evil/..' }],
+                docs: [],
+            }),
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 1, title: 'gotcha', properties: {} }],
+            }),
+            makeMcpSuccess({
+                results: [
+                    { index: 0, status: 'found', id: 1, title: 'gotcha', folder_path: 'evil/..', current_revision_id: 1, properties: {}, body: 'x' },
+                ],
+            }),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('evil', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            const manifest = readManifest(dest);
+            const relPaths = Object.keys(manifest.docs);
+            expect(relPaths.length).toBe(1);
+
+            const writtenAbs = path.resolve(dest, relPaths[0]);
+            expect(writtenAbs.startsWith(dest + path.sep)).toBe(true);
+            expect(fs.existsSync(writtenAbs)).toBe(true);
+
+            // Nothing was written outside the destination directory.
+            const outsidePath = path.resolve(dest, '..', 'gotcha.md');
+            expect(fs.existsSync(outsidePath)).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Destination resolves to an existing file
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — destination is a file', () => {
+    it('exits 1 with a clear error instead of throwing ENOTDIR', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'not-a-dir');
+        fs.writeFileSync(dest, 'i am a file', 'utf8');
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
+            expect(code).toBe(1);
+            expect(stderrLines.join('')).toMatch(/not a directory/i);
+            expect(allCaptures.length).toBe(0);
         } finally {
             restoreExit();
             restoreStderr();

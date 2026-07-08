@@ -105,6 +105,7 @@ function readManifest(absDir: string): DocsManifest | null {
     try {
         return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
     } catch {
+        process.stderr.write(chalk.yellow(`warn: ${DOCS_MANIFEST} exists but could not be parsed — all files will be treated as untracked\n`));
         return null;
     }
 }
@@ -229,7 +230,6 @@ export async function docsPushWithConfig(
     const trackedWritten: TrackedWritten[] = [];
     const trackedDrifted: TrackedDrifted[] = [];
     const trackedPlanned: TrackedPlanned[] = [];
-    let manifestChanged = false;
 
     for (const { absPath, relPath } of trackedFiles) {
         const entry = manifest!.docs[relPath];
@@ -269,8 +269,11 @@ export async function docsPushWithConfig(
         }
 
         entry.current_revision_id = data?.current_revision_id ?? entry.current_revision_id;
-        manifestChanged = true;
         trackedWritten.push({ file: relPath, id: entry.id, current_revision_id: entry.current_revision_id });
+
+        // Persist immediately so a later failure (another tracked write, or an
+        // untracked bulk_create error) never loses this file's refreshed revision.
+        fs.writeFileSync(path.join(absDir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     }
 
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
@@ -348,11 +351,6 @@ export async function docsPushWithConfig(
             missing: r.property_validation!.missing ?? [],
             invalid: r.property_validation!.invalid ?? [],
         }));
-
-    // Rewrite the manifest on disk if any tracked entry's revision changed.
-    if (manifest && manifestChanged) {
-        fs.writeFileSync(path.join(absDir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-    }
 
     const exitCode = trackedDrifted.length > 0 ? 1 : 0;
 

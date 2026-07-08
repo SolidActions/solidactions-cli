@@ -58,10 +58,24 @@ const UNSAFE_CHARS = /[/\\:*?"<>|\x00-\x1f]/g;
 
 /**
  * Replace filesystem-unsafe characters (/ \ : * ? " < > | and control chars)
+ * with underscores so a server-provided name (doc title or folder name) is
+ * safe to use as a single filesystem path segment. Also neutralizes bare
+ * `.` and `..` segments (which would otherwise resolve to the current or
+ * parent directory — a path-traversal risk for folder names in particular).
+ */
+export function sanitizeSegment(name: string): string {
+    const replaced = name.replace(UNSAFE_CHARS, '_');
+    if (replaced === '.') return '_';
+    if (replaced === '..') return '__';
+    return replaced;
+}
+
+/**
+ * Replace filesystem-unsafe characters (/ \ : * ? " < > | and control chars)
  * in a doc title with underscores so it can be used as a file basename.
  */
 export function sanitizeTitle(title: string): string {
-    return title.replace(UNSAFE_CHARS, '_');
+    return sanitizeSegment(title);
 }
 
 /** Row collected during the BFS list walk, before bodies are fetched. */
@@ -160,7 +174,8 @@ async function listTree(config: Config, folderPath: string): Promise<{ ok: true;
         first = false;
 
         for (const folder of result.data?.folders ?? []) {
-            const childRelative = relative ? `${relative}/${folder.name}` : folder.name;
+            const safeName = sanitizeSegment(folder.name);
+            const childRelative = relative ? `${relative}/${safeName}` : safeName;
             queue.push({ folder_path: folder.folder_path, relative: childRelative });
         }
         for (const doc of result.data?.docs ?? []) {
@@ -171,12 +186,22 @@ async function listTree(config: Config, folderPath: string): Promise<{ ok: true;
     return { ok: true, rows };
 }
 
-/** Fetch bodies + revisions for every collected row via bulk_read, chunked at CHUNK_SIZE ids. */
-async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]> {
+/** The bulk_read row status that means "body/revision were returned successfully". */
+const BULK_READ_OK_STATUS = 'found';
+
+/**
+ * Fetch bodies + revisions for every collected row via bulk_read, chunked at
+ * CHUNK_SIZE ids. A row whose status isn't `BULK_READ_OK_STATUS` (e.g. a
+ * server-side `error` or `not_found`), or a requested id absent from the
+ * response entirely, is soft-skipped: a warning naming the doc, no file
+ * written, no manifest entry — mirroring the media download soft-skip.
+ */
+async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: FetchedDoc[]; warnings: string[] }> {
     const byId = new Map<number, DocRow>();
     for (const row of rows) byId.set(row.id, row);
 
     const fetched: FetchedDoc[] = [];
+    const warnings: string[] = [];
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
         const chunk = rows.slice(i, i + CHUNK_SIZE);
         const result = await callDocsTool(config, 'docs_vault', {
@@ -192,9 +217,17 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]
         }
 
         const resultRows = result.data?.results ?? [];
+        const seenIds = new Set<number>();
         for (const row of resultRows) {
             const original = byId.get(row.id);
             if (!original) continue;
+            seenIds.add(row.id);
+
+            if (row.status !== BULK_READ_OK_STATUS) {
+                warnings.push(`warn: skipping doc ${row.id} (${original.title}): bulk_read returned status "${row.status ?? 'unknown'}"`);
+                continue;
+            }
+
             fetched.push({
                 ...original,
                 body: row.body ?? '',
@@ -202,9 +235,15 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<FetchedDoc[]
                 properties: row.properties ?? {},
             });
         }
+
+        for (const requested of chunk) {
+            if (!seenIds.has(requested.id)) {
+                warnings.push(`warn: skipping doc ${requested.id} (${requested.title}): missing from bulk_read results`);
+            }
+        }
     }
 
-    return fetched;
+    return { fetched, warnings };
 }
 
 /**
@@ -297,6 +336,10 @@ export async function docsPullWithConfig(
 
     // Overwrite-confirm: warn + confirm on a non-empty destination before any network I/O.
     if (fs.existsSync(destination)) {
+        if (!fs.statSync(destination).isDirectory()) {
+            process.stderr.write(chalk.red(`error: destination "${destination}" exists and is not a directory.\n`));
+            process.exit(1);
+        }
         const entries = fs.readdirSync(destination);
         if (entries.length > 0 && !options.yes) {
             console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
@@ -344,7 +387,7 @@ export async function docsPullWithConfig(
             properties: data.properties ?? {},
         }];
 
-        await report(destination, folderPath, fetched, options, config);
+        await report(destination, folderPath, fetched, options, config, []);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -352,19 +395,19 @@ export async function docsPullWithConfig(
         return;
     }
 
-    const fetched = await fetchBodies(config, rows);
-    await report(destination, folderPath, fetched, options, config);
+    const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
+    await report(destination, folderPath, fetched, options, config, fetchWarnings);
 }
 
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
-async function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions, config: Config): Promise<void> {
+async function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions, config: Config, extraWarnings: string[]): Promise<void> {
     fs.mkdirSync(destination, { recursive: true });
     const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
 
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
     fs.writeFileSync(path.join(destination, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
-    for (const warning of warnings) {
+    for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));
     }
 

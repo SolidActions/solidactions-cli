@@ -167,6 +167,8 @@ Manage docs in SA-Docs (the app's built-in documentation vault). `push` is drift
 | `docs push <dir>` | `--on-conflict`, `--type`, `--folder`, `--dry-run`, `--force`, `--json` | Recursively upload a local markdown tree. Manifest-tracked files (from a prior `pull`) are written with a `base_revision` guard and reported separately as written/drifted; `--force` skips the guard. `--dry-run` previews without writing |
 | `docs upload <files...>` | `--folder`, `--title` | Upload one or more media files to SA-Docs (requires a token with the "docs" ability); `--title` only valid for a single file |
 
+Deletions don't propagate: a doc removed on the server still exists locally after a re-pull, and an untracked `push` can re-create it — remove the local file yourself.
+
 ### workspace
 
 | Command | Description |
