@@ -646,9 +646,10 @@ docs
     .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
     .option('--folder <base>', 'Nest the whole upload under this base folder path in SA-Docs')
     .option('--dry-run', 'Preview what would be created without writing')
+    .option('--force', 'Overwrite tracked docs (from a prior docs pull) without a base-revision drift guard')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
-        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
+        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, force: options.force, json: options.json });
     });
 
 docs

@@ -14,6 +14,8 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docsPushWithConfig } from '../src/commands/docs-push';
 import type { DocsPushOptions } from '../src/commands/docs-push';
 import type { Config } from '../src/utils/config';
+import { DOCS_MANIFEST } from '../src/commands/docs-pull';
+import type { DocsManifest } from '../src/commands/docs-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server
@@ -885,6 +887,165 @@ describe('docsPushWithConfig — --folder base', () => {
 
             expect(allCaptures.length).toBe(1);
             expect(allCaptures[0].body.params.arguments).not.toHaveProperty('folder_path');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: drift guard — tracked docs (manifest-backed) use docs_edit write
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — drift guard (tracked docs)', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('tracked file uses docs_edit write with base_revision from the manifest; untracked file still uses bulk_create', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A\n\nTracked content.',
+            'b.md': '# B\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments.action).toBe('write');
+            expect(editCalls[0].body.params.arguments.id).toBe(1);
+            expect(editCalls[0].body.params.arguments.base_revision).toBe(10);
+            expect(editCalls[0].body.params.arguments.body).toBe('# A\n\nTracked content.');
+
+            const bulkCalls = allCaptures.filter(
+                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+            );
+            expect(bulkCalls.length).toBe(1);
+            const items = bulkCalls[0].body.params.arguments.items;
+            expect(items.length).toBe(1);
+            expect(items[0].title).toBe('b');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a stale write response reports drift and exits 1, naming the file, both revisions, and --force', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({
+            stale: true,
+            code: 'stale_revision',
+            current_revision_id: 12,
+            base_revision: 10,
+        })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(1);
+            const err = stderrLines.join('\n');
+            expect(err).toContain('a.md');
+            expect(err).toContain('10');
+            expect(err).toContain('12');
+            expect(err.toLowerCase()).toContain('--force');
+            expect(err.toLowerCase()).toContain('re-pull');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('--force omits base_revision entirely from the docs_edit write call', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments).not.toHaveProperty('base_revision');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('rewrites the manifest on disk with the new current_revision_id after a successful write', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const manifestRaw = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+            const manifest: DocsManifest = JSON.parse(manifestRaw);
+            expect(manifest.docs['a.md'].current_revision_id).toBe(11);
         } finally {
             restoreExit();
             restoreStdout();
