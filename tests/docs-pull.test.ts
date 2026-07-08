@@ -789,6 +789,48 @@ describe('docsPullWithConfig — media docs', () => {
         }
     });
 
+    it('confirmed media whose signed-URL download fails: soft-skips the write, keeps the manifest entry, warns', async () => {
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 11, title: 'lost.png', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'ok', id: 11, title: 'lost.png', folder_path: '', current_revision_id: 14,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 3 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/11`, mime: 'image/png', size: 3 } },
+        ];
+        blobResponseQueue = [{ status: 500, bytes: Buffer.alloc(0) }];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'lost.png'))).toBe(false);
+
+            const manifest = readManifest(dest);
+            expect(manifest.docs['lost.png']).toEqual({ id: 11, title: 'lost.png', current_revision_id: 14, media: true });
+
+            expect(stderrLines.join('')).toContain('lost.png');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
     it('exits 1 on an unexpected media-confirm error (not the documented 404 media_not_found false positive)', async () => {
         responseQueue = [
             makeMcpSuccess({
