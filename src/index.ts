@@ -40,6 +40,7 @@ import { skillRun } from './commands/skill-run';
 import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
+import { docsPull } from './commands/docs-pull';
 import { docsUpload } from './commands/docs-upload';
 import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
@@ -672,9 +673,22 @@ docs
     .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
     .option('--folder <base>', 'Nest the whole upload under this base folder path in SA-Docs')
     .option('--dry-run', 'Preview what would be created without writing')
+    .option('--force', 'Overwrite tracked docs (from a prior docs pull) without a base-revision drift guard')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
-        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, json: options.json });
+        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, force: options.force, json: options.json });
+    });
+
+docs
+    .command('pull')
+    .description('Download a Docs folder tree to a local directory for editing (inverse of push)')
+    .argument('<folder>', 'Docs folder path (or a single doc path)')
+    .argument('[dest]', 'Destination directory (defaults to ./<last-segment>/)')
+    .option('-y, --yes', 'Overwrite a non-empty destination without confirmation')
+    .option('--overwrite', 'DESTRUCTIVE: discard unpushed local changes (tracked files whose content no longer matches the last pull) and overwrite them; implies --yes')
+    .option('--json', 'Machine-readable output')
+    .action(async (folder, dest, options) => {
+        await docsPull(folder, dest, options);
     });
 
 docs

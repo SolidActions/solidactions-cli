@@ -14,6 +14,8 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docsPushWithConfig } from '../src/commands/docs-push';
 import type { DocsPushOptions } from '../src/commands/docs-push';
 import type { Config } from '../src/utils/config';
+import { DOCS_MANIFEST, sha256Hex } from '../src/commands/docs-pull';
+import type { DocsManifest } from '../src/commands/docs-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server
@@ -38,6 +40,18 @@ function makeMcpSuccess(toolData: object): string {
         result: {
             isError: false,
             content: [{ type: 'text', text: JSON.stringify(toolData) }],
+        },
+    });
+}
+
+/** Build a canned MCP error response (isError envelope). */
+function makeMcpError(code: string, message: string): string {
+    return JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+            isError: true,
+            content: [{ type: 'text', text: JSON.stringify({ code, message }) }],
         },
     });
 }
@@ -885,6 +899,579 @@ describe('docsPushWithConfig — --folder base', () => {
 
             expect(allCaptures.length).toBe(1);
             expect(allCaptures[0].body.params.arguments).not.toHaveProperty('folder_path');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: drift guard — tracked docs (manifest-backed) use docs_edit write
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — drift guard (tracked docs)', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('tracked file uses docs_edit write with base_revision from the manifest; untracked file still uses bulk_create', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A\n\nTracked content.',
+            'b.md': '# B\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments.action).toBe('write');
+            expect(editCalls[0].body.params.arguments.id).toBe(1);
+            expect(editCalls[0].body.params.arguments.base_revision).toBe(10);
+            expect(editCalls[0].body.params.arguments.body).toBe('# A\n\nTracked content.');
+
+            const bulkCalls = allCaptures.filter(
+                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+            );
+            expect(bulkCalls.length).toBe(1);
+            const items = bulkCalls[0].body.params.arguments.items;
+            expect(items.length).toBe(1);
+            expect(items[0].title).toBe('b');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a stale write response reports drift and exits 1, naming the file, both revisions, and --force', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({
+            stale: true,
+            code: 'stale_revision',
+            current_revision_id: 12,
+            base_revision: 10,
+        })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(1);
+            const err = stderrLines.join('\n');
+            expect(err).toContain('a.md');
+            expect(err).toContain('10');
+            expect(err).toContain('12');
+            expect(err.toLowerCase()).toContain('--force');
+            expect(err.toLowerCase()).toContain('re-pull');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('--force omits base_revision entirely from the docs_edit write call', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments).not.toHaveProperty('base_revision');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('rewrites the manifest on disk with the new current_revision_id after a successful write', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const manifestRaw = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+            const manifest: DocsManifest = JSON.parse(manifestRaw);
+            expect(manifest.docs['a.md'].current_revision_id).toBe(11);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--dry-run never calls docs_edit for tracked files; only bulk_create (dry_run: true) runs for untracked, tracked file reported as planned, exits 0, manifest untouched', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A\n\nTracked content.',
+            'b.md': '# B\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+        const manifestBefore = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+
+        responseQueue = [(body: any) => {
+            const items = body?.params?.arguments?.items ?? [];
+            const results = items.map((_: any, i: number) => ({ index: i, status: 'planned', action: 'create' }));
+            return makeMcpSuccess({
+                results,
+                summary: { planned_create: items.length, planned_overwrite: 0, planned_skip: 0, planned_rename: 0, errors: 0, folders_created: 0 },
+            });
+        }];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // No docs_edit call was ever made for the tracked file.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+
+            // Only the untracked file went through bulk_create, with dry_run threaded.
+            const bulkCalls = allCaptures.filter(
+                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+            );
+            expect(bulkCalls.length).toBe(1);
+            expect(bulkCalls[0].body.params.arguments.dry_run).toBe(true);
+            const items = bulkCalls[0].body.params.arguments.items;
+            expect(items.length).toBe(1);
+            expect(items[0].title).toBe('b');
+
+            // The tracked file is reported as a planned write in the JSON payload.
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            expect(jsonLine).toBeDefined();
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked).toHaveProperty('planned');
+            expect(parsed.tracked.planned).toEqual([{ file: 'a.md', id: 1 }]);
+            expect(parsed.tracked.written).toEqual([]);
+            expect(parsed.tracked.drifted).toEqual([]);
+
+            // The manifest file on disk is untouched.
+            const manifestAfter = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+            expect(manifestAfter).toBe(manifestBefore);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: incremental manifest refresh — a later failure must not lose an
+// earlier tracked write's already-persisted revision.
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — incremental manifest refresh', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('persists the manifest after each successful tracked write, so a later write failure does not lose an earlier one', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            'b.md': '# B',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+                'b.md': { id: 2, title: 'b', current_revision_id: 20, media: false },
+            }),
+        });
+
+        // First docs_edit call succeeds (bumping that doc's revision), the second
+        // fails with an MCP error — regardless of which tracked file (a or b) is
+        // processed first, since directory read order isn't guaranteed.
+        let callCount = 0;
+        const respond = (body: any) => {
+            callCount++;
+            if (callCount === 1) {
+                const id = body.params.arguments.id;
+                return makeMcpSuccess({ id, current_revision_id: id * 10 + 1 });
+            }
+            return makeMcpError('internal_error', 'boom');
+        };
+        responseQueue = [respond, respond];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(1);
+
+            const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            const revisions = {
+                'a.md': manifest.docs['a.md'].current_revision_id,
+                'b.md': manifest.docs['b.md'].current_revision_id,
+            };
+
+            // Exactly one tracked file's revision advanced (the one written first,
+            // and persisted to disk immediately); the other's manifest entry is
+            // untouched at its original value.
+            const advanced = Object.entries(revisions).filter(([file, rev]) => {
+                const original = file === 'a.md' ? 10 : 20;
+                return rev !== original;
+            });
+            expect(advanced.length).toBe(1);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: unparseable manifest warns once, downgrades everything to untracked
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — unparseable manifest', () => {
+    it('warns on stderr when the manifest exists but fails to parse, and treats all files as untracked', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A',
+            [DOCS_MANIFEST]: '{ not valid json',
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(stderrLines.join('')).toMatch(/could not be parsed/i);
+
+            // Everything went through bulk_create as untracked — no docs_edit call.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: content hashes — skip-unchanged tracked files
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — content hash skip-unchanged', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('skips a tracked file whose content hash matches the manifest (zero docs_edit calls, reported as unchanged) while writing a changed one', async () => {
+        const unchangedContent = '# A\n\nUnchanged content.';
+        const changedContent = '# B\n\nNew content, differs from manifest hash.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': unchangedContent,
+            'b.md': changedContent,
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex(unchangedContent) },
+                'b.md': { id: 2, title: 'b', current_revision_id: 20, media: false, body_sha256: sha256Hex('# B\n\nOld content.') },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 2, current_revision_id: 21 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // Exactly one docs_edit call, for the changed file only.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments.id).toBe(2);
+            expect(editCalls[0].body.params.arguments.body).toBe(changedContent);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('reports the unchanged file in tracked.unchanged and the written file in tracked.written via --json', async () => {
+        const unchangedContent = '# A\n\nUnchanged content.';
+        const changedContent = '# B\n\nNew content.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': unchangedContent,
+            'b.md': changedContent,
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex(unchangedContent) },
+                'b.md': { id: 2, title: 'b', current_revision_id: 20, media: false, body_sha256: sha256Hex('# B\n\nOld.') },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 2, current_revision_id: 21 })];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+
+            expect(parsed.tracked.unchanged).toEqual([{ file: 'a.md', id: 1 }]);
+            expect(parsed.tracked.written).toEqual([{ file: 'b.md', id: 2, current_revision_id: 21 }]);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('skip-unchanged applies even under --force (force answers drift, not staleness)', async () => {
+        const unchangedContent = '# A\n\nUnchanged content.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': unchangedContent,
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex(unchangedContent) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true, json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked.unchanged).toEqual([{ file: 'a.md', id: 1 }]);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a tracked entry from an old manifest (no body_sha256 field) is always written, never falsely reported unchanged', async () => {
+        const content = '# A\n\nSame content the manifest was pulled with.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': content,
+            [DOCS_MANIFEST]: manifestFile({
+                // No body_sha256 field at all — simulates a manifest from before this feature.
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(1);
+            expect(editCalls[0].body.params.arguments.body).toBe(content);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked.unchanged).toEqual([]);
+            expect(parsed.tracked.written).toEqual([{ file: 'a.md', id: 1, current_revision_id: 11 }]);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('refreshes body_sha256 on disk (hash of the body just sent) after a successful tracked write', async () => {
+        const newContent = '# A\n\nBrand new content.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': newContent,
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex('# A\n\nOld content.') },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ id: 1, current_revision_id: 11 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            expect(manifest.docs['a.md'].body_sha256).toBe(sha256Hex(newContent));
+            expect(manifest.docs['a.md'].current_revision_id).toBe(11);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--dry-run distinguishes would-write from would-skip (unchanged) without any docs_edit calls', async () => {
+        const unchangedContent = '# A\n\nUnchanged.';
+        const changedContent = '# B\n\nChanged.';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': unchangedContent,
+            'b.md': changedContent,
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex(unchangedContent) },
+                'b.md': { id: 2, title: 'b', current_revision_id: 20, media: false, body_sha256: sha256Hex('# B\n\nOld.') },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked.unchanged).toEqual([{ file: 'a.md', id: 1 }]);
+            expect(parsed.tracked.planned).toEqual([{ file: 'b.md', id: 2 }]);
         } finally {
             restoreExit();
             restoreStdout();

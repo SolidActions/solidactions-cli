@@ -14,6 +14,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
+import { DOCS_MANIFEST, DocsManifest, sha256Hex } from './docs-pull';
 
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
@@ -22,6 +23,8 @@ export interface DocsPushOptions {
     folder?: string;
     dryRun?: boolean;
     json?: boolean;
+    /** Overwrite tracked docs without a base_revision guard, ignoring server-side drift. */
+    force?: boolean;
 }
 
 const CHUNK_SIZE = 50;
@@ -69,6 +72,47 @@ interface PendingItem {
 
 interface ResultRow extends BulkCreateResultRow {
     file: string;
+}
+
+interface TrackedWritten {
+    file: string;
+    id: number;
+    current_revision_id: number | null;
+}
+
+interface TrackedDrifted {
+    file: string;
+    /** The revision the server is currently at. */
+    their: number | null;
+    /** The revision our manifest thought was current (what we sent as base_revision). */
+    base: number | null;
+}
+
+interface TrackedPlanned {
+    file: string;
+    id: number;
+}
+
+interface TrackedUnchanged {
+    file: string;
+    id: number;
+}
+
+/**
+ * Read `<absDir>/.solidactions-docs.json`. Absent or unparseable → null,
+ * meaning nothing under `absDir` is guarded (sidecar convention from D1/D2).
+ */
+function readManifest(absDir: string): DocsManifest | null {
+    const manifestPath = path.join(absDir, DOCS_MANIFEST);
+    if (!fs.existsSync(manifestPath)) {
+        return null;
+    }
+    try {
+        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
+    } catch {
+        process.stderr.write(chalk.yellow(`warn: ${DOCS_MANIFEST} exists but could not be parsed — all files will be treated as untracked\n`));
+        return null;
+    }
 }
 
 /**
@@ -173,7 +217,81 @@ export async function docsPushWithConfig(
         process.exit(1);
     }
 
-    const items: DocItem[] = allFiles.map((f) => fileToItem(f, absDir));
+    // Partition into tracked (relative path present in the pull manifest) vs. untracked.
+    // A missing/unparseable manifest means nothing is tracked — everything is untracked,
+    // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
+    const manifest = readManifest(absDir);
+    const trackedFiles: Array<{ absPath: string; relPath: string }> = [];
+    const untrackedFiles: string[] = [];
+    for (const f of allFiles) {
+        const relPath = path.relative(absDir, f).split(path.sep).join('/');
+        if (manifest?.docs[relPath]) {
+            trackedFiles.push({ absPath: f, relPath });
+        } else {
+            untrackedFiles.push(f);
+        }
+    }
+
+    const trackedWritten: TrackedWritten[] = [];
+    const trackedDrifted: TrackedDrifted[] = [];
+    const trackedPlanned: TrackedPlanned[] = [];
+    const trackedUnchanged: TrackedUnchanged[] = [];
+
+    for (const { absPath, relPath } of trackedFiles) {
+        const entry = manifest!.docs[relPath];
+        const body = fs.readFileSync(absPath, 'utf8');
+        const bodyHash = sha256Hex(body);
+
+        // Skip-unchanged applies regardless of --force or --dry-run: force answers
+        // drift, not staleness, and an old manifest lacking body_sha256 (undefined)
+        // never matches, so it always falls through to a write (graceful degradation).
+        if (entry.body_sha256 != null && entry.body_sha256 === bodyHash) {
+            trackedUnchanged.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        // --dry-run must never live-write: preview the tracked doc instead of calling docs_edit.
+        if (options.dryRun) {
+            trackedPlanned.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        const editArgs: Record<string, unknown> = { action: 'write', id: entry.id, body };
+        if (!options.force && entry.current_revision_id !== null) {
+            editArgs.base_revision = entry.current_revision_id;
+        }
+
+        let mcpResult: Awaited<ReturnType<typeof callDocsTool>>;
+        try {
+            mcpResult = await callDocsTool(config, 'docs_edit', editArgs);
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: ${e.message}\n`));
+            process.exit(1);
+        }
+
+        if (!mcpResult.ok) {
+            const code = mcpResult.data?.code ?? 'unknown_error';
+            const message = mcpResult.data?.message ?? 'MCP returned an error with no message';
+            process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
+            process.exit(1);
+        }
+
+        const data = mcpResult.data;
+        if (data?.stale === true || data?.code === 'stale_revision') {
+            trackedDrifted.push({ file: relPath, their: data.current_revision_id ?? null, base: entry.current_revision_id });
+            continue;
+        }
+
+        entry.current_revision_id = data?.current_revision_id ?? entry.current_revision_id;
+        entry.body_sha256 = bodyHash;
+        trackedWritten.push({ file: relPath, id: entry.id, current_revision_id: entry.current_revision_id });
+
+        // Persist immediately so a later failure (another tracked write, or an
+        // untracked bulk_create error) never loses this file's refreshed revision.
+        fs.writeFileSync(path.join(absDir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    }
+
+    const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
 
     // Chunk into groups of CHUNK_SIZE
     const chunks: DocItem[][] = [];
@@ -249,17 +367,40 @@ export async function docsPushWithConfig(
             invalid: r.property_validation!.invalid ?? [],
         }));
 
+    const exitCode = trackedDrifted.length > 0 ? 1 : 0;
+
     // --json: output single JSON object
     if (options.json) {
         console.log(JSON.stringify({
             summary: mergedSummary,
             pending: pendingItems,
             results: allResultRows,
+            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged },
         }));
-        process.exit(0);
+        process.exit(exitCode);
     }
 
     // Human-readable output
+    if (options.dryRun) {
+        if (trackedPlanned.length > 0) {
+            console.log(chalk.cyan(`tracked: ${trackedPlanned.length} planned write`));
+            for (const p of trackedPlanned) {
+                console.log(chalk.gray(`  ${p.file}`));
+            }
+        }
+        if (trackedUnchanged.length > 0) {
+            console.log(chalk.gray(`tracked: ${trackedUnchanged.length} planned unchanged (skip)`));
+            for (const u of trackedUnchanged) {
+                console.log(chalk.gray(`  ${u.file}`));
+            }
+        }
+    } else if (trackedWritten.length > 0 || trackedDrifted.length > 0 || trackedUnchanged.length > 0) {
+        console.log(chalk.green(`tracked: ${trackedWritten.length} written, ${trackedDrifted.length} drifted, ${trackedUnchanged.length} unchanged`));
+        for (const w of trackedWritten) {
+            console.log(chalk.gray(`  ${w.file}`));
+        }
+    }
+
     const summaryLine = formatSummaryLine(mergedSummary, !!options.dryRun);
     if (options.dryRun) {
         console.log(chalk.cyan(`[dry-run preview] ${summaryLine}`));
@@ -280,7 +421,15 @@ export async function docsPushWithConfig(
         }
     }
 
-    process.exit(0);
+    if (trackedDrifted.length > 0) {
+        process.stderr.write(chalk.red(`\ndrift: ${trackedDrifted.length} tracked doc${trackedDrifted.length === 1 ? '' : 's'} changed on the server since the last pull:\n`));
+        for (const d of trackedDrifted) {
+            process.stderr.write(chalk.red(`  ${d.file} (local base_revision ${d.base}, server now at ${d.their})\n`));
+        }
+        process.stderr.write(chalk.red('re-pull to merge, or pass --force to overwrite\n'));
+    }
+
+    process.exit(exitCode);
 }
 
 /**
