@@ -505,20 +505,25 @@ async function report(
 
             // Only ever remove regular files. A directory here means a corrupt manifest;
             // rmSync would throw mid-pull, leaving a half-deleted tree.
-            let stat: fs.Stats;
+            //
+            // The whole entry is guarded: the new manifest is already on disk by now, so an
+            // uncaught throw would abort the report, silently skip every later orphan, and
+            // print a raw stack trace instead of this command's normal error format. One bad
+            // entry must cost only that entry.
             try {
-                stat = fs.statSync(absPath);
-            } catch {
-                continue; // missing (or unreadable) — nothing to delete
-            }
-            if (!stat.isFile()) continue;
+                const stat = fs.statSync(absPath);
+                if (!stat.isFile()) continue;
 
-            const currentHash = sha256Hex(fs.readFileSync(absPath));
-            if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {
-                fs.rmSync(absPath);
-                removed.push(relPath);
-            } else {
-                keptModified.push(relPath);
+                const currentHash = sha256Hex(fs.readFileSync(absPath));
+                if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {
+                    fs.rmSync(absPath);
+                    removed.push(relPath);
+                } else {
+                    keptModified.push(relPath);
+                }
+            } catch {
+                // Vanished mid-run, unreadable, or refuses inspection: never delete blind.
+                continue;
             }
         }
     }
