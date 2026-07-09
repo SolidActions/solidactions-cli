@@ -353,4 +353,186 @@ describe('docsUpload', () => {
             cleanup();
         }
     });
+
+    // -------------------------------------------------------------------
+    // --replace
+    // -------------------------------------------------------------------
+
+    it('--replace <numeric id>: POSTs to /docs/{id}/media directly, no by-path lookup', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { logs, restore } = captureConsole();
+        try {
+            queue(200, { doc: { id: 42, current_version_id: 8 } });
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: '42' }));
+            expect(code).toBeUndefined();
+
+            expect(allCaptures).toHaveLength(1);
+            expect(allCaptures[0].method).toBe('POST');
+            expect(allCaptures[0].path).toBe('/api/v1/docs/42/media');
+            expect(allCaptures.some((c) => c.path?.startsWith('/api/v1/docs/by-path'))).toBe(false);
+
+            expect(logs.join('\n')).toContain('✓ hero.png → doc 42 (replaced, rev 8)');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('--replace <path with folder>: resolves via by-path first, then POSTs to /docs/{id}/media', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { restore } = captureConsole();
+        try {
+            queue(200, { doc: { id: 42 } });
+            queue(200, { doc: { id: 42, current_version_id: 8 } });
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+            expect(code).toBeUndefined();
+
+            expect(allCaptures).toHaveLength(2);
+            expect(allCaptures[0].method).toBe('GET');
+            expect(allCaptures[0].path).toBe('/api/v1/docs/by-path?folder_path=marketing&title=hero.png');
+            expect(allCaptures[1].method).toBe('POST');
+            expect(allCaptures[1].path).toBe('/api/v1/docs/42/media');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('--replace <path with no slash>: treats the whole string as a root-folder title, omits folder_path', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { restore } = captureConsole();
+        try {
+            queue(200, { doc: { id: 7 } });
+            queue(200, { doc: { id: 7, current_version_id: 3 } });
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: 'hero.png' }));
+            expect(code).toBeUndefined();
+
+            expect(allCaptures).toHaveLength(2);
+            expect(allCaptures[0].path).toBe('/api/v1/docs/by-path?title=hero.png');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('by-path 422 folder_path_not_found: stderr mentions the missing folder, exits 1', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            queue(422, { code: 'folder_path_not_found' });
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(1);
+            expect(errors.join('\n')).toMatch(/no folder/);
+            expect(errors.join('\n')).toContain('marketing');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('by-path 404: stderr says no doc titled <title>, exits 1', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            queue(404, {});
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(1);
+            expect(errors.join('\n')).toMatch(/no doc titled/);
+            expect(errors.join('\n')).toContain('hero.png');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('replace POST 404 media_not_found: stderr says the doc is not a media doc, exits 1', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            queue(404, { code: 'media_not_found' });
+
+            const code = await runExpectingExit(() => docsUpload([file], { replace: '42' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(1);
+            expect(errors.join('\n')).toMatch(/not a media doc/);
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('--replace with two files: errors before any request is made', async () => {
+        const { cleanup } = setupConfig();
+        const { file: file1, cleanup: cleanup1 } = writeTmpFile('a.png', 'aaa');
+        const { file: file2, cleanup: cleanup2 } = writeTmpFile('b.png', 'bbb');
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => docsUpload([file1, file2], { replace: '42' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(0);
+            expect(errors.join('\n')).toContain('--replace can only be used when uploading a single file.');
+        } finally {
+            restore();
+            cleanup1();
+            cleanup2();
+            cleanup();
+        }
+    });
+
+    it('--replace combined with --title: errors before any request is made', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => docsUpload([file], { replace: '42', title: 'Hero' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(0);
+            expect(errors.join('\n')).toContain('--replace cannot be combined with --title or --folder');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('--replace combined with --folder: errors before any request is made', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => docsUpload([file], { replace: '42', folder: 'marketing' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(0);
+            expect(errors.join('\n')).toContain('--replace cannot be combined with --title or --folder');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
 });

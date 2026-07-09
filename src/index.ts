@@ -696,8 +696,9 @@ docs
     .description('Upload one or more media files to SA-Docs (requires a token with the "docs" ability)')
     .option('--folder <path>', 'Folder path to upload into (auto-created if missing)')
     .option('--title <title>', 'Title for the uploaded doc (only valid with a single file)')
+    .option('--replace <doc-id-or-path>', 'replace the bytes of an existing media doc (by id, or by docs path)')
     .action(async (files, options) => {
-        await docsUpload(files, { folder: options.folder, title: options.title });
+        await docsUpload(files, { folder: options.folder, title: options.title, replace: options.replace });
     });
 
 program.parseAsync().catch((err) => {
