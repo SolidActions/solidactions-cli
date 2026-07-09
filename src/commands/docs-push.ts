@@ -14,7 +14,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
-import { DOCS_MANIFEST, DocsManifest, sha256Hex } from './docs-pull';
+import { DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
@@ -96,23 +96,6 @@ interface TrackedPlanned {
 interface TrackedUnchanged {
     file: string;
     id: number;
-}
-
-/**
- * Read `<absDir>/.solidactions-docs.json`. Absent or unparseable → null,
- * meaning nothing under `absDir` is guarded (sidecar convention from D1/D2).
- */
-function readManifest(absDir: string): DocsManifest | null {
-    const manifestPath = path.join(absDir, DOCS_MANIFEST);
-    if (!fs.existsSync(manifestPath)) {
-        return null;
-    }
-    try {
-        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
-    } catch {
-        process.stderr.write(chalk.yellow(`warn: ${DOCS_MANIFEST} exists but could not be parsed — all files will be treated as untracked\n`));
-        return null;
-    }
 }
 
 /**
@@ -220,7 +203,7 @@ export async function docsPushWithConfig(
     // Partition into tracked (relative path present in the pull manifest) vs. untracked.
     // A missing/unparseable manifest means nothing is tracked — everything is untracked,
     // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
-    const manifest = readManifest(absDir);
+    const manifest = readManifest(absDir, { warnOnParseError: true });
     const trackedFiles: Array<{ absPath: string; relPath: string }> = [];
     const untrackedFiles: string[] = [];
     for (const f of allFiles) {
@@ -288,7 +271,7 @@ export async function docsPushWithConfig(
 
         // Persist immediately so a later failure (another tracked write, or an
         // untracked bulk_create error) never loses this file's refreshed revision.
-        fs.writeFileSync(path.join(absDir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+        writeManifest(absDir, manifest!);
     }
 
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));

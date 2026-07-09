@@ -17,13 +17,17 @@
 
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { Config } from '../utils/config';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
+import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
+
+// Re-exported for backward compatibility: tests and docs-push import these from here.
+export { DOCS_MANIFEST, sha256Hex };
+export type { DocsManifest, ManifestEntry };
 
 /** Extension appended to a media file's sanitized title when the title itself has none. */
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -33,27 +37,6 @@ const MIME_EXTENSIONS: Record<string, string> = {
     'image/webp': '.webp',
     'application/pdf': '.pdf',
 };
-
-export const DOCS_MANIFEST = '.solidactions-docs.json';
-
-export interface DocsManifest {
-    folder_path: string;
-    docs: Record<string, {
-        id: number;
-        title: string;
-        current_revision_id: number | null;
-        media: boolean;
-        /**
-         * sha256 (hex) of the exact bytes written for this file at pull time
-         * (markdown body string, or downloaded media bytes). `null` when a
-         * media download soft-failed (no bytes to hash). Manifests written
-         * before this field existed simply omit it — callers must treat a
-         * missing/undefined value the same as "no hash available", never as
-         * a match.
-         */
-        body_sha256?: string | null;
-    }>;
-}
 
 export interface DocsPullOptions {
     yes?: boolean;
@@ -159,27 +142,6 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
     }
 
     return { isMedia: true, mime, bytes: Buffer.from(download.data) };
-}
-
-/** sha256 hex digest of the given bytes/string, as written to disk. */
-export function sha256Hex(data: string | Buffer): string {
-    return crypto.createHash('sha256').update(data).digest('hex');
-}
-
-/**
- * Read `<destination>/.solidactions-docs.json`. Absent or unparseable → null,
- * meaning the destination isn't manifest-tracked (nothing to protect).
- */
-function readExistingManifest(destination: string): DocsManifest | null {
-    const manifestPath = path.join(destination, DOCS_MANIFEST);
-    if (!fs.existsSync(manifestPath)) {
-        return null;
-    }
-    try {
-        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
-    } catch {
-        return null;
-    }
 }
 
 /**
@@ -407,7 +369,7 @@ export async function docsPullWithConfig(
         // manifest-tracked files against their pull-time body_sha256. --overwrite is the
         // only way past a refusal; plain --yes still only covers the generic non-empty
         // confirmation below.
-        const existingManifest = readExistingManifest(destination);
+        const existingManifest = readManifest(destination);
         if (existingManifest && !options.overwrite) {
             const modified = detectLocalModifications(destination, existingManifest);
             if (modified.length > 0) {
@@ -486,7 +448,7 @@ async function report(destination: string, folderPath: string, fetched: FetchedD
     const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
 
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
-    fs.writeFileSync(path.join(destination, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));
