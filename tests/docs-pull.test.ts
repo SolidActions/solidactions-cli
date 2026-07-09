@@ -636,6 +636,39 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         }
     });
 
+    it('refuses (exit 1) when a tracked MEDIA file has unpushed local changes (binary bytes differ from body_sha256) — coverage: detection is extension-agnostic, no code change needed', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const originalBytes = Buffer.from([1, 2, 3, 4]);
+        writeManifest(dest, {
+            'hero.png': { id: 7, title: 'hero', current_revision_id: 10, media: true, body_sha256: sha256Hex(originalBytes) },
+        });
+        fs.writeFileSync(path.join(dest, 'hero.png'), Buffer.from([9, 9, 9, 9]));
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('hero.png');
+            expect(err).toContain('unpushed local changes');
+            expect(err).toContain('--overwrite');
+
+            // Nothing written, no network calls.
+            expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(Buffer.from([9, 9, 9, 9]));
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
     it('--overwrite proceeds without a prompt and replaces the locally-modified file with server content', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');

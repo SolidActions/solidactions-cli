@@ -163,11 +163,13 @@ Manage docs in SA-Docs (the app's built-in documentation vault). `push` is drift
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `docs pull <folder> [dest]` | `-y`, `--json` | Download a Docs folder tree (markdown + media) to `dest` (defaults to `./<last-segment>/`); writes a `.solidactions-docs.json` revision manifest used by `push`'s drift guard. Falls back to fetching a single doc if `folder` is a doc path, not a folder |
-| `docs push <dir>` | `--on-conflict`, `--type`, `--folder`, `--dry-run`, `--force`, `--json` | Recursively upload a local markdown tree. Manifest-tracked files (from a prior `pull`) are written with a `base_revision` guard and reported separately as written/drifted; `--force` skips the guard. `--dry-run` previews without writing |
+| `docs pull <folder> [dest]` | `-y`, `--overwrite`, `--json` | Download a Docs folder tree (markdown + media) to `dest` (defaults to `./<last-segment>/`); writes a `.solidactions-docs.json` revision manifest (including a `body_sha256` content hash per file) used by `push`'s drift guard. Falls back to fetching a single doc if `folder` is a doc path, not a folder |
+| `docs push <dir>` | `--on-conflict`, `--type`, `--folder`, `--dry-run`, `--force`, `--json` | Recursively upload a local markdown tree. Manifest-tracked files (from a prior `pull`) are written with a `base_revision` guard and reported separately as written/drifted/unchanged; files whose content hash still matches the last pull are skipped as unchanged (no write, no revision bump). `--force` skips the drift guard (unchanged files are still skipped). `--dry-run` previews without writing |
 | `docs upload <files...>` | `--folder`, `--title` | Upload one or more media files to SA-Docs (requires a token with the "docs" ability); `--title` only valid for a single file |
 
 Deletions don't propagate: a doc removed on the server still exists locally after a re-pull, and an untracked `push` can re-create it — remove the local file yourself.
+
+**`docs pull --overwrite` is destructive.** If any manifest-tracked file's local content no longer matches the `body_sha256` recorded at the last pull (i.e. you've edited it and haven't pushed yet), a plain `docs pull` — even with `-y`/`--yes` — refuses with exit 1, naming every modified file, rather than silently discarding your edits. `-y`/`--yes` only bypasses the generic "destination is not empty" prompt; it does not cover locally-modified tracked files. Pass `--overwrite` to discard those local changes and re-pull server content anyway (it also implies `--yes`).
 
 ### workspace
 
