@@ -155,7 +155,15 @@ function detectLocalModifications(destination: string, manifest: DocsManifest): 
     for (const [relPath, entry] of Object.entries(manifest.docs)) {
         if (entry.body_sha256 == null) continue;
         const absPath = path.join(destination, relPath);
-        if (!fs.existsSync(absPath)) continue;
+        // Only hash regular files. A corrupt manifest key naming a directory would
+        // otherwise throw EISDIR and abort the pull before it starts.
+        let stat: fs.Stats;
+        try {
+            stat = fs.statSync(absPath);
+        } catch {
+            continue; // missing locally — graceful degradation, never a false refusal
+        }
+        if (!stat.isFile()) continue;
         const currentHash = sha256Hex(fs.readFileSync(absPath));
         if (currentHash !== entry.body_sha256) {
             modified.push(relPath);
@@ -482,11 +490,28 @@ async function report(
         previousManifest.folder_path === folderPath;
 
     if (canPropagateDeletions) {
+        const destPrefix = path.resolve(destination) + path.sep;
+
         for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
             if (manifestDocs[relPath]) continue;
 
-            const absPath = path.join(destination, ...relPath.split('/'));
-            if (!fs.existsSync(absPath)) continue;
+            const absPath = path.resolve(destination, ...relPath.split('/'));
+
+            // Containment: a hand-edited or corrupt manifest key such as "../../etc/passwd"
+            // would otherwise resolve outside the pull destination. `docs pull` never writes
+            // such a key (titles are sanitized), but this loop is the only code in the CLI
+            // that deletes files — never let it act on a path it did not create.
+            if (!absPath.startsWith(destPrefix)) continue;
+
+            // Only ever remove regular files. A directory here means a corrupt manifest;
+            // rmSync would throw mid-pull, leaving a half-deleted tree.
+            let stat: fs.Stats;
+            try {
+                stat = fs.statSync(absPath);
+            } catch {
+                continue; // missing (or unreadable) — nothing to delete
+            }
+            if (!stat.isFile()) continue;
 
             const currentHash = sha256Hex(fs.readFileSync(absPath));
             if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {

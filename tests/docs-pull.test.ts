@@ -815,6 +815,80 @@ describe('docsPullWithConfig — deletion propagation', () => {
         }
     });
 
+    it('never deletes outside the destination, even for a manifest key that escapes it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        // A sibling of `dest`, i.e. OUTSIDE the pull destination. `docs pull` never writes
+        // such a manifest key (titles are sanitized), but a hand-edited manifest could.
+        const outsideFile = path.join(tmpDest, 'outside.md');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(outsideFile, 'G', 'utf8');
+
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            // Bytes match, so ONLY the containment check can save this file.
+            '../outside.md': { id: 2, title: 'outside', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.existsSync(outsideFile)).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('never deletes a directory named by a corrupt manifest key', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'subdir': { id: 2, title: 'subdir', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.mkdirSync(path.join(dest, 'subdir'), { recursive: true });
+        fs.writeFileSync(path.join(dest, 'subdir', 'keep.txt'), 'keep', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            // A directory key must neither crash the pull nor remove the tree.
+            expect(code).toBe(0);
+            expect(fs.existsSync(path.join(dest, 'subdir', 'keep.txt'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
     it('keeps and warns about an orphan that was modified locally', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
