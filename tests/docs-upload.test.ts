@@ -394,7 +394,12 @@ describe('docsUpload', () => {
 
             expect(allCaptures).toHaveLength(2);
             expect(allCaptures[0].method).toBe('GET');
-            expect(allCaptures[0].path).toBe('/api/v1/docs/by-path?folder_path=marketing&title=hero.png');
+            // Assert on parsed params, not the serialized string: query-param order is an
+            // incidental detail the server does not care about.
+            const byPath = new URL(allCaptures[0].path!, 'http://stub');
+            expect(byPath.pathname).toBe('/api/v1/docs/by-path');
+            expect(byPath.searchParams.get('folder_path')).toBe('marketing');
+            expect(byPath.searchParams.get('title')).toBe('hero.png');
             expect(allCaptures[1].method).toBe('POST');
             expect(allCaptures[1].path).toBe('/api/v1/docs/42/media');
         } finally {
@@ -416,7 +421,10 @@ describe('docsUpload', () => {
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(2);
-            expect(allCaptures[0].path).toBe('/api/v1/docs/by-path?title=hero.png');
+            const rootByPath = new URL(allCaptures[0].path!, 'http://stub');
+            expect(rootByPath.pathname).toBe('/api/v1/docs/by-path');
+            expect(rootByPath.searchParams.get('title')).toBe('hero.png');
+            expect(rootByPath.searchParams.has('folder_path')).toBe(false);
         } finally {
             restore();
             cleanupFile();
@@ -437,6 +445,23 @@ describe('docsUpload', () => {
             expect(allCaptures).toHaveLength(1);
             expect(errors.join('\n')).toMatch(/no folder/);
             expect(errors.join('\n')).toContain('marketing');
+        } finally {
+            restore();
+            cleanupFile();
+            cleanup();
+        }
+    });
+
+    it('--replace with a trailing slash names a folder, not a doc: exits 1 without any request', async () => {
+        const { cleanup } = setupConfig();
+        const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/' }));
+
+            expect(code).toBe(1);
+            expect(allCaptures).toHaveLength(0);
+            expect(errors.join('\n')).toMatch(/names a folder, not a doc/);
         } finally {
             restore();
             cleanupFile();

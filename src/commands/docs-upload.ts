@@ -30,6 +30,13 @@ async function resolveReplaceTarget(config: Config, replace: string): Promise<nu
     const folderPath = slash === -1 ? undefined : replace.slice(0, slash);
     const title = slash === -1 ? replace : replace.slice(slash + 1);
 
+    // A trailing slash ("marketing/") leaves no title to look up. Fail here rather
+    // than asking the server to resolve an empty title and reporting its 404.
+    if (title === '') {
+        console.error(chalk.red(`✗ --replace "${replace}" names a folder, not a doc`));
+        return process.exit(1);
+    }
+
     try {
         const params: Record<string, string> = {};
         if (folderPath) params.folder_path = folderPath;
@@ -93,8 +100,12 @@ export async function docsUpload(files: string[], options: DocsUploadOptions = {
             if (options.title) form.append('title', options.title);
         }
 
-        const url = options.replace
-            ? `${config.host}/api/v1/docs/${await resolveReplaceTarget(config, options.replace)}/media`
+        // Resolved once (--replace forbids multiple files), and kept so error messages
+        // can name the numeric doc id rather than echoing back a path.
+        const replaceDocId = options.replace ? await resolveReplaceTarget(config, options.replace) : null;
+
+        const url = replaceDocId !== null
+            ? `${config.host}/api/v1/docs/${replaceDocId}/media`
             : `${config.host}/api/v1/docs/media`;
 
         try {
@@ -125,7 +136,7 @@ export async function docsUpload(files: string[], options: DocsUploadOptions = {
                 } else if (status === 401) {
                     console.error(chalk.red(`✗ ${displayName} — Authentication failed. Run "solidactions login <api-key>" to re-configure.`));
                 } else if (status === 404 && data?.code === 'media_not_found') {
-                    console.error(chalk.red(`✗ ${displayName} — doc ${options.replace} is not a media doc`));
+                    console.error(chalk.red(`✗ ${displayName} — doc ${replaceDocId} is not a media doc`));
                 } else if (status === 422) {
                     console.error(chalk.red(`✗ ${displayName} — ${formatValidationError(data)}`));
                 } else {
