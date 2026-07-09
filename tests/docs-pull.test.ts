@@ -594,6 +594,148 @@ describe('docsPullWithConfig — overwrite confirm', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Unpushed local changes — pull overwrite protection + --overwrite
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — unpushed local changes', () => {
+    function writeManifest(dest: string, docs: DocsManifest['docs'], folderPath = 'marketing/docs'): void {
+        const manifest: DocsManifest = { folder_path: folderPath, docs };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+
+    it('refuses (exit 1) when a tracked file has unpushed local changes, even with --yes; names the file and points at --overwrite', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+        });
+        fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('doc.md');
+            expect(err).toContain('unpushed local changes');
+            expect(err).toContain('--overwrite');
+
+            // Nothing written, no network calls.
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('local edits, unpushed');
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('--overwrite proceeds without a prompt and replaces the locally-modified file with server content', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+        });
+        fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 99, properties: {}, body: '# Server Content' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            // No prompt injected: prompts() would throw/hang if the code tried to prompt.
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/docs', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Server Content');
+
+            const manifest = readManifest(dest);
+            expect(manifest.docs['doc.md'].body_sha256).toBe(sha256Hex('# Server Content'));
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('unmodified tracked files (hash matches) + --yes: proceeds silently, no refusal', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+        });
+        fs.writeFileSync(path.join(dest, 'doc.md'), '# Original', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 11, properties: {}, body: '# Original updated' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Original updated');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('old manifest entries without body_sha256 never trigger a refusal (graceful degradation)', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            // Old manifest shape: no body_sha256 field at all.
+            'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false },
+        });
+        fs.writeFileSync(path.join(dest, 'doc.md'), 'arbitrary local content, no hash to compare against', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 12, properties: {}, body: '# Fresh Pull' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Fresh Pull');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // --json output
 // ---------------------------------------------------------------------------
 

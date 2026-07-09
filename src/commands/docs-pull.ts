@@ -58,6 +58,12 @@ export interface DocsManifest {
 export interface DocsPullOptions {
     yes?: boolean;
     json?: boolean;
+    /**
+     * Discard unpushed local changes detected against the destination's
+     * `.solidactions-docs.json` manifest (body_sha256 mismatch) and proceed.
+     * Implies the generic non-empty-destination confirmation — no prompt.
+     */
+    overwrite?: boolean;
 }
 
 const CHUNK_SIZE = 50;
@@ -158,6 +164,42 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
 /** sha256 hex digest of the given bytes/string, as written to disk. */
 export function sha256Hex(data: string | Buffer): string {
     return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Read `<destination>/.solidactions-docs.json`. Absent or unparseable → null,
+ * meaning the destination isn't manifest-tracked (nothing to protect).
+ */
+function readExistingManifest(destination: string): DocsManifest | null {
+    const manifestPath = path.join(destination, DOCS_MANIFEST);
+    if (!fs.existsSync(manifestPath)) {
+        return null;
+    }
+    try {
+        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Compare each manifest-tracked file against its recorded `body_sha256` to
+ * find unpushed local edits. An entry without a hash (old manifest) or whose
+ * file is missing locally is never reported as modified — graceful
+ * degradation to "no detection" rather than a false refusal.
+ */
+function detectLocalModifications(destination: string, manifest: DocsManifest): string[] {
+    const modified: string[] = [];
+    for (const [relPath, entry] of Object.entries(manifest.docs)) {
+        if (entry.body_sha256 == null) continue;
+        const absPath = path.join(destination, relPath);
+        if (!fs.existsSync(absPath)) continue;
+        const currentHash = sha256Hex(fs.readFileSync(absPath));
+        if (currentHash !== entry.body_sha256) {
+            modified.push(relPath);
+        }
+    }
+    return modified;
 }
 
 /** The last non-empty path segment of a '/'-separated folder path. */
@@ -361,8 +403,26 @@ export async function docsPullWithConfig(
             process.stderr.write(chalk.red(`error: destination "${destination}" exists and is not a directory.\n`));
             process.exit(1);
         }
+        // Unpushed-local-changes protection: before any writes or network I/O, compare
+        // manifest-tracked files against their pull-time body_sha256. --overwrite is the
+        // only way past a refusal; plain --yes still only covers the generic non-empty
+        // confirmation below.
+        const existingManifest = readExistingManifest(destination);
+        if (existingManifest && !options.overwrite) {
+            const modified = detectLocalModifications(destination, existingManifest);
+            if (modified.length > 0) {
+                const noun = modified.length === 1 ? 'file has' : 'files have';
+                process.stderr.write(chalk.red(`${modified.length} ${noun} unpushed local changes:\n`));
+                for (const file of modified) {
+                    process.stderr.write(chalk.red(`  ${file}\n`));
+                }
+                process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
+                process.exit(1);
+            }
+        }
+
         const entries = fs.readdirSync(destination);
-        if (entries.length > 0 && !options.yes) {
+        if (entries.length > 0 && !options.yes && !options.overwrite) {
             console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
             console.log(chalk.yellow('Pulling will overwrite existing files.'));
             const response = await prompts({

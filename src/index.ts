@@ -658,6 +658,7 @@ docs
     .argument('<folder>', 'Docs folder path (or a single doc path)')
     .argument('[dest]', 'Destination directory (defaults to ./<last-segment>/)')
     .option('-y, --yes', 'Overwrite a non-empty destination without confirmation')
+    .option('--overwrite', 'DESTRUCTIVE: discard unpushed local changes (tracked files whose content no longer matches the last pull) and overwrite them; implies --yes')
     .option('--json', 'Machine-readable output')
     .action(async (folder, dest, options) => {
         await docsPull(folder, dest, options);
