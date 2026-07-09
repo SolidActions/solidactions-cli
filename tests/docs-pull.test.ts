@@ -769,6 +769,272 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Deletion propagation (orphan cleanup)
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — deletion propagation', () => {
+    function writeManifest(dest: string, docs: DocsManifest['docs'], folderPath = 'marketing'): void {
+        const manifest: DocsManifest = { folder_path: folderPath, docs };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+
+    it('deletes an orphan whose bytes still match the manifest hash', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'G', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'gone.md'))).toBe(false);
+            expect(fs.existsSync(path.join(dest, 'a.md'))).toBe(true);
+            expect(logLines.join('\n')).toContain('gone.md');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('keeps and warns about an orphan that was modified locally', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'CHANGED', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            // --overwrite so the pre-existing local-modification refusal doesn't fire first.
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'gone.md'), 'utf8')).toBe('CHANGED');
+            const err = stderrLines.join('');
+            expect(err).toContain('gone.md');
+            expect(err).toContain('modified locally');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('keeps an orphan whose manifest entry has body_sha256 null', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: null },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'anything', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'gone.md'))).toBe(true);
+            expect(stderrLines.join('')).toContain('gone.md');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('propagates no deletions when the manifest folder_path differs from the pull target', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unmodified.md': { id: 5, title: 'unmodified', current_revision_id: 1, media: false, body_sha256: sha256Hex('U') },
+        }, 'other/folder');
+        fs.writeFileSync(path.join(dest, 'unmodified.md'), 'U', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            // CRITICAL: the pre-existing unmodified file must survive — it belongs to a
+            // DIFFERENT manifest folder_path than the one being pulled now.
+            expect(fs.existsSync(path.join(dest, 'unmodified.md'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('propagates no deletions on the single-doc fallback path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unrelated.md': { id: 5, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+        }, 'notes');
+        fs.writeFileSync(path.join(dest, 'unrelated.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3, folder_path: 'notes' }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'unrelated.md'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a media orphan whose bytes still match is deleted like any other orphan', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const mediaBytes = Buffer.from([1, 2, 3, 4]);
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'hero.png': { id: 2, title: 'hero.png', current_revision_id: 2, media: true, body_sha256: sha256Hex(mediaBytes) },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'hero.png'), mediaBytes);
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'hero.png'))).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--json output contains removed and kept_modified', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+            'kept.md': { id: 3, title: 'kept', current_revision_id: 3, media: false, body_sha256: sha256Hex('K') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'G', 'utf8');
+        fs.writeFileSync(path.join(dest, 'kept.md'), 'CHANGED', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+        const { restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true, json: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            expect(jsonLine).toBeDefined();
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.removed).toEqual(['gone.md']);
+            expect(parsed.kept_modified).toEqual(['kept.md']);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // --json output
 // ---------------------------------------------------------------------------
 

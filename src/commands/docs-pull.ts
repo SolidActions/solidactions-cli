@@ -359,6 +359,12 @@ export async function docsPullWithConfig(
     const destInput = dest ?? `./${lastSegment(folderPath)}`;
     const destination = path.resolve(destInput);
 
+    // Captured once, before the walk, so deletion propagation (below) can diff
+    // against the folder tree as it stood before this pull. Already read below
+    // for overwrite protection — hoisted here rather than read twice.
+    const previousManifest = fs.existsSync(destination) ? readManifest(destination) : null;
+    let usedSingleDocFallback = false;
+
     // Overwrite-confirm: warn + confirm on a non-empty destination before any network I/O.
     if (fs.existsSync(destination)) {
         if (!fs.statSync(destination).isDirectory()) {
@@ -369,9 +375,8 @@ export async function docsPullWithConfig(
         // manifest-tracked files against their pull-time body_sha256. --overwrite is the
         // only way past a refusal; plain --yes still only covers the generic non-empty
         // confirmation below.
-        const existingManifest = readManifest(destination);
-        if (existingManifest && !options.overwrite) {
-            const modified = detectLocalModifications(destination, existingManifest);
+        if (previousManifest && !options.overwrite) {
+            const modified = detectLocalModifications(destination, previousManifest);
             if (modified.length > 0) {
                 const noun = modified.length === 1 ? 'file has' : 'files have';
                 process.stderr.write(chalk.red(`${modified.length} ${noun} unpushed local changes:\n`));
@@ -407,6 +412,7 @@ export async function docsPullWithConfig(
         rows = listResult.rows;
     } else if (listResult.isRoot && listResult.code === 'folder_path_not_found') {
         // Single-doc fallback: the target might be a doc path, not a folder.
+        usedSingleDocFallback = true;
         const dir = path.dirname(folderPath);
         const title = path.basename(folderPath);
         const readArgs: Record<string, unknown> = { action: 'read', path: dir === '.' ? { title } : { folder_path: dir, title } };
@@ -430,7 +436,7 @@ export async function docsPullWithConfig(
             properties: data.properties ?? {},
         }];
 
-        await report(destination, folderPath, fetched, options, config, []);
+        await report(destination, folderPath, fetched, options, config, [], previousManifest, usedSingleDocFallback);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -439,11 +445,20 @@ export async function docsPullWithConfig(
     }
 
     const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
-    await report(destination, folderPath, fetched, options, config, fetchWarnings);
+    await report(destination, folderPath, fetched, options, config, fetchWarnings, previousManifest, usedSingleDocFallback);
 }
 
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
-async function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions, config: Config, extraWarnings: string[]): Promise<void> {
+async function report(
+    destination: string,
+    folderPath: string,
+    fetched: FetchedDoc[],
+    options: DocsPullOptions,
+    config: Config,
+    extraWarnings: string[],
+    previousManifest: DocsManifest | null,
+    usedSingleDocFallback: boolean,
+): Promise<void> {
     fs.mkdirSync(destination, { recursive: true });
     const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
 
@@ -454,14 +469,50 @@ async function report(destination: string, folderPath: string, fetched: FetchedD
         process.stderr.write(chalk.yellow(`${warning}\n`));
     }
 
+    const removed: string[] = [];
+    const keptModified: string[] = [];
+
+    // Deletion propagation is only safe when the old manifest describes the SAME
+    // folder we just pulled. Otherwise every tracked file looks like an orphan and
+    // the unmodified ones would be deleted. The single-doc fallback writes a
+    // one-entry manifest, so it can never speak for a folder's contents either.
+    const canPropagateDeletions =
+        previousManifest !== null &&
+        !usedSingleDocFallback &&
+        previousManifest.folder_path === folderPath;
+
+    if (canPropagateDeletions) {
+        for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
+            if (manifestDocs[relPath]) continue;
+
+            const absPath = path.join(destination, ...relPath.split('/'));
+            if (!fs.existsSync(absPath)) continue;
+
+            const currentHash = sha256Hex(fs.readFileSync(absPath));
+            if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {
+                fs.rmSync(absPath);
+                removed.push(relPath);
+            } else {
+                keptModified.push(relPath);
+            }
+        }
+    }
+
     if (options.json) {
-        console.log(JSON.stringify({ manifest, files }));
+        console.log(JSON.stringify({ manifest, files, removed, kept_modified: keptModified }));
         process.exit(0);
     }
 
     console.log(chalk.green(`pulled ${files.length} doc${files.length === 1 ? '' : 's'} → ${destination}`));
     for (const file of files) {
         console.log(chalk.gray(`  ${file.path}`));
+    }
+    for (const file of removed) {
+        console.log(chalk.gray(`- removed (deleted remotely): ${file}`));
+    }
+    for (const file of keptModified) {
+        process.stderr.write(chalk.yellow(`! kept ${file} — deleted remotely but modified locally\n`));
+        process.stderr.write(chalk.yellow('  (it is now untracked; `docs push` will re-create it)\n'));
     }
     process.exit(0);
 }
