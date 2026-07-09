@@ -1751,6 +1751,54 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         }
     });
 
+    it('--force does not bypass skip-unchanged in the media pass: zero requests when hashes match, a write with no base_revision when they differ', async () => {
+        const bytes = 'unchanged image bytes for force test';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': bytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(bytes) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            // Phase 1: local bytes match the manifest hash — --force must not bypass skip-unchanged.
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(0);
+
+            // Phase 2: bytes changed on disk — --force still triggers a write, but omits base_revision.
+            const changedBytes = 'changed image bytes for force test';
+            fs.writeFileSync(path.join(dir, 'hero.png'), changedBytes, 'utf8');
+            queueMedia(200, { doc: { id: 42, current_version_id: 8 } });
+
+            caughtExit = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            expect(caughtExit?.code).toBe(0);
+
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/42/media');
+            expect(mediaCalls.length).toBe(1);
+            expect(mediaCalls[0].parts!.find((p) => p.name === 'base_revision')).toBeUndefined();
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
     it('reports drift and exits 1 on a 409 stale_revision from the media endpoint', async () => {
         const oldBytes = 'old bytes';
         const newBytes = 'new bytes, changed';
@@ -1946,6 +1994,83 @@ describe('docsPushWithConfig — untracked binaries', () => {
 
             expect(caughtExit?.code).toBe(0);
             expect(stderrLines.join('')).not.toMatch(/not pushed/);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('exposes untracked_media in the --json payload, excluding tracked files and the manifest sidecar', async () => {
+        const trackedContent = '# Doc';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'doc.md': trackedContent,
+            [DOCS_MANIFEST]: JSON.stringify({
+                folder_path: '/some/folder',
+                docs: {
+                    'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex(trackedContent) },
+                },
+            }, null, 2),
+        });
+        writeBinaryFile(dir, 'images/new-hero.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+
+            expect(parsed.untracked_media).toContain('images/new-hero.png');
+            expect(parsed.untracked_media).not.toContain('doc.md');
+            expect(parsed.untracked_media).not.toContain('.solidactions-docs.json');
+
+            expect(allCaptures.filter((c) => c.path?.includes('/media')).length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('caps the human-mode untracked-binary warning at 10 lines and prints "… and N more" for the rest', async () => {
+        const files: Record<string, string> = { 'doc.md': '# Doc' };
+        for (let i = 0; i < 13; i++) {
+            files[`img-${i}.png`] = `binary content ${i}`;
+        }
+        const { dir, cleanup } = makeTmpDocsDir(files);
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const warningLines = stderrLines.filter((l) => l.includes('not pushed — use `solidactions docs upload`'));
+            expect(warningLines.length).toBe(10);
+            expect(stderrLines.some((l) => /… and 3 more/.test(l))).toBe(true);
+
+            expect(allCaptures.filter((c) => c.path?.includes('/media')).length).toBe(0);
         } finally {
             restoreExit();
             restoreStdout();
