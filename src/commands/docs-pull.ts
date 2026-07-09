@@ -325,6 +325,15 @@ async function writeDocs(destination: string, docs: FetchedDoc[], config: Config
         const fileName = `${candidate}${ext}`;
         const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
+        // A destination path that already exists as a directory would make writeFileSync
+        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
+        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
+        const targetAbs = path.join(dirAbs, fileName);
+        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
+            process.stderr.write(chalk.red(`error: "${relPath}" exists and is not a regular file — cannot write doc ${doc.id} (${doc.title}).\n`));
+            process.exit(1);
+        }
+
         let bodySha256: string | null;
         if (media.isMedia) {
             if (media.bytes) {

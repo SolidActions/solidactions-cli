@@ -854,6 +854,36 @@ describe('docsPullWithConfig — deletion propagation', () => {
         }
     });
 
+    it('fails cleanly when a doc would be written over an existing directory', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        fs.mkdirSync(path.join(dest, 'a.md'), { recursive: true });
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            // A clean exit 1 with a named path, not an uncaught EISDIR stack trace.
+            expect(code).toBe(1);
+            expect(errLines.join('\n')).toMatch(/is not a regular file/);
+            expect(errLines.join('\n')).toContain('a.md');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
     it('never deletes a directory named by a corrupt manifest key', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
