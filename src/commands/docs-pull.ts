@@ -17,6 +17,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
@@ -42,6 +43,15 @@ export interface DocsManifest {
         title: string;
         current_revision_id: number | null;
         media: boolean;
+        /**
+         * sha256 (hex) of the exact bytes written for this file at pull time
+         * (markdown body string, or downloaded media bytes). `null` when a
+         * media download soft-failed (no bytes to hash). Manifests written
+         * before this field existed simply omit it — callers must treat a
+         * missing/undefined value the same as "no hash available", never as
+         * a match.
+         */
+        body_sha256?: string | null;
     }>;
 }
 
@@ -143,6 +153,11 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
     }
 
     return { isMedia: true, mime, bytes: Buffer.from(download.data) };
+}
+
+/** sha256 hex digest of the given bytes/string, as written to disk. */
+export function sha256Hex(data: string | Buffer): string {
+    return crypto.createHash('sha256').update(data).digest('hex');
 }
 
 /** The last non-empty path segment of a '/'-separated folder path. */
@@ -298,16 +313,21 @@ async function writeDocs(destination: string, docs: FetchedDoc[], config: Config
         const fileName = `${candidate}${ext}`;
         const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
+        let bodySha256: string | null;
         if (media.isMedia) {
             if (media.bytes) {
                 fs.writeFileSync(path.join(dirAbs, fileName), media.bytes);
                 files.push({ path: relPath, action: 'written' });
+                bodySha256 = sha256Hex(media.bytes);
+            } else {
+                // Download failure: warning already recorded above; skip the write but
+                // still record the manifest entry below so the doc isn't silently lost.
+                bodySha256 = null;
             }
-            // Download failure: warning already recorded above; skip the write but
-            // still record the manifest entry below so the doc isn't silently lost.
         } else {
             fs.writeFileSync(path.join(dirAbs, fileName), doc.body, 'utf8');
             files.push({ path: relPath, action: 'written' });
+            bodySha256 = sha256Hex(doc.body);
         }
 
         manifestDocs[relPath] = {
@@ -315,6 +335,7 @@ async function writeDocs(destination: string, docs: FetchedDoc[], config: Config
             title: doc.title,
             current_revision_id: doc.current_revision_id,
             media: media.isMedia,
+            body_sha256: bodySha256,
         };
     }
 

@@ -10,11 +10,17 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docsPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/docs-pull';
 import type { DocsManifest } from '../src/commands/docs-pull';
 import type { Config } from '../src/utils/config';
+
+/** sha256 hex digest, for asserting manifest body_sha256 values in tests. */
+function sha256Hex(data: string | Buffer): string {
+    return crypto.createHash('sha256').update(data).digest('hex');
+}
 
 // ---------------------------------------------------------------------------
 // Stub MCP server
@@ -269,8 +275,8 @@ describe('docsPullWithConfig — folder tree', () => {
             expect(fs.readFileSync(path.join(dest, 'ads', 'ad-a.md'), 'utf8')).toBe('# Ad A');
 
             const manifest = readManifest(dest);
-            expect(manifest.docs['brief.md']).toEqual({ id: 1, title: 'brief', current_revision_id: 10, media: false });
-            expect(manifest.docs['ads/ad-a.md']).toEqual({ id: 2, title: 'ad-a', current_revision_id: 20, media: false });
+            expect(manifest.docs['brief.md']).toEqual({ id: 1, title: 'brief', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Brief') });
+            expect(manifest.docs['ads/ad-a.md']).toEqual({ id: 2, title: 'ad-a', current_revision_id: 20, media: false, body_sha256: sha256Hex('# Ad A') });
             expect(manifest.folder_path).toBe('marketing/fb-campaign');
 
             // Manifest file itself is pretty-printed with a trailing newline
@@ -431,7 +437,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
             expect(fs.readFileSync(path.join(dest, 'solo.md'), 'utf8')).toBe('x');
             const manifest = readManifest(dest);
             expect(Object.keys(manifest.docs).length).toBe(1);
-            expect(manifest.docs['solo.md']).toEqual({ id: 5, title: 'solo', current_revision_id: 3, media: false });
+            expect(manifest.docs['solo.md']).toEqual({ id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') });
 
             expect(allCaptures.length).toBe(2);
         } finally {
@@ -617,7 +623,7 @@ describe('docsPullWithConfig — --json', () => {
             expect(parsed).toHaveProperty('manifest');
             expect(parsed).toHaveProperty('files');
             expect(parsed.files).toEqual([{ path: 'brief.md', action: 'written' }]);
-            expect(parsed.manifest.docs['brief.md']).toEqual({ id: 1, title: 'brief', current_revision_id: 10, media: false });
+            expect(parsed.manifest.docs['brief.md']).toEqual({ id: 1, title: 'brief', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Brief') });
         } finally {
             restoreExit();
             restoreStdout();
@@ -696,7 +702,7 @@ describe('docsPullWithConfig — media docs', () => {
             expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(stubBytes);
 
             const manifest = readManifest(dest);
-            expect(manifest.docs['hero.png']).toEqual({ id: 7, title: 'hero.png', current_revision_id: 9, media: true });
+            expect(manifest.docs['hero.png']).toEqual({ id: 7, title: 'hero.png', current_revision_id: 9, media: true, body_sha256: sha256Hex(stubBytes) });
 
             const confirmCall = allCaptures.find((c) => c.path === '/api/v1/docs/7/media');
             expect(confirmCall).toBeDefined();
@@ -741,7 +747,7 @@ describe('docsPullWithConfig — media docs', () => {
             expect(fs.readFileSync(path.join(dest, 'fake.md'), 'utf8')).toBe('');
 
             const manifest = readManifest(dest);
-            expect(manifest.docs['fake.md']).toEqual({ id: 8, title: 'fake', current_revision_id: 11, media: false });
+            expect(manifest.docs['fake.md']).toEqual({ id: 8, title: 'fake', current_revision_id: 11, media: false, body_sha256: sha256Hex('') });
 
             // No signed-URL download was attempted.
             expect(allCaptures.find((c) => c.path?.startsWith('/blob/'))).toBeUndefined();
@@ -781,7 +787,7 @@ describe('docsPullWithConfig — media docs', () => {
 
             expect(fs.existsSync(path.join(dest, 'hero.png'))).toBe(true);
             const manifest = readManifest(dest);
-            expect(manifest.docs['hero.png']).toEqual({ id: 9, title: 'hero', current_revision_id: 12, media: true });
+            expect(manifest.docs['hero.png']).toEqual({ id: 9, title: 'hero', current_revision_id: 12, media: true, body_sha256: sha256Hex(Buffer.from([9, 9, 9])) });
         } finally {
             restoreExit();
             restoreStdout();
@@ -820,7 +826,7 @@ describe('docsPullWithConfig — media docs', () => {
             expect(fs.existsSync(path.join(dest, 'lost.png'))).toBe(false);
 
             const manifest = readManifest(dest);
-            expect(manifest.docs['lost.png']).toEqual({ id: 11, title: 'lost.png', current_revision_id: 14, media: true });
+            expect(manifest.docs['lost.png']).toEqual({ id: 11, title: 'lost.png', current_revision_id: 14, media: true, body_sha256: null });
 
             expect(stderrLines.join('')).toContain('lost.png');
         } finally {
@@ -861,6 +867,58 @@ describe('docsPullWithConfig — media docs', () => {
         } finally {
             restoreExit();
             restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Content hashes — body_sha256 recorded per manifest entry
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — content hashes', () => {
+    it('records body_sha256 as the sha256 hex of the exact bytes written, for both a markdown doc and a media doc', async () => {
+        const mdBody = '# Hashed Doc\n\nSome content.';
+        const mediaBytes = Buffer.from([10, 20, 30, 40]);
+
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [
+                    { id: 1, title: 'hashed-doc', properties: {} },
+                    { id: 2, title: 'hashed.png', properties: { blob_sha: 'abc', mime: 'image/png', size: mediaBytes.length } },
+                ],
+            }),
+            makeMcpSuccess({
+                results: [
+                    { index: 0, status: 'found', id: 1, title: 'hashed-doc', folder_path: '', current_revision_id: 1, properties: {}, body: mdBody },
+                    {
+                        index: 1, status: 'found', id: 2, title: 'hashed.png', folder_path: '', current_revision_id: 2,
+                        properties: { blob_sha: 'abc', mime: 'image/png', size: mediaBytes.length }, body: '',
+                    },
+                ],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/2`, mime: 'image/png', size: mediaBytes.length } },
+        ];
+        blobResponseQueue = [{ status: 200, bytes: mediaBytes }];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docsPullWithConfig('hash-tree', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+
+            const manifest = readManifest(dest);
+            expect(manifest.docs['hashed-doc.md'].body_sha256).toBe(sha256Hex(mdBody));
+            expect(manifest.docs['hashed.png'].body_sha256).toBe(sha256Hex(mediaBytes));
+        } finally {
+            restoreExit();
+            restoreStdout();
             cleanup();
         }
     });

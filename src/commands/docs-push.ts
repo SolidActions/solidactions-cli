@@ -14,7 +14,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
-import { DOCS_MANIFEST, DocsManifest } from './docs-pull';
+import { DOCS_MANIFEST, DocsManifest, sha256Hex } from './docs-pull';
 
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
@@ -89,6 +89,11 @@ interface TrackedDrifted {
 }
 
 interface TrackedPlanned {
+    file: string;
+    id: number;
+}
+
+interface TrackedUnchanged {
     file: string;
     id: number;
 }
@@ -230,17 +235,26 @@ export async function docsPushWithConfig(
     const trackedWritten: TrackedWritten[] = [];
     const trackedDrifted: TrackedDrifted[] = [];
     const trackedPlanned: TrackedPlanned[] = [];
+    const trackedUnchanged: TrackedUnchanged[] = [];
 
     for (const { absPath, relPath } of trackedFiles) {
         const entry = manifest!.docs[relPath];
+        const body = fs.readFileSync(absPath, 'utf8');
+        const bodyHash = sha256Hex(body);
+
+        // Skip-unchanged applies regardless of --force or --dry-run: force answers
+        // drift, not staleness, and an old manifest lacking body_sha256 (undefined)
+        // never matches, so it always falls through to a write (graceful degradation).
+        if (entry.body_sha256 != null && entry.body_sha256 === bodyHash) {
+            trackedUnchanged.push({ file: relPath, id: entry.id });
+            continue;
+        }
 
         // --dry-run must never live-write: preview the tracked doc instead of calling docs_edit.
         if (options.dryRun) {
             trackedPlanned.push({ file: relPath, id: entry.id });
             continue;
         }
-
-        const body = fs.readFileSync(absPath, 'utf8');
 
         const editArgs: Record<string, unknown> = { action: 'write', id: entry.id, body };
         if (!options.force && entry.current_revision_id !== null) {
@@ -269,6 +283,7 @@ export async function docsPushWithConfig(
         }
 
         entry.current_revision_id = data?.current_revision_id ?? entry.current_revision_id;
+        entry.body_sha256 = bodyHash;
         trackedWritten.push({ file: relPath, id: entry.id, current_revision_id: entry.current_revision_id });
 
         // Persist immediately so a later failure (another tracked write, or an
@@ -360,7 +375,7 @@ export async function docsPushWithConfig(
             summary: mergedSummary,
             pending: pendingItems,
             results: allResultRows,
-            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned },
+            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged },
         }));
         process.exit(exitCode);
     }
@@ -373,8 +388,14 @@ export async function docsPushWithConfig(
                 console.log(chalk.gray(`  ${p.file}`));
             }
         }
-    } else if (trackedWritten.length > 0 || trackedDrifted.length > 0) {
-        console.log(chalk.green(`tracked: ${trackedWritten.length} written, ${trackedDrifted.length} drifted`));
+        if (trackedUnchanged.length > 0) {
+            console.log(chalk.gray(`tracked: ${trackedUnchanged.length} planned unchanged (skip)`));
+            for (const u of trackedUnchanged) {
+                console.log(chalk.gray(`  ${u.file}`));
+            }
+        }
+    } else if (trackedWritten.length > 0 || trackedDrifted.length > 0 || trackedUnchanged.length > 0) {
+        console.log(chalk.green(`tracked: ${trackedWritten.length} written, ${trackedDrifted.length} drifted, ${trackedUnchanged.length} unchanged`));
         for (const w of trackedWritten) {
             console.log(chalk.gray(`  ${w.file}`));
         }
