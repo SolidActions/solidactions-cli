@@ -26,6 +26,48 @@ interface CapturedRequest {
     path: string | undefined;
     headers: http.IncomingHttpHeaders;
     body: any;
+    /** Populated only for multipart/form-data requests (the media POST). */
+    parts?: MultipartPart[];
+}
+
+// ---------------------------------------------------------------------------
+// Minimal multipart/form-data parser — just enough to assert field names,
+// filenames, and values in tests. Pattern copied from docs-upload.test.ts.
+// ---------------------------------------------------------------------------
+
+interface MultipartPart {
+    name: string;
+    filename?: string;
+    value: string;
+}
+
+function parseMultipart(body: Buffer, contentType: string | undefined): MultipartPart[] {
+    const boundaryMatch = contentType?.match(/boundary=(.+)$/);
+    if (!boundaryMatch) return [];
+    const boundary = `--${boundaryMatch[1]}`;
+    const bodyStr = body.toString('binary');
+    const rawParts = bodyStr.split(boundary).slice(1, -1);
+
+    const parts: MultipartPart[] = [];
+    for (const rawPart of rawParts) {
+        const part = rawPart.replace(/^\r\n/, '').replace(/\r\n$/, '');
+        const headerEndIdx = part.indexOf('\r\n\r\n');
+        if (headerEndIdx === -1) continue;
+        const headerBlock = part.slice(0, headerEndIdx);
+        const value = part.slice(headerEndIdx + 4);
+        const nameMatch = headerBlock.match(/name="([^"]+)"/);
+        const filenameMatch = headerBlock.match(/filename="([^"]*)"/);
+        if (!nameMatch) continue;
+        parts.push({ name: nameMatch[1], filename: filenameMatch?.[1], value });
+    }
+    return parts;
+}
+
+/** FIFO queue of canned {status, body} responses for the REST media POST endpoint. */
+let mediaResponseQueue: Array<{ status: number; body: any }> = [];
+
+function queueMedia(status: number, body: any): void {
+    mediaResponseQueue.push({ status, body });
 }
 
 let stubServer: http.Server;
@@ -85,20 +127,43 @@ function nextResponseBody(body: any): string {
 
 beforeAll(async () => {
     stubServer = http.createServer((req, res) => {
-        let rawBody = '';
-        req.on('data', (chunk) => { rawBody += chunk; });
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk) => { chunks.push(chunk); });
         req.on('end', () => {
+            const rawBody = Buffer.concat(chunks);
+            const contentType = req.headers['content-type'];
+            const isMultipart = contentType?.startsWith('multipart/form-data') ?? false;
+
             let parsedBody: any = null;
-            try { parsedBody = JSON.parse(rawBody); } catch { /* ignore */ }
+            let parts: MultipartPart[] | undefined;
+            if (isMultipart) {
+                parts = parseMultipart(rawBody, contentType);
+            } else {
+                try { parsedBody = JSON.parse(rawBody.toString('utf8')); } catch { /* ignore */ }
+            }
 
             const capture: CapturedRequest = {
                 method: req.method,
                 path: req.url,
                 headers: req.headers,
                 body: parsedBody,
+                parts,
             };
 
             allCaptures.push(capture);
+
+            // Media POST (docs push replaces tracked media): /api/v1/docs/{id}/media
+            if (req.method === 'POST' && /^\/api\/v1\/docs\/\d+\/media$/.test(req.url ?? '')) {
+                const next = mediaResponseQueue.shift();
+                if (!next) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ message: 'no stub media response queued for this request' }));
+                    return;
+                }
+                res.writeHead(next.status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(next.body));
+                return;
+            }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(nextResponseBody(parsedBody));
@@ -122,6 +187,7 @@ afterAll(() => {
 beforeEach(() => {
     allCaptures = [];
     responseQueue = [];
+    mediaResponseQueue = [];
 });
 
 // ---------------------------------------------------------------------------
@@ -184,6 +250,13 @@ function makeTmpDocsDir(files: Record<string, string>): { dir: string; cleanup: 
         dir,
         cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
     };
+}
+
+/** Write (or overwrite) a single binary file under an existing tmp dir. */
+function writeBinaryFile(dir: string, relPath: string, bytes: Buffer): void {
+    const abs = path.join(dir, relPath);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,6 +1548,408 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         } finally {
             restoreExit();
             restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: media pass — tracked binaries replace via POST /api/v1/docs/{id}/media
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — media pass (tracked binaries)', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('replaces a tracked media file whose bytes changed, sending base_revision; manifest on disk gets the new revision + hash', async () => {
+        const oldBytes = 'old png bytes';
+        const newBytes = 'new png bytes, totally different from the old ones';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': newBytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        queueMedia(200, { doc: { id: 42, current_version_id: 8 } });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/42/media');
+            expect(mediaCalls.length).toBe(1);
+            expect(mediaCalls[0].method).toBe('POST');
+
+            const filePart = mediaCalls[0].parts!.find((p) => p.name === 'file');
+            expect(filePart?.filename).toBe('hero.png');
+            expect(filePart?.value).toBe(newBytes);
+
+            const baseRevisionPart = mediaCalls[0].parts!.find((p) => p.name === 'base_revision');
+            expect(baseRevisionPart?.value).toBe('7');
+
+            const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            expect(manifest.docs['hero.png'].current_revision_id).toBe(8);
+            expect(manifest.docs['hero.png'].body_sha256).toBe(sha256Hex(newBytes));
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('reads the new revision from doc.current_version_id (not doc.current_revision_id, absent from the response), then sends it as base_revision on the next push', async () => {
+        const oldBytes = 'v1 bytes';
+        const v2Bytes = 'v2 bytes, changed';
+        const v3Bytes = 'v3 bytes, changed again';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': v2Bytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        // The stub's 200 body returns ONLY { doc: { id, current_version_id } } — no current_revision_id key.
+        queueMedia(200, { doc: { id: 42, current_version_id: 8 } });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const manifestAfterFirst: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            expect(manifestAfterFirst.docs['hero.png'].current_revision_id).toBe(8);
+
+            // Second push, different bytes — must send base_revision=8.
+            fs.writeFileSync(path.join(dir, 'hero.png'), v3Bytes, 'utf8');
+            queueMedia(200, { doc: { id: 42, current_version_id: 9 } });
+
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/42/media');
+            expect(mediaCalls.length).toBe(2);
+            const secondBaseRevision = mediaCalls[1].parts!.find((p) => p.name === 'base_revision');
+            expect(secondBaseRevision?.value).toBe('8');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('skips a tracked media file whose bytes match the manifest hash (zero requests, reported unchanged)', async () => {
+        const bytes = 'unchanged bytes';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': bytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(bytes) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.filter((c) => c.path === '/api/v1/docs/42/media').length).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked.unchanged).toEqual([{ file: 'hero.png', id: 42 }]);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('skips a tracked media entry with no local file (pull-time download failure) — zero requests, no crash', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: null },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.filter((c) => c.path === '/api/v1/docs/42/media').length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--force omits base_revision entirely from the media multipart body', async () => {
+        const oldBytes = 'old bytes';
+        const newBytes = 'new bytes, changed';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': newBytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        queueMedia(200, { doc: { id: 42, current_version_id: 8 } });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/42/media');
+            expect(mediaCalls.length).toBe(1);
+            expect(mediaCalls[0].parts!.find((p) => p.name === 'base_revision')).toBeUndefined();
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('reports drift and exits 1 on a 409 stale_revision from the media endpoint', async () => {
+        const oldBytes = 'old bytes';
+        const newBytes = 'new bytes, changed';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': newBytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        queueMedia(409, { code: 'stale_revision', current_revision_id: 9 });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(1);
+            expect(stderrLines.join('\n')).toContain('hero.png');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('a media doc titled notes.md holding binary bytes is never sent through docs_edit; a media POST is made instead', async () => {
+        const oldBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+        const newBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0xfd]);
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'notes.md': { id: 5, title: 'notes.md', current_revision_id: 3, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+        writeBinaryFile(dir, 'notes.md', newBytes);
+
+        queueMedia(200, { doc: { id: 5, current_version_id: 4 } });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_edit');
+            expect(editCalls.length).toBe(0);
+
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/5/media');
+            expect(mediaCalls.length).toBe(1);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('pushes a folder containing only images (no .md files) without tripping the "no .md files" exit', async () => {
+        const bytes = 'unchanged image bytes';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': bytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(bytes) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--dry-run performs zero media requests', async () => {
+        const oldBytes = 'old bytes';
+        const newBytes = 'new bytes, changed';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': newBytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.filter((c) => c.path === '/api/v1/docs/42/media').length).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.tracked.planned).toEqual([{ file: 'hero.png', id: 42 }]);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: untracked binaries — warn, never upload
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — untracked binaries', () => {
+    it('warns once per untracked binary and never uploads it', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'doc.md': '# Doc',
+            'diagram.png': 'some binary-ish content',
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(stderrLines.join('')).toMatch(/diagram\.png: not pushed — use `solidactions docs upload`/);
+            expect(allCaptures.filter((c) => c.path?.includes('/media')).length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('does not warn about files under node_modules or dot-directories', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'doc.md': '# Doc',
+            'node_modules/some-pkg/lib.bin': 'ignored',
+            '.cache/data.bin': 'ignored',
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(stderrLines.join('')).not.toMatch(/not pushed/);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
             cleanup();
         }
     });

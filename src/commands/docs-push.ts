@@ -10,9 +10,11 @@
 
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
+import FormData from 'form-data';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
-import { requireConfigWithWorkspace } from '../utils/api';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
@@ -120,6 +122,37 @@ function walkMarkdownFiles(dir: string): string[] {
     return results;
 }
 
+const SKIP_DIRS = new Set(['node_modules']);
+
+/**
+ * Recursively walk `dir` and collect relative paths of non-.md files that
+ * are not present in the manifest — never uploaded by `docs push`; `docs
+ * upload` is the way to create media docs from these. Dotfiles and
+ * dot-directories are excluded (`entry.name.startsWith('.')` also covers the
+ * `.solidactions-docs.json` sidecar itself).
+ */
+function walkUntrackedBinaries(dir: string, manifest: DocsManifest | null): string[] {
+    const results: string[] = [];
+
+    const walk = (current: string): void => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+            const abs = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(abs);
+            } else if (entry.isFile() && !entry.name.endsWith('.md')) {
+                const relPath = path.relative(dir, abs).split(path.sep).join('/');
+                if (!manifest?.docs[relPath]) {
+                    results.push(relPath);
+                }
+            }
+        }
+    };
+
+    walk(dir);
+    return results;
+}
+
 /**
  * Convert an absolute file path to a bulk_create item, relative to `rootDir`.
  */
@@ -195,20 +228,31 @@ export async function docsPushWithConfig(
 
     const allFiles = walkMarkdownFiles(absDir);
 
-    if (allFiles.length === 0) {
-        process.stderr.write(chalk.red(`error: no .md files found under "${dir}" — nothing to push.\n`));
+    // A missing/unparseable manifest means nothing is tracked — everything is untracked,
+    // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
+    const manifest = readManifest(absDir, { warnOnParseError: true });
+    const trackedMediaEntries = Object.entries(manifest?.docs ?? {}).filter(([, e]) => e.media);
+
+    // A pulled folder of images alone (no .md files) must still be pushable — the early
+    // exit only fires when there's truly nothing to push.
+    if (allFiles.length === 0 && trackedMediaEntries.length === 0) {
+        process.stderr.write(chalk.red(`error: no .md files or tracked media found under "${dir}" — nothing to push.\n`));
         process.exit(1);
     }
 
     // Partition into tracked (relative path present in the pull manifest) vs. untracked.
-    // A missing/unparseable manifest means nothing is tracked — everything is untracked,
-    // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
-    const manifest = readManifest(absDir, { warnOnParseError: true });
+    // A media doc titled *.md (e.g. `notes.md`) is bytes, not markdown — it's owned by
+    // the media pass below, not this markdown pass, or its bytes would be sent through
+    // docs_edit as a text body and corrupt the doc.
     const trackedFiles: Array<{ absPath: string; relPath: string }> = [];
     const untrackedFiles: string[] = [];
     for (const f of allFiles) {
         const relPath = path.relative(absDir, f).split(path.sep).join('/');
-        if (manifest?.docs[relPath]) {
+        const entry = manifest?.docs[relPath];
+        if (entry?.media) {
+            continue;
+        }
+        if (entry) {
             trackedFiles.push({ absPath: f, relPath });
         } else {
             untrackedFiles.push(f);
@@ -273,6 +317,67 @@ export async function docsPushWithConfig(
         // untracked bulk_create error) never loses this file's refreshed revision.
         writeManifest(absDir, manifest!);
     }
+
+    // Media pass: tracked binaries (media: true) replace via POST /api/v1/docs/{id}/media,
+    // sharing the report arrays above.
+    for (const [relPath, entry] of trackedMediaEntries) {
+        const absPath = path.join(absDir, ...relPath.split('/'));
+
+        // Existence before hash: a pull whose media download failed records
+        // `media: true, body_sha256: null` and writes no file. push never deletes.
+        if (!fs.existsSync(absPath)) {
+            continue;
+        }
+
+        const bytes = fs.readFileSync(absPath);
+        const bodyHash = sha256Hex(bytes);
+
+        if (entry.body_sha256 != null && entry.body_sha256 === bodyHash) {
+            trackedUnchanged.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        if (options.dryRun) {
+            trackedPlanned.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        const form = new FormData();
+        form.append('file', bytes, { filename: path.basename(relPath) });
+        if (!options.force && entry.current_revision_id !== null) {
+            form.append('base_revision', String(entry.current_revision_id));
+        }
+
+        let doc: any;
+        try {
+            const response = await axios.post(`${config.host}/api/v1/docs/${entry.id}/media`, form, {
+                headers: { ...form.getHeaders(), ...getApiHeaders(config) },
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+            });
+            doc = response.data?.doc;
+        } catch (error: any) {
+            const status = error.response?.status;
+            const data = error.response?.data;
+            if (status === 409 && data?.code === 'stale_revision') {
+                trackedDrifted.push({ file: relPath, their: data.current_revision_id ?? null, base: entry.current_revision_id });
+                continue;
+            }
+            process.stderr.write(chalk.red(`error: ${relPath}: ${data?.message ?? error.message}\n`));
+            process.exit(1);
+        }
+
+        // The REST presenter names the revision `current_version_id`; MCP docs_edit
+        // names it `current_revision_id`. Reading the wrong one nulls the entry and
+        // silently disarms the drift guard on every later push.
+        entry.current_revision_id = doc?.current_version_id ?? entry.current_revision_id;
+        entry.body_sha256 = bodyHash;
+        trackedWritten.push({ file: relPath, id: entry.id, current_revision_id: entry.current_revision_id });
+
+        writeManifest(absDir, manifest!);
+    }
+
+    const untrackedMedia = walkUntrackedBinaries(absDir, manifest);
 
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
 
@@ -359,6 +464,7 @@ export async function docsPushWithConfig(
             pending: pendingItems,
             results: allResultRows,
             tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged },
+            untracked_media: untrackedMedia,
         }));
         process.exit(exitCode);
     }
@@ -381,6 +487,15 @@ export async function docsPushWithConfig(
         console.log(chalk.green(`tracked: ${trackedWritten.length} written, ${trackedDrifted.length} drifted, ${trackedUnchanged.length} unchanged`));
         for (const w of trackedWritten) {
             console.log(chalk.gray(`  ${w.file}`));
+        }
+    }
+
+    if (untrackedMedia.length > 0) {
+        for (const file of untrackedMedia.slice(0, 10)) {
+            process.stderr.write(chalk.yellow(`${file}: not pushed — use \`solidactions docs upload\`\n`));
+        }
+        if (untrackedMedia.length > 10) {
+            process.stderr.write(chalk.yellow(`… and ${untrackedMedia.length - 10} more\n`));
         }
     }
 
