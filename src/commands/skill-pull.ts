@@ -22,6 +22,9 @@ export interface SkillPullOptions {
     json?: boolean;
 }
 
+/** Filename of the provenance sidecar written alongside a pulled skill. */
+export const SKILL_SIDECAR = '.solidactions-skill.json';
+
 /**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
@@ -60,6 +63,7 @@ export async function skillPullWithConfig(
     const data = result.data as {
         identifier: string;
         doc_id: number | string;
+        head_revision_id?: number | string;
         properties: Record<string, unknown>;
         body: string;
         reference: Record<string, string>;
@@ -135,6 +139,16 @@ export async function skillPullWithConfig(
         fs.writeFileSync(target, content, 'utf8');
         writtenCount++;
     }
+
+    // Write the provenance sidecar so downstream commands (e.g. `skill push`)
+    // can detect drift against the revision this pull was taken from.
+    const sidecar = {
+        identifier: data.identifier,
+        doc_id: typeof data.doc_id === 'string' ? parseInt(data.doc_id, 10) : data.doc_id,
+        head_revision_id: typeof data.head_revision_id === 'string' ? parseInt(data.head_revision_id, 10) : (data.head_revision_id ?? null),
+        role: null as string | null,
+    };
+    fs.writeFileSync(path.join(absOut, SKILL_SIDECAR), JSON.stringify(sidecar, null, 2) + '\n', 'utf8');
 
     const refSummary = writtenCount === 1 ? '1 reference' : `${writtenCount} references`;
     console.log(chalk.green(`pulled skill '${name}' → ${out} (${refSummary})`));
