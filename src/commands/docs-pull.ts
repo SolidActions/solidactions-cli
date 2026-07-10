@@ -537,6 +537,20 @@ async function report(
     fs.mkdirSync(destination, { recursive: true });
     const { manifestDocs, files } = commitDocs(destination, planned);
 
+    // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
+    // deletion-propagation loop below to recognize an "orphan" that is really just the
+    // same file this pull wrote under a different manifest key (e.g. a case-only title
+    // rename on a case-insensitive filesystem) — that file must never be deleted.
+    const writtenIdentities = new Set<string>();
+    for (const file of files) {
+        try {
+            const stat = fs.statSync(path.join(destination, ...file.path.split('/')));
+            writtenIdentities.add(`${stat.dev}:${stat.ino}`);
+        } catch {
+            continue;
+        }
+    }
+
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
     writeManifest(destination, manifest);
 
@@ -556,8 +570,19 @@ async function report(
         !usedSingleDocFallback &&
         previousManifest.folder_path === folderPath;
 
+    if (previousManifest !== null && !canPropagateDeletions) {
+        if (usedSingleDocFallback) {
+            process.stderr.write(chalk.yellow("deletions not propagated: single-doc pull cannot speak for a folder's contents\n"));
+        } else if (previousManifest.folder_path !== folderPath) {
+            process.stderr.write(chalk.yellow(`deletions not propagated: this directory tracks "${previousManifest.folder_path}", not "${folderPath}"\n`));
+        }
+    }
+
+    const keptModifiedMedia = new Set<string>();
+
     if (canPropagateDeletions) {
         const destPrefix = path.resolve(destination) + path.sep;
+        const realDest = fs.realpathSync(destination);
 
         for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
             if (manifestDocs[relPath]) continue;
@@ -581,12 +606,28 @@ async function report(
                 const stat = fs.statSync(absPath);
                 if (!stat.isFile()) continue;
 
+                // Physical containment: the lexical check above only guards the string. If
+                // an intermediate path segment (e.g. "sub" in "sub/x.png") is a symlink to a
+                // directory OUTSIDE the destination, statSync/readFileSync/rmSync all follow
+                // it transparently. Resolve the real parent directory and require it to
+                // physically live under the real destination before ever touching the file.
+                const realParent = fs.realpathSync(path.dirname(absPath));
+                if (realParent !== realDest && !realParent.startsWith(realDest + path.sep)) continue;
+
+                // Identity: never delete a file this pull just wrote. A case-only title
+                // rename on a case-insensitive filesystem (or a hand-edited manifest with a
+                // hardlinked entry) can make an "orphan" key resolve to the very file the
+                // new manifest just wrote under a different key — bytes trivially match.
+                const identity = `${stat.dev}:${stat.ino}`;
+                if (writtenIdentities.has(identity)) continue;
+
                 const currentHash = sha256Hex(fs.readFileSync(absPath));
                 if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {
                     fs.rmSync(absPath);
                     removed.push(relPath);
                 } else {
                     keptModified.push(relPath);
+                    if (entry.media) keptModifiedMedia.add(relPath);
                 }
             } catch {
                 // Vanished mid-run, unreadable, or refuses inspection: never delete blind.
@@ -609,7 +650,11 @@ async function report(
     }
     for (const file of keptModified) {
         process.stderr.write(chalk.yellow(`! kept ${file} — deleted remotely but modified locally\n`));
-        process.stderr.write(chalk.yellow('  (it is now untracked; `docs push` will re-create it)\n'));
+        if (keptModifiedMedia.has(file)) {
+            process.stderr.write(chalk.yellow('  (it is now untracked; use `solidactions docs upload` to re-create it)\n'));
+        } else {
+            process.stderr.write(chalk.yellow('  (it is now untracked; `docs push` will re-create it)\n'));
+        }
     }
     process.exit(0);
 }

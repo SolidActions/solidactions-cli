@@ -345,6 +345,13 @@ export async function docsPushWithConfig(
             continue;
         }
 
+        // A directory sitting where a media file is tracked (e.g. `hero.png/`) would
+        // otherwise make readFileSync throw EISDIR uncaught mid-push. push never deletes,
+        // so skip it rather than crash.
+        if (!fs.statSync(absPath).isFile()) {
+            continue;
+        }
+
         const bytes = fs.readFileSync(absPath);
         const bodyHash = sha256Hex(bytes);
 
@@ -490,7 +497,9 @@ export async function docsPushWithConfig(
             invalid: r.property_validation!.invalid ?? [],
         }));
 
-    const exitCode = trackedDrifted.length > 0 ? 1 : 0;
+    // `done: N errors` on its own says nothing. Name the file and the server's reason.
+    const erroredRows = allResultRows.filter((r) => r.status === 'error');
+    const exitCode = trackedDrifted.length > 0 || erroredRows.length > 0 ? 1 : 0;
 
     // --json: output single JSON object
     if (options.json) {
@@ -547,8 +556,6 @@ export async function docsPushWithConfig(
         console.log(chalk.green(`done: ${summaryLine}`));
     }
 
-    // `done: N errors` on its own says nothing. Name the file and the server's reason.
-    const erroredRows = allResultRows.filter((r) => r.status === 'error');
     if (erroredRows.length > 0 && !options.json) {
         for (const row of erroredRows) {
             process.stderr.write(chalk.red(`${row.file}: ${row.error ?? row.code ?? 'unknown error'}\n`));

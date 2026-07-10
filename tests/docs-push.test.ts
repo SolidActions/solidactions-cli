@@ -1235,6 +1235,10 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
             expect(err).toContain('12');
             expect(err.toLowerCase()).toContain('--force');
             expect(err.toLowerCase()).toContain('re-pull');
+            // Pin the exact value read from the drift response's current_revision_id —
+            // a wrong key would leave `their: null` ("server now at null") and this line
+            // alone would catch it.
+            expect(err).toContain('server now at 12');
         } finally {
             restoreExit();
             restoreStdout();
@@ -2054,6 +2058,35 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         }
     });
 
+    it('skips a tracked media entry whose local path is a directory instead of a file — zero requests, no crash', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex('old bytes') },
+            }),
+        });
+        fs.mkdirSync(path.join(dir, 'hero.png'));
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.filter((c) => c.path === '/api/v1/docs/42/media').length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
     it('--force omits base_revision entirely from the media multipart body', async () => {
         const oldBytes = 'old bytes';
         const newBytes = 'new bytes, changed';
@@ -2160,7 +2193,12 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
             }
 
             expect(caughtExit?.code).toBe(1);
-            expect(stderrLines.join('\n')).toContain('hero.png');
+            const err = stderrLines.join('\n');
+            expect(err).toContain('hero.png');
+            // Pin the exact value read from the 409 body's current_revision_id — a wrong
+            // key would leave `their: null` ("server now at null") and the suite would
+            // stay green without this assertion.
+            expect(err).toContain('server now at 9');
         } finally {
             restoreExit();
             restoreStdout();
@@ -2416,7 +2454,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
 });
 
 describe('docsPushWithConfig — server-side bulk_create errors', () => {
-    it('names the file and the server reason instead of a bare "N errors" count', async () => {
+    it('names the file and the server reason instead of a bare "N errors" count, and exits 1', async () => {
         const { dir, cleanup } = makeTmpDocsDir({ 'note2.md': 'body' });
         responseQueue = [
             makeMcpSuccess({
@@ -2433,14 +2471,19 @@ describe('docsPushWithConfig — server-side bulk_create errors', () => {
         const restoreExit = patchProcessExit();
         const { lines: errLines, restore: restoreStderr } = captureStderr();
         try {
+            let caughtExit: ProcessExitError | null = null;
             try {
                 await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
-                if (!(e instanceof ProcessExitError)) throw e;
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
             }
             const err = errLines.join('\n');
             expect(err).toContain('note2.md');
             expect(err).toContain('still in the trash');
+            // A push where every untracked file errored must not exit 0 — that hides a
+            // genuine failure from CI/scripts polling the exit code.
+            expect(caughtExit?.code).toBe(1);
         } finally {
             restoreExit();
             restoreStderr();
