@@ -893,6 +893,191 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Manifest-clobber protection — dest tracks a DIFFERENT folder
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — manifest tracks a different folder', () => {
+    it('dest manifest tracks a DIFFERENT folder: refuses before any network I/O, names both folders, and leaves the manifest untouched', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/b', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('marketing/a');
+            expect(err).toContain('marketing/b');
+            expect(err).toContain('--overwrite');
+
+            // Refuses before the server walk: zero MCP requests.
+            expect(allCaptures.length).toBe(0);
+            // The manifest on disk is byte-for-byte unchanged.
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('--overwrite bypasses the mismatched-folder refusal and replaces the manifest with the new folder', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 2, title: 'y', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 2, title: 'y', folder_path: 'marketing/b', current_revision_id: 1, properties: {}, body: 'Y' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/b', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const newManifest = readManifest(dest);
+            expect(newManifest.folder_path).toBe('marketing/b');
+            expect(fs.readFileSync(path.join(dest, 'y.md'), 'utf8')).toBe('Y');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('dest manifest tracks the SAME folder: no refusal, normal re-pull proceeds', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 2, properties: {}, body: 'X updated' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/a', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X updated');
+            expect(allCaptures.length).toBeGreaterThan(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('empty dest with no manifest: no refusal, first pull proceeds', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 1, properties: {}, body: 'X' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/a', dest, {}, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('single-doc fallback into a dir tracking a folder: refuses before network I/O, and the one-entry manifest is never written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: {
+                'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+                'y.md': { id: 2, title: 'y', current_revision_id: 1, media: false, body_sha256: sha256Hex('Y') },
+            },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+        fs.writeFileSync(path.join(dest, 'y.md'), 'Y', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // No responseQueue entries: the refusal must fire before the list call that
+        // would normally 404 and trigger the single-doc fallback.
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/notes', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('marketing/a');
+            expect(err).toContain('marketing/notes');
+
+            expect(allCaptures.length).toBe(0);
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
+            const finalManifest = readManifest(dest);
+            expect(Object.keys(finalManifest.docs).length).toBe(2);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Deletion propagation (orphan cleanup)
 // ---------------------------------------------------------------------------
 

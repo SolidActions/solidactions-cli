@@ -456,6 +456,20 @@ export async function docsPullWithConfig(
         }
     }
 
+    // Manifest-clobber protection: a manifest tracking a DIFFERENT folder than the one
+    // being pulled must never be silently replaced — every file it tracks would become
+    // untracked, and detectLocalModifications only protects tracked files. This must run
+    // before any network I/O (listTree/planDocs) and before detectLocalModifications, since
+    // a mismatched manifest can't meaningfully speak for the folder being pulled anyway.
+    // --overwrite already means "discard local-edit protection", so it bypasses this too.
+    if (previousManifest !== null && previousManifest.folder_path !== folderPath && !options.overwrite) {
+        process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
+        process.stderr.write(chalk.red(`Pulling "${folderPath}" here would replace its manifest, and local edits to the\n`));
+        process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
+        process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
+        process.exit(1);
+    }
+
     let rows: DocRow[];
 
     const listResult = await listTree(config, folderPath);
