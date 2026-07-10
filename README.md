@@ -180,7 +180,13 @@ solidactions docs upload logo-v2.png --replace marketing/logo.png
 
 **`docs pull` propagates deletions, within limits.** A file is removed locally only when its doc was deleted on the server *and* the file's bytes still match what the last pull gave it (the manifest's `body_sha256`) — anything you've edited locally is kept, with a warning that it's now untracked and `docs push` will re-create it. Deletions only propagate when the destination's existing manifest `folder_path` matches the folder you're pulling (so pulling a different folder into a directory holding an old manifest deletes nothing), and never on the single-doc pull path; nothing outside the destination directory is ever touched.
 
-**`docs pull --overwrite` is destructive.** If any manifest-tracked file's local content no longer matches the `body_sha256` recorded at the last pull (i.e. you've edited it and haven't pushed yet), a plain `docs pull` — even with `-y`/`--yes` — refuses with exit 1, naming every modified file, rather than silently discarding your edits. `-y`/`--yes` only bypasses the generic "destination is not empty" prompt; it does not cover locally-modified tracked files. Pass `--overwrite` to discard those local changes and re-pull server content anyway (it also implies `--yes`).
+**`docs pull --overwrite` is destructive.** If a manifest-tracked file still exists on the server *and* your local copy no longer matches the `body_sha256` recorded at the last pull (i.e. you've edited it and haven't pushed yet), a plain `docs pull` — even with `-y`/`--yes` — refuses with exit 1, naming every modified file, rather than silently discarding your edits. Nothing is written before that refusal. `-y`/`--yes` only bypasses the generic "destination is not empty" prompt; it does not cover locally-modified tracked files. Pass `--overwrite` to discard those local changes and re-pull server content anyway (it also implies `--yes`).
+
+You do **not** need `--overwrite` to keep an edited file whose doc was deleted on the server — that case is handled by deletion propagation above, on the default path, and the file is kept with a warning.
+
+**Getting a doc id.** `docs upload --replace` accepts a docs path (`marketing/hero.png`), so you rarely need an id. If you want one, `docs pull` records it per file in the destination's `.solidactions-docs.json` sidecar, and `import_outputs` returns the ids it created. Note that `--replace` does not update a pulled directory's manifest — after replacing a tracked image out-of-band, the next `docs push` will report it as drifted; re-pull to resync.
+
+**`docs push` and deleted docs.** If a tracked file's doc was deleted on the server, `push` reports it per file (`doc <id> no longer exists (deleted remotely) — re-pull to untrack it, then push to re-create`) and continues; it does not fail the run. Only genuine drift — the doc moved on since your pull — exits 1.
 
 ### workspace
 
