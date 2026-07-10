@@ -2414,3 +2414,37 @@ describe('docsPushWithConfig — untracked binaries', () => {
         }
     });
 });
+
+describe('docsPushWithConfig — server-side bulk_create errors', () => {
+    it('names the file and the server reason instead of a bare "N errors" count', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'note2.md': 'body' });
+        responseQueue = [
+            makeMcpSuccess({
+                summary: { errors: 1 },
+                results: [{
+                    index: 0,
+                    status: 'error',
+                    code: 'trashed_title_conflict',
+                    error: "A deleted doc titled 'note2' is still in the trash in this folder.",
+                }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreStderr } = captureStderr();
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+            const err = errLines.join('\n');
+            expect(err).toContain('note2.md');
+            expect(err).toContain('still in the trash');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});

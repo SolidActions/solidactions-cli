@@ -45,6 +45,9 @@ interface BulkCreateResultRow {
     id?: string;
     folder_path?: string;
     action?: string;
+    /** Server-side reason when `status === 'error'` (e.g. a trashed doc holds the title). */
+    error?: string;
+    code?: string;
     property_validation?: {
         status: string;
         missing: string[];
@@ -532,7 +535,7 @@ export async function docsPushWithConfig(
     }
 
     for (const m of trackedMissing) {
-        process.stderr.write(chalk.yellow(`${m.file}: doc ${m.id} no longer exists (deleted remotely) — re-pull to untrack it, then push to re-create\n`));
+        process.stderr.write(chalk.yellow(`${m.file}: doc ${m.id} no longer exists (deleted remotely) — re-pull to untrack it, then push to re-create (restore or empty it from the trash first, or the title stays taken)\n`));
     }
 
     const summaryLine = formatSummaryLine(mergedSummary, !!options.dryRun);
@@ -542,6 +545,14 @@ export async function docsPushWithConfig(
         // Suppress "done: 0 docs" when there was nothing to bulk_create — printing it
         // alongside a successful tracked/media write reads as a contradiction.
         console.log(chalk.green(`done: ${summaryLine}`));
+    }
+
+    // `done: N errors` on its own says nothing. Name the file and the server's reason.
+    const erroredRows = allResultRows.filter((r) => r.status === 'error');
+    if (erroredRows.length > 0 && !options.json) {
+        for (const row of erroredRows) {
+            process.stderr.write(chalk.red(`${row.file}: ${row.error ?? row.code ?? 'unknown error'}\n`));
+        }
     }
 
     if (pendingItems.length > 0) {
