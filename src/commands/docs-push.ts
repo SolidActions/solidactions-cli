@@ -16,7 +16,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
-import { DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
+import { DOCS_MANIFEST, DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
@@ -401,10 +401,20 @@ export async function docsPushWithConfig(
 
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
 
+    // Untracked docs (new files, or files re-orphaned by a deleted-remotely re-pull)
+    // must land back under the folder this directory was pulled into, not the docs
+    // root — an explicit --folder always overrides the manifest's recorded folder.
+    const effectiveFolder = options.folder ?? manifest?.folder_path;
+    const folderInferredFromManifest = !options.folder && !!manifest?.folder_path;
+
     // Chunk into groups of CHUNK_SIZE
     const chunks: DocItem[][] = [];
     for (let i = 0; i < items.length; i += CHUNK_SIZE) {
         chunks.push(items.slice(i, i + CHUNK_SIZE));
+    }
+
+    if (folderInferredFromManifest && items.length > 0 && !options.json) {
+        console.log(chalk.gray(`creating untracked docs under "${effectiveFolder}" (from ${DOCS_MANIFEST})`));
     }
 
     const onConflict = options.onConflict ?? 'skip';
@@ -427,9 +437,11 @@ export async function docsPushWithConfig(
         if (options.type) {
             callArgs.type = options.type;
         }
-        if (options.folder) {
+        if (effectiveFolder) {
             // Top-level base for every item; each item's relative_folder_path nests under it.
-            callArgs.folder_path = options.folder;
+            // Explicit --folder wins; otherwise defaults to the manifest's folder_path so
+            // untracked docs in a pulled directory land back in the folder they came from.
+            callArgs.folder_path = effectiveFolder;
         }
         if (options.dryRun) {
             callArgs.dry_run = true;

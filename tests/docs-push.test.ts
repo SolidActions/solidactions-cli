@@ -981,6 +981,171 @@ describe('docsPushWithConfig — --folder base', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: untracked docs in a pulled dir default to the manifest's folder_path
+// (regression: docs push used to always create untracked docs at the docs
+// root, ignoring the pulled folder — see issue #433).
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — untracked docs inherit the manifest folder_path', () => {
+    function manifestFile(folder_path: string, docs: DocsManifest['docs'] = {}): string {
+        return JSON.stringify({ folder_path, docs }, null, 2);
+    }
+
+    it('pulled dir + untracked new.md + no --folder → bulk_create carries the manifest folder_path', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'new.md': '# New\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile('marketing/fb'),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.folder_path).toBe('marketing/fb');
+
+            // The inferred base is surfaced to the user.
+            expect(logLines.some((l) => l.includes('marketing/fb') && l.includes(DOCS_MANIFEST))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('an explicit --folder always wins over the manifest folder_path', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'new.md': '# New\n\nUntracked content.',
+            [DOCS_MANIFEST]: manifestFile('marketing/fb'),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip', folder: 'other/place' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.folder_path).toBe('other/place');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('no manifest in the dir → folder_path is absent, exactly as today', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'new.md': '# New\n\nUntracked content.' });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments).not.toHaveProperty('folder_path');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a nested untracked file keeps a relative_folder_path relative to <dir> — no double-prefix under the inferred base', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'sub/deep.md': '# Deep\n\nNested untracked content.',
+            [DOCS_MANIFEST]: manifestFile('marketing/fb'),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (!(e instanceof ProcessExitError)) throw e;
+            }
+
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(args.folder_path).toBe('marketing/fb');
+
+            const item = args.items.find((i: any) => i.title === 'deep');
+            expect(item).toBeDefined();
+            // Relative to <dir>, NOT pre-joined with the manifest folder_path — the
+            // server composes folder_path + relative_folder_path itself.
+            expect(item.relative_folder_path).toBe('sub');
+            expect(item.relative_folder_path).not.toBe('marketing/fb/sub');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('delete-recovery shape: a tracked doc missing from the manifest but present on disk is bulk_created under the manifest folder_path', async () => {
+        // Simulates the post-re-pull state described in the bug report: `gone.md` was
+        // deleted remotely, re-pulling untracked it (dropped from manifest.docs), but
+        // the local file is still on disk — so it's picked up as untracked and must be
+        // recreated under the pulled folder, not the docs root.
+        const trackedContent = '# Still Tracked';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'gone.md': '# Gone\n\nWas deleted remotely; now untracked.',
+            'still-tracked.md': trackedContent,
+            [DOCS_MANIFEST]: manifestFile('marketing/fb', {
+                'still-tracked.md': { id: 1, title: 'still-tracked', current_revision_id: 10, media: false, body_sha256: sha256Hex(trackedContent) },
+            }),
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const bulkCalls = allCaptures.filter((c) => c.body.params.arguments.action === 'bulk_create');
+            expect(bulkCalls.length).toBe(1);
+            expect(bulkCalls[0].body.params.arguments.folder_path).toBe('marketing/fb');
+
+            const items = bulkCalls[0].body.params.arguments.items;
+            expect(items.length).toBe(1);
+            expect(items[0].title).toBe('gone');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Tests: drift guard — tracked docs (manifest-backed) use docs_edit write
 // ---------------------------------------------------------------------------
 
