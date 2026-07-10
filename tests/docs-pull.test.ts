@@ -604,13 +604,22 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
     }
 
-    it('refuses (exit 1) when a tracked file has unpushed local changes, even with --yes; names the file and points at --overwrite', async () => {
+    it('edited file whose doc STILL EXISTS remotely: plain pull still refuses (exit 1), names the file, points at --overwrite, and writes nothing', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         writeManifest(dest, {
             'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
         });
         fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // The doc still exists on the server — this is a genuine conflict, not an orphan.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 15, properties: {}, body: '# Server Content' }],
+            }),
+        ];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -626,9 +635,11 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             expect(err).toContain('unpushed local changes');
             expect(err).toContain('--overwrite');
 
-            // Nothing written, no network calls.
+            // Refusal happens AFTER the server walk (network calls did occur) but BEFORE
+            // any write: the file's edited bytes and the manifest sidecar are untouched.
+            expect(allCaptures.length).toBeGreaterThan(0);
             expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('local edits, unpushed');
-            expect(allCaptures.length).toBe(0);
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
             restoreExit();
             restoreStderr();
@@ -636,7 +647,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         }
     });
 
-    it('refuses (exit 1) when a tracked MEDIA file has unpushed local changes (binary bytes differ from body_sha256) — coverage: detection is extension-agnostic, no code change needed', async () => {
+    it('edited MEDIA file whose doc STILL EXISTS remotely: plain pull still refuses (exit 1) — coverage: detection is extension-agnostic, no code change needed', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         const originalBytes = Buffer.from([1, 2, 3, 4]);
@@ -644,6 +655,23 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             'hero.png': { id: 7, title: 'hero', current_revision_id: 10, media: true, body_sha256: sha256Hex(originalBytes) },
         });
         fs.writeFileSync(path.join(dest, 'hero.png'), Buffer.from([9, 9, 9, 9]));
+
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 7, title: 'hero', properties: { blob_sha: 'abc', mime: 'image/png', size: 4 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'found', id: 7, title: 'hero', folder_path: 'marketing/docs', current_revision_id: 11,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 4 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+        ];
+        blobResponseQueue = [{ status: 200, bytes: Buffer.from([5, 6, 7, 8]) }];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -659,9 +687,105 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             expect(err).toContain('unpushed local changes');
             expect(err).toContain('--overwrite');
 
-            // Nothing written, no network calls.
+            // Nothing written: the locally-modified bytes on disk are untouched.
             expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(Buffer.from([9, 9, 9, 9]));
-            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('edited file whose doc was DELETED remotely: plain pull (no flags at all) succeeds, the file survives on disk with its edited bytes, and kept_modified names it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'doc.md': { id: 2, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+        }, 'marketing');
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+
+        // doc.md's doc (id 2) is no longer returned by the server — it was deleted remotely.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            // No --overwrite: the plain default path must be enough. --yes bypasses only
+            // the unrelated generic non-empty-destination prompt (it never bypasses the
+            // unpushed-local-changes conflict check — see the "even with --yes" test above).
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('local edits, unpushed');
+            const err = stderrLines.join('');
+            expect(err).toContain('doc.md');
+            expect(err).toContain('modified locally');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('both together in one pull: the still-existing conflict refuses (exit 1) and NOTHING is written or deleted, including the deleted-remotely orphan', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            // Still exists remotely, edited locally: a real conflict.
+            'conflict.md': { id: 2, title: 'conflict', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+            // Deleted remotely, edited locally: an orphan — not part of the refusal.
+            'orphan.md': { id: 3, title: 'orphan', current_revision_id: 5, media: false, body_sha256: sha256Hex('# Orphan Original') },
+        }, 'marketing');
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'conflict.md'), 'local edits to conflict', 'utf8');
+        fs.writeFileSync(path.join(dest, 'orphan.md'), 'local edits to orphan', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // Server still has doc 1 (a) and doc 2 (conflict), but doc 3 (orphan) is gone.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }, { id: 2, title: 'conflict', properties: {} }] }),
+            makeMcpSuccess({
+                results: [
+                    { index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' },
+                    { index: 1, status: 'found', id: 2, title: 'conflict', folder_path: 'marketing', current_revision_id: 12, properties: {}, body: '# Server Content' },
+                ],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('conflict.md');
+            expect(err).toContain('unpushed local changes');
+            // The orphan must not be named in the refusal — it isn't a conflict.
+            expect(err).not.toContain('orphan.md');
+
+            // Nothing was written or deleted: both edited files retain their local bytes,
+            // the unmodified file is untouched, and the manifest sidecar was never rewritten.
+            expect(fs.readFileSync(path.join(dest, 'conflict.md'), 'utf8')).toBe('local edits to conflict');
+            expect(fs.readFileSync(path.join(dest, 'orphan.md'), 'utf8')).toBe('local edits to orphan');
+            expect(fs.readFileSync(path.join(dest, 'a.md'), 'utf8')).toBe('A');
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
             restoreExit();
             restoreStderr();

@@ -1206,6 +1206,176 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tracked doc deleted remotely (docs_edit write / media POST -> doc_not_found)
+// ---------------------------------------------------------------------------
+
+describe('docsPushWithConfig — tracked doc deleted remotely', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    it('a tracked markdown doc whose docs_edit write returns doc_not_found: clear per-file message, exit 0, other tracked files still pushed', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'gone.md': '# Gone, edited locally',
+            'still-here.md': '# Still here, edited locally',
+            [DOCS_MANIFEST]: manifestFile({
+                'gone.md': { id: 1, title: 'gone', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Gone, original') },
+                'still-here.md': { id: 2, title: 'still-here', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Still here, original') },
+            }),
+        });
+
+        // Keyed off the request's doc id rather than call order — directory read order
+        // isn't guaranteed, so gone.md (id 1) and still-here.md (id 2) may be processed
+        // in either order.
+        const respond = (body: any) => {
+            const id = body.params.arguments.id;
+            if (id === 1) return makeMcpError('doc_not_found', 'Doc not found');
+            return makeMcpSuccess({ id, current_revision_id: 11 });
+        };
+        responseQueue = [respond, respond];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            const err = stderrLines.join('\n');
+            expect(err).toContain('gone.md');
+            expect(err).toContain('doc 1');
+            expect(err).toContain('no longer exists');
+            expect(err.toLowerCase()).toContain('re-pull');
+
+            // The other tracked file was still written despite the doc_not_found.
+            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_edit');
+            expect(editCalls.length).toBe(2);
+            expect(editCalls.some((c) => c.body.params.arguments.id === 2)).toBe(true);
+
+            const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+            // gone.md's entry is untouched — still tracked at its old revision — so a
+            // re-pull can untrack it (the deletion-propagation path in `docs pull`).
+            expect(manifest.docs['gone.md'].current_revision_id).toBe(10);
+            expect(manifest.docs['still-here.md'].current_revision_id).toBe(11);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('a tracked media doc whose replace POST returns 404 doc_not_found: clear per-file message, exit 0', async () => {
+        const bytes = 'new bytes, changed from the pull-time original';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': bytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex('old bytes') },
+            }),
+        });
+
+        queueMedia(404, { code: 'doc_not_found', message: 'Doc not found' });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            const err = stderrLines.join('\n');
+            expect(err).toContain('hero.png');
+            expect(err).toContain('doc 42');
+            expect(err).toContain('no longer exists');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('the pre-existing drift test still exits 1 (doc_not_found handling does not weaken genuine drift)', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'a.md': '# A, edited',
+            [DOCS_MANIFEST]: manifestFile({
+                'a.md': { id: 1, title: 'a', current_revision_id: 10, media: false, body_sha256: sha256Hex('# A, original') },
+            }),
+        });
+
+        responseQueue = [makeMcpSuccess({ stale: true, code: 'stale_revision', current_revision_id: 12, base_revision: 10 })];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            expect(caughtExit?.code).toBe(1);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('a media-only successful push prints no "done: 0 docs" line', async () => {
+        const oldBytes = 'old png bytes';
+        const newBytes = 'new png bytes, totally different from the old ones';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'hero.png': newBytes,
+            [DOCS_MANIFEST]: manifestFile({
+                'hero.png': { id: 42, title: 'hero.png', current_revision_id: 7, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+
+        queueMedia(200, { doc: { id: 42, current_version_id: 8 } });
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(logLines.some((l) => l.includes('done:'))).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Tests: incremental manifest refresh — a later failure must not lose an
 // earlier tracked write's already-persisted revision.
 // ---------------------------------------------------------------------------

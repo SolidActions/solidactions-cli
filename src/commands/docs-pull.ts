@@ -274,22 +274,37 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
 }
 
 /**
- * Write every fetched doc to disk under `destination`, tracking sanitized
- * filename collisions per directory (suffix "-2", "-3", ... before the
- * extension). Returns the manifest docs map, the ordered list of written
- * files (for --json output), and any non-fatal warnings (e.g. a media
- * signed-URL download that failed).
+ * A fetched doc resolved to its final on-disk path (including per-directory
+ * collision suffixes), with media confirmed/downloaded and its content hash
+ * computed. No filesystem writes happen while building this — see
+ * `commitDocs`. Kept separate so a caller can inspect the plan (e.g. to
+ * check for an unpushed-local-changes conflict) before anything touches
+ * disk.
  */
-async function writeDocs(destination: string, docs: FetchedDoc[], config: Config): Promise<{ manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }>; warnings: string[] }> {
-    const manifestDocs: DocsManifest['docs'] = {};
-    const files: Array<{ path: string; action: 'written' }> = [];
+interface PlannedDoc {
+    doc: FetchedDoc;
+    relPath: string;
+    dirRel: string;
+    fileName: string;
+    isMedia: boolean;
+    /** Bytes to write for a media doc; null if the signed-URL download failed. */
+    mediaBytes: Buffer | null;
+    bodySha256: string | null;
+}
+
+/**
+ * Resolve every fetched doc into a `PlannedDoc` — final relative path and
+ * content hash — confirming/downloading media as needed. This is the only
+ * place that talks to the media confirm/download endpoints; it performs no
+ * filesystem writes.
+ */
+async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+    const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
 
     for (const doc of docs) {
         const dirRel = doc.relative;
-        const dirAbs = dirRel ? path.join(destination, ...dirRel.split('/')) : destination;
-        fs.mkdirSync(dirAbs, { recursive: true });
 
         let used = usedNamesByDir.get(dirRel);
         if (!used) {
@@ -325,42 +340,74 @@ async function writeDocs(destination: string, docs: FetchedDoc[], config: Config
         const fileName = `${candidate}${ext}`;
         const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
-        // A destination path that already exists as a directory would make writeFileSync
-        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
-        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
-        const targetAbs = path.join(dirAbs, fileName);
-        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
-            process.stderr.write(chalk.red(`error: "${relPath}" exists and is not a regular file — cannot write doc ${doc.id} (${doc.title}).\n`));
-            process.exit(1);
-        }
-
         let bodySha256: string | null;
+        let mediaBytes: Buffer | null = null;
         if (media.isMedia) {
             if (media.bytes) {
-                fs.writeFileSync(path.join(dirAbs, fileName), media.bytes);
-                files.push({ path: relPath, action: 'written' });
+                mediaBytes = media.bytes;
                 bodySha256 = sha256Hex(media.bytes);
             } else {
-                // Download failure: warning already recorded above; skip the write but
-                // still record the manifest entry below so the doc isn't silently lost.
+                // Download failure: warning already recorded above; the doc is still
+                // tracked (manifest entry written by commitDocs) but there is nothing
+                // to write to disk.
                 bodySha256 = null;
             }
         } else {
-            fs.writeFileSync(path.join(dirAbs, fileName), doc.body, 'utf8');
-            files.push({ path: relPath, action: 'written' });
             bodySha256 = sha256Hex(doc.body);
         }
 
-        manifestDocs[relPath] = {
-            id: doc.id,
-            title: doc.title,
-            current_revision_id: doc.current_revision_id,
-            media: media.isMedia,
-            body_sha256: bodySha256,
+        planned.push({ doc, relPath, dirRel, fileName, isMedia: media.isMedia, mediaBytes, bodySha256 });
+    }
+
+    return { planned, warnings };
+}
+
+/**
+ * Write every planned doc to disk under `destination` and build the
+ * manifest docs map. The only step in the whole pull that creates
+ * directories or writes/overwrites files — called only after any
+ * unpushed-local-changes conflict has already refused, so it never clobbers
+ * a file the caller decided to keep.
+ */
+function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
+    const manifestDocs: DocsManifest['docs'] = {};
+    const files: Array<{ path: string; action: 'written' }> = [];
+
+    for (const p of planned) {
+        const dirAbs = p.dirRel ? path.join(destination, ...p.dirRel.split('/')) : destination;
+        fs.mkdirSync(dirAbs, { recursive: true });
+
+        // A destination path that already exists as a directory would make writeFileSync
+        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
+        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
+        const targetAbs = path.join(dirAbs, p.fileName);
+        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
+            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
+            process.exit(1);
+        }
+
+        if (p.isMedia) {
+            if (p.mediaBytes) {
+                fs.writeFileSync(targetAbs, p.mediaBytes);
+                files.push({ path: p.relPath, action: 'written' });
+            }
+            // else: download failure, warning already recorded by planDocs; skip the
+            // write but still record the manifest entry below so the doc isn't lost.
+        } else {
+            fs.writeFileSync(targetAbs, p.doc.body, 'utf8');
+            files.push({ path: p.relPath, action: 'written' });
+        }
+
+        manifestDocs[p.relPath] = {
+            id: p.doc.id,
+            title: p.doc.title,
+            current_revision_id: p.doc.current_revision_id,
+            media: p.isMedia,
+            body_sha256: p.bodySha256,
         };
     }
 
-    return { manifestDocs, files, warnings };
+    return { manifestDocs, files };
 }
 
 /**
@@ -383,26 +430,13 @@ export async function docsPullWithConfig(
     let usedSingleDocFallback = false;
 
     // Overwrite-confirm: warn + confirm on a non-empty destination before any network I/O.
+    // The unpushed-local-changes conflict refusal (detectLocalModifications) happens later,
+    // in report() — only once the server walk is known can it tell a real conflict (the
+    // doc still exists remotely) from an edited orphan (kept + warned, no flag needed).
     if (fs.existsSync(destination)) {
         if (!fs.statSync(destination).isDirectory()) {
             process.stderr.write(chalk.red(`error: destination "${destination}" exists and is not a directory.\n`));
             process.exit(1);
-        }
-        // Unpushed-local-changes protection: before any writes or network I/O, compare
-        // manifest-tracked files against their pull-time body_sha256. --overwrite is the
-        // only way past a refusal; plain --yes still only covers the generic non-empty
-        // confirmation below.
-        if (previousManifest && !options.overwrite) {
-            const modified = detectLocalModifications(destination, previousManifest);
-            if (modified.length > 0) {
-                const noun = modified.length === 1 ? 'file has' : 'files have';
-                process.stderr.write(chalk.red(`${modified.length} ${noun} unpushed local changes:\n`));
-                for (const file of modified) {
-                    process.stderr.write(chalk.red(`  ${file}\n`));
-                }
-                process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
-                process.exit(1);
-            }
         }
 
         const entries = fs.readdirSync(destination);
@@ -476,8 +510,32 @@ async function report(
     previousManifest: DocsManifest | null,
     usedSingleDocFallback: boolean,
 ): Promise<void> {
+    const { planned, warnings } = await planDocs(fetched, config);
+
+    // Unpushed-local-changes protection: now that the server walk is known, refuse only
+    // for a file whose doc still exists remotely — i.e. its relative path is part of this
+    // pull's plan and would be overwritten by commitDocs below. A modified file whose
+    // relPath is NOT in the plan is an orphan, not a conflict: it is left alone here and
+    // the deletion-propagation block further down keeps it and warns (no --overwrite
+    // needed). This check must run before commitDocs — nothing may be written to disk
+    // before a real conflict has had the chance to refuse.
+    if (previousManifest && !options.overwrite) {
+        const modified = detectLocalModifications(destination, previousManifest);
+        const plannedPaths = new Set(planned.map((p) => p.relPath));
+        const conflicts = modified.filter((relPath) => plannedPaths.has(relPath));
+        if (conflicts.length > 0) {
+            const noun = conflicts.length === 1 ? 'file has' : 'files have';
+            process.stderr.write(chalk.red(`${conflicts.length} ${noun} unpushed local changes:\n`));
+            for (const file of conflicts) {
+                process.stderr.write(chalk.red(`  ${file}\n`));
+            }
+            process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
+            process.exit(1);
+        }
+    }
+
     fs.mkdirSync(destination, { recursive: true });
-    const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
+    const { manifestDocs, files } = commitDocs(destination, planned);
 
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
     writeManifest(destination, manifest);

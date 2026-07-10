@@ -100,6 +100,12 @@ interface TrackedUnchanged {
     id: number;
 }
 
+/** A tracked doc/media entry whose id no longer exists server-side (deleted remotely). */
+interface TrackedMissing {
+    file: string;
+    id: number;
+}
+
 /**
  * Recursively walk `dir` and collect all *.md files.
  * Returns a list of absolute paths.
@@ -263,6 +269,7 @@ export async function docsPushWithConfig(
     const trackedDrifted: TrackedDrifted[] = [];
     const trackedPlanned: TrackedPlanned[] = [];
     const trackedUnchanged: TrackedUnchanged[] = [];
+    const trackedMissing: TrackedMissing[] = [];
 
     for (const { absPath, relPath } of trackedFiles) {
         const entry = manifest!.docs[relPath];
@@ -298,6 +305,12 @@ export async function docsPushWithConfig(
 
         if (!mcpResult.ok) {
             const code = mcpResult.data?.code ?? 'unknown_error';
+            if (code === 'doc_not_found') {
+                // The tracked doc was deleted remotely since the last pull. Not a genuine
+                // drift/error: report it and move on rather than aborting the whole push.
+                trackedMissing.push({ file: relPath, id: entry.id });
+                continue;
+            }
             const message = mcpResult.data?.message ?? 'MCP returned an error with no message';
             process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
             process.exit(1);
@@ -361,6 +374,13 @@ export async function docsPushWithConfig(
             const data = error.response?.data;
             if (status === 409 && data?.code === 'stale_revision') {
                 trackedDrifted.push({ file: relPath, their: data.current_revision_id ?? null, base: entry.current_revision_id });
+                continue;
+            }
+            if (status === 404 && data?.code === 'doc_not_found') {
+                // The tracked doc was deleted remotely since the last pull — same
+                // treatment as the markdown pass. `media_not_found` is a different case
+                // (doc exists but isn't a media doc) and is not handled here.
+                trackedMissing.push({ file: relPath, id: entry.id });
                 continue;
             }
             process.stderr.write(chalk.red(`error: ${relPath}: ${data?.message ?? error.message}\n`));
@@ -463,7 +483,7 @@ export async function docsPushWithConfig(
             summary: mergedSummary,
             pending: pendingItems,
             results: allResultRows,
-            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged },
+            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged, missing: trackedMissing },
             untracked_media: untrackedMedia,
         }));
         process.exit(exitCode);
@@ -499,10 +519,16 @@ export async function docsPushWithConfig(
         }
     }
 
+    for (const m of trackedMissing) {
+        process.stderr.write(chalk.yellow(`${m.file}: doc ${m.id} no longer exists (deleted remotely) — re-pull to untrack it, then push to re-create\n`));
+    }
+
     const summaryLine = formatSummaryLine(mergedSummary, !!options.dryRun);
     if (options.dryRun) {
         console.log(chalk.cyan(`[dry-run preview] ${summaryLine}`));
-    } else {
+    } else if (items.length > 0) {
+        // Suppress "done: 0 docs" when there was nothing to bulk_create — printing it
+        // alongside a successful tracked/media write reads as a contradiction.
         console.log(chalk.green(`done: ${summaryLine}`));
     }
 
