@@ -10,11 +10,13 @@
 
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
+import FormData from 'form-data';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
-import { requireConfigWithWorkspace } from '../utils/api';
+import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
-import { DOCS_MANIFEST, DocsManifest, sha256Hex } from './docs-pull';
+import { DOCS_MANIFEST, DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
 export interface DocsPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
@@ -43,6 +45,9 @@ interface BulkCreateResultRow {
     id?: string;
     folder_path?: string;
     action?: string;
+    /** Server-side reason when `status === 'error'` (e.g. a trashed doc holds the title). */
+    error?: string;
+    code?: string;
     property_validation?: {
         status: string;
         missing: string[];
@@ -98,21 +103,10 @@ interface TrackedUnchanged {
     id: number;
 }
 
-/**
- * Read `<absDir>/.solidactions-docs.json`. Absent or unparseable → null,
- * meaning nothing under `absDir` is guarded (sidecar convention from D1/D2).
- */
-function readManifest(absDir: string): DocsManifest | null {
-    const manifestPath = path.join(absDir, DOCS_MANIFEST);
-    if (!fs.existsSync(manifestPath)) {
-        return null;
-    }
-    try {
-        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
-    } catch {
-        process.stderr.write(chalk.yellow(`warn: ${DOCS_MANIFEST} exists but could not be parsed — all files will be treated as untracked\n`));
-        return null;
-    }
+/** A tracked doc/media entry whose id no longer exists server-side (deleted remotely). */
+interface TrackedMissing {
+    file: string;
+    id: number;
 }
 
 /**
@@ -129,6 +123,37 @@ function walkMarkdownFiles(dir: string): string[] {
                 walk(abs);
             } else if (entry.isFile() && entry.name.endsWith('.md')) {
                 results.push(abs);
+            }
+        }
+    };
+
+    walk(dir);
+    return results;
+}
+
+const SKIP_DIRS = new Set(['node_modules']);
+
+/**
+ * Recursively walk `dir` and collect relative paths of non-.md files that
+ * are not present in the manifest — never uploaded by `docs push`; `docs
+ * upload` is the way to create media docs from these. Dotfiles and
+ * dot-directories are excluded (`entry.name.startsWith('.')` also covers the
+ * `.solidactions-docs.json` sidecar itself).
+ */
+function walkUntrackedBinaries(dir: string, manifest: DocsManifest | null): string[] {
+    const results: string[] = [];
+
+    const walk = (current: string): void => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+            const abs = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(abs);
+            } else if (entry.isFile() && !entry.name.endsWith('.md')) {
+                const relPath = path.relative(dir, abs).split(path.sep).join('/');
+                if (!manifest?.docs[relPath]) {
+                    results.push(relPath);
+                }
             }
         }
     };
@@ -212,20 +237,31 @@ export async function docsPushWithConfig(
 
     const allFiles = walkMarkdownFiles(absDir);
 
-    if (allFiles.length === 0) {
-        process.stderr.write(chalk.red(`error: no .md files found under "${dir}" — nothing to push.\n`));
+    // A missing/unparseable manifest means nothing is tracked — everything is untracked,
+    // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
+    const manifest = readManifest(absDir, { warnOnParseError: true });
+    const trackedMediaEntries = Object.entries(manifest?.docs ?? {}).filter(([, e]) => e.media);
+
+    // A pulled folder of images alone (no .md files) must still be pushable — the early
+    // exit only fires when there's truly nothing to push.
+    if (allFiles.length === 0 && trackedMediaEntries.length === 0) {
+        process.stderr.write(chalk.red(`error: no .md files or tracked media found under "${dir}" — nothing to push.\n`));
         process.exit(1);
     }
 
     // Partition into tracked (relative path present in the pull manifest) vs. untracked.
-    // A missing/unparseable manifest means nothing is tracked — everything is untracked,
-    // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
-    const manifest = readManifest(absDir);
+    // A media doc titled *.md (e.g. `notes.md`) is bytes, not markdown — it's owned by
+    // the media pass below, not this markdown pass, or its bytes would be sent through
+    // docs_edit as a text body and corrupt the doc.
     const trackedFiles: Array<{ absPath: string; relPath: string }> = [];
     const untrackedFiles: string[] = [];
     for (const f of allFiles) {
         const relPath = path.relative(absDir, f).split(path.sep).join('/');
-        if (manifest?.docs[relPath]) {
+        const entry = manifest?.docs[relPath];
+        if (entry?.media) {
+            continue;
+        }
+        if (entry) {
             trackedFiles.push({ absPath: f, relPath });
         } else {
             untrackedFiles.push(f);
@@ -236,6 +272,7 @@ export async function docsPushWithConfig(
     const trackedDrifted: TrackedDrifted[] = [];
     const trackedPlanned: TrackedPlanned[] = [];
     const trackedUnchanged: TrackedUnchanged[] = [];
+    const trackedMissing: TrackedMissing[] = [];
 
     for (const { absPath, relPath } of trackedFiles) {
         const entry = manifest!.docs[relPath];
@@ -271,6 +308,12 @@ export async function docsPushWithConfig(
 
         if (!mcpResult.ok) {
             const code = mcpResult.data?.code ?? 'unknown_error';
+            if (code === 'doc_not_found') {
+                // The tracked doc was deleted remotely since the last pull. Not a genuine
+                // drift/error: report it and move on rather than aborting the whole push.
+                trackedMissing.push({ file: relPath, id: entry.id });
+                continue;
+            }
             const message = mcpResult.data?.message ?? 'MCP returned an error with no message';
             process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
             process.exit(1);
@@ -288,15 +331,100 @@ export async function docsPushWithConfig(
 
         // Persist immediately so a later failure (another tracked write, or an
         // untracked bulk_create error) never loses this file's refreshed revision.
-        fs.writeFileSync(path.join(absDir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+        writeManifest(absDir, manifest!);
     }
 
+    // Media pass: tracked binaries (media: true) replace via POST /api/v1/docs/{id}/media,
+    // sharing the report arrays above.
+    for (const [relPath, entry] of trackedMediaEntries) {
+        const absPath = path.join(absDir, ...relPath.split('/'));
+
+        // Existence before hash: a pull whose media download failed records
+        // `media: true, body_sha256: null` and writes no file. push never deletes.
+        if (!fs.existsSync(absPath)) {
+            continue;
+        }
+
+        // A directory sitting where a media file is tracked (e.g. `hero.png/`) would
+        // otherwise make readFileSync throw EISDIR uncaught mid-push. push never deletes,
+        // so skip it rather than crash.
+        if (!fs.statSync(absPath).isFile()) {
+            continue;
+        }
+
+        const bytes = fs.readFileSync(absPath);
+        const bodyHash = sha256Hex(bytes);
+
+        if (entry.body_sha256 != null && entry.body_sha256 === bodyHash) {
+            trackedUnchanged.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        if (options.dryRun) {
+            trackedPlanned.push({ file: relPath, id: entry.id });
+            continue;
+        }
+
+        const form = new FormData();
+        form.append('file', bytes, { filename: path.basename(relPath) });
+        if (!options.force && entry.current_revision_id !== null) {
+            form.append('base_revision', String(entry.current_revision_id));
+        }
+
+        let doc: any;
+        try {
+            const response = await axios.post(`${config.host}/api/v1/docs/${entry.id}/media`, form, {
+                headers: { ...form.getHeaders(), ...getApiHeaders(config) },
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+            });
+            doc = response.data?.doc;
+        } catch (error: any) {
+            const status = error.response?.status;
+            const data = error.response?.data;
+            if (status === 409 && data?.code === 'stale_revision') {
+                trackedDrifted.push({ file: relPath, their: data.current_revision_id ?? null, base: entry.current_revision_id });
+                continue;
+            }
+            if (status === 404 && data?.code === 'doc_not_found') {
+                // The tracked doc was deleted remotely since the last pull — same
+                // treatment as the markdown pass. `media_not_found` is a different case
+                // (doc exists but isn't a media doc) and is not handled here.
+                trackedMissing.push({ file: relPath, id: entry.id });
+                continue;
+            }
+            process.stderr.write(chalk.red(`error: ${relPath}: ${data?.message ?? error.message}\n`));
+            process.exit(1);
+        }
+
+        // The REST presenter names the revision `current_version_id`; MCP docs_edit
+        // names it `current_revision_id`. Reading the wrong one nulls the entry and
+        // silently disarms the drift guard on every later push.
+        entry.current_revision_id = doc?.current_version_id ?? entry.current_revision_id;
+        entry.body_sha256 = bodyHash;
+        trackedWritten.push({ file: relPath, id: entry.id, current_revision_id: entry.current_revision_id });
+
+        writeManifest(absDir, manifest!);
+    }
+
+    const untrackedMedia = walkUntrackedBinaries(absDir, manifest);
+
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
+
+    // Untracked docs (new files, or files re-orphaned by a deleted-remotely re-pull)
+    // must land back under the folder this directory was pulled into, not the docs
+    // root — an explicit --folder always overrides the manifest's recorded folder.
+    const effectiveFolder = options.folder ?? manifest?.folder_path;
+    const folderInferredFromManifest = !options.folder && !!manifest?.folder_path;
 
     // Chunk into groups of CHUNK_SIZE
     const chunks: DocItem[][] = [];
     for (let i = 0; i < items.length; i += CHUNK_SIZE) {
         chunks.push(items.slice(i, i + CHUNK_SIZE));
+    }
+
+    if (folderInferredFromManifest && items.length > 0 && !options.json) {
+        console.log(chalk.gray(`creating untracked docs under "${effectiveFolder}" (from ${DOCS_MANIFEST})`));
     }
 
     const onConflict = options.onConflict ?? 'skip';
@@ -319,9 +447,11 @@ export async function docsPushWithConfig(
         if (options.type) {
             callArgs.type = options.type;
         }
-        if (options.folder) {
+        if (effectiveFolder) {
             // Top-level base for every item; each item's relative_folder_path nests under it.
-            callArgs.folder_path = options.folder;
+            // Explicit --folder wins; otherwise defaults to the manifest's folder_path so
+            // untracked docs in a pulled directory land back in the folder they came from.
+            callArgs.folder_path = effectiveFolder;
         }
         if (options.dryRun) {
             callArgs.dry_run = true;
@@ -367,7 +497,9 @@ export async function docsPushWithConfig(
             invalid: r.property_validation!.invalid ?? [],
         }));
 
-    const exitCode = trackedDrifted.length > 0 ? 1 : 0;
+    // `done: N errors` on its own says nothing. Name the file and the server's reason.
+    const erroredRows = allResultRows.filter((r) => r.status === 'error');
+    const exitCode = trackedDrifted.length > 0 || erroredRows.length > 0 ? 1 : 0;
 
     // --json: output single JSON object
     if (options.json) {
@@ -375,7 +507,8 @@ export async function docsPushWithConfig(
             summary: mergedSummary,
             pending: pendingItems,
             results: allResultRows,
-            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged },
+            tracked: { written: trackedWritten, drifted: trackedDrifted, planned: trackedPlanned, unchanged: trackedUnchanged, missing: trackedMissing },
+            untracked_media: untrackedMedia,
         }));
         process.exit(exitCode);
     }
@@ -401,11 +534,32 @@ export async function docsPushWithConfig(
         }
     }
 
+    if (untrackedMedia.length > 0) {
+        for (const file of untrackedMedia.slice(0, 10)) {
+            process.stderr.write(chalk.yellow(`${file}: not pushed — use \`solidactions docs upload\`\n`));
+        }
+        if (untrackedMedia.length > 10) {
+            process.stderr.write(chalk.yellow(`… and ${untrackedMedia.length - 10} more\n`));
+        }
+    }
+
+    for (const m of trackedMissing) {
+        process.stderr.write(chalk.yellow(`${m.file}: doc ${m.id} no longer exists (deleted remotely) — re-pull to untrack it, then push to re-create (restore or empty it from the trash first, or the title stays taken)\n`));
+    }
+
     const summaryLine = formatSummaryLine(mergedSummary, !!options.dryRun);
     if (options.dryRun) {
         console.log(chalk.cyan(`[dry-run preview] ${summaryLine}`));
-    } else {
+    } else if (items.length > 0) {
+        // Suppress "done: 0 docs" when there was nothing to bulk_create — printing it
+        // alongside a successful tracked/media write reads as a contradiction.
         console.log(chalk.green(`done: ${summaryLine}`));
+    }
+
+    if (erroredRows.length > 0 && !options.json) {
+        for (const row of erroredRows) {
+            process.stderr.write(chalk.red(`${row.file}: ${row.error ?? row.code ?? 'unknown error'}\n`));
+        }
     }
 
     if (pendingItems.length > 0) {

@@ -17,13 +17,17 @@
 
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { Config } from '../utils/config';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
+import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
+
+// Re-exported for backward compatibility: tests and docs-push import these from here.
+export { DOCS_MANIFEST, sha256Hex };
+export type { DocsManifest, ManifestEntry };
 
 /** Extension appended to a media file's sanitized title when the title itself has none. */
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -33,27 +37,6 @@ const MIME_EXTENSIONS: Record<string, string> = {
     'image/webp': '.webp',
     'application/pdf': '.pdf',
 };
-
-export const DOCS_MANIFEST = '.solidactions-docs.json';
-
-export interface DocsManifest {
-    folder_path: string;
-    docs: Record<string, {
-        id: number;
-        title: string;
-        current_revision_id: number | null;
-        media: boolean;
-        /**
-         * sha256 (hex) of the exact bytes written for this file at pull time
-         * (markdown body string, or downloaded media bytes). `null` when a
-         * media download soft-failed (no bytes to hash). Manifests written
-         * before this field existed simply omit it — callers must treat a
-         * missing/undefined value the same as "no hash available", never as
-         * a match.
-         */
-        body_sha256?: string | null;
-    }>;
-}
 
 export interface DocsPullOptions {
     yes?: boolean;
@@ -161,27 +144,6 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
     return { isMedia: true, mime, bytes: Buffer.from(download.data) };
 }
 
-/** sha256 hex digest of the given bytes/string, as written to disk. */
-export function sha256Hex(data: string | Buffer): string {
-    return crypto.createHash('sha256').update(data).digest('hex');
-}
-
-/**
- * Read `<destination>/.solidactions-docs.json`. Absent or unparseable → null,
- * meaning the destination isn't manifest-tracked (nothing to protect).
- */
-function readExistingManifest(destination: string): DocsManifest | null {
-    const manifestPath = path.join(destination, DOCS_MANIFEST);
-    if (!fs.existsSync(manifestPath)) {
-        return null;
-    }
-    try {
-        return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as DocsManifest;
-    } catch {
-        return null;
-    }
-}
-
 /**
  * Compare each manifest-tracked file against its recorded `body_sha256` to
  * find unpushed local edits. An entry without a hash (old manifest) or whose
@@ -193,7 +155,15 @@ function detectLocalModifications(destination: string, manifest: DocsManifest): 
     for (const [relPath, entry] of Object.entries(manifest.docs)) {
         if (entry.body_sha256 == null) continue;
         const absPath = path.join(destination, relPath);
-        if (!fs.existsSync(absPath)) continue;
+        // Only hash regular files. A corrupt manifest key naming a directory would
+        // otherwise throw EISDIR and abort the pull before it starts.
+        let stat: fs.Stats;
+        try {
+            stat = fs.statSync(absPath);
+        } catch {
+            continue; // missing locally — graceful degradation, never a false refusal
+        }
+        if (!stat.isFile()) continue;
         const currentHash = sha256Hex(fs.readFileSync(absPath));
         if (currentHash !== entry.body_sha256) {
             modified.push(relPath);
@@ -304,22 +274,37 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
 }
 
 /**
- * Write every fetched doc to disk under `destination`, tracking sanitized
- * filename collisions per directory (suffix "-2", "-3", ... before the
- * extension). Returns the manifest docs map, the ordered list of written
- * files (for --json output), and any non-fatal warnings (e.g. a media
- * signed-URL download that failed).
+ * A fetched doc resolved to its final on-disk path (including per-directory
+ * collision suffixes), with media confirmed/downloaded and its content hash
+ * computed. No filesystem writes happen while building this — see
+ * `commitDocs`. Kept separate so a caller can inspect the plan (e.g. to
+ * check for an unpushed-local-changes conflict) before anything touches
+ * disk.
  */
-async function writeDocs(destination: string, docs: FetchedDoc[], config: Config): Promise<{ manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }>; warnings: string[] }> {
-    const manifestDocs: DocsManifest['docs'] = {};
-    const files: Array<{ path: string; action: 'written' }> = [];
+interface PlannedDoc {
+    doc: FetchedDoc;
+    relPath: string;
+    dirRel: string;
+    fileName: string;
+    isMedia: boolean;
+    /** Bytes to write for a media doc; null if the signed-URL download failed. */
+    mediaBytes: Buffer | null;
+    bodySha256: string | null;
+}
+
+/**
+ * Resolve every fetched doc into a `PlannedDoc` — final relative path and
+ * content hash — confirming/downloading media as needed. This is the only
+ * place that talks to the media confirm/download endpoints; it performs no
+ * filesystem writes.
+ */
+async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+    const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
 
     for (const doc of docs) {
         const dirRel = doc.relative;
-        const dirAbs = dirRel ? path.join(destination, ...dirRel.split('/')) : destination;
-        fs.mkdirSync(dirAbs, { recursive: true });
 
         let used = usedNamesByDir.get(dirRel);
         if (!used) {
@@ -356,32 +341,73 @@ async function writeDocs(destination: string, docs: FetchedDoc[], config: Config
         const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
         let bodySha256: string | null;
+        let mediaBytes: Buffer | null = null;
         if (media.isMedia) {
             if (media.bytes) {
-                fs.writeFileSync(path.join(dirAbs, fileName), media.bytes);
-                files.push({ path: relPath, action: 'written' });
+                mediaBytes = media.bytes;
                 bodySha256 = sha256Hex(media.bytes);
             } else {
-                // Download failure: warning already recorded above; skip the write but
-                // still record the manifest entry below so the doc isn't silently lost.
+                // Download failure: warning already recorded above; the doc is still
+                // tracked (manifest entry written by commitDocs) but there is nothing
+                // to write to disk.
                 bodySha256 = null;
             }
         } else {
-            fs.writeFileSync(path.join(dirAbs, fileName), doc.body, 'utf8');
-            files.push({ path: relPath, action: 'written' });
             bodySha256 = sha256Hex(doc.body);
         }
 
-        manifestDocs[relPath] = {
-            id: doc.id,
-            title: doc.title,
-            current_revision_id: doc.current_revision_id,
-            media: media.isMedia,
-            body_sha256: bodySha256,
+        planned.push({ doc, relPath, dirRel, fileName, isMedia: media.isMedia, mediaBytes, bodySha256 });
+    }
+
+    return { planned, warnings };
+}
+
+/**
+ * Write every planned doc to disk under `destination` and build the
+ * manifest docs map. The only step in the whole pull that creates
+ * directories or writes/overwrites files — called only after any
+ * unpushed-local-changes conflict has already refused, so it never clobbers
+ * a file the caller decided to keep.
+ */
+function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
+    const manifestDocs: DocsManifest['docs'] = {};
+    const files: Array<{ path: string; action: 'written' }> = [];
+
+    for (const p of planned) {
+        const dirAbs = p.dirRel ? path.join(destination, ...p.dirRel.split('/')) : destination;
+        fs.mkdirSync(dirAbs, { recursive: true });
+
+        // A destination path that already exists as a directory would make writeFileSync
+        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
+        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
+        const targetAbs = path.join(dirAbs, p.fileName);
+        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
+            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
+            process.exit(1);
+        }
+
+        if (p.isMedia) {
+            if (p.mediaBytes) {
+                fs.writeFileSync(targetAbs, p.mediaBytes);
+                files.push({ path: p.relPath, action: 'written' });
+            }
+            // else: download failure, warning already recorded by planDocs; skip the
+            // write but still record the manifest entry below so the doc isn't lost.
+        } else {
+            fs.writeFileSync(targetAbs, p.doc.body, 'utf8');
+            files.push({ path: p.relPath, action: 'written' });
+        }
+
+        manifestDocs[p.relPath] = {
+            id: p.doc.id,
+            title: p.doc.title,
+            current_revision_id: p.doc.current_revision_id,
+            media: p.isMedia,
+            body_sha256: p.bodySha256,
         };
     }
 
-    return { manifestDocs, files, warnings };
+    return { manifestDocs, files };
 }
 
 /**
@@ -397,28 +423,20 @@ export async function docsPullWithConfig(
     const destInput = dest ?? `./${lastSegment(folderPath)}`;
     const destination = path.resolve(destInput);
 
+    // Captured once, before the walk, so deletion propagation (below) can diff
+    // against the folder tree as it stood before this pull. Already read below
+    // for overwrite protection — hoisted here rather than read twice.
+    const previousManifest = fs.existsSync(destination) ? readManifest(destination) : null;
+    let usedSingleDocFallback = false;
+
     // Overwrite-confirm: warn + confirm on a non-empty destination before any network I/O.
+    // The unpushed-local-changes conflict refusal (detectLocalModifications) happens later,
+    // in report() — only once the server walk is known can it tell a real conflict (the
+    // doc still exists remotely) from an edited orphan (kept + warned, no flag needed).
     if (fs.existsSync(destination)) {
         if (!fs.statSync(destination).isDirectory()) {
             process.stderr.write(chalk.red(`error: destination "${destination}" exists and is not a directory.\n`));
             process.exit(1);
-        }
-        // Unpushed-local-changes protection: before any writes or network I/O, compare
-        // manifest-tracked files against their pull-time body_sha256. --overwrite is the
-        // only way past a refusal; plain --yes still only covers the generic non-empty
-        // confirmation below.
-        const existingManifest = readExistingManifest(destination);
-        if (existingManifest && !options.overwrite) {
-            const modified = detectLocalModifications(destination, existingManifest);
-            if (modified.length > 0) {
-                const noun = modified.length === 1 ? 'file has' : 'files have';
-                process.stderr.write(chalk.red(`${modified.length} ${noun} unpushed local changes:\n`));
-                for (const file of modified) {
-                    process.stderr.write(chalk.red(`  ${file}\n`));
-                }
-                process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
-                process.exit(1);
-            }
         }
 
         const entries = fs.readdirSync(destination);
@@ -438,6 +456,20 @@ export async function docsPullWithConfig(
         }
     }
 
+    // Manifest-clobber protection: a manifest tracking a DIFFERENT folder than the one
+    // being pulled must never be silently replaced — every file it tracks would become
+    // untracked, and detectLocalModifications only protects tracked files. This must run
+    // before any network I/O (listTree/planDocs) and before detectLocalModifications, since
+    // a mismatched manifest can't meaningfully speak for the folder being pulled anyway.
+    // --overwrite already means "discard local-edit protection", so it bypasses this too.
+    if (previousManifest !== null && previousManifest.folder_path !== folderPath && !options.overwrite) {
+        process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
+        process.stderr.write(chalk.red(`Pulling "${folderPath}" here would replace its manifest, and local edits to the\n`));
+        process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
+        process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
+        process.exit(1);
+    }
+
     let rows: DocRow[];
 
     const listResult = await listTree(config, folderPath);
@@ -445,6 +477,7 @@ export async function docsPullWithConfig(
         rows = listResult.rows;
     } else if (listResult.isRoot && listResult.code === 'folder_path_not_found') {
         // Single-doc fallback: the target might be a doc path, not a folder.
+        usedSingleDocFallback = true;
         const dir = path.dirname(folderPath);
         const title = path.basename(folderPath);
         const readArgs: Record<string, unknown> = { action: 'read', path: dir === '.' ? { title } : { folder_path: dir, title } };
@@ -468,7 +501,7 @@ export async function docsPullWithConfig(
             properties: data.properties ?? {},
         }];
 
-        await report(destination, folderPath, fetched, options, config, []);
+        await report(destination, folderPath, fetched, options, config, [], previousManifest, usedSingleDocFallback);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -477,29 +510,165 @@ export async function docsPullWithConfig(
     }
 
     const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
-    await report(destination, folderPath, fetched, options, config, fetchWarnings);
+    await report(destination, folderPath, fetched, options, config, fetchWarnings, previousManifest, usedSingleDocFallback);
 }
 
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
-async function report(destination: string, folderPath: string, fetched: FetchedDoc[], options: DocsPullOptions, config: Config, extraWarnings: string[]): Promise<void> {
+async function report(
+    destination: string,
+    folderPath: string,
+    fetched: FetchedDoc[],
+    options: DocsPullOptions,
+    config: Config,
+    extraWarnings: string[],
+    previousManifest: DocsManifest | null,
+    usedSingleDocFallback: boolean,
+): Promise<void> {
+    const { planned, warnings } = await planDocs(fetched, config);
+
+    // Unpushed-local-changes protection: now that the server walk is known, refuse only
+    // for a file whose doc still exists remotely — i.e. its relative path is part of this
+    // pull's plan and would be overwritten by commitDocs below. A modified file whose
+    // relPath is NOT in the plan is an orphan, not a conflict: it is left alone here and
+    // the deletion-propagation block further down keeps it and warns (no --overwrite
+    // needed). This check must run before commitDocs — nothing may be written to disk
+    // before a real conflict has had the chance to refuse.
+    if (previousManifest && !options.overwrite) {
+        const modified = detectLocalModifications(destination, previousManifest);
+        const plannedPaths = new Set(planned.map((p) => p.relPath));
+        const conflicts = modified.filter((relPath) => plannedPaths.has(relPath));
+        if (conflicts.length > 0) {
+            const noun = conflicts.length === 1 ? 'file has' : 'files have';
+            process.stderr.write(chalk.red(`${conflicts.length} ${noun} unpushed local changes:\n`));
+            for (const file of conflicts) {
+                process.stderr.write(chalk.red(`  ${file}\n`));
+            }
+            process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
+            process.exit(1);
+        }
+    }
+
     fs.mkdirSync(destination, { recursive: true });
-    const { manifestDocs, files, warnings } = await writeDocs(destination, fetched, config);
+    const { manifestDocs, files } = commitDocs(destination, planned);
+
+    // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
+    // deletion-propagation loop below to recognize an "orphan" that is really just the
+    // same file this pull wrote under a different manifest key (e.g. a case-only title
+    // rename on a case-insensitive filesystem) — that file must never be deleted.
+    const writtenIdentities = new Set<string>();
+    for (const file of files) {
+        try {
+            const stat = fs.statSync(path.join(destination, ...file.path.split('/')));
+            writtenIdentities.add(`${stat.dev}:${stat.ino}`);
+        } catch {
+            continue;
+        }
+    }
 
     const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
-    fs.writeFileSync(path.join(destination, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));
     }
 
+    const removed: string[] = [];
+    const keptModified: string[] = [];
+
+    // Deletion propagation is only safe when the old manifest describes the SAME
+    // folder we just pulled. Otherwise every tracked file looks like an orphan and
+    // the unmodified ones would be deleted. The single-doc fallback writes a
+    // one-entry manifest, so it can never speak for a folder's contents either.
+    const canPropagateDeletions =
+        previousManifest !== null &&
+        !usedSingleDocFallback &&
+        previousManifest.folder_path === folderPath;
+
+    if (previousManifest !== null && !canPropagateDeletions) {
+        if (usedSingleDocFallback) {
+            process.stderr.write(chalk.yellow("deletions not propagated: single-doc pull cannot speak for a folder's contents\n"));
+        } else if (previousManifest.folder_path !== folderPath) {
+            process.stderr.write(chalk.yellow(`deletions not propagated: this directory tracks "${previousManifest.folder_path}", not "${folderPath}"\n`));
+        }
+    }
+
+    const keptModifiedMedia = new Set<string>();
+
+    if (canPropagateDeletions) {
+        const destPrefix = path.resolve(destination) + path.sep;
+        const realDest = fs.realpathSync(destination);
+
+        for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
+            if (manifestDocs[relPath]) continue;
+
+            const absPath = path.resolve(destination, ...relPath.split('/'));
+
+            // Containment: a hand-edited or corrupt manifest key such as "../../etc/passwd"
+            // would otherwise resolve outside the pull destination. `docs pull` never writes
+            // such a key (titles are sanitized), but this loop is the only code in the CLI
+            // that deletes files — never let it act on a path it did not create.
+            if (!absPath.startsWith(destPrefix)) continue;
+
+            // Only ever remove regular files. A directory here means a corrupt manifest;
+            // rmSync would throw mid-pull, leaving a half-deleted tree.
+            //
+            // The whole entry is guarded: the new manifest is already on disk by now, so an
+            // uncaught throw would abort the report, silently skip every later orphan, and
+            // print a raw stack trace instead of this command's normal error format. One bad
+            // entry must cost only that entry.
+            try {
+                const stat = fs.statSync(absPath);
+                if (!stat.isFile()) continue;
+
+                // Physical containment: the lexical check above only guards the string. If
+                // an intermediate path segment (e.g. "sub" in "sub/x.png") is a symlink to a
+                // directory OUTSIDE the destination, statSync/readFileSync/rmSync all follow
+                // it transparently. Resolve the real parent directory and require it to
+                // physically live under the real destination before ever touching the file.
+                const realParent = fs.realpathSync(path.dirname(absPath));
+                if (realParent !== realDest && !realParent.startsWith(realDest + path.sep)) continue;
+
+                // Identity: never delete a file this pull just wrote. A case-only title
+                // rename on a case-insensitive filesystem (or a hand-edited manifest with a
+                // hardlinked entry) can make an "orphan" key resolve to the very file the
+                // new manifest just wrote under a different key — bytes trivially match.
+                const identity = `${stat.dev}:${stat.ino}`;
+                if (writtenIdentities.has(identity)) continue;
+
+                const currentHash = sha256Hex(fs.readFileSync(absPath));
+                if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {
+                    fs.rmSync(absPath);
+                    removed.push(relPath);
+                } else {
+                    keptModified.push(relPath);
+                    if (entry.media) keptModifiedMedia.add(relPath);
+                }
+            } catch {
+                // Vanished mid-run, unreadable, or refuses inspection: never delete blind.
+                continue;
+            }
+        }
+    }
+
     if (options.json) {
-        console.log(JSON.stringify({ manifest, files }));
+        console.log(JSON.stringify({ manifest, files, removed, kept_modified: keptModified }));
         process.exit(0);
     }
 
     console.log(chalk.green(`pulled ${files.length} doc${files.length === 1 ? '' : 's'} → ${destination}`));
     for (const file of files) {
         console.log(chalk.gray(`  ${file.path}`));
+    }
+    for (const file of removed) {
+        console.log(chalk.gray(`- removed (deleted remotely): ${file}`));
+    }
+    for (const file of keptModified) {
+        process.stderr.write(chalk.yellow(`! kept ${file} — deleted remotely but modified locally\n`));
+        if (keptModifiedMedia.has(file)) {
+            process.stderr.write(chalk.yellow('  (it is now untracked; use `solidactions docs upload` to re-create it)\n'));
+        } else {
+            process.stderr.write(chalk.yellow('  (it is now untracked; `docs push` will re-create it)\n'));
+        }
     }
     process.exit(0);
 }

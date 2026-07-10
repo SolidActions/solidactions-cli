@@ -604,13 +604,22 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
     }
 
-    it('refuses (exit 1) when a tracked file has unpushed local changes, even with --yes; names the file and points at --overwrite', async () => {
+    it('edited file whose doc STILL EXISTS remotely: plain pull still refuses (exit 1), names the file, points at --overwrite, and writes nothing', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         writeManifest(dest, {
             'doc.md': { id: 1, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
         });
         fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // The doc still exists on the server — this is a genuine conflict, not an orphan.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 15, properties: {}, body: '# Server Content' }],
+            }),
+        ];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -626,9 +635,11 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             expect(err).toContain('unpushed local changes');
             expect(err).toContain('--overwrite');
 
-            // Nothing written, no network calls.
+            // Refusal happens AFTER the server walk (network calls did occur) but BEFORE
+            // any write: the file's edited bytes and the manifest sidecar are untouched.
+            expect(allCaptures.length).toBeGreaterThan(0);
             expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('local edits, unpushed');
-            expect(allCaptures.length).toBe(0);
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
             restoreExit();
             restoreStderr();
@@ -636,7 +647,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         }
     });
 
-    it('refuses (exit 1) when a tracked MEDIA file has unpushed local changes (binary bytes differ from body_sha256) — coverage: detection is extension-agnostic, no code change needed', async () => {
+    it('edited MEDIA file whose doc STILL EXISTS remotely: plain pull still refuses (exit 1) — coverage: detection is extension-agnostic, no code change needed', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         const originalBytes = Buffer.from([1, 2, 3, 4]);
@@ -644,6 +655,23 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             'hero.png': { id: 7, title: 'hero', current_revision_id: 10, media: true, body_sha256: sha256Hex(originalBytes) },
         });
         fs.writeFileSync(path.join(dest, 'hero.png'), Buffer.from([9, 9, 9, 9]));
+
+        responseQueue = [
+            makeMcpSuccess({
+                folders: [],
+                docs: [{ id: 7, title: 'hero', properties: { blob_sha: 'abc', mime: 'image/png', size: 4 } }],
+            }),
+            makeMcpSuccess({
+                results: [{
+                    index: 0, status: 'found', id: 7, title: 'hero', folder_path: 'marketing/docs', current_revision_id: 11,
+                    properties: { blob_sha: 'abc', mime: 'image/png', size: 4 }, body: '',
+                }],
+            }),
+        ];
+        mediaResponseQueue = [
+            { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+        ];
+        blobResponseQueue = [{ status: 200, bytes: Buffer.from([5, 6, 7, 8]) }];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -659,9 +687,105 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             expect(err).toContain('unpushed local changes');
             expect(err).toContain('--overwrite');
 
-            // Nothing written, no network calls.
+            // Nothing written: the locally-modified bytes on disk are untouched.
             expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(Buffer.from([9, 9, 9, 9]));
-            expect(allCaptures.length).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('edited file whose doc was DELETED remotely: plain pull (no flags at all) succeeds, the file survives on disk with its edited bytes, and kept_modified names it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'doc.md': { id: 2, title: 'doc', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+        }, 'marketing');
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
+
+        // doc.md's doc (id 2) is no longer returned by the server — it was deleted remotely.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            // No --overwrite: the plain default path must be enough. --yes bypasses only
+            // the unrelated generic non-empty-destination prompt (it never bypasses the
+            // unpushed-local-changes conflict check — see the "even with --yes" test above).
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('local edits, unpushed');
+            const err = stderrLines.join('');
+            expect(err).toContain('doc.md');
+            expect(err).toContain('modified locally');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('both together in one pull: the still-existing conflict refuses (exit 1) and NOTHING is written or deleted, including the deleted-remotely orphan', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            // Still exists remotely, edited locally: a real conflict.
+            'conflict.md': { id: 2, title: 'conflict', current_revision_id: 10, media: false, body_sha256: sha256Hex('# Original') },
+            // Deleted remotely, edited locally: an orphan — not part of the refusal.
+            'orphan.md': { id: 3, title: 'orphan', current_revision_id: 5, media: false, body_sha256: sha256Hex('# Orphan Original') },
+        }, 'marketing');
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'conflict.md'), 'local edits to conflict', 'utf8');
+        fs.writeFileSync(path.join(dest, 'orphan.md'), 'local edits to orphan', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // Server still has doc 1 (a) and doc 2 (conflict), but doc 3 (orphan) is gone.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }, { id: 2, title: 'conflict', properties: {} }] }),
+            makeMcpSuccess({
+                results: [
+                    { index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' },
+                    { index: 1, status: 'found', id: 2, title: 'conflict', folder_path: 'marketing', current_revision_id: 12, properties: {}, body: '# Server Content' },
+                ],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('conflict.md');
+            expect(err).toContain('unpushed local changes');
+            // The orphan must not be named in the refusal — it isn't a conflict.
+            expect(err).not.toContain('orphan.md');
+
+            // Nothing was written or deleted: both edited files retain their local bytes,
+            // the unmodified file is untouched, and the manifest sidecar was never rewritten.
+            expect(fs.readFileSync(path.join(dest, 'conflict.md'), 'utf8')).toBe('local edits to conflict');
+            expect(fs.readFileSync(path.join(dest, 'orphan.md'), 'utf8')).toBe('local edits to orphan');
+            expect(fs.readFileSync(path.join(dest, 'a.md'), 'utf8')).toBe('A');
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
             restoreExit();
             restoreStderr();
@@ -763,6 +887,805 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         } finally {
             restoreExit();
             restoreStdout();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Manifest-clobber protection — dest tracks a DIFFERENT folder
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — manifest tracks a different folder', () => {
+    it('dest manifest tracks a DIFFERENT folder: refuses before any network I/O, names both folders, and leaves the manifest untouched', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/b', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('marketing/a');
+            expect(err).toContain('marketing/b');
+            expect(err).toContain('--overwrite');
+
+            // Refuses before the server walk: zero MCP requests.
+            expect(allCaptures.length).toBe(0);
+            // The manifest on disk is byte-for-byte unchanged.
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('--overwrite bypasses the mismatched-folder refusal and replaces the manifest with the new folder', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 2, title: 'y', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 2, title: 'y', folder_path: 'marketing/b', current_revision_id: 1, properties: {}, body: 'Y' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/b', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const newManifest = readManifest(dest);
+            expect(newManifest.folder_path).toBe('marketing/b');
+            expect(fs.readFileSync(path.join(dest, 'y.md'), 'utf8')).toBe('Y');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('dest manifest tracks the SAME folder: no refusal, normal re-pull proceeds', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: { 'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') } },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 2, properties: {}, body: 'X updated' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/a', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X updated');
+            expect(allCaptures.length).toBeGreaterThan(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('empty dest with no manifest: no refusal, first pull proceeds', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 1, properties: {}, body: 'X' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/a', dest, {}, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('single-doc fallback into a dir tracking a folder: refuses before network I/O, and the one-entry manifest is never written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const manifest: DocsManifest = {
+            folder_path: 'marketing/a',
+            docs: {
+                'x.md': { id: 1, title: 'x', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+                'y.md': { id: 2, title: 'y', current_revision_id: 1, media: false, body_sha256: sha256Hex('Y') },
+            },
+        };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+        fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
+        fs.writeFileSync(path.join(dest, 'y.md'), 'Y', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // No responseQueue entries: the refusal must fire before the list call that
+        // would normally 404 and trigger the single-doc fallback.
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing/notes', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(1);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('marketing/a');
+            expect(err).toContain('marketing/notes');
+
+            expect(allCaptures.length).toBe(0);
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
+            const finalManifest = readManifest(dest);
+            expect(Object.keys(finalManifest.docs).length).toBe(2);
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Deletion propagation (orphan cleanup)
+// ---------------------------------------------------------------------------
+
+describe('docsPullWithConfig — deletion propagation', () => {
+    function writeManifest(dest: string, docs: DocsManifest['docs'], folderPath = 'marketing'): void {
+        const manifest: DocsManifest = { folder_path: folderPath, docs };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+
+    it('deletes an orphan whose bytes still match the manifest hash', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'G', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'gone.md'))).toBe(false);
+            expect(fs.existsSync(path.join(dest, 'a.md'))).toBe(true);
+            expect(logLines.join('\n')).toContain('gone.md');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('never deletes outside the destination, even for a manifest key that escapes it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        // A sibling of `dest`, i.e. OUTSIDE the pull destination. `docs pull` never writes
+        // such a manifest key (titles are sanitized), but a hand-edited manifest could.
+        const outsideFile = path.join(tmpDest, 'outside.md');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(outsideFile, 'G', 'utf8');
+
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            // Bytes match, so ONLY the containment check can save this file.
+            '../outside.md': { id: 2, title: 'outside', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+            expect(fs.existsSync(outsideFile)).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('fails cleanly when a doc would be written over an existing directory', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        fs.mkdirSync(path.join(dest, 'a.md'), { recursive: true });
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            // A clean exit 1 with a named path, not an uncaught EISDIR stack trace.
+            expect(code).toBe(1);
+            expect(errLines.join('\n')).toMatch(/is not a regular file/);
+            expect(errLines.join('\n')).toContain('a.md');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('never deletes a directory named by a corrupt manifest key', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'subdir': { id: 2, title: 'subdir', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.mkdirSync(path.join(dest, 'subdir'), { recursive: true });
+        fs.writeFileSync(path.join(dest, 'subdir', 'keep.txt'), 'keep', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            // A directory key must neither crash the pull nor remove the tree.
+            expect(code).toBe(0);
+            expect(fs.existsSync(path.join(dest, 'subdir', 'keep.txt'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('keeps and warns about an orphan that was modified locally', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'CHANGED', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            // --overwrite so the pre-existing local-modification refusal doesn't fire first.
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.readFileSync(path.join(dest, 'gone.md'), 'utf8')).toBe('CHANGED');
+            const err = stderrLines.join('');
+            expect(err).toContain('gone.md');
+            expect(err).toContain('modified locally');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('keeps an orphan whose manifest entry has body_sha256 null', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: null },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'anything', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'gone.md'))).toBe(true);
+            expect(stderrLines.join('')).toContain('gone.md');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('propagates no deletions when the manifest folder_path differs from the pull target', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unmodified.md': { id: 5, title: 'unmodified', current_revision_id: 1, media: false, body_sha256: sha256Hex('U') },
+        }, 'other/folder');
+        fs.writeFileSync(path.join(dest, 'unmodified.md'), 'U', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            // CRITICAL: the pre-existing unmodified file must survive — it belongs to a
+            // DIFFERENT manifest folder_path than the one being pulled now.
+            expect(fs.existsSync(path.join(dest, 'unmodified.md'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('propagates no deletions on the single-doc fallback path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unrelated.md': { id: 5, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+        }, 'notes');
+        fs.writeFileSync(path.join(dest, 'unrelated.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3, folder_path: 'notes' }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'unrelated.md'))).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a media orphan whose bytes still match is deleted like any other orphan', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const mediaBytes = Buffer.from([1, 2, 3, 4]);
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'hero.png': { id: 2, title: 'hero.png', current_revision_id: 2, media: true, body_sha256: sha256Hex(mediaBytes) },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'hero.png'), mediaBytes);
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            expect(fs.existsSync(path.join(dest, 'hero.png'))).toBe(false);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('--json output contains removed and kept_modified', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+            'kept.md': { id: 3, title: 'kept', current_revision_id: 3, media: false, body_sha256: sha256Hex('K') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'G', 'utf8');
+        fs.writeFileSync(path.join(dest, 'kept.md'), 'CHANGED', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { lines: logLines, restore: restoreStdout } = captureStdout();
+        const { restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true, json: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
+            expect(jsonLine).toBeDefined();
+            const parsed = JSON.parse(jsonLine!);
+            expect(parsed.removed).toEqual(['gone.md']);
+            expect(parsed.kept_modified).toEqual(['kept.md']);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('never deletes through a directory symlink, even when the lexical path is contained', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const outsideDir = path.join(tmpDest, 'outside');
+        fs.mkdirSync(outsideDir, { recursive: true });
+        const outsideFile = path.join(outsideDir, 'x.png');
+        const mediaBytes = Buffer.from([9, 9, 9]);
+        fs.writeFileSync(outsideFile, mediaBytes);
+
+        fs.mkdirSync(dest, { recursive: true });
+        // dest/sub is a symlink to a directory OUTSIDE the pull destination.
+        fs.symlinkSync(outsideDir, path.join(dest, 'sub'), 'dir');
+
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            // Lexically "dest/sub/x.png" is contained. Physically it resolves outside.
+            'sub/x.png': { id: 2, title: 'x.png', current_revision_id: 2, media: true, body_sha256: sha256Hex(mediaBytes) },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            // CRITICAL: the file outside the destination, reached only via the symlink,
+            // must survive — the orphan's real parent directory is not under `dest`.
+            expect(fs.existsSync(outsideFile)).toBe(true);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('never deletes an orphan whose file is the same inode as a file this pull just wrote (case-rename survives)', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+
+        // Simulates a case-only rename ("Readme" -> "readme") on a case-insensitive
+        // filesystem: the old and new manifest keys resolve to the SAME underlying file.
+        // On Linux we prove this with an explicit hardlink rather than relying on
+        // case-insensitivity.
+        fs.writeFileSync(path.join(dest, 'readme.md'), 'BODY', 'utf8');
+        fs.linkSync(path.join(dest, 'readme.md'), path.join(dest, 'Readme.md'));
+
+        writeManifest(dest, {
+            'Readme.md': { id: 1, title: 'Readme', current_revision_id: 1, media: false, body_sha256: sha256Hex('BODY') },
+        });
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'readme', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'readme', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'BODY' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            // The new manifest tracks "readme.md".
+            const manifest = readManifest(dest);
+            expect(Object.keys(manifest.docs)).toEqual(['readme.md']);
+
+            // The old key "Readme.md" is the SAME file (hardlink) the pull just wrote
+            // under "readme.md" — it must not be deleted, even though it looks orphaned.
+            expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(true);
+            expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a kept media orphan warns to use `docs upload`, not `docs push`, to re-create it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const mediaBytes = Buffer.from([1, 2, 3]);
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'hero.png': { id: 2, title: 'hero.png', current_revision_id: 2, media: true, body_sha256: sha256Hex(mediaBytes) },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        // Locally modified: bytes no longer match the manifest hash.
+        fs.writeFileSync(path.join(dest, 'hero.png'), Buffer.from([9, 9, 9, 9]));
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('hero.png');
+            expect(err).toContain('docs upload');
+            expect(err).not.toContain('docs push` will re-create it');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('a kept non-media orphan still warns that `docs push` will re-create it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'a.md': { id: 1, title: 'a', current_revision_id: 1, media: false, body_sha256: sha256Hex('A') },
+            'gone.md': { id: 2, title: 'gone', current_revision_id: 2, media: false, body_sha256: sha256Hex('G') },
+        });
+        fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
+        fs.writeFileSync(path.join(dest, 'gone.md'), 'CHANGED', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('gone.md');
+            expect(err).toContain('docs push` will re-create it');
+            expect(err).not.toContain('docs upload');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('warns why deletions were not propagated: folder mismatch', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unmodified.md': { id: 5, title: 'unmodified', current_revision_id: 1, media: false, body_sha256: sha256Hex('U') },
+        }, 'other/folder');
+        fs.writeFileSync(path.join(dest, 'unmodified.md'), 'U', 'utf8');
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
+            }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('deletions not propagated');
+            expect(err).toContain('other/folder');
+            expect(err).toContain('marketing');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('warns why deletions were not propagated: single-doc fallback', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeManifest(dest, {
+            'unrelated.md': { id: 5, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+        }, 'notes');
+        fs.writeFileSync(path.join(dest, 'unrelated.md'), 'X', 'utf8');
+
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3, folder_path: 'notes' }),
+        ];
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() =>
+                docsPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
+            );
+            expect(code).toBe(0);
+
+            const err = stderrLines.join('');
+            expect(err).toContain('deletions not propagated');
+            expect(err).toContain('single-doc pull');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
             cleanup();
         }
     });
