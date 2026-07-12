@@ -20,7 +20,7 @@ import { callCrewsTool } from '../utils/mcp';
 import { execLocally, shellQuoteArg } from './skill-run';
 import { resolveCrewId, resolveRoleCrewPath, crewIdForPath } from '../utils/crew';
 import {
-    artifactIdentity, cacheDirFor, cacheOrigin, planCacheRefresh,
+    cacheDirFor, cacheOrigin, planCacheRefresh,
     CacheManifest, CacheScope, DesiredFile,
 } from '../utils/skill-cache';
 import {

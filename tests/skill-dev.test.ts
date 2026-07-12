@@ -153,6 +153,7 @@ describe('solidactions skill dev — integration (rename from skill run)', () =>
             ],
             baseEnv(),
         );
+        expect(devResult.status).toBe(0);
         expect(runResult.status).toBe(0);
         expect(runResult.stdout).toBe(devResult.stdout);
         expect(runResult.stderr).toContain('deprecated');
@@ -162,8 +163,8 @@ describe('solidactions skill dev — integration (rename from skill run)', () =>
     it("4. skill --help hides `run` but lists `dev` and `exec`", async () => {
         const result = await runCli(['skill', '--help'], baseEnv());
         expect(result.status).toBe(0);
-        expect(result.stdout).toContain('dev');
-        expect(result.stdout).toContain('exec');
+        expect(result.stdout).toMatch(/^\s*dev\s/m);
+        expect(result.stdout).toMatch(/^\s*exec\s/m);
         expect(result.stdout).not.toMatch(/^\s*run\s/m);
     });
 });

@@ -53,6 +53,8 @@ function toNum(v: number | string | null | undefined): number | null {
 export function artifactIdentity(bundle: BundleMeta): ArtifactIdentity {
     const published = bundle.published !== false;
     const executionRevisionId = published
+        // The `?? toNum(bundle.head_revision_id)` fallback guards a domain-unreachable
+        // state: a published doc without an active snapshot revision.
         ? (toNum(bundle.active_snapshot_revision_id) ?? toNum(bundle.head_revision_id))
         : toNum(bundle.head_revision_id);
     return { docId: toNum(bundle.doc_id) as number, published, executionRevisionId };

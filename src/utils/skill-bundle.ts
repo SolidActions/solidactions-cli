@@ -74,6 +74,8 @@ export function normalizeBundle(data: any): SkillBundle {
             const v = value as any;
             binaryFiles[key] = { blobSha: v.blob_sha, mime: v.mime, size: v.size };
         }
+        // else: unreachable — the server wire contract has exactly two reference
+        // shapes, string | {binary:true,...} (see ResolvedReference::toWireValue).
     }
 
     return {

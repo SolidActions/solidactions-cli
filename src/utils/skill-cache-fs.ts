@@ -14,7 +14,9 @@
  * (token included) before re-acquiring, and release only removes the lock
  * dir when its `owner` file still matches our token — so a holder that ran
  * past the staleness window and had its lock stolen can't rm the new
- * holder's lock out from under it.
+ * holder's lock out from under it. If a concurrent stale-takeover `rmSync`
+ * lands between our `mkdirSync` and the `owner` write, that write sees
+ * ENOENT — treated as having lost the race, so acquisition retries.
  */
 import crypto from 'crypto';
 import fs from 'fs';
@@ -96,7 +98,7 @@ export async function withCacheLock<T>(cacheDir: string, fn: () => Promise<T>): 
             fs.writeFileSync(path.join(lockDir, 'owner'), token);
             break;
         } catch (e: any) {
-            if (e?.code !== 'EEXIST') throw e;
+            if (e?.code !== 'EEXIST' && e?.code !== 'ENOENT') throw e;
             let stale = false;
             try {
                 stale = Date.now() - fs.statSync(lockDir).mtimeMs > LOCK_STALE_MS;

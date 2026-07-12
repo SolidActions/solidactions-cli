@@ -150,8 +150,8 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 | `skill view <name>` | `--json` | Show one skill |
 | `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push); writes a `.solidactions-skill.json` provenance sidecar used by `push`'s drift guard |
 | `skill delete <name>` | `--json` | Delete a skill (Admin only) |
-| `skill exec <name> --target sandbox -- <cmd>` | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Execute the server-stored skill in its server sandbox (post-push smoke; default env production) |
-| `skill exec <name> --target host -- <cmd>` | `--role <name>`, `--in-crew <crew>`, `--crew <nameOrId>`, `--environment <env>` (default `production`), `--env-file <path>` | Execute the server-stored skill on THIS machine via a transparent revision-checked cache — no pull step; crew vars fetched from the platform (default env production; secrets need `env:reveal`) |
+| `skill exec <name> --target sandbox -- <cmd>` (`--target` required) | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Execute the server-stored skill in its server sandbox (post-push smoke; default env production) |
+| `skill exec <name> --target host -- <cmd>` (`--target` required) | `--role <name>`, `--in-crew <crew>`, `--crew <nameOrId>`, `--environment <env>` (default `production`), `--env-file <path>` | Execute the server-stored skill on THIS machine via a transparent revision-checked cache — no pull step; crew vars fetched from the platform (default env production; secrets need `env:reveal`) |
 | `skill dev <dir> -- <cmd>` | `--crew <nameOrId>`, `--environment <env>` (default `dev`), `--env-file <path>` | Run your local working copy (the folder you're editing) with platform crew vars (default env dev). Replaces `skill run` (deprecated) |
 
 `skill exec` always executes the **server-stored** skill — `--target` only picks
