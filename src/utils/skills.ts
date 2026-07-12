@@ -8,6 +8,7 @@ const SKILL_NAMES = [
     'solidactions-workflow-coding',
     'solidactions-deploy-and-config',
     'solidactions-oauth-actions',
+    'solidactions-crew-skills',
 ] as const;
 
 const EXAMPLES_OWNER = 'SolidActions';
