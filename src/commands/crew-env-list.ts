@@ -17,16 +17,17 @@ interface CrewVariable {
 }
 
 /**
- * Format a value for display. Secrets are ALWAYS masked with a fixed
- * placeholder — regardless of what the server sent — so a server-side
- * masking bug can never leak a raw secret into stdout.
+ * Format a value for display. A null/undefined value means the env is
+ * unset and always renders as '-'. Otherwise, a secret's value is ALWAYS
+ * masked with a fixed placeholder — regardless of what the server sent —
+ * so a server-side masking bug can never leak a raw secret into stdout.
  */
-function formatValue(value: string | null, isSecret: boolean): string {
-    if (isSecret) {
-        return chalk.yellow('••••••');
-    }
+export function formatValue(value: string | null, isSecret: boolean): string {
     if (value === null || value === undefined) {
         return chalk.gray('-');
+    }
+    if (isSecret) {
+        return chalk.yellow('••••••');
     }
     return value.substring(0, 18);
 }

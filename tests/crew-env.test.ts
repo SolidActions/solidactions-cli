@@ -17,7 +17,7 @@ import * as path from 'path';
 import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { crewEnvSet, buildVariableBody } from '../src/commands/crew-env-set';
-import { crewEnvList } from '../src/commands/crew-env-list';
+import { crewEnvList, formatValue } from '../src/commands/crew-env-list';
 import { crewEnvDelete } from '../src/commands/crew-env-delete';
 import { crewEnvPush, diffPushEntry } from '../src/commands/crew-env-push';
 import { matchCrewByName } from '../src/utils/crew';
@@ -271,6 +271,34 @@ describe('diffPushEntry', () => {
         };
         const entry = diffPushEntry('KEY', 'v', 'all', false, existing);
         expect(entry.action).toBe('update');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Pure unit tests: formatValue (unset-vs-masked column rendering)
+// ---------------------------------------------------------------------------
+
+describe('formatValue', () => {
+    it('null (unset env) renders "-" for a secret column, not the mask', () => {
+        const result = formatValue(null, true);
+        expect(result).toContain('-');
+        expect(result).not.toContain('•');
+    });
+
+    it('null (unset env) renders "-" for a plain column', () => {
+        const result = formatValue(null, false);
+        expect(result).toContain('-');
+        expect(result).not.toContain('•');
+    });
+
+    it('a set secret value is always masked, never printed raw', () => {
+        const result = formatValue('dev-secret-value', true);
+        expect(result).toContain('••••••');
+        expect(result).not.toContain('dev-secret-value');
+    });
+
+    it('a set plain value is printed as-is', () => {
+        expect(formatValue('us-east-1', false)).toContain('us-east-1');
     });
 });
 
