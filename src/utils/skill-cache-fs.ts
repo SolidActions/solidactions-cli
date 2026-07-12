@@ -8,6 +8,13 @@
  * mid-refresh leaves a manifest that simply mismatches on the next run and
  * triggers a clean re-refresh. Per-file renames also mean a concurrently
  * RUNNING exec keeps its already-open scripts.
+ *
+ * Lock ownership: the lock dir carries an `owner` token file written right
+ * after `mkdirSync` succeeds. A stale-lock takeover removes the whole dir
+ * (token included) before re-acquiring, and release only removes the lock
+ * dir when its `owner` file still matches our token — so a holder that ran
+ * past the staleness window and had its lock stolen can't rm the new
+ * holder's lock out from under it.
  */
 import crypto from 'crypto';
 import fs from 'fs';
@@ -29,7 +36,7 @@ export function hashFileOrNull(filePath: string): string | null {
 export function readManifest(cacheDir: string): CacheManifest | null {
     try {
         const parsed = JSON.parse(fs.readFileSync(path.join(cacheDir, CACHE_MANIFEST), 'utf8'));
-        if (parsed?.schema_version !== 1 || typeof parsed?.files !== 'object') return null;
+        if (parsed?.schema_version !== 1 || typeof parsed?.files !== 'object' || parsed.files === null || Array.isArray(parsed.files)) return null;
         return parsed as CacheManifest;
     } catch {
         return null;
@@ -70,7 +77,7 @@ export function applyCachePlan(
     writeFileAtomic(path.join(cacheDir, CACHE_MANIFEST), JSON.stringify(manifest, null, 2) + '\n');
 }
 
-const LOCK_STALE_MS = 30_000;
+const LOCK_STALE_MS = 120_000;
 const LOCK_TIMEOUT_MS = 20_000;
 const LOCK_POLL_MS = 100;
 
@@ -78,10 +85,15 @@ export async function withCacheLock<T>(cacheDir: string, fn: () => Promise<T>): 
     const lockDir = cacheDir + '.lock';
     fs.mkdirSync(path.dirname(lockDir), { recursive: true });
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
 
     for (;;) {
+        if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for skill cache lock: ${lockDir} (another exec running? delete it if stale)`);
+        }
         try {
             fs.mkdirSync(lockDir);
+            fs.writeFileSync(path.join(lockDir, 'owner'), token);
             break;
         } catch (e: any) {
             if (e?.code !== 'EEXIST') throw e;
@@ -92,11 +104,8 @@ export async function withCacheLock<T>(cacheDir: string, fn: () => Promise<T>): 
                 continue; // holder just released — retry immediately
             }
             if (stale) {
-                try { fs.rmdirSync(lockDir); } catch { /* raced another taker */ }
+                try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch { /* raced another taker */ }
                 continue;
-            }
-            if (Date.now() > deadline) {
-                throw new Error(`timed out waiting for skill cache lock: ${lockDir} (another exec running? delete it if stale)`);
             }
             await new Promise((r) => setTimeout(r, LOCK_POLL_MS));
         }
@@ -105,6 +114,10 @@ export async function withCacheLock<T>(cacheDir: string, fn: () => Promise<T>): 
     try {
         return await fn();
     } finally {
-        try { fs.rmdirSync(lockDir); } catch { /* best-effort */ }
+        try {
+            if (fs.readFileSync(path.join(lockDir, 'owner'), 'utf8') === token) {
+                fs.rmSync(lockDir, { recursive: true, force: true });
+            }
+        } catch { /* lock missing or owned by someone else — best-effort, do nothing */ }
     }
 }

@@ -98,6 +98,7 @@ describe('withCacheLock', () => {
         const dir = tmpdir();
         const lockDir = dir + '.lock';
         fs.mkdirSync(lockDir, { recursive: true });
+        fs.writeFileSync(path.join(lockDir, 'owner'), 'some-stale-token');
         const past = Date.now() / 1000 - 3600;
         fs.utimesSync(lockDir, past, past);
         let ran = false;
@@ -109,5 +110,25 @@ describe('withCacheLock', () => {
         const dir = tmpdir();
         await expect(withCacheLock(dir, async () => { throw new Error('boom'); })).rejects.toThrow('boom');
         expect(fs.existsSync(dir + '.lock')).toBe(false);
+    });
+
+    it('does not release a lock it no longer owns', async () => {
+        const dir = tmpdir();
+        const lockDir = dir + '.lock';
+        await withCacheLock(dir, async () => {
+            fs.rmSync(lockDir, { recursive: true, force: true });
+            fs.mkdirSync(lockDir);
+            fs.writeFileSync(path.join(lockDir, 'owner'), 'someone-else');
+        });
+        expect(fs.existsSync(lockDir)).toBe(true);
+        fs.rmSync(lockDir, { recursive: true, force: true });
+    });
+});
+
+describe('readManifest', () => {
+    it('returns null when files is an array', () => {
+        const dir = tmpdir();
+        fs.writeFileSync(path.join(dir, CACHE_MANIFEST), JSON.stringify({ schema_version: 1, files: [] }));
+        expect(readManifest(dir)).toBeNull();
     });
 });
