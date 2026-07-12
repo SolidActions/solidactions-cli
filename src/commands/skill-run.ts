@@ -1,5 +1,5 @@
 /**
- * solidactions skill run <dir> [--crew <c>] [--environment <env>] [--env-file <f>] -- <command...>
+ * solidactions skill dev <dir> [--crew <c>] [--environment <env>] [--env-file <f>] -- <command...>
  *
  * Local analogue of the crews MCP exec_skill: runs <command> with cwd=<dir>
  * (matching the sandbox's cwd=/work/skills/<slug>), with crew variables
@@ -166,12 +166,16 @@ export async function skillRunWithConfig(
     config: Config,
 ): Promise<void> {
     const absDir = path.resolve(dir);
+    if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
+        process.stderr.write(chalk.red(`error: '${dir}' is not a directory — skill dev runs a local working folder. To execute the stored skill locally: skill exec ${dir} --target host\n`));
+        process.exit(1);
+    }
     if (!fs.existsSync(path.join(absDir, 'SKILL.md'))) {
         process.stderr.write(chalk.red(`error: ${dir} does not contain a SKILL.md\n`));
         process.exit(1);
     }
     if (commandParts.length === 0) {
-        process.stderr.write(chalk.red('error: no command given — usage: skill run <dir> -- <command...>\n'));
+        process.stderr.write(chalk.red('error: no command given — usage: skill dev <dir> -- <command...>\n'));
         process.exit(1);
     }
 
