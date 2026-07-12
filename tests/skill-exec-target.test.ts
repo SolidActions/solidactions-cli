@@ -115,6 +115,9 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
 
     // Mutable bundle served by crews_skills/read and crews_roles/read_skill.
     let BUNDLE: any;
+    // Separate skill served only to the corrupt-binary negative-case test, so it
+    // never shares cache state with the BUNDLE-driven tests above.
+    let BAD_BUNDLE: any;
     let execSkillCalls: Array<Record<string, unknown>> = [];
 
     beforeAll(async () => {
@@ -136,10 +139,34 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
             },
         };
 
+        BAD_BUNDLE = {
+            identifier: 'bad-tool',
+            doc_id: 99,
+            published: true,
+            head_revision_id: 1,
+            active_snapshot_revision_id: 1,
+            properties: { name: 'bad-tool', description: 'd' },
+            body: 'B',
+            reference: {
+                'assets/bad-blob.bin': { binary: true, mime: 'application/octet-stream', size: 5, blob_sha: 'badblob1' },
+            },
+        };
+
         stubServer = http.createServer((req, res) => {
             if (req.method === 'GET' && req.url === '/signed/blob.bin') {
                 res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
                 res.end(Buffer.from('BIN!'));
+                return;
+            }
+            if (req.method === 'GET' && req.url === '/signed/role-blob.bin') {
+                res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+                res.end(Buffer.from('RBIN!'));
+                return;
+            }
+            if (req.method === 'GET' && req.url === '/signed/bad-blob.bin') {
+                // Wrong length on purpose: bundle declares size 5, this serves 3.
+                res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+                res.end(Buffer.from('BAD'));
                 return;
             }
             if (req.method === 'GET' && req.url === '/api/v1/crews') {
@@ -170,10 +197,29 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                     };
 
                     if (toolName === 'crews_skills' && action === 'read') {
-                        respondText(BUNDLE);
+                        respondText(args.identifier === 'bad-tool' ? BAD_BUNDLE : BUNDLE);
                         return;
                     }
-                    if (toolName === 'crews_skills' && action === 'read_reference_file') {
+                    if ((toolName === 'crews_skills' || toolName === 'crews_roles') && action === 'read_reference_file') {
+                        const refPath = args.path as string;
+                        if (refPath === 'assets/role-blob.bin') {
+                            respondText({
+                                path: refPath,
+                                mime: 'application/octet-stream',
+                                size: 5,
+                                signed_url: `http://127.0.0.1:${stubPort}/signed/role-blob.bin`,
+                            });
+                            return;
+                        }
+                        if (refPath === 'assets/bad-blob.bin') {
+                            respondText({
+                                path: refPath,
+                                mime: 'application/octet-stream',
+                                size: 5,
+                                signed_url: `http://127.0.0.1:${stubPort}/signed/bad-blob.bin`,
+                            });
+                            return;
+                        }
                         respondText({
                             path: 'assets/blob.bin',
                             mime: 'application/octet-stream',
@@ -200,6 +246,7 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                     if (toolName === 'crews_roles' && action === 'read_skill') {
                         const roleReference = { ...BUNDLE.reference };
                         delete roleReference['assets/blob.bin'];
+                        roleReference['assets/role-blob.bin'] = { binary: true, mime: 'application/octet-stream', size: 5, blob_sha: 'roleblob1' };
                         respondText({ ...BUNDLE, identifier: 'q-tool', reference: roleReference });
                         return;
                     }
@@ -397,6 +444,10 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
         expect(writerResult.status).toBe(0);
         expect(writerResult.stdout).toContain('VAR=resolved');
 
+        const roleCacheDir = findCacheDir(home, 'acme', 'writer');
+        expect(fs.existsSync(path.join(roleCacheDir, 'assets/role-blob.bin'))).toBe(true);
+        expect(fs.readFileSync(path.join(roleCacheDir, 'assets/role-blob.bin'), 'utf8')).toBe('RBIN!');
+
         const dupeResult = await runCli(
             ['skill', 'exec', 'q-tool', '--target', 'host', '--role', 'dupe', '--', 'node', 'scripts/q.js'],
             baseEnv(home),
@@ -405,7 +456,34 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
         expect(dupeResult.stderr).toContain('--in-crew');
     });
 
-    it('11. two simultaneous cold-cache runs both succeed (lock serializes materialization)', async () => {
+    it('11. --target host refuses to cache a corrupt/truncated binary download (size mismatch)', async () => {
+        // Fresh HOME + a dedicated skill name so this never contaminates the
+        // q-tool cache state exercised by the other tests.
+        const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-skill-exec-target-badbin-'));
+        const badHome = path.join(badRoot, 'home');
+        fs.mkdirSync(badHome, { recursive: true });
+
+        try {
+            const result = await runCli(
+                ['skill', 'exec', 'bad-tool', '--target', 'host', '--', 'node', '-e', 'x'],
+                baseEnv(badHome),
+            );
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain('failed validation');
+
+            const base = path.join(badHome, '.solidactions', 'cache', 'skills');
+            if (fs.existsSync(base)) {
+                for (const origin of fs.readdirSync(base)) {
+                    const manifestPath = path.join(base, origin, 'shared', 'bad-tool', '.sa-cache-manifest.json');
+                    expect(fs.existsSync(manifestPath)).toBe(false);
+                }
+            }
+        } finally {
+            fs.rmSync(badRoot, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    it('12. two simultaneous cold-cache runs both succeed (lock serializes materialization)', async () => {
         const coldRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-skill-exec-target-cold-'));
         const coldHome = path.join(coldRoot, 'home');
         fs.mkdirSync(coldHome, { recursive: true });

@@ -47,7 +47,8 @@ export const CACHE_MANIFEST = '.sa-cache-manifest.json';
 
 function toNum(v: number | string | null | undefined): number | null {
     if (v === null || v === undefined) return null;
-    return typeof v === 'string' ? parseInt(v, 10) : v;
+    const n = typeof v === 'string' ? parseInt(v, 10) : v;
+    return Number.isNaN(n) ? null : n;
 }
 
 export function artifactIdentity(bundle: BundleMeta): ArtifactIdentity {

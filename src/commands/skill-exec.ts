@@ -207,10 +207,14 @@ async function execOnHost(
                     newFiles[p] = { sha256: spec.sha256 as string };
                 } else {
                     if (plan.writes.includes(p)) {
-                        const bytes = await fetchBinaryReference(config, tool as 'skills' | 'roles', locator, p);
+                        const ref = bundle.binaryFiles[p];
+                        const bytes = await fetchBinaryReference(config, tool as 'skills' | 'roles', locator, p, { size: ref.size, blobSha: ref.blobSha });
                         contents[p] = bytes;
                         newFiles[p] = { sha256: sha256Hex(bytes), blob_sha: spec.blobSha };
                     } else {
+                        // Invariant: the planner only omits a binary from writes when the
+                        // manifest entry exists and matches (upstreamSame && diskSame), so
+                        // this carry-over cannot be undefined.
                         newFiles[p] = manifest?.files[p] as CacheManifest['files'][string];
                     }
                 }

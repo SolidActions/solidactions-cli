@@ -13,6 +13,7 @@ import yaml from 'js-yaml';
 import { Config } from './config';
 import { callCrewsToolContent } from './mcp';
 import { ArtifactIdentity, artifactIdentity } from './skill-cache';
+import { sha256Hex } from './skill-cache-fs';
 
 export function reconstructSkillMd(properties: Record<string, unknown>, body: string | undefined): string {
     const { type: _type, name: propName, description: propDescription, ...extraProps } = properties;
@@ -95,6 +96,7 @@ export async function fetchBinaryReference(
     tool: 'skills' | 'roles',
     locator: Record<string, unknown>,
     refPath: string,
+    expected: { size: number; blobSha: string },
 ): Promise<Buffer> {
     const result = await callCrewsToolContent(config, tool, {
         action: 'read_reference_file',
@@ -107,9 +109,11 @@ export async function fetchBinaryReference(
         throw new Error(`failed to fetch binary reference '${refPath}': ${text}`);
     }
 
+    let bytes: Buffer | null = null;
     for (const block of result.content) {
         if (block?.type === 'image' && typeof block.data === 'string') {
-            return Buffer.from(block.data, 'base64');
+            bytes = Buffer.from(block.data, 'base64');
+            break;
         }
         if (block?.type === 'text' && typeof block.text === 'string') {
             let parsed: any;
@@ -120,10 +124,25 @@ export async function fetchBinaryReference(
             }
             if (parsed?.signed_url) {
                 const response = await axios.get(parsed.signed_url, { responseType: 'arraybuffer' });
-                return Buffer.from(response.data);
+                bytes = Buffer.from(response.data);
+                break;
             }
         }
     }
 
-    throw new Error(`failed to fetch binary reference '${refPath}': unrecognized response shape`);
+    if (bytes === null) {
+        throw new Error(`failed to fetch binary reference '${refPath}': unrecognized response shape`);
+    }
+
+    if (bytes.length !== expected.size) {
+        throw new Error(`binary reference '${refPath}' failed validation (got ${bytes.length} bytes, expected ${expected.size}) — refusing to cache a corrupt download`);
+    }
+    if (/^[0-9a-f]{64}$/.test(expected.blobSha)) {
+        const actualHash = sha256Hex(bytes);
+        if (actualHash !== expected.blobSha) {
+            throw new Error(`binary reference '${refPath}' failed validation (sha256 mismatch: got ${actualHash}, expected ${expected.blobSha}) — refusing to cache a corrupt download`);
+        }
+    }
+
+    return bytes;
 }

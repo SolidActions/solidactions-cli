@@ -66,7 +66,7 @@ export function applyCachePlan(
     contents: Record<string, Buffer | string>,
     manifest: CacheManifest,
 ): void {
-    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     for (const rel of plan.writes) {
         if (!(rel in contents)) {
             throw new Error(`applyCachePlan: no content provided for planned write '${rel}'`);
