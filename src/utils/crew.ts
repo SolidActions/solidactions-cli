@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { Config } from './config';
 import { getApiHeaders } from './api';
+import { callCrewsTool } from './mcp';
 
 export interface CrewRecord {
     id: string | number;
@@ -76,4 +77,51 @@ export async function resolveCrewId(config: Config, input: string): Promise<Crew
         process.exit(1);
     }
     return result.crew;
+}
+
+/**
+ * Resolve the containment crew path for a role-scoped skill. --in-crew names it
+ * directly; otherwise roles.list is consulted (each entry carries in_crew).
+ * roles.read_skill does NOT return the crew, so this lookup is load-bearing for
+ * both variable resolution and cache scoping.
+ */
+export async function resolveRoleCrewPath(config: Config, role: string, inCrew?: string): Promise<string> {
+    if (inCrew) return inCrew;
+
+    const result = await callCrewsTool(config, 'roles', { action: 'list' });
+    if (!result.ok) {
+        console.error(chalk.red(`Failed to list roles: ${result.data?.message ?? 'unknown error'}`));
+        process.exit(1);
+    }
+    const roles: Array<{ identifier: string; in_crew: string | null }> = result.data?.roles ?? [];
+    const matches = roles.filter((r) => r.identifier === role);
+
+    if (matches.length === 0) {
+        console.error(chalk.red(`Role "${role}" not found.`));
+        process.exit(1);
+    }
+    if (matches.length > 1) {
+        console.error(chalk.red(`Role "${role}" exists in multiple crews — pass --in-crew <crew>:`));
+        for (const m of matches) console.error(chalk.gray(`  --in-crew ${m.in_crew ?? '(legacy flat role)'}`));
+        process.exit(1);
+    }
+    if (!matches[0].in_crew) {
+        console.error(chalk.red(`Role "${role}" is a legacy flat role with no crew — crew variables cannot be resolved.`));
+        process.exit(1);
+    }
+    return matches[0].in_crew;
+}
+
+/** Map a containment crew path (e.g. "acme/marketing") to the crew doc id used by /variables/resolve. */
+export async function crewIdForPath(config: Config, crewPath: string): Promise<string | number> {
+    const crews = await fetchCrews(config);
+    const byPath = crews.filter((c) => c.path === crewPath);
+    if (byPath.length === 1) return byPath[0].id;
+
+    const lastSegment = crewPath.split('/').pop() ?? crewPath;
+    const byName = crews.filter((c) => c.name.toLowerCase() === lastSegment.toLowerCase());
+    if (byName.length === 1) return byName[0].id;
+
+    console.error(chalk.red(`Could not resolve crew "${crewPath}" to a crew id (matched ${byPath.length} by path, ${byName.length} by name).`));
+    process.exit(1);
 }

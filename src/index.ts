@@ -36,7 +36,7 @@ import { skillPull } from './commands/skill-pull';
 import { skillList } from './commands/skill-list';
 import { skillView } from './commands/skill-view';
 import { skillDelete } from './commands/skill-delete';
-import { skillRun } from './commands/skill-run';
+import { skillDev } from './commands/skill-dev';
 import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
 import { docsPush } from './commands/docs-push';
@@ -621,25 +621,41 @@ skill
     });
 
 skill
-    .command('run')
-    .description('Run a skill script LOCALLY with crew variables fetched from the platform (dev loop; default env dev; secrets need env:reveal; see `skill exec` for the remote/deployed counterpart, default env production)')
+    .command('dev')
+    .description('Run YOUR WORKING COPY of a skill locally with crew variables fetched from the platform (dev loop; default env dev; secrets need env:reveal). To execute the server-stored skill instead: skill exec <name> --target sandbox|host')
     .argument('<dir>', 'Local skill directory (must contain SKILL.md)')
     .argument('<command...>', 'Command to run (after --), e.g. -- node scripts/q.js')
     .option('--crew <nameOrId>', 'Crew whose variables to fetch (omit for shared skills)')
     .option('--environment <env>', 'Variable environment: production|staging|dev', 'dev')
     .option('--env-file <path>', 'Local KEY=VALUE overrides (reserved names ignored)')
     .action(async (dir, commandParts, options) => {
-        await skillRun(dir, commandParts, options);
+        await skillDev(dir, commandParts, options);
+    });
+
+skill
+    .command('run', { hidden: true })
+    .description('[deprecated] alias of `skill dev` — removed in v2.0.0')
+    .argument('<dir>', 'Local skill directory (must contain SKILL.md)')
+    .argument('<command...>', 'Command to run (after --)')
+    .option('--crew <nameOrId>', 'Crew whose variables to fetch (omit for shared skills)')
+    .option('--environment <env>', 'Variable environment: production|staging|dev', 'dev')
+    .option('--env-file <path>', 'Local KEY=VALUE overrides (reserved names ignored)')
+    .action(async (dir, commandParts, options) => {
+        process.stderr.write(chalk.yellow("warn: 'skill run' is deprecated — use 'skill dev' (alias removed in v2.0.0)\n"));
+        await skillDev(dir, commandParts, options);
     });
 
 skill
     .command('exec')
-    .description('Run a command against the DEPLOYED skill in its real sandbox runtime (post-push smoke; default env production; see `skill run` for the local dev-loop counterpart, default env dev)')
-    .argument('<name>', 'Skill name or identifier')
-    .argument('<command...>', 'Command to run remotely (after --), e.g. -- node scripts/q.js')
-    .option('--role <name>', 'Role-scoped skill (uses roles.exec_skill)')
+    .description('Execute the SERVER-STORED skill (never local edits — see `skill dev`). --target picks where: sandbox (server) or host (this machine, transparent cache). Default env production for both targets; secrets on host need env:reveal')
+    .argument('<name>', 'Skill name or identifier (names only — directories are rejected)')
+    .argument('<command...>', 'Command to run (after --), e.g. -- node scripts/q.js')
+    .requiredOption('--target <target>', "Where to execute: 'sandbox' or 'host'")
+    .option('--role <name>', 'Role-scoped skill (crew inferred from the role)')
     .option('--in-crew <crew>', 'Disambiguate when the role name exists in multiple crews')
-    .option('--environment <env>', 'Sandbox environment: production|staging|dev (default production)')
+    .option('--crew <nameOrId>', 'host+shared only: crew whose variables to fetch')
+    .option('--environment <env>', 'Variable environment: production|staging|dev (default production)')
+    .option('--env-file <path>', 'host only: local KEY=VALUE overrides (reserved names ignored)')
     .action(async (name, commandParts, options) => {
         await skillExec(name, commandParts, options);
     });
