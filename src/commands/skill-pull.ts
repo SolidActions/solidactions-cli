@@ -13,10 +13,10 @@
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
-import yaml from 'js-yaml';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
+import { reconstructSkillMd } from '../utils/skill-bundle';
 
 export interface SkillPullOptions {
     json?: boolean;
@@ -85,22 +85,7 @@ export async function skillPullWithConfig(
     // The server stores a `type` field but it is stripped on push (parseSkillFile
     // does `const { type: _type, ...properties } = rest`). We mirror that here
     // so that pull → push is idempotent.
-    const { type: _type, name: propName, description: propDescription, ...extraProps } = data.properties;
-
-    // Reconstruct the full frontmatter: name + description (from properties)
-    // followed by all remaining extra props (minus type).
-    const frontmatterObj: Record<string, unknown> = {
-        name: propName,
-        description: propDescription,
-        ...extraProps,
-    };
-
-    // yaml.dump produces "key: value\n" lines; we wrap in ---\n...\n---\n
-    const yamlBlock = yaml.dump(frontmatterObj, { lineWidth: -1 });
-    const body = data.body ?? '';
-
-    // Ensure the body starts on its own line after the closing ---
-    const skillMdContent = `---\n${yamlBlock}---\n${body.startsWith('\n') ? body : '\n' + body}`;
+    const skillMdContent = reconstructSkillMd(data.properties, data.body);
 
     // Create the output directory (and parents) if needed
     fs.mkdirSync(absOut, { recursive: true });
