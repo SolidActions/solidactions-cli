@@ -150,10 +150,19 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 | `skill view <name>` | `--json` | Show one skill |
 | `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push); writes a `.solidactions-skill.json` provenance sidecar used by `push`'s drift guard |
 | `skill delete <name>` | `--json` | Delete a skill (Admin only) |
-| `skill run <dir> -- <command...>` | `--crew <nameOrId>`, `--environment <env>` (default `dev`), `--env-file <path>` | Run a skill script LOCALLY with crew variables fetched from the platform (dev loop). Secret values need a token with `env:reveal`; see `skill exec` for the remote/deployed counterpart |
-| `skill exec <name> -- <command...>` | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Run a command against the DEPLOYED skill in its real sandbox runtime (post-push smoke); see `skill run` for the local dev-loop counterpart |
+| `skill exec <name> --target sandbox -- <cmd>` | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Execute the server-stored skill in its server sandbox (post-push smoke; default env production) |
+| `skill exec <name> --target host -- <cmd>` | `--role <name>`, `--in-crew <crew>`, `--crew <nameOrId>`, `--environment <env>` (default `production`), `--env-file <path>` | Execute the server-stored skill on THIS machine via a transparent revision-checked cache — no pull step; crew vars fetched from the platform (default env production; secrets need `env:reveal`) |
+| `skill dev <dir> -- <cmd>` | `--crew <nameOrId>`, `--environment <env>` (default `dev`), `--env-file <path>` | Run your local working copy (the folder you're editing) with platform crew vars (default env dev). Replaces `skill run` (deprecated) |
 
-For `skill run` / `skill exec`, pass the command as separate words after `--` (e.g. `-- python script.py --flag`); to run a single preformed shell string, wrap it explicitly with `sh -c '...'`.
+`skill exec` always executes the **server-stored** skill — `--target` only picks
+where it runs (`sandbox` = server, `host` = your machine, cached under
+`~/.solidactions/cache/skills/`, refreshed automatically when the skill's
+published revision changes). `skill dev` always runs the **folder you're
+editing**. Passing a directory to `exec` or a bare name to `dev` is an error
+that points at the right command. Both `exec` targets default to `production`
+variables; `dev` defaults to `dev`.
+
+For `skill dev` / `skill exec`, pass the command as separate words after `--` (e.g. `-- python script.py --flag`); to run a single preformed shell string, wrap it explicitly with `sh -c '...'`.
 
 ### role
 

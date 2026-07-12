@@ -114,7 +114,7 @@ export function parseSkillFile(content: string): {
  * SKILL.md cites them, so bundled reference docs land complete (#247).
  *
  * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR) and
- * `skill run`'s local runtime-state dir (.sa-state/) — neither is skill
+ * `skill dev`'s local runtime-state dir (.sa-state/) — neither is skill
  * content, and uploading them would leak local revision bookkeeping / state
  * into the remote library and agent sandboxes.
  */
@@ -125,7 +125,7 @@ export function readReferences(dir: string): Record<string, string> {
         for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
-                if (entry.name === '.sa-state') continue; // skill run's local runtime-state dir
+                if (entry.name === '.sa-state') continue; // skill dev's local runtime-state dir
                 walk(abs);
                 continue;
             }
