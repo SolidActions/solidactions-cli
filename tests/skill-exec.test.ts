@@ -1,5 +1,10 @@
 /**
- * Tests for `solidactions skill exec <name> -- <command...>`.
+ * Tests for `solidactions skill exec <name> --target sandbox -- <command...>`
+ * (the `--target sandbox` path — v1.30 behavior unchanged by Task 4). The
+ * `--target host` path and the option-matrix/validation rules added in
+ * Task 4 are covered by the built-CLI integration suite in
+ * tests/skill-exec-target.test.ts (host execution needs a real fs cache and
+ * `stdio: 'inherit'`, which this in-process harness can't observe).
  *
  * Test-double policy: no mock/spy/stub libraries. Uses a real in-process HTTP
  * server (Node's http.createServer) to stub the unified /mcp endpoint —
@@ -7,10 +12,10 @@
  *
  * Unlike `skill run` (tests/skill-run.test.ts), which spawns the built CLI
  * binary because production code uses `stdio: 'inherit'` (unobservable via a
- * JS-level monkeypatch), `skill exec` writes remote stdout/stderr via
- * `process.stdout.write` / `process.stderr.write` directly. That makes the
- * in-process pattern (patchProcessExit + captured writes) sufficient here —
- * no subprocess needed.
+ * JS-level monkeypatch), `skill exec --target sandbox` writes remote
+ * stdout/stderr via `process.stdout.write` / `process.stderr.write` directly.
+ * That makes the in-process pattern (patchProcessExit + captured writes)
+ * sufficient here — no subprocess needed.
  */
 import * as http from 'http';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -147,7 +152,7 @@ describe('skillExecWithConfig — shared skill (no --role)', () => {
     it('posts tools/call with name:crews_skills and action:exec_skill, exits 0, prints remote stdout', async () => {
         responseQueue = [makeMcpSuccess({ stdout: 'hi', stderr: '', exit_code: 0, status: 'ok' })];
 
-        const { code, stdout } = await run('my-skill', ['node', 'scripts/q.js'], {});
+        const { code, stdout } = await run('my-skill', ['node', 'scripts/q.js'], { target: 'sandbox' });
 
         expect(code).toBe(0);
         expect(stdout).toContain('hi');
@@ -171,7 +176,7 @@ describe('skillExecWithConfig — role-scoped skill (--role)', () => {
     it('posts tools/call with name:crews_roles and action:exec_skill, sends role and name arguments', async () => {
         responseQueue = [makeMcpSuccess({ stdout: 'hi', stderr: '', exit_code: 0, status: 'ok', available_variables: [] })];
 
-        const { code } = await run('my-skill', ['node', 'scripts/q.js'], { role: 'writer' });
+        const { code } = await run('my-skill', ['node', 'scripts/q.js'], { target: 'sandbox', role: 'writer' });
 
         expect(code).toBe(0);
         expect(lastCapture).not.toBeNull();
@@ -188,7 +193,7 @@ describe('skillExecWithConfig — remote exit_code propagation', () => {
     it('exits with the remote exit_code (non-zero)', async () => {
         responseQueue = [makeMcpSuccess({ stdout: '', stderr: 'boom', exit_code: 3, status: 'failed' })];
 
-        const { code, stderr } = await run('my-skill', ['node', 'scripts/q.js'], {});
+        const { code, stderr } = await run('my-skill', ['node', 'scripts/q.js'], { target: 'sandbox' });
 
         expect(code).toBe(3);
         expect(stderr).toContain('boom');
@@ -197,24 +202,26 @@ describe('skillExecWithConfig — remote exit_code propagation', () => {
 
 describe('skillExecWithConfig — options passthrough', () => {
     it('sends --environment as top-level environment argument', async () => {
-        await run('my-skill', ['echo', 'hi'], { environment: 'staging' });
+        await run('my-skill', ['echo', 'hi'], { target: 'sandbox', environment: 'staging' });
         expect(lastCapture!.body.params.arguments.environment).toBe('staging');
     });
 
     it('sends --in-crew as in_crew only when --role is also given', async () => {
-        await run('my-skill', ['echo', 'hi'], { role: 'writer', inCrew: 'crew-a' });
+        await run('my-skill', ['echo', 'hi'], { target: 'sandbox', role: 'writer', inCrew: 'crew-a' });
         expect(lastCapture!.body.params.arguments.in_crew).toBe('crew-a');
     });
 
-    it('does not send in_crew when --role is absent, even if inCrew is set', async () => {
-        await run('my-skill', ['echo', 'hi'], { inCrew: 'crew-a' });
-        expect(lastCapture!.body.params.arguments).not.toHaveProperty('in_crew');
+    it('rejects --in-crew when --role is absent (option matrix: Task 4)', async () => {
+        const { code, stderr } = await run('my-skill', ['echo', 'hi'], { target: 'sandbox', inCrew: 'crew-a' });
+        expect(code).toBe(1);
+        expect(stderr).toContain('--in-crew');
+        expect(lastCapture).toBeNull();
     });
 });
 
 describe('skillExecWithConfig — command quoting', () => {
     it('shell-quotes each command word before joining into params.arguments.command, so shell metacharacters in an argv word (e.g. parens in a `node -e` script) survive the remote shell unmangled', async () => {
-        const { code } = await run('my-skill', ['node', '-e', 'console.log(42)'], {});
+        const { code } = await run('my-skill', ['node', '-e', 'console.log(42)'], { target: 'sandbox' });
 
         expect(code).toBe(0);
         // Matches shellQuoteArg's single-quote-every-word behavior in skill-run.ts:
@@ -225,7 +232,7 @@ describe('skillExecWithConfig — command quoting', () => {
 
 describe('skillExecWithConfig — error cases', () => {
     it('exits 1 with no command given, without making any HTTP request', async () => {
-        const { code, stderr } = await run('my-skill', [], {});
+        const { code, stderr } = await run('my-skill', [], { target: 'sandbox' });
         expect(code).toBe(1);
         expect(stderr).toContain('no command given');
         expect(lastCapture).toBeNull();
@@ -234,7 +241,7 @@ describe('skillExecWithConfig — error cases', () => {
     it('surfaces an MCP error code and message and exits 1', async () => {
         responseQueue = [makeMcpError('skill_not_found', 'No skill with that identifier exists.')];
 
-        const { code, stderr } = await run('missing-skill', ['echo', 'hi'], {});
+        const { code, stderr } = await run('missing-skill', ['echo', 'hi'], { target: 'sandbox' });
 
         expect(code).toBe(1);
         expect(stderr).toContain('skill_not_found');

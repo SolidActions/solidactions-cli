@@ -110,6 +110,49 @@ function readStorageScope(dir: string): string | null {
     return scope === 'crew' || scope === 'workspace' ? scope : null;
 }
 
+export interface ExecLocallyArgs {
+    dir: string;
+    commandParts: string[];
+    environment: string;
+    resolved: Record<string, string>;
+    skippedSecrets: string[];
+    envFile?: string;
+    config: Config;
+    banner: string;
+}
+
+/**
+ * Shared local runner: env assembly + provenance banner + spawn. Used by both
+ * `skill dev` (working copy) and `skill exec --target host` (cached artifact).
+ */
+export function execLocally(args: ExecLocallyArgs): never {
+    const fileVars = args.envFile ? parseEnvFile(fs.readFileSync(path.resolve(args.envFile), 'utf8')) : {};
+    const storageScope = readStorageScope(args.dir);
+    const { env, warnings } = assembleEnv({
+        resolved: args.resolved, fileVars, storageScope, dir: args.dir, config: args.config,
+    });
+
+    for (const w of warnings) process.stderr.write(chalk.yellow(`warn: ${w}\n`));
+    if (env.SOLIDACTIONS_STATE_DIR) fs.mkdirSync(env.SOLIDACTIONS_STATE_DIR, { recursive: true });
+    if (env.SOLIDACTIONS_SHARED_DIR) fs.mkdirSync(env.SOLIDACTIONS_SHARED_DIR, { recursive: true });
+
+    process.stderr.write(chalk.blue(`${args.banner}\n`));
+    if (args.skippedSecrets.length > 0) {
+        process.stderr.write(chalk.yellow(
+            `${args.skippedSecrets.length} secret ${args.skippedSecrets.length === 1 ? 'var' : 'vars'} unavailable (${args.skippedSecrets.join(', ')}): ` +
+            `your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, set a dev value with \`solidactions crew env set\`, or use --env-file.\n`,
+        ));
+    }
+
+    const result = spawnSync(args.commandParts.map(shellQuoteArg).join(' '), {
+        shell: true,
+        cwd: args.dir,
+        stdio: 'inherit',
+        env: { ...process.env, ...env },
+    });
+    process.exit(result.status ?? 1);
+}
+
 export interface SkillRunOptions {
     crew?: string;
     environment?: string;
@@ -154,30 +197,17 @@ export async function skillRunWithConfig(
         process.stderr.write(chalk.gray('no --crew given — running without crew variables (shared-skill parity)\n'));
     }
 
-    const fileVars = options.envFile ? parseEnvFile(fs.readFileSync(path.resolve(options.envFile), 'utf8')) : {};
-    const storageScope = readStorageScope(absDir);
-    const { env, warnings } = assembleEnv({ resolved, fileVars, storageScope, dir: absDir, config });
-
-    for (const w of warnings) process.stderr.write(chalk.yellow(`warn: ${w}\n`));
-    if (env.SOLIDACTIONS_STATE_DIR) fs.mkdirSync(env.SOLIDACTIONS_STATE_DIR, { recursive: true });
-    if (env.SOLIDACTIONS_SHARED_DIR) fs.mkdirSync(env.SOLIDACTIONS_SHARED_DIR, { recursive: true });
-
     const plainCount = Object.keys(resolved).length;
-    process.stderr.write(chalk.blue(`running locally in ${dir} — env '${environment}', ${plainCount} crew vars loaded\n`));
-    if (skippedSecrets.length > 0) {
-        process.stderr.write(chalk.yellow(
-            `${skippedSecrets.length} secret ${skippedSecrets.length === 1 ? 'var' : 'vars'} unavailable (${skippedSecrets.join(', ')}): ` +
-            `your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, set a dev value with \`solidactions crew env set\`, or use --env-file.\n`,
-        ));
-    }
-
-    const result = spawnSync(commandParts.map(shellQuoteArg).join(' '), {
-        shell: true,
-        cwd: absDir,
-        stdio: 'inherit',
-        env: { ...process.env, ...env },
+    execLocally({
+        dir: absDir,
+        commandParts,
+        environment,
+        resolved,
+        skippedSecrets,
+        envFile: options.envFile,
+        config,
+        banner: `▶ working copy ${dir} → local (${environment}) — ${plainCount} crew vars`,
     });
-    process.exit(result.status ?? 1);
 }
 
 export async function skillRun(dir: string, commandParts: string[], options: SkillRunOptions): Promise<void> {
