@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs",
-    "check:release": "npm run test && npm run build && npm run smoke:init",
+    "check:release": "npm run build && npm run test && npm run smoke:init",
     "prepublishOnly": "npm run build",
     "smoke:init": "node scripts/smoke-init.mjs",
     "test": "vitest run",
