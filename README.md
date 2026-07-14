@@ -2,6 +2,13 @@
 
 Deploy and manage workflow automation with SolidActions.
 
+Public setup guides: [www.solidactions.com/docs](https://www.solidactions.com/docs)
+
+## Prerequisites
+
+- Node.js 24 for generated workflow projects (`@solidactions/sdk` requires Node 24)
+- A SolidActions account, workspace, and API key
+
 ## Installation
 
 ```bash
@@ -10,14 +17,65 @@ npm install -g @solidactions/cli
 
 ## Quick Start
 
+Create an API key in the SolidActions app under **Settings → API Keys**, then run:
+
 ```bash
-solidactions login <api-key>                          # Authenticate (prompts for workspace)
-solidactions init my-project                          # Scaffold a new project (files + AI skills)
+# The API key is requested in a masked prompt and is not placed in shell history.
+solidactions login --global
+
+# Choose one agent target. init creates the project and installs local skills.
+solidactions init my-project --claude
+# Or: solidactions init my-project --agents
+
 cd my-project
-solidactions project deploy my-project -e production  # Deploy it
-solidactions run start my-project <workflow>          # Trigger a workflow
-solidactions run view <run-id>                        # Inspect a run
+npm install
+solidactions project deploy my-project -e production
+solidactions run start my-project hello -e production -i '{"name":"Ada"}' --wait
 ```
+
+The generated `hello` workflow requires no third-party credentials. A successful
+run completes with a greeting of `Hello, Ada!`; use the run ID printed by the
+command with `solidactions run view <run-id>` or open the run in the app.
+
+For non-interactive automation, explicitly read the key from stdin instead of
+placing it in argv:
+
+```bash
+printenv SOLIDACTIONS_API_KEY | solidactions login --stdin --global
+```
+
+Automation that does not need to write a config file can set
+`SOLIDACTIONS_API_KEY` and `SOLIDACTIONS_WORKSPACE_ID` directly.
+
+### Verify the generated AI tooling
+
+`solidactions init` installs all five current SolidActions skills plus the SDK
+reference:
+
+- `solidactions-getting-started`
+- `solidactions-workflow-coding`
+- `solidactions-deploy-and-config`
+- `solidactions-oauth-actions`
+- `solidactions-crew-skills`
+
+For `--claude`, skills are written to `.claude/skills/`; for `--agents`, they
+are written to `.agents/skills/`. Each skill is a flat `solidactions-*.md` file.
+Both targets receive `.solidactions/sdk-reference.md` and a pointer block in
+`CLAUDE.md` or `AGENTS.md`.
+
+```bash
+# Use the directory matching the target selected above.
+find .claude/skills -maxdepth 1 -name 'solidactions-*.md' -print
+test -f .solidactions/sdk-reference.md
+```
+
+Restart the coding-agent session after installation so it reloads project
+instructions. Then ask: “Which SolidActions skills are installed, and which
+one should you use to deploy this workflow?” The answer should identify the
+installed skills and select `solidactions-deploy-and-config` for deployment.
+
+For an existing project, install or refresh the same tooling with
+`solidactions ai init --claude` or `solidactions ai init --agents`.
 
 ## Configuration
 
@@ -38,6 +96,9 @@ You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while
 
 ### `solidactions login` flags
 
+- With no positional argument, `login` securely prompts for the API key using
+  masked input. This is the recommended interactive flow.
+- `--stdin` — read the API key from stdin for explicitly non-interactive use.
 - `--local` — write config to `./.solidactions/config.json` in the current folder.
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
@@ -60,7 +121,7 @@ Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration an
 
 If you run multiple AI coding agents in different project folders simultaneously, either:
 
-- Run `solidactions login <key> --local` in each folder so each has its own config, or
+- Run `solidactions login --local` interactively in each folder so each has its own config, or
 - Set `SOLIDACTIONS_API_KEY` / `SOLIDACTIONS_WORKSPACE_ID` in the environment each agent uses (no files to share or stomp).
 
 ### Deploy bundle exclusions (`solidactions.yaml`)
@@ -89,7 +150,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Description |
 |---------|-------------|
-| `login <api-key>` | Authenticate CLI with API key |
+| `login` | Authenticate via a masked API-key prompt (`--stdin` for automation) |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
 | `init [directory]` | Scaffold a new project (files + AI skills) |
@@ -129,9 +190,13 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `schedule set <project> <cron>` | `--workflow`, `-i`, `-y` | Set cron schedule (warns if exists) |
+| `schedule set <project> <cron>` | `--workflow`, `-i`, `-z`, `-y` | Set cron schedule and optional IANA timezone (warns if exists) |
 | `schedule list <project>` | | List schedules |
 | `schedule delete <project> <id>` | `-y` | Delete a schedule |
+
+```bash
+solidactions schedule set my-project '0 9 * * 1-5' --workflow daily-summary --timezone America/Chicago
+```
 
 ### webhook
 
@@ -213,7 +278,7 @@ You do **not** need `--overwrite` to keep an edited file whose doc was deleted o
 | `ai init` | `--claude`, `--agents` | Install AI skills and SDK reference into an **existing** project (use `init` for new projects) |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
-`ai init` installs three auto-activating SolidActions skills and a
+`ai init` installs five auto-activating SolidActions skills and a
 full SDK reference into your project:
 
 - Skills go to `.claude/skills/` (for `--claude` / Claude Code) or

@@ -34,6 +34,11 @@ export function timezoneMismatchRemedy(projectName: string): string {
     return `Your server may not support schedule timezones yet; update the server, or run 'solidactions schedule list ${projectName}' to find the schedule ID and remove it with: solidactions schedule delete ${projectName} <schedule-id>`;
 }
 
+export const EXISTING_SCHEDULE_CHOICES = [
+    { title: 'Replace existing schedule', value: 'replace' },
+    { title: 'Cancel', value: 'cancel' },
+];
+
 export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; timezone?: string; yes?: boolean }) {
     const config = await requireConfigWithWorkspace();
 
@@ -69,23 +74,15 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
                     type: 'select',
                     name: 'action',
                     message: 'What would you like to do?',
-                    choices: [
-                        { title: 'Replace existing schedule', value: 'replace' },
-                        { title: 'Add another schedule', value: 'add' },
-                        { title: 'Cancel', value: 'cancel' },
-                    ],
+                    choices: EXISTING_SCHEDULE_CHOICES,
                 });
                 if (confirm.action === 'cancel' || confirm.action === undefined) {
                     console.log(chalk.gray('Cancelled.'));
                     return;
                 }
-                if (confirm.action === 'replace') {
-                    // Delete the existing schedule first
-                    await axios.delete(`${config.host}/api/v1/projects/${projectName}/schedules/${existing.id}`, {
-                        headers: getApiHeaders(config),
-                    });
-                    console.log(chalk.gray(`Removed old schedule (${existing.cron_expression}).`));
-                }
+                // The API owns the one-schedule-per-workflow invariant and
+                // updates the existing row. Do not delete first: deletion
+                // loses YAML provenance and any persistent override state.
             }
         } catch {
             // If we can't check, proceed anyway
@@ -126,7 +123,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {

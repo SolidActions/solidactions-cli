@@ -1,0 +1,45 @@
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      examples_ref:
+        description: solidactions-examples release-candidate ref
+        required: true
+        default: main
+      sdk_ref:
+        description: solidactions-ts-sdk release-candidate ref
+        required: true
+        default: main
+
+jobs:
+  release-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: cli
+      - uses: actions/checkout@v6
+        with:
+          repository: SolidActions/solidactions-examples
+          ref: ${{ inputs.examples_ref || 'main' }}
+          path: examples
+      - uses: actions/checkout@v6
+        with:
+          repository: SolidActions/solidactions-ts-sdk
+          ref: ${{ inputs.sdk_ref || 'main' }}
+          path: ts-sdk
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: cli
+      - run: npm run check:release
+        working-directory: cli
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: cli

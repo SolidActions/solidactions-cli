@@ -1,6 +1,7 @@
 import fs from 'fs';
 import readline from 'readline';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import {
     Config,
     ConfigSource,
@@ -14,6 +15,76 @@ import { decideWriteTarget, pathForTarget, ensureGitignoreCovers, confirmOverwri
 import { fetchWorkspaces, matchWorkspace, WorkspaceLookupRecord } from '../utils/workspace-lookup';
 
 export type { Config };
+
+export const API_KEY_PROMPT = {
+    type: 'password' as const,
+    name: 'apiKey' as const,
+    message: 'SolidActions API key',
+};
+
+interface LoginSecretOptions {
+    stdin?: boolean;
+}
+
+interface LoginSecretDependencies {
+    input?: NodeJS.ReadableStream;
+    isTTY?: boolean;
+    prompt?: () => Promise<string | undefined>;
+}
+
+async function readAll(input: NodeJS.ReadableStream): Promise<string> {
+    let value = '';
+    for await (const chunk of input) {
+        value += chunk.toString();
+    }
+    return value;
+}
+
+/**
+ * Resolve a login secret without requiring it in argv. The positional key is
+ * retained for backwards compatibility, while new interactive documentation
+ * uses the masked prompt and automation can opt into stdin explicitly.
+ */
+export async function resolveLoginApiKey(
+    apiKey: string | undefined,
+    options: LoginSecretOptions = {},
+    dependencies: LoginSecretDependencies = {},
+): Promise<string> {
+    if (apiKey && options.stdin) {
+        throw new Error('Pass the API key either as the legacy positional argument or via --stdin, not both.');
+    }
+
+    let resolved = apiKey;
+
+    if (options.stdin) {
+        resolved = await readAll(dependencies.input ?? process.stdin);
+    } else if (!resolved) {
+        const isTTY = dependencies.isTTY ?? process.stdin.isTTY === true;
+        if (!isTTY) {
+            throw new Error(
+                'API key is required in non-interactive mode. Pipe it with --stdin, ' +
+                'or set SOLIDACTIONS_API_KEY without running login.',
+            );
+        }
+
+        const prompt = dependencies.prompt ?? (async () => {
+            const response = await prompts(API_KEY_PROMPT);
+            return response.apiKey as string | undefined;
+        });
+        resolved = await prompt();
+
+        if (resolved === undefined) {
+            throw new Error('Login cancelled.');
+        }
+    }
+
+    const trimmed = resolved?.trim();
+    if (!trimmed) {
+        throw new Error('API key is required.');
+    }
+
+    return trimmed;
+}
 
 export function getConfig(): Config | null {
     const resolved = resolveConfig();
@@ -231,7 +302,7 @@ export function whoami() {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
-        console.log(chalk.gray('Run "solidactions login <api-key>" to configure.'));
+        console.log(chalk.gray('Run "solidactions login --global" to configure.'));
         process.exit(1);
     }
 

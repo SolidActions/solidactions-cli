@@ -106,7 +106,7 @@ export function formatValidationError(data: unknown): string {
 export function requireResolvedConfig(): ResolvedConfig {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions login <api-key>` first.'));
+        console.error(chalk.red('Not initialized. Run `solidactions login --global` first.'));
         process.exit(1);
     }
     return resolved;
@@ -123,7 +123,7 @@ export function requireConfig(): Config {
  */
 export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
     const keySource = sources?.apiKey ?? 'config';
-    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login <api-key>\` to re-configure.`;
+    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
 }
 
 export async function ensureWorkspaceSelected(config: Config): Promise<Config> {

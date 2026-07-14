@@ -138,7 +138,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
                 } else if (error.response.status === 404) {
                     const envsList = await describeProjectEnvironments(config, projectName);
                     console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
@@ -169,7 +169,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
 
         console.log(chalk.yellow(GLOBAL_ENV_SCOPE_NOTE));
 
-        const isSecret = options.secret || false;
+        // Keep global and project writes consistent: names that commonly carry
+        // credentials are secrets unless the caller explicitly uses a plain
+        // name. `--secret` remains available for sensitive values whose names
+        // do not match this convention.
+        const isSecret = options.secret || /secret|key|token|password|credential/i.test(key);
 
         // Build the request body with per-environment values
         const body: Record<string, any> = {
@@ -267,7 +271,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {

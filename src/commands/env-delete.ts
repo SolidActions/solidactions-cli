@@ -100,7 +100,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 if (isProjectMode) {
                     const envsList = await describeProjectEnvironments(config, projectName!);

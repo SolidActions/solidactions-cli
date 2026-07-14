@@ -108,7 +108,7 @@ export async function crewEnvPush(crewArg: string, filePath: string = '.env', op
         serverVariables = response.data?.data ?? [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response?.status === 404) {
             console.error(chalk.red(error.response.data?.message || `Crew "${crewArg}" not found.`));
         } else {

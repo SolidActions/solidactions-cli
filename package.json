@@ -1,6 +1,6 @@
 {
   "name": "@solidactions/cli",
-  "version": "1.31.0",
+  "version": "1.31.1",
   "description": "SolidActions CLI - Deploy and manage workflow automation",
   "main": "dist/index.js",
   "bin": {
@@ -33,24 +33,27 @@
   ],
   "scripts": {
     "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs",
+    "check:release": "npm run build && npm run test && npm run smoke:init",
     "prepublishOnly": "npm run build",
+    "smoke:init": "node scripts/smoke-init.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "archiver": "^7.0.0",
-    "axios": "^1.6.0",
+    "axios": "^1.18.1",
     "chalk": "^4.1.2",
     "commander": "^11.0.0",
     "dotenv": "^17.3.1",
-    "form-data": "^4.0.0",
+    "form-data": "^4.0.6",
     "fs-extra": "^11.0.0",
     "ignore": "^7.0.5",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.0",
     "prompts": "^2.4.2",
-    "tar": "^7.5.12"
+    "tar": "^7.5.20"
   },
   "devDependencies": {
+    "@solidactions/sdk": "^0.7.3",
     "@types/archiver": "^6.0.0",
     "@types/fs-extra": "^11.0.0",
     "@types/js-yaml": "^4.0.9",

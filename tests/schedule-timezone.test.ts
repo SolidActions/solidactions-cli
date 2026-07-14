@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSchedulePayload, timezoneMismatch, timezoneMismatchRemedy } from '../src/commands/schedule-set';
+import { buildSchedulePayload, EXISTING_SCHEDULE_CHOICES, timezoneMismatch, timezoneMismatchRemedy } from '../src/commands/schedule-set';
 
 describe('buildSchedulePayload', () => {
     it('includes timezone only when passed', () => {
@@ -35,5 +35,14 @@ describe('timezoneMismatchRemedy — schedule delete takes a numeric ID, not a w
         const remedy = timezoneMismatchRemedy('my-project');
         expect(remedy).toContain('solidactions schedule list my-project');
         expect(remedy).toContain('solidactions schedule delete my-project <schedule-id>');
+    });
+});
+
+describe('one schedule per workflow', () => {
+    it('offers replacement or cancellation, never an unsupported second schedule', () => {
+        expect(EXISTING_SCHEDULE_CHOICES).toEqual([
+            { title: 'Replace existing schedule', value: 'replace' },
+            { title: 'Cancel', value: 'cancel' },
+        ]);
     });
 });

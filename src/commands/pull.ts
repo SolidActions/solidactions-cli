@@ -76,7 +76,7 @@ export async function pull(projectName: string, destPath?: string, options: { ye
             if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`));
             }
