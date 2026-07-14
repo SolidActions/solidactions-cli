@@ -50,7 +50,7 @@ export async function oauthActionsList(platform: string, options: OAuthActionsLi
         if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
             console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-actions platforms\` to see available platforms.`));
         } else if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>".'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global".'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
         } else {

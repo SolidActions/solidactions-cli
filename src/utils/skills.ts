@@ -3,7 +3,7 @@ import path from 'path';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from './github';
 
-const SKILL_NAMES = [
+export const SOLIDACTIONS_SKILL_NAMES = [
     'solidactions-getting-started',
     'solidactions-workflow-coding',
     'solidactions-deploy-and-config',
@@ -43,7 +43,7 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
 
     fsExtra.ensureDirSync(targetDir);
 
-    for (const skillName of SKILL_NAMES) {
+    for (const skillName of SOLIDACTIONS_SKILL_NAMES) {
         const remotePath = `${SKILLS_PATH_PREFIX}/${skillName}.md`;
         const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
 

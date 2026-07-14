@@ -31,7 +31,7 @@ export async function oauthActionsPlatforms(options: OAuthActionsPlatformsOption
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>".'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global".'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
         } else {

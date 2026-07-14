@@ -85,7 +85,7 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
                 console.error(chalk.yellow(`Ambiguous project '${projectName}': found in environments: ${envs}.`));
                 console.error(chalk.yellow(`Pass -e <env> to disambiguate, e.g.: solidactions run list ${projectName} -e dev`));
             } else if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }

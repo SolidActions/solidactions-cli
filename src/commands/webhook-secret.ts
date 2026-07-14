@@ -78,7 +78,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
         if (error.response) {
             if (error.response.status === 401) {
                 console.error(
-                    chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.')
+                    chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.')
                 );
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));

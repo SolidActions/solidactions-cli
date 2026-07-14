@@ -112,11 +112,11 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         serverMappings = response.data || [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             process.exit(1);
         } else if (error.response?.status === 404) {
             console.error(chalk.red(`Project "${projectSlug}" not found.`));
-            console.log(chalk.gray(`Deploy first with: solidactions project deploy ${projectName} --env ${environment}` + (environment !== 'production' ? ' --create' : '')));
+            console.log(chalk.gray(`Deploy first with: solidactions project deploy ${projectName} -e ${environment}` + (environment !== 'production' ? ' --create' : '')));
             process.exit(1);
         }
         throw error;

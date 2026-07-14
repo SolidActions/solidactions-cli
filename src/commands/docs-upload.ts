@@ -134,7 +134,7 @@ export async function docsUpload(files: string[], options: DocsUploadOptions = {
                 if (status === 413) {
                     console.error(chalk.red(`✗ ${displayName} — ${data?.message || 'File exceeds the maximum upload size (20MB).'}`));
                 } else if (status === 401) {
-                    console.error(chalk.red(`✗ ${displayName} — Authentication failed. Run "solidactions login <api-key>" to re-configure.`));
+                    console.error(chalk.red(`✗ ${displayName} — Authentication failed. Run "solidactions login --global" to re-configure.`));
                 } else if (status === 404 && data?.code === 'media_not_found') {
                     console.error(chalk.red(`✗ ${displayName} — doc ${replaceDocId} is not a media doc`));
                 } else if (status === 422) {

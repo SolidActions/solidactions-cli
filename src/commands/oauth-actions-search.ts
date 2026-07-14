@@ -61,7 +61,7 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
             console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-actions platforms\` to see available platforms.`));
         } else if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
         } else {

@@ -126,7 +126,23 @@ describe('envSet — --global guard (Jordan Wall #4)', () => {
             try { await envSet('KEY', 'value', undefined, { global: true, yes: true }); }
             catch (e) { if (e instanceof ProcessExitError) caught = e; else throw e; }
             expect(caught).toBeNull();
-            expect(requests.some((r) => r.method === 'POST' && r.path === '/api/v1/variables')).toBe(true);
+            const write = requests.find((r) => r.method === 'POST' && r.path === '/api/v1/variables');
+            expect(write).toBeDefined();
+            expect(write?.body.is_secret).toBe(true);
+        } finally { restoreExit(); env.cleanup(); }
+    });
+
+    it('global mode leaves a non-sensitive variable name plain by default', async () => {
+        const env = makeTmpEnv();
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'sk_test', workspaceId: 'ws-1' });
+        const restoreExit = patchProcessExit();
+        try {
+            let caught: ProcessExitError | null = null;
+            try { await envSet('REPORT_REGION', 'us-central', undefined, { global: true, yes: true }); }
+            catch (e) { if (e instanceof ProcessExitError) caught = e; else throw e; }
+            expect(caught).toBeNull();
+            const write = requests.find((r) => r.method === 'POST' && r.path === '/api/v1/variables');
+            expect(write?.body.is_secret).toBe(false);
         } finally { restoreExit(); env.cleanup(); }
     });
 

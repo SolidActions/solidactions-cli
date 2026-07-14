@@ -1,8 +1,15 @@
 import axios from 'axios';
 
+const DEFAULT_RAW_CONTENT_BASE_URL = 'https://raw.githubusercontent.com';
+
+export function rawContentUrl(owner: string, repo: string, path: string, branch: string = 'main'): string {
+    const baseUrl = (process.env.SOLIDACTIONS_RAW_CONTENT_BASE_URL ?? DEFAULT_RAW_CONTENT_BASE_URL).replace(/\/$/, '');
+    return `${baseUrl}/${owner}/${repo}/${branch}/${path}`;
+}
+
 export async function fetchRawFile(owner: string, repo: string, path: string, branch: string = 'main'): Promise<string> {
     try {
-        const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
+        const url = rawContentUrl(owner, repo, path, branch);
         const response = await axios.get(url, { responseType: 'text' });
         return response.data;
     } catch (error: any) {
