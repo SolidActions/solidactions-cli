@@ -42,20 +42,31 @@ function sleep(ms: number): Promise<void> {
  * Poll POST /oauth/token per RFC 8628 §3.5: repeat at `intervalSeconds`,
  * honoring `authorization_pending` (keep polling) and `slow_down` (add
  * `slowDownIncrementSeconds` to the interval and keep polling). Rejects on
- * any other OAuth error. `slowDownIncrementSeconds` defaults to the
- * RFC-recommended 5s and is only overridden by tests, to keep them fast.
+ * any other OAuth error, including a server-sent `expired_token`.
+ * `slowDownIncrementSeconds` defaults to the RFC-recommended 5s and is only
+ * overridden by tests, to keep them fast.
+ *
+ * `expiresInSeconds` bounds the loop client-side to the device code's own
+ * lifetime, so a server that never emits `expired_token` (and just keeps
+ * returning `authorization_pending`) can't cause an infinite poll.
  */
 export async function pollForToken(
     host: string,
     clientId: string,
     deviceCode: string,
     intervalSeconds: number,
+    expiresInSeconds: number,
     slowDownIncrementSeconds = 5,
 ): Promise<TokenResponse> {
     let interval = intervalSeconds;
+    let elapsed = 0;
 
     while (true) {
+        if (elapsed + interval > expiresInSeconds) {
+            throw new Error('device code expired — run `solidactions login --device` again');
+        }
         await sleep(interval * 1000);
+        elapsed += interval;
 
         try {
             const response = await axios.post(`${host}/oauth/token`, {
@@ -72,6 +83,9 @@ export async function pollForToken(
             if (oauthError === 'slow_down') {
                 interval += slowDownIncrementSeconds;
                 continue;
+            }
+            if (oauthError === 'expired_token') {
+                throw new Error('device code expired — run `solidactions login --device` again');
             }
             throw new Error(oauthError || error.message);
         }
@@ -97,7 +111,7 @@ export async function deviceLogin(
 
     let token: TokenResponse;
     try {
-        token = await pollForToken(host, CLI_OAUTH_CLIENT_ID, code.device_code, code.interval || 5);
+        token = await pollForToken(host, CLI_OAUTH_CLIENT_ID, code.device_code, code.interval || 5, code.expires_in);
     } catch (error: any) {
         console.error(chalk.red('Device login failed:'), error.message);
         process.exit(1);

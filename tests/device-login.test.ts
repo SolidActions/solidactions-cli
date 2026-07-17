@@ -48,7 +48,7 @@ describe('pollForToken', () => {
             { status: 200, body: { access_token: 'tok-123', expires_in: 3600 } },
         ];
 
-        const result = await pollForToken(HOST(), 'client-id', 'devcode', 0.02, 0.02);
+        const result = await pollForToken(HOST(), 'client-id', 'devcode', 0.02, 10, 0.02);
 
         expect(result.access_token).toBe('tok-123');
         expect(requestCount).toBe(2);
@@ -61,7 +61,7 @@ describe('pollForToken', () => {
         ];
 
         const start = Date.now();
-        const result = await pollForToken(HOST(), 'client-id', 'devcode', 0.02, 0.1);
+        const result = await pollForToken(HOST(), 'client-id', 'devcode', 0.02, 10, 0.1);
         const elapsed = Date.now() - start;
 
         expect(result.access_token).toBe('tok-456');
@@ -73,7 +73,27 @@ describe('pollForToken', () => {
     it('throws on access_denied', async () => {
         responses = [{ status: 400, body: { error: 'access_denied' } }];
 
-        await expect(pollForToken(HOST(), 'client-id', 'devcode', 0.02, 0.02)).rejects.toThrow('access_denied');
+        await expect(pollForToken(HOST(), 'client-id', 'devcode', 0.02, 10, 0.02)).rejects.toThrow('access_denied');
         expect(requestCount).toBe(1);
+    });
+
+    it('throws on expired_token from the server', async () => {
+        responses = [{ status: 400, body: { error: 'expired_token' } }];
+
+        await expect(pollForToken(HOST(), 'client-id', 'devcode', 0.02, 10, 0.02)).rejects.toThrow(
+            'device code expired',
+        );
+        expect(requestCount).toBe(1);
+    });
+
+    it('aborts with a clear error once elapsed polling exceeds expires_in, without a server-sent expired_token', async () => {
+        // Server always returns authorization_pending (never expired_token); a
+        // short expires_in with a small interval means the client-side deadline
+        // check fires before it would run out of canned responses.
+        responses = Array.from({ length: 20 }, () => ({ status: 400, body: { error: 'authorization_pending' } }));
+
+        await expect(pollForToken(HOST(), 'client-id', 'devcode', 0.05, 0.15, 0.02)).rejects.toThrow(
+            'device code expired — run `solidactions login --device` again',
+        );
     });
 });
