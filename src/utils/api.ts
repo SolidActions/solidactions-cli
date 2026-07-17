@@ -28,9 +28,26 @@ export function augmentNotFoundMessage(error: any): any {
     return error;
 }
 
+/**
+ * Inspect an axios error and, if it's a 403 with the app's `workspace_forbidden`
+ * error code (device-flow-scoped token targeting a workspace outside its
+ * scope), replace the raw server message with the same actionable guidance
+ * `workspaceSet`'s local pre-check gives — so slug/name inputs (which can't
+ * be pre-checked locally) still surface a clear message instead of a raw
+ * axios/HTTP error.
+ */
+export function augmentWorkspaceForbiddenMessage(error: any): any {
+    if (error?.response?.status === 403 && error.response.data?.code === 'workspace_forbidden') {
+        error.response.data.message =
+            'This session is scoped to a limited set of workspaces. '
+            + 'Re-run `solidactions login --device` to change scope.';
+    }
+    return error;
+}
+
 axios.interceptors.response.use(
     (response) => response,
-    (error) => Promise.reject(augmentNotFoundMessage(error)),
+    (error) => Promise.reject(augmentWorkspaceForbiddenMessage(augmentNotFoundMessage(error))),
 );
 
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
@@ -158,6 +175,12 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
             }
         } else {
             workspaces = Array.isArray(grouped) ? grouped : [];
+        }
+
+        const scope = response.data.scope as { mode: 'all' | 'subset' | 'single'; workspace_ids: string[] } | null;
+        if (scope) {
+            config.scopeMode = scope.mode;
+            config.scopedWorkspaceIds = scope.workspace_ids;
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
