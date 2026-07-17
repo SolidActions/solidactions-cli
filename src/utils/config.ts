@@ -8,6 +8,8 @@ export interface Config {
     apiKey: string;
     workspace?: string;     // human-readable slug; cosmetic
     workspaceId?: string;   // canonical UUID used in API calls
+    scopeMode?: 'all' | 'subset' | 'single'; // set for device-flow tokens; absent for user-scoped Sanctum PATs
+    scopedWorkspaceIds?: string[];           // present when scopeMode is 'subset' or 'single'
 }
 
 export type ConfigSource = 'env' | string | null;
@@ -188,6 +190,10 @@ export function mergeConfigs(
     const workspace = pickWorkspaceField('workspace');
     const workspaceId = pickWorkspaceField('workspaceId');
 
+    // Never env-settable — config-file layers only (local > global).
+    const scopeMode = pick('scopeMode');
+    const scopedWorkspaceIds = pick('scopedWorkspaceIds');
+
     if (!host.value && !apiKey.value) {
         return null;
     }
@@ -198,6 +204,8 @@ export function mergeConfigs(
             apiKey: (apiKey.value ?? '') as string,
             workspace: workspace.value as string | undefined,
             workspaceId: workspaceId.value as string | undefined,
+            scopeMode: scopeMode.value as Config['scopeMode'],
+            scopedWorkspaceIds: scopedWorkspaceIds.value as string[] | undefined,
         },
         sources: {
             host: host.source,

@@ -94,8 +94,12 @@ async function startSourceServer() {
 
 async function expectHelp(binary, args, expected, env, cwd) {
   const output = await run(binary, [...args, '--help'], { capture: true, env, cwd });
+  // commander wraps help text to the terminal width, which can be narrower in CI
+  // (no TTY / piped output) than locally, splitting a phrase across a line break.
+  // Collapse all whitespace before matching so wrapping doesn't affect the check.
+  const normalized = output.replace(/\s+/g, ' ');
   for (const fragment of expected) {
-    assert(output.includes(fragment), `${args.join(' ')} --help is missing ${fragment}`);
+    assert(normalized.includes(fragment), `${args.join(' ')} --help is missing ${fragment}`);
   }
 }
 

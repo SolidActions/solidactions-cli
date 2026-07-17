@@ -58,6 +58,12 @@ interface WorkspaceSetOptions {
     gitignore?: boolean;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function looksLikeUuid(input: string): boolean {
+    return UUID_RE.test(input);
+}
+
 export async function workspaceSet(input: string, options: WorkspaceSetOptions = {}) {
     if (process.env.SOLIDACTIONS_WORKSPACE_ID) {
         console.error(chalk.red(
@@ -68,6 +74,21 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
     }
 
     const config = requireResolvedConfig().config;
+
+    if ((config.scopeMode === 'single' || config.scopeMode === 'subset') && config.scopedWorkspaceIds) {
+        // Best-effort pre-check: the scope list holds raw ids, so only an id
+        // input can be checked locally; slug/name inputs fall through to the
+        // server's authoritative 403 workspace_forbidden (surfaced cleanly).
+        const isKnownOutOfScope = config.scopedWorkspaceIds.length > 0
+            && !config.scopedWorkspaceIds.includes(input);
+        if (isKnownOutOfScope && looksLikeUuid(input)) {
+            console.error(chalk.red(
+                `This session is scoped to workspace(s) ${config.scopedWorkspaceIds.join(', ')}. `
+                + 'Re-run `solidactions login --device` to change scope.',
+            ));
+            process.exit(1);
+        }
+    }
 
     const workspace = await resolveWorkspaceInput(config, input);
 
