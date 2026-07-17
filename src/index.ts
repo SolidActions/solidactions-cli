@@ -110,9 +110,10 @@ program.hook('preAction', (thisCommand, actionCommand) => {
 
 program
     .command('login')
-    .description('Authenticate the CLI (prompts securely for your API key)')
-    .argument('[api-key]', 'Legacy positional API key (prefer the masked prompt or --stdin)')
+    .description('Authenticate the CLI (prompts securely for your API key, or via --device for browser-based login)')
+    .argument('[api-key]', 'Legacy positional API key (prefer the masked prompt, --stdin, or --device)')
     .option('--stdin', 'Read the API key from stdin (for non-interactive automation)')
+    .option('--device', 'Authenticate via browser using OAuth device authorization')
     .option('--dev', 'Use local development server (http://localhost:8000)')
     .option('--host <url>', 'Custom API host URL')
     .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt). Non-interactive logins without this flag leave the workspace unset.')
@@ -120,6 +121,11 @@ program
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
     .action(async (apiKey, options) => {
+        if (options.device) {
+            const { deviceLogin } = await import('./commands/device-login');
+            await deviceLogin(options);
+            return;
+        }
         const resolvedApiKey = await resolveLoginApiKey(apiKey, { stdin: options.stdin });
         await login(resolvedApiKey, options);
     });

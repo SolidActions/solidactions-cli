@@ -173,43 +173,16 @@ async function selectWorkspaceInteractively(
     return workspaces[index];
 }
 
-export async function login(
-    apiKey: string,
-    options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
-) {
-    const resolved = resolveLoginHost(options);
-    const host = resolved.host;
-
-    if (!apiKey || apiKey.trim().length === 0) {
-        console.error(chalk.red('Error: API key is required.'));
-        console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
-        process.exit(1);
-    }
-
-    console.log(chalk.blue(`Initializing SolidActions CLI...`));
-    for (const line of loginHostLines(resolved)) {
-        console.log(resolved.isDefault ? chalk.yellow(line) : chalk.gray(line));
-    }
-
-    const config: Config = {
-        host,
-        apiKey: apiKey.trim(),
-    };
-
-    // 1. Validate the key BEFORE any disk write.
-    let workspaces: WorkspaceLookupRecord[];
-    try {
-        workspaces = await fetchWorkspaces(config);
-    } catch (e: any) {
-        if (e.response?.status === 401) {
-            console.error(chalk.red(`Invalid API key for ${host}.`));
-        } else {
-            console.error(chalk.red(`Could not reach ${host}: ${e.message}`));
-        }
-        process.exit(1);
-        return;
-    }
-
+/**
+ * Shared tail of `login`, reused verbatim by `deviceLogin`: resolve the
+ * workspace against an already-fetched list, determine the write target,
+ * back up + write the config file once, and print the success output.
+ */
+export async function completeLogin(
+    config: Config,
+    workspaces: WorkspaceLookupRecord[],
+    options: { workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
+): Promise<void> {
     // 2. Resolve the workspace (still before writing).
     if (options.workspace) {
         const match = matchWorkspace(options.workspace, workspaces);
@@ -265,6 +238,46 @@ export async function login(
     console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
     console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
     console.log(chalk.gray('  solidactions run list                 List recent runs'));
+}
+
+export async function login(
+    apiKey: string,
+    options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
+) {
+    const resolved = resolveLoginHost(options);
+    const host = resolved.host;
+
+    if (!apiKey || apiKey.trim().length === 0) {
+        console.error(chalk.red('Error: API key is required.'));
+        console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
+        process.exit(1);
+    }
+
+    console.log(chalk.blue(`Initializing SolidActions CLI...`));
+    for (const line of loginHostLines(resolved)) {
+        console.log(resolved.isDefault ? chalk.yellow(line) : chalk.gray(line));
+    }
+
+    const config: Config = {
+        host,
+        apiKey: apiKey.trim(),
+    };
+
+    // 1. Validate the key BEFORE any disk write.
+    let workspaces: WorkspaceLookupRecord[];
+    try {
+        workspaces = await fetchWorkspaces(config);
+    } catch (e: any) {
+        if (e.response?.status === 401) {
+            console.error(chalk.red(`Invalid API key for ${host}.`));
+        } else {
+            console.error(chalk.red(`Could not reach ${host}: ${e.message}`));
+        }
+        process.exit(1);
+        return;
+    }
+
+    await completeLogin(config, workspaces, options);
 }
 
 export function logout(options: { local?: boolean; global?: boolean } = {}) {
