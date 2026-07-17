@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
-import { fetchWorkspaces, WorkspaceLookupRecord } from '../utils/workspace-lookup';
+import { fetchWorkspaces, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
 import { completeLogin, resolveLoginHost } from './login';
 
 // Public device-flow client id — not a secret; matches the server-seeded
@@ -123,8 +123,9 @@ export async function deviceLogin(
     // Same tail as login(): fetch workspaces, then resolve + write + report
     // exactly as login() does via the shared completeLogin() helper.
     let workspaces: WorkspaceLookupRecord[];
+    let scope: WorkspaceScope | null;
     try {
-        workspaces = await fetchWorkspaces(config);
+        ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (e: any) {
         if (e.response?.status === 401) {
             console.error(chalk.red(`Invalid API key for ${host}.`));
@@ -135,5 +136,5 @@ export async function deviceLogin(
         return;
     }
 
-    await completeLogin(config, workspaces, options);
+    await completeLogin(config, workspaces, options, scope);
 }

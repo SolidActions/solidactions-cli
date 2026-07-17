@@ -196,4 +196,34 @@ describe('login — validates before writing (F-C2)', () => {
         expect(out).toContain('No workspace set');
         expect(out).toContain('Logged in successfully!');
     });
+
+    it('a scoped /v1/workspaces response (device-flow token) persists scopeMode + scopedWorkspaceIds through completeLogin', async () => {
+        nextStatus = 200;
+        nextBody = {
+            data: [{ id: 'ws-1', name: 'Some Workspace', slug: 'some-workspace' }],
+            scope: { mode: 'subset', workspace_ids: ['ws-1', 'ws-2'] },
+        };
+
+        await login('good-key', { global: true, host: HOST(), workspace: 'Some Workspace' });
+
+        const globalPath = path.join(env.home, '.solidactions', 'config.json');
+        const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(config.scopeMode).toBe('subset');
+        expect(config.scopedWorkspaceIds).toEqual(['ws-1', 'ws-2']);
+    });
+
+    it('a null scope (Sanctum PAT) leaves scopeMode/scopedWorkspaceIds absent through completeLogin', async () => {
+        nextStatus = 200;
+        nextBody = {
+            data: [{ id: 'ws-1', name: 'Some Workspace', slug: 'some-workspace' }],
+            scope: null,
+        };
+
+        await login('good-key', { global: true, host: HOST(), workspace: 'Some Workspace' });
+
+        const globalPath = path.join(env.home, '.solidactions', 'config.json');
+        const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(config.scopeMode).toBeUndefined();
+        expect(config.scopedWorkspaceIds).toBeUndefined();
+    });
 });

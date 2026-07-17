@@ -12,7 +12,7 @@ import {
     getGlobalConfigPath,
 } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers, confirmOverwrite } from '../utils/config-write-target';
-import { fetchWorkspaces, matchWorkspace, WorkspaceLookupRecord } from '../utils/workspace-lookup';
+import { fetchWorkspaces, matchWorkspace, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
 
 export type { Config };
 
@@ -182,7 +182,15 @@ export async function completeLogin(
     config: Config,
     workspaces: WorkspaceLookupRecord[],
     options: { workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
+    scope: WorkspaceScope | null = null,
 ): Promise<void> {
+    // Device-flow tokens carry a scope (mode + workspace_ids) that later
+    // gates `workspace set`; absent for user-scoped Sanctum PATs.
+    if (scope) {
+        config.scopeMode = scope.mode;
+        config.scopedWorkspaceIds = scope.workspace_ids;
+    }
+
     // 2. Resolve the workspace (still before writing).
     if (options.workspace) {
         const match = matchWorkspace(options.workspace, workspaces);
@@ -265,8 +273,9 @@ export async function login(
 
     // 1. Validate the key BEFORE any disk write.
     let workspaces: WorkspaceLookupRecord[];
+    let scope: WorkspaceScope | null;
     try {
-        workspaces = await fetchWorkspaces(config);
+        ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (e: any) {
         if (e.response?.status === 401) {
             console.error(chalk.red(`Invalid API key for ${host}.`));
@@ -277,7 +286,7 @@ export async function login(
         return;
     }
 
-    await completeLogin(config, workspaces, options);
+    await completeLogin(config, workspaces, options, scope);
 }
 
 export function logout(options: { local?: boolean; global?: boolean } = {}) {
