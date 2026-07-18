@@ -65,15 +65,28 @@ export async function resolveWorkspaceInput(
     input: string,
 ): Promise<WorkspaceLookupRecord> {
     let workspaces: WorkspaceLookupRecord[];
+    let scope: WorkspaceScope | null = null;
     try {
-        ({ workspaces } = await fetchWorkspaces(config));
+        ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (error: any) {
         console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
         process.exit(1);
     }
     const match = matchWorkspace(input, workspaces);
     if (!match) {
-        console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+        // A scoped (single/subset) session only ever lists the workspaces its
+        // OAuth grant covers, so a miss can mean either "doesn't exist" OR
+        // "exists but out of this session's scope" — disambiguate so the user
+        // knows re-auth with broader scope may be the fix, not a typo.
+        if (scope && (scope.mode === 'single' || scope.mode === 'subset')) {
+            console.error(chalk.red(
+                `Workspace "${input}" not found in this session's authorized workspaces `
+                + `(scope: ${scope.mode}${scope.workspace_ids.length ? `, covering ${scope.workspace_ids.join(', ')}` : ''}). `
+                + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login --device`.',
+            ));
+        } else {
+            console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+        }
         process.exit(1);
     }
     return match;
