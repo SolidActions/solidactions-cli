@@ -20,6 +20,16 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # `npm version` resolves increment KEYWORDS (patch/minor/major/…), so a
+      # release tagged e.g. `patch` would silently publish a bumped version
+      # instead of failing. Assert the tag is a literal semver before we hand it
+      # to `npm version`, so only an explicit version ever reaches the registry.
+      - name: Assert release tag is a literal semver version
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] || {
+            echo "release tag '${GITHUB_REF_NAME}' is not a semver version"; exit 1;
+          }
+
       # The release tag is the single source of truth for the published version.
       # Deriving it here (rather than relying on a package.json bump commit) means
       # a release whose package.json wasn't bumped can no longer collide with the
