@@ -19,4 +19,12 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # The release tag is the single source of truth for the published version.
+      # Deriving it here (rather than relying on a package.json bump commit) means
+      # a release whose package.json wasn't bumped can no longer collide with the
+      # registry's existing version and fail `npm publish` silently (#77). No git
+      # tag is created — this only rewrites the in-workspace package.json version.
+      - run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+
       - run: npm publish --provenance --access public

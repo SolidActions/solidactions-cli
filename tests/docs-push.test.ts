@@ -2375,6 +2375,44 @@ describe('docsPushWithConfig — untracked binaries', () => {
         }
     });
 
+    it('never pushes untracked .md files under node_modules or dot-directories', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'real.md': '# Real',
+            'node_modules/some-pkg/readme.md': '# Should be ignored',
+            '.cache/notes.md': '# Also ignored',
+        });
+
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // Only `real.md` reaches bulk_create; the excluded trees are never sent.
+            const bulkItems = allCaptures
+                .flatMap((c) => c.body?.params?.arguments?.items ?? []);
+            const titles = bulkItems.map((i: any) => i.title);
+            expect(titles).toEqual(['real']);
+
+            // And they must not be warned about as untracked binaries either.
+            expect(stderrLines.join('')).not.toMatch(/not pushed/);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
     it('exposes untracked_media in the --json payload, excluding tracked files and the manifest sidecar', async () => {
         const trackedContent = '# Doc';
         const { dir, cleanup } = makeTmpDocsDir({

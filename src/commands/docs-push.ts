@@ -109,6 +109,18 @@ interface TrackedMissing {
     id: number;
 }
 
+const SKIP_DIRS = new Set(['node_modules']);
+
+/**
+ * Directory/dot entries neither walker descends into or picks up: dotfiles and
+ * dot-directories (also covers the `.solidactions-docs.json` sidecar itself) and
+ * `node_modules/`. Shared so the markdown and binary walkers stay in lockstep —
+ * an untracked `.md` under `node_modules/` or a dot-directory must not be pushed.
+ */
+function isSkippedEntry(name: string): boolean {
+    return name.startsWith('.') || SKIP_DIRS.has(name);
+}
+
 /**
  * Recursively walk `dir` and collect all *.md files.
  * Returns a list of absolute paths.
@@ -118,6 +130,7 @@ function walkMarkdownFiles(dir: string): string[] {
 
     const walk = (current: string): void => {
         for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            if (isSkippedEntry(entry.name)) continue;
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
                 walk(abs);
@@ -131,8 +144,6 @@ function walkMarkdownFiles(dir: string): string[] {
     return results;
 }
 
-const SKIP_DIRS = new Set(['node_modules']);
-
 /**
  * Recursively walk `dir` and collect relative paths of non-.md files that
  * are not present in the manifest — never uploaded by `docs push`; `docs
@@ -145,7 +156,7 @@ function walkUntrackedBinaries(dir: string, manifest: DocsManifest | null): stri
 
     const walk = (current: string): void => {
         for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-            if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+            if (isSkippedEntry(entry.name)) continue;
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
                 walk(abs);
