@@ -1,5 +1,5 @@
 /**
- * Tests for `solidactions docs pull <folder> [dest]`
+ * Tests for `solidactions doc pull <folder> [dest]`
  *
  * Uses a real in-process HTTP server (Node's http.createServer) to stub the
  * unified /mcp endpoint. No mock/spy/stub libraries — follows the pattern in
@@ -13,8 +13,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { docsPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/docs-pull';
-import type { DocsManifest } from '../src/commands/docs-pull';
+import { docPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/doc-pull';
+import type { DocsManifest } from '../src/commands/doc-pull';
 import type { Config } from '../src/utils/config';
 
 /** sha256 hex digest, for asserting manifest body_sha256 values in tests. */
@@ -225,7 +225,7 @@ describe('sanitizeTitle', () => {
 // Integration: BFS folder tree pull
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — folder tree', () => {
+describe('docPullWithConfig — folder tree', () => {
     it('BFS-walks a folder tree, writes files + manifest with ids/revisions', async () => {
         responseQueue = [
             // list on marketing/fb-campaign -> one subfolder (ads) + root doc "brief"
@@ -267,7 +267,7 @@ describe('docsPullWithConfig — folder tree', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()),
+                docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -328,7 +328,7 @@ describe('docsPullWithConfig — folder tree', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('many', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('many', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             // 1 list call + 2 bulk_read calls (50 + 10)
@@ -351,7 +351,7 @@ describe('docsPullWithConfig — folder tree', () => {
 // Unit/integration: collision suffixing
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — title collisions', () => {
+describe('docPullWithConfig — title collisions', () => {
     it('two docs titled "Same" in different folders get no suffix; same folder gets -2', async () => {
         responseQueue = [
             // root list: one subfolder "sub" + one root doc "Same"
@@ -387,7 +387,7 @@ describe('docsPullWithConfig — title collisions', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('root', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('root', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             // Same-folder collision: "Same.md" and "Same-2.md"
@@ -410,7 +410,7 @@ describe('docsPullWithConfig — title collisions', () => {
 // Single-doc fallback
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — single-doc fallback', () => {
+describe('docPullWithConfig — single-doc fallback', () => {
     it('falls back to a single read when list 404s with folder_path_not_found', async () => {
         responseQueue = [
             (body: any) => {
@@ -431,7 +431,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('notes/solo', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.readFileSync(path.join(dest, 'solo.md'), 'utf8')).toBe('x');
@@ -465,7 +465,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('solo', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('solo', dest, {}, stubConfig()));
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'solo.md'), 'utf8')).toBe('x');
         } finally {
@@ -487,7 +487,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('notes/ghost', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('notes/ghost', dest, {}, stubConfig()));
             expect(code).not.toBe(0);
             const out = stderrLines.join('');
             expect(out).toContain('folder_path_not_found');
@@ -511,7 +511,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
             expect(code).not.toBe(0);
             expect(allCaptures.length).toBe(1);
             expect(stderrLines.join('')).toContain('permission_denied');
@@ -527,7 +527,7 @@ describe('docsPullWithConfig — single-doc fallback', () => {
 // Overwrite confirmation
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — overwrite confirm', () => {
+describe('docPullWithConfig — overwrite confirm', () => {
     it('non-empty dest without --yes: declining the prompt exits 0 and writes nothing', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
@@ -546,7 +546,7 @@ describe('docsPullWithConfig — overwrite confirm', () => {
 
         try {
             prompts.inject([false]);
-            const code = await runExpectingExit(() => docsPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             // No MCP calls at all — confirmation happens before any network I/O
@@ -581,7 +581,7 @@ describe('docsPullWithConfig — overwrite confirm', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/fb-campaign', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/fb-campaign', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'brief.md'), 'utf8')).toBe('# Brief');
@@ -597,7 +597,7 @@ describe('docsPullWithConfig — overwrite confirm', () => {
 // Unpushed local changes — pull overwrite protection + --overwrite
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — unpushed local changes', () => {
+describe('docPullWithConfig — unpushed local changes', () => {
     function writeManifest(dest: string, docs: DocsManifest['docs'], folderPath = 'marketing/docs'): void {
         const manifest: DocsManifest = { folder_path: folderPath, docs };
         fs.mkdirSync(dest, { recursive: true });
@@ -626,7 +626,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(1);
 
@@ -678,7 +678,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(1);
 
@@ -723,7 +723,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
             // the unrelated generic non-empty-destination prompt (it never bypasses the
             // unpushed-local-changes conflict check — see the "even with --yes" test above).
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -770,7 +770,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(1);
 
@@ -814,7 +814,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
         try {
             // No prompt injected: prompts() would throw/hang if the code tried to prompt.
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/docs', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing/docs', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Server Content');
@@ -848,7 +848,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Original updated');
@@ -880,7 +880,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/docs', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'doc.md'), 'utf8')).toBe('# Fresh Pull');
@@ -896,7 +896,7 @@ describe('docsPullWithConfig — unpushed local changes', () => {
 // Manifest-clobber protection — dest tracks a DIFFERENT folder
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — manifest tracks a different folder', () => {
+describe('docPullWithConfig — manifest tracks a different folder', () => {
     it('dest manifest tracks a DIFFERENT folder: refuses before any network I/O, names both folders, and leaves the manifest untouched', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
@@ -914,7 +914,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/b', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/b', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(1);
 
@@ -957,7 +957,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/b', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing/b', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -994,7 +994,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/a', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/a', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X updated');
@@ -1022,7 +1022,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/a', dest, {}, stubConfig()),
+                docPullWithConfig('marketing/a', dest, {}, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'x.md'), 'utf8')).toBe('X');
@@ -1057,7 +1057,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/notes', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing/notes', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(1);
 
@@ -1081,7 +1081,7 @@ describe('docsPullWithConfig — manifest tracks a different folder', () => {
 // Deletion propagation (orphan cleanup)
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — deletion propagation', () => {
+describe('docPullWithConfig — deletion propagation', () => {
     function writeManifest(dest: string, docs: DocsManifest['docs'], folderPath = 'marketing'): void {
         const manifest: DocsManifest = { folder_path: folderPath, docs };
         fs.mkdirSync(dest, { recursive: true });
@@ -1110,7 +1110,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1127,7 +1127,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
     it('never deletes outside the destination, even for a manifest key that escapes it', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
-        // A sibling of `dest`, i.e. OUTSIDE the pull destination. `docs pull` never writes
+        // A sibling of `dest`, i.e. OUTSIDE the pull destination. `doc pull` never writes
         // such a manifest key (titles are sanitized), but a hand-edited manifest could.
         const outsideFile = path.join(tmpDest, 'outside.md');
         fs.mkdirSync(dest, { recursive: true });
@@ -1152,7 +1152,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.existsSync(outsideFile)).toBe(true);
@@ -1180,7 +1180,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             // A clean exit 1 with a named path, not an uncaught EISDIR stack trace.
             expect(code).toBe(1);
@@ -1216,7 +1216,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             // A directory key must neither crash the pull nor remove the tree.
             expect(code).toBe(0);
@@ -1252,7 +1252,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
         try {
             // --overwrite so the pre-existing local-modification refusal doesn't fire first.
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1291,7 +1291,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1325,7 +1325,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1357,7 +1357,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1392,7 +1392,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1429,7 +1429,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true, json: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true, json: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1478,7 +1478,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1520,7 +1520,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1539,7 +1539,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
         }
     });
 
-    it('a kept media orphan warns to use `docs upload`, not `docs push`, to re-create it', async () => {
+    it('a kept media orphan warns to use `doc upload`, not `doc push`, to re-create it', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         const mediaBytes = Buffer.from([1, 2, 3]);
@@ -1564,14 +1564,14 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
             const err = stderrLines.join('');
             expect(err).toContain('hero.png');
-            expect(err).toContain('docs upload');
-            expect(err).not.toContain('docs push` will re-create it');
+            expect(err).toContain('doc upload');
+            expect(err).not.toContain('doc push` will re-create it');
         } finally {
             restoreExit();
             restoreStdout();
@@ -1580,7 +1580,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
         }
     });
 
-    it('a kept non-media orphan still warns that `docs push` will re-create it', async () => {
+    it('a kept non-media orphan still warns that `doc push` will re-create it', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         writeManifest(dest, {
@@ -1603,14 +1603,14 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
             const err = stderrLines.join('');
             expect(err).toContain('gone.md');
-            expect(err).toContain('docs push` will re-create it');
-            expect(err).not.toContain('docs upload');
+            expect(err).toContain('doc push` will re-create it');
+            expect(err).not.toContain('doc upload');
         } finally {
             restoreExit();
             restoreStdout();
@@ -1640,7 +1640,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('marketing', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1675,7 +1675,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
+                docPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1695,7 +1695,7 @@ describe('docsPullWithConfig — deletion propagation', () => {
 // --json output
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — --json', () => {
+describe('docPullWithConfig — --json', () => {
     it('prints {manifest, files} JSON instead of chalk lines', async () => {
         responseQueue = [
             makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
@@ -1711,7 +1711,7 @@ describe('docsPullWithConfig — --json', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/fb-campaign', dest, { json: true }, stubConfig()),
+                docPullWithConfig('marketing/fb-campaign', dest, { json: true }, stubConfig()),
             );
             expect(code).toBe(0);
 
@@ -1734,7 +1734,7 @@ describe('docsPullWithConfig — --json', () => {
 // Default destination
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — default destination', () => {
+describe('docPullWithConfig — default destination', () => {
     it('defaults dest to ./<last-path-segment>/ when dest is omitted', async () => {
         responseQueue = [
             makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
@@ -1751,7 +1751,7 @@ describe('docsPullWithConfig — default destination', () => {
 
         try {
             const code = await runExpectingExit(() =>
-                docsPullWithConfig('marketing/fb-campaign', undefined, {}, stubConfig()),
+                docPullWithConfig('marketing/fb-campaign', undefined, {}, stubConfig()),
             );
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(tmpDest, 'fb-campaign', 'brief.md'), 'utf8')).toBe('# Brief');
@@ -1768,7 +1768,7 @@ describe('docsPullWithConfig — default destination', () => {
 // Media docs
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — media docs', () => {
+describe('docPullWithConfig — media docs', () => {
     it('downloads a media candidate confirmed by the media endpoint: bytes on disk, media: true, auth on confirm only', async () => {
         responseQueue = [
             makeMcpSuccess({
@@ -1794,7 +1794,7 @@ describe('docsPullWithConfig — media docs', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('media', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.readFileSync(path.join(dest, 'hero.png'))).toEqual(stubBytes);
@@ -1839,7 +1839,7 @@ describe('docsPullWithConfig — media docs', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('media', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.readFileSync(path.join(dest, 'fake.md'), 'utf8')).toBe('');
@@ -1880,7 +1880,7 @@ describe('docsPullWithConfig — media docs', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('media', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.existsSync(path.join(dest, 'hero.png'))).toBe(true);
@@ -1918,7 +1918,7 @@ describe('docsPullWithConfig — media docs', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('media', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.existsSync(path.join(dest, 'lost.png'))).toBe(false);
@@ -1958,7 +1958,7 @@ describe('docsPullWithConfig — media docs', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('media', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('media', dest, {}, stubConfig()));
             expect(code).toBe(1);
             expect(stderrLines.join('')).toContain('internal_error');
             expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
@@ -1974,7 +1974,7 @@ describe('docsPullWithConfig — media docs', () => {
 // Content hashes — body_sha256 recorded per manifest entry
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — content hashes', () => {
+describe('docPullWithConfig — content hashes', () => {
     it('records body_sha256 as the sha256 hex of the exact bytes written, for both a markdown doc and a media doc', async () => {
         const mdBody = '# Hashed Doc\n\nSome content.';
         const mediaBytes = Buffer.from([10, 20, 30, 40]);
@@ -2008,7 +2008,7 @@ describe('docsPullWithConfig — content hashes', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('hash-tree', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('hash-tree', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             const manifest = readManifest(dest);
@@ -2026,7 +2026,7 @@ describe('docsPullWithConfig — content hashes', () => {
 // bulk_read row-status guard
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — bulk_read row-status guard', () => {
+describe('docPullWithConfig — bulk_read row-status guard', () => {
     it('a non-ok status row and a row missing from results are both warned + skipped; the ok row still pulls', async () => {
         responseQueue = [
             makeMcpSuccess({
@@ -2057,7 +2057,7 @@ describe('docsPullWithConfig — bulk_read row-status guard', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('root', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('root', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             expect(fs.readFileSync(path.join(dest, 'good.md'), 'utf8')).toBe('ok body');
@@ -2083,7 +2083,7 @@ describe('docsPullWithConfig — bulk_read row-status guard', () => {
 // Folder-name path traversal (sanitizeSegment)
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — folder-name path traversal', () => {
+describe('docPullWithConfig — folder-name path traversal', () => {
     it('a folder named ".." is sanitized so the doc inside it lands under the destination', async () => {
         responseQueue = [
             makeMcpSuccess({
@@ -2107,7 +2107,7 @@ describe('docsPullWithConfig — folder-name path traversal', () => {
         const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('evil', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('evil', dest, {}, stubConfig()));
             expect(code).toBe(0);
 
             const manifest = readManifest(dest);
@@ -2133,7 +2133,7 @@ describe('docsPullWithConfig — folder-name path traversal', () => {
 // Destination resolves to an existing file
 // ---------------------------------------------------------------------------
 
-describe('docsPullWithConfig — destination is a file', () => {
+describe('docPullWithConfig — destination is a file', () => {
     it('exits 1 with a clear error instead of throwing ENOTDIR', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'not-a-dir');
@@ -2143,7 +2143,7 @@ describe('docsPullWithConfig — destination is a file', () => {
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docsPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
+            const code = await runExpectingExit(() => docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
             expect(code).toBe(1);
             expect(stderrLines.join('')).toMatch(/not a directory/i);
             expect(allCaptures.length).toBe(0);

@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 
-export interface DocsUploadOptions {
+export interface DocUploadOptions {
     folder?: string;
     title?: string;
     /** Doc id, or a docs path like "marketing/hero.png", whose bytes to replace. */
@@ -17,9 +17,9 @@ export interface DocsUploadOptions {
  * Resolve `--replace` to a doc id. A purely numeric value is an id; anything else
  * is a docs path, resolved against the doc's *title* via GET /docs/by-path.
  *
- * Note the title is not always the local filename: `docs pull` sanitizes
+ * Note the title is not always the local filename: `doc pull` sanitizes
  * filesystem-illegal characters and may suffix collisions. For path-based work
- * on a pulled folder, `docs push` is the right verb.
+ * on a pulled folder, `doc push` is the right verb.
  */
 async function resolveReplaceTarget(config: Config, replace: string): Promise<number> {
     if (/^\d+$/.test(replace)) {
@@ -65,7 +65,7 @@ async function resolveReplaceTarget(config: Config, replace: string): Promise<nu
  * sequentially. `--title` is only valid for a single file — with multiple
  * files, every upload would otherwise silently collide on the same title.
  */
-export async function docsUpload(files: string[], options: DocsUploadOptions = {}): Promise<void> {
+export async function docUpload(files: string[], options: DocUploadOptions = {}): Promise<void> {
     if (options.title && files.length > 1) {
         console.error(chalk.red('--title can only be used when uploading a single file.'));
         process.exit(1);

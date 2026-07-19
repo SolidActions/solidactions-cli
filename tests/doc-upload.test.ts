@@ -1,10 +1,10 @@
 /**
- * Tests for `solidactions docs upload <file...>`.
+ * Tests for `solidactions doc upload <file...>`.
  *
  * Uses a real in-process HTTP server (Node's http.createServer) to stub the
  * POST /api/v1/docs/media endpoint — no mock/spy/stub libraries. Pattern
  * copied from tests/crew-env.test.ts (FIFO response queue + request
- * capture); config is written to a real temp config file since docsUpload
+ * capture); config is written to a real temp config file since docUpload
  * resolves config via requireConfigWithWorkspace(), not an injected Config
  * param. Since the request body is multipart/form-data (not JSON), the raw
  * body is captured and parsed with a small hand-rolled multipart parser.
@@ -15,7 +15,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { docsUpload } from '../src/commands/docs-upload';
+import { docUpload } from '../src/commands/doc-upload';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 // ---------------------------------------------------------------------------
@@ -176,10 +176,10 @@ function writeTmpFile(name: string, content: string): { file: string; cleanup: (
 }
 
 // ---------------------------------------------------------------------------
-// Integration: docsUpload
+// Integration: docUpload
 // ---------------------------------------------------------------------------
 
-describe('docsUpload', () => {
+describe('docUpload', () => {
     it('single file: POSTs multipart with file + folder_path fields, sends auth + workspace headers, prints a ✓ result line', async () => {
         const { cleanup } = setupConfig();
         const { file, cleanup: cleanupFile } = writeTmpFile('chart.png', 'binary-ish content');
@@ -187,7 +187,7 @@ describe('docsUpload', () => {
         try {
             queue(201, { doc: { id: 42, title: 'chart.png', folder_path: 'LOD/Reports' } });
 
-            const code = await runExpectingExit(() => docsUpload([file], { folder: 'LOD/Reports' }));
+            const code = await runExpectingExit(() => docUpload([file], { folder: 'LOD/Reports' }));
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(1);
@@ -225,7 +225,7 @@ describe('docsUpload', () => {
         try {
             queue(201, { doc: { id: 7, title: 'Quarterly Report', folder_path: '' } });
 
-            await runExpectingExit(() => docsUpload([file], { title: 'Quarterly Report' }));
+            await runExpectingExit(() => docUpload([file], { title: 'Quarterly Report' }));
 
             const titlePart = allCaptures[0].parts.find((p) => p.name === 'title');
             expect(titlePart?.value).toBe('Quarterly Report');
@@ -246,7 +246,7 @@ describe('docsUpload', () => {
             queue(201, { doc: { id: 1, title: 'a.txt', folder_path: 'Notes' } });
             queue(201, { doc: { id: 2, title: 'b.txt', folder_path: 'Notes' } });
 
-            const code = await runExpectingExit(() => docsUpload([file1, file2], { folder: 'Notes' }));
+            const code = await runExpectingExit(() => docUpload([file1, file2], { folder: 'Notes' }));
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(2);
@@ -272,7 +272,7 @@ describe('docsUpload', () => {
         const { file: file2, cleanup: cleanup2 } = writeTmpFile('b.txt', 'bbb');
         const { errors, restore } = captureConsole();
         try {
-            const code = await runExpectingExit(() => docsUpload([file1, file2], { title: 'One Title For All' }));
+            const code = await runExpectingExit(() => docUpload([file1, file2], { title: 'One Title For All' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(0);
@@ -292,7 +292,7 @@ describe('docsUpload', () => {
         try {
             queue(413, { code: 'media_too_large', message: 'File exceeds the 20MB upload limit.' });
 
-            const code = await runExpectingExit(() => docsUpload([file], {}));
+            const code = await runExpectingExit(() => docUpload([file], {}));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(1);
@@ -315,7 +315,7 @@ describe('docsUpload', () => {
             queue(201, { doc: { id: 5, title: 'good.txt', folder_path: '' } });
             queue(500, { message: 'Internal server error.' });
 
-            const code = await runExpectingExit(() => docsUpload([file1, file2], {}));
+            const code = await runExpectingExit(() => docUpload([file1, file2], {}));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(2);
@@ -337,7 +337,7 @@ describe('docsUpload', () => {
         try {
             queue(201, { doc: { id: 9, title: 'exists.txt', folder_path: '' } });
 
-            const code = await runExpectingExit(() => docsUpload([missingFile, goodFile], {}));
+            const code = await runExpectingExit(() => docUpload([missingFile, goodFile], {}));
 
             expect(code).toBe(1);
             // Only ONE request — the missing file never hit the server.
@@ -365,7 +365,7 @@ describe('docsUpload', () => {
         try {
             queue(200, { doc: { id: 42, current_version_id: 8 } });
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: '42' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: '42' }));
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(1);
@@ -389,7 +389,7 @@ describe('docsUpload', () => {
             queue(200, { doc: { id: 42 } });
             queue(200, { doc: { id: 42, current_version_id: 8 } });
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: 'marketing/hero.png' }));
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(2);
@@ -417,7 +417,7 @@ describe('docsUpload', () => {
             queue(200, { doc: { id: 7 } });
             queue(200, { doc: { id: 7, current_version_id: 3 } });
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: 'hero.png' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: 'hero.png' }));
             expect(code).toBeUndefined();
 
             expect(allCaptures).toHaveLength(2);
@@ -439,7 +439,7 @@ describe('docsUpload', () => {
         try {
             queue(422, { code: 'folder_path_not_found' });
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: 'marketing/hero.png' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(1);
@@ -457,7 +457,7 @@ describe('docsUpload', () => {
         const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
         const { errors, restore } = captureConsole();
         try {
-            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: 'marketing/' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(0);
@@ -476,7 +476,7 @@ describe('docsUpload', () => {
         try {
             queue(404, {});
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: 'marketing/hero.png' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: 'marketing/hero.png' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(1);
@@ -496,7 +496,7 @@ describe('docsUpload', () => {
         try {
             queue(404, { code: 'media_not_found' });
 
-            const code = await runExpectingExit(() => docsUpload([file], { replace: '42' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: '42' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(1);
@@ -514,7 +514,7 @@ describe('docsUpload', () => {
         const { file: file2, cleanup: cleanup2 } = writeTmpFile('b.png', 'bbb');
         const { errors, restore } = captureConsole();
         try {
-            const code = await runExpectingExit(() => docsUpload([file1, file2], { replace: '42' }));
+            const code = await runExpectingExit(() => docUpload([file1, file2], { replace: '42' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(0);
@@ -532,7 +532,7 @@ describe('docsUpload', () => {
         const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
         const { errors, restore } = captureConsole();
         try {
-            const code = await runExpectingExit(() => docsUpload([file], { replace: '42', title: 'Hero' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: '42', title: 'Hero' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(0);
@@ -549,7 +549,7 @@ describe('docsUpload', () => {
         const { file, cleanup: cleanupFile } = writeTmpFile('hero.png', 'new bytes');
         const { errors, restore } = captureConsole();
         try {
-            const code = await runExpectingExit(() => docsUpload([file], { replace: '42', folder: 'marketing' }));
+            const code = await runExpectingExit(() => docUpload([file], { replace: '42', folder: 'marketing' }));
 
             expect(code).toBe(1);
             expect(allCaptures).toHaveLength(0);

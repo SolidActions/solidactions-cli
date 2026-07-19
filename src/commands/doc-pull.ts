@@ -1,8 +1,8 @@
 /**
- * solidactions docs pull <folder> [dest]
+ * solidactions doc pull <folder> [dest]
  *
  * Downloads a Docs folder tree from SA-Docs into a local markdown tree (the
- * inverse of `docs push`): BFS-walks the folder via `docs_vault list`,
+ * inverse of `doc push`): BFS-walks the folder via `docs_vault list`,
  * bulk-fetches doc bodies via `docs_vault bulk_read`, and writes each doc as
  * <dest>/<relative-folder>/<sanitized-title>.md plus a revision manifest
  * (<dest>/.solidactions-docs.json) recording id/title/current_revision_id
@@ -25,7 +25,7 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
-// Re-exported for backward compatibility: tests and docs-push import these from here.
+// Re-exported for backward compatibility: tests and doc-push import these from here.
 export { DOCS_MANIFEST, sha256Hex };
 export type { DocsManifest, ManifestEntry };
 
@@ -38,7 +38,7 @@ const MIME_EXTENSIONS: Record<string, string> = {
     'application/pdf': '.pdf',
 };
 
-export interface DocsPullOptions {
+export interface DocPullOptions {
     yes?: boolean;
     json?: boolean;
     /**
@@ -414,10 +414,10 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
  */
-export async function docsPullWithConfig(
+export async function docPullWithConfig(
     folderPath: string,
     dest: string | undefined,
-    options: DocsPullOptions,
+    options: DocPullOptions,
     config: Config,
 ): Promise<void> {
     const destInput = dest ?? `./${lastSegment(folderPath)}`;
@@ -518,7 +518,7 @@ async function report(
     destination: string,
     folderPath: string,
     fetched: FetchedDoc[],
-    options: DocsPullOptions,
+    options: DocPullOptions,
     config: Config,
     extraWarnings: string[],
     previousManifest: DocsManifest | null,
@@ -604,7 +604,7 @@ async function report(
             const absPath = path.resolve(destination, ...relPath.split('/'));
 
             // Containment: a hand-edited or corrupt manifest key such as "../../etc/passwd"
-            // would otherwise resolve outside the pull destination. `docs pull` never writes
+            // would otherwise resolve outside the pull destination. `doc pull` never writes
             // such a key (titles are sanitized), but this loop is the only code in the CLI
             // that deletes files — never let it act on a path it did not create.
             if (!absPath.startsWith(destPrefix)) continue;
@@ -665,9 +665,9 @@ async function report(
     for (const file of keptModified) {
         process.stderr.write(chalk.yellow(`! kept ${file} — deleted remotely but modified locally\n`));
         if (keptModifiedMedia.has(file)) {
-            process.stderr.write(chalk.yellow('  (it is now untracked; use `solidactions docs upload` to re-create it)\n'));
+            process.stderr.write(chalk.yellow('  (it is now untracked; use `solidactions doc upload` to re-create it)\n'));
         } else {
-            process.stderr.write(chalk.yellow('  (it is now untracked; `docs push` will re-create it)\n'));
+            process.stderr.write(chalk.yellow('  (it is now untracked; `doc push` will re-create it)\n'));
         }
     }
     process.exit(0);
@@ -676,7 +676,7 @@ async function report(
 /**
  * Entry point called from index.ts.
  */
-export async function docsPull(folder: string, dest: string | undefined, options: DocsPullOptions): Promise<void> {
+export async function docPull(folder: string, dest: string | undefined, options: DocPullOptions): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    await docsPullWithConfig(folder, dest, options, config);
+    await docPullWithConfig(folder, dest, options, config);
 }

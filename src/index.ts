@@ -39,9 +39,9 @@ import { skillDelete } from './commands/skill-delete';
 import { skillDev } from './commands/skill-dev';
 import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
-import { docsPush } from './commands/docs-push';
-import { docsPull } from './commands/docs-pull';
-import { docsUpload } from './commands/docs-upload';
+import { docPush } from './commands/doc-push';
+import { docPull } from './commands/doc-pull';
+import { docUpload } from './commands/doc-upload';
 import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
 import { crewEnvDelete } from './commands/crew-env-delete';
@@ -684,12 +684,12 @@ role
     });
 
 // =============================================================================
-// docs <subcommand>  (SA-Docs surface)
+// doc <subcommand>  (SA-Docs surface)
 // =============================================================================
 
-const docs = program.command('docs').description('Manage docs in SA-Docs');
+const doc = program.command('doc').description('Manage docs in SA-Docs');
 
-docs
+doc
     .command('push')
     .description('Recursively upload a local markdown tree into SA-Docs')
     .argument('<dir>', 'Path to the directory containing markdown files')
@@ -697,13 +697,13 @@ docs
     .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
     .option('--folder <base>', 'Nest the whole upload under this base folder path in SA-Docs')
     .option('--dry-run', 'Preview what would be created without writing')
-    .option('--force', 'Overwrite tracked docs (from a prior docs pull) without a base-revision drift guard')
+    .option('--force', 'Overwrite tracked docs (from a prior doc pull) without a base-revision drift guard')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
-        await docsPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, force: options.force, json: options.json });
+        await docPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, force: options.force, json: options.json });
     });
 
-docs
+doc
     .command('pull')
     .description('Download a Docs folder tree to a local directory for editing (inverse of push)')
     .argument('<folder>', 'Docs folder path (or a single doc path)')
@@ -712,17 +712,17 @@ docs
     .option('--overwrite', 'DESTRUCTIVE: discard unpushed local changes (tracked files whose content no longer matches the last pull) and overwrite them; implies --yes')
     .option('--json', 'Machine-readable output')
     .action(async (folder, dest, options) => {
-        await docsPull(folder, dest, options);
+        await docPull(folder, dest, options);
     });
 
-docs
+doc
     .command('upload <files...>')
     .description('Upload one or more media files to SA-Docs (requires a token with the "docs" ability)')
     .option('--folder <path>', 'Folder path to upload into (auto-created if missing)')
     .option('--title <title>', 'Title for the uploaded doc (only valid with a single file)')
     .option('--replace <doc-id-or-path>', 'replace the bytes of an existing media doc (by id, or by docs path)')
     .action(async (files, options) => {
-        await docsUpload(files, { folder: options.folder, title: options.title, replace: options.replace });
+        await docUpload(files, { folder: options.folder, title: options.title, replace: options.replace });
     });
 
 program.parseAsync().catch((err) => {
