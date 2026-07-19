@@ -1,5 +1,5 @@
 /**
- * Tests for `solidactions docs push <dir>`
+ * Tests for `solidactions doc push <dir>`
  *
  * Uses a real in-process HTTP server (Node's http.createServer) to stub the
  * /mcp/docs endpoint.  No mock/spy/stub libraries — follows the pattern in
@@ -11,11 +11,11 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { docsPushWithConfig } from '../src/commands/docs-push';
-import type { DocsPushOptions } from '../src/commands/docs-push';
+import { docPushWithConfig } from '../src/commands/doc-push';
+import type { DocPushOptions } from '../src/commands/doc-push';
 import type { Config } from '../src/utils/config';
-import { DOCS_MANIFEST, sha256Hex } from '../src/commands/docs-pull';
-import type { DocsManifest } from '../src/commands/docs-pull';
+import { DOCS_MANIFEST, sha256Hex } from '../src/commands/doc-pull';
+import type { DocsManifest } from '../src/commands/doc-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server
@@ -32,7 +32,7 @@ interface CapturedRequest {
 
 // ---------------------------------------------------------------------------
 // Minimal multipart/form-data parser — just enough to assert field names,
-// filenames, and values in tests. Pattern copied from docs-upload.test.ts.
+// filenames, and values in tests. Pattern copied from doc-upload.test.ts.
 // ---------------------------------------------------------------------------
 
 interface MultipartPart {
@@ -152,7 +152,7 @@ beforeAll(async () => {
 
             allCaptures.push(capture);
 
-            // Media POST (docs push replaces tracked media): /api/v1/docs/{id}/media
+            // Media POST (doc push replaces tracked media): /api/v1/docs/{id}/media
             if (req.method === 'POST' && /^\/api\/v1\/docs\/\d+\/media$/.test(req.url ?? '')) {
                 const next = mediaResponseQueue.shift();
                 if (!next) {
@@ -263,7 +263,7 @@ function writeBinaryFile(dir: string, relPath: string, bytes: Buffer): void {
 // Tests: chunking — 57 files → exactly 2 bulk_create calls (50 + 7)
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — chunking', () => {
+describe('docPushWithConfig — chunking', () => {
     it('sends exactly 2 bulk_create calls for 57 files (50 + 7), total items = 57', async () => {
         // Build 57 md files: 55 root-level + 2 in a subfolder
         const files: Record<string, string> = {};
@@ -280,7 +280,7 @@ describe('docsPushWithConfig — chunking', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -329,7 +329,7 @@ describe('docsPushWithConfig — chunking', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -375,7 +375,7 @@ describe('docsPushWithConfig — chunking', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -409,7 +409,7 @@ describe('docsPushWithConfig — chunking', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -431,7 +431,7 @@ describe('docsPushWithConfig — chunking', () => {
 // Tests: request shape — on_conflict, type, body content
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — request shape', () => {
+describe('docPushWithConfig — request shape', () => {
     it('sends on_conflict from options', async () => {
         const { dir, cleanup } = makeTmpDocsDir({ 'doc.md': '# Doc' });
         const restoreExit = patchProcessExit();
@@ -440,7 +440,7 @@ describe('docsPushWithConfig — request shape', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'overwrite' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'overwrite' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -464,7 +464,7 @@ describe('docsPushWithConfig — request shape', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', type: 'tutorial' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', type: 'tutorial' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -488,7 +488,7 @@ describe('docsPushWithConfig — request shape', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -513,7 +513,7 @@ describe('docsPushWithConfig — request shape', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -538,7 +538,7 @@ describe('docsPushWithConfig — request shape', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig('ws-abc'));
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig('ws-abc'));
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -559,7 +559,7 @@ describe('docsPushWithConfig — request shape', () => {
 // Tests: dry-run
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — dry-run', () => {
+describe('docPushWithConfig — dry-run', () => {
     it('sends dry_run: true in bulk_create args and does not throw', async () => {
         // dry-run response uses planned status
         responseQueue = [(body: any) => {
@@ -586,7 +586,7 @@ describe('docsPushWithConfig — dry-run', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', dryRun: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -623,7 +623,7 @@ describe('docsPushWithConfig — dry-run', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', dryRun: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -645,7 +645,7 @@ describe('docsPushWithConfig — dry-run', () => {
 // Tests: report output — properties pending section
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — report: properties pending', () => {
+describe('docPushWithConfig — report: properties pending', () => {
     it('prints "Properties pending" section for files that have property_validation in their result', async () => {
         // Response with one pending result
         responseQueue = [makeMcpSuccess({
@@ -682,7 +682,7 @@ describe('docsPushWithConfig — report: properties pending', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -728,7 +728,7 @@ describe('docsPushWithConfig — report: properties pending', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -749,7 +749,7 @@ describe('docsPushWithConfig — report: properties pending', () => {
 // Tests: --json flag
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — --json flag', () => {
+describe('docPushWithConfig — --json flag', () => {
     it('outputs a single JSON object with summary, pending, and results fields', async () => {
         responseQueue = [makeMcpSuccess({
             results: [
@@ -780,7 +780,7 @@ describe('docsPushWithConfig — --json flag', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -818,7 +818,7 @@ describe('docsPushWithConfig — --json flag', () => {
 // Tests: report totals output
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — report totals', () => {
+describe('docPushWithConfig — report totals', () => {
     it('prints totals from aggregated summaries across multiple chunks', async () => {
         // 57 files: 50 + 7
         const files: Record<string, string> = {};
@@ -853,7 +853,7 @@ describe('docsPushWithConfig — report totals', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -877,7 +877,7 @@ describe('docsPushWithConfig — report totals', () => {
 // Tests: error handling
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — error handling', () => {
+describe('docPushWithConfig — error handling', () => {
     it('exits non-zero with an error message when the directory does not exist', async () => {
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -885,7 +885,7 @@ describe('docsPushWithConfig — error handling', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig('/nonexistent/path/that/does/not/exist', { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig('/nonexistent/path/that/does/not/exist', { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -908,7 +908,7 @@ describe('docsPushWithConfig — error handling', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -929,7 +929,7 @@ describe('docsPushWithConfig — error handling', () => {
 // Tests: --folder <base> nests the whole upload under a base folder path
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — --folder base', () => {
+describe('docPushWithConfig — --folder base', () => {
     it('forwards --folder as the top-level folder_path on every bulk_create call', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'root.md': '# Root',
@@ -940,7 +940,7 @@ describe('docsPushWithConfig — --folder base', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', folder: '4 MomentFactory' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', folder: '4 MomentFactory' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -965,7 +965,7 @@ describe('docsPushWithConfig — --folder base', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -982,11 +982,11 @@ describe('docsPushWithConfig — --folder base', () => {
 
 // ---------------------------------------------------------------------------
 // Tests: untracked docs in a pulled dir default to the manifest's folder_path
-// (regression: docs push used to always create untracked docs at the docs
+// (regression: doc push used to always create untracked docs at the docs
 // root, ignoring the pulled folder — see issue #433).
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — untracked docs inherit the manifest folder_path', () => {
+describe('docPushWithConfig — untracked docs inherit the manifest folder_path', () => {
     function manifestFile(folder_path: string, docs: DocsManifest['docs'] = {}): string {
         return JSON.stringify({ folder_path, docs }, null, 2);
     }
@@ -1003,7 +1003,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1033,7 +1033,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', folder: 'other/place' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', folder: 'other/place' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1055,7 +1055,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1080,7 +1080,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1122,7 +1122,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1149,7 +1149,7 @@ describe('docsPushWithConfig — untracked docs inherit the manifest folder_path
 // Tests: drift guard — tracked docs (manifest-backed) use docs_edit write
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — drift guard (tracked docs)', () => {
+describe('docPushWithConfig — drift guard (tracked docs)', () => {
     function manifestFile(docs: DocsManifest['docs']): string {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
@@ -1171,7 +1171,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1222,7 +1222,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1262,7 +1262,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1292,7 +1292,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1332,7 +1332,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1378,7 +1378,7 @@ describe('docsPushWithConfig — drift guard (tracked docs)', () => {
 // Tracked doc deleted remotely (docs_edit write / media POST -> doc_not_found)
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — tracked doc deleted remotely', () => {
+describe('docPushWithConfig — tracked doc deleted remotely', () => {
     function manifestFile(docs: DocsManifest['docs']): string {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
@@ -1410,7 +1410,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1431,7 +1431,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
 
             const manifest: DocsManifest = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
             // gone.md's entry is untouched — still tracked at its old revision — so a
-            // re-pull can untrack it (the deletion-propagation path in `docs pull`).
+            // re-pull can untrack it (the deletion-propagation path in `doc pull`).
             expect(manifest.docs['gone.md'].current_revision_id).toBe(10);
             expect(manifest.docs['still-here.md'].current_revision_id).toBe(11);
         } finally {
@@ -1460,7 +1460,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1496,7 +1496,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1528,7 +1528,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1549,7 +1549,7 @@ describe('docsPushWithConfig — tracked doc deleted remotely', () => {
 // earlier tracked write's already-persisted revision.
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — incremental manifest refresh', () => {
+describe('docPushWithConfig — incremental manifest refresh', () => {
     function manifestFile(docs: DocsManifest['docs']): string {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
@@ -1585,7 +1585,7 @@ describe('docsPushWithConfig — incremental manifest refresh', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1620,7 +1620,7 @@ describe('docsPushWithConfig — incremental manifest refresh', () => {
 // Tests: unparseable manifest warns once, downgrades everything to untracked
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — unparseable manifest', () => {
+describe('docPushWithConfig — unparseable manifest', () => {
     it('warns on stderr when the manifest exists but fails to parse, and treats all files as untracked', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'a.md': '# A',
@@ -1634,7 +1634,7 @@ describe('docsPushWithConfig — unparseable manifest', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1659,7 +1659,7 @@ describe('docsPushWithConfig — unparseable manifest', () => {
 // Tests: content hashes — skip-unchanged tracked files
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — content hash skip-unchanged', () => {
+describe('docPushWithConfig — content hash skip-unchanged', () => {
     function manifestFile(docs: DocsManifest['docs']): string {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
@@ -1684,7 +1684,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1724,7 +1724,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1758,7 +1758,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', force: true, json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', force: true, json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1797,7 +1797,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1836,7 +1836,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1869,7 +1869,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1896,7 +1896,7 @@ describe('docsPushWithConfig — content hash skip-unchanged', () => {
 // Tests: media pass — tracked binaries replace via POST /api/v1/docs/{id}/media
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — media pass (tracked binaries)', () => {
+describe('docPushWithConfig — media pass (tracked binaries)', () => {
     function manifestFile(docs: DocsManifest['docs']): string {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
@@ -1919,7 +1919,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -1967,7 +1967,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -1980,7 +1980,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
             queueMedia(200, { doc: { id: 42, current_version_id: 9 } });
 
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -2011,7 +2011,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2043,7 +2043,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2072,7 +2072,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2104,7 +2104,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
 
         try {
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
             } catch (e) {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
@@ -2135,7 +2135,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
             // Phase 1: local bytes match the manifest hash — --force must not bypass skip-unchanged.
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2150,7 +2150,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
 
             caughtExit = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', force: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2186,7 +2186,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2225,7 +2225,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2260,7 +2260,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2290,7 +2290,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', dryRun: true, json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2314,7 +2314,7 @@ describe('docsPushWithConfig — media pass (tracked binaries)', () => {
 // Tests: untracked binaries — warn, never upload
 // ---------------------------------------------------------------------------
 
-describe('docsPushWithConfig — untracked binaries', () => {
+describe('docPushWithConfig — untracked binaries', () => {
     it('warns once per untracked binary and never uploads it', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'doc.md': '# Doc',
@@ -2328,14 +2328,14 @@ describe('docsPushWithConfig — untracked binaries', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
             }
 
             expect(caughtExit?.code).toBe(0);
-            expect(stderrLines.join('')).toMatch(/diagram\.png: not pushed — use `solidactions docs upload`/);
+            expect(stderrLines.join('')).toMatch(/diagram\.png: not pushed — use `solidactions doc upload`/);
             expect(allCaptures.filter((c) => c.path?.includes('/media')).length).toBe(0);
         } finally {
             restoreExit();
@@ -2359,7 +2359,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2432,7 +2432,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip', json: true }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2469,7 +2469,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -2477,7 +2477,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const warningLines = stderrLines.filter((l) => l.includes('not pushed — use `solidactions docs upload`'));
+            const warningLines = stderrLines.filter((l) => l.includes('not pushed — use `solidactions doc upload`'));
             expect(warningLines.length).toBe(10);
             expect(stderrLines.some((l) => /… and 3 more/.test(l))).toBe(true);
 
@@ -2491,7 +2491,7 @@ describe('docsPushWithConfig — untracked binaries', () => {
     });
 });
 
-describe('docsPushWithConfig — server-side bulk_create errors', () => {
+describe('docPushWithConfig — server-side bulk_create errors', () => {
     it('names the file and the server reason instead of a bare "N errors" count, and exits 1', async () => {
         const { dir, cleanup } = makeTmpDocsDir({ 'note2.md': 'body' });
         responseQueue = [
@@ -2511,7 +2511,7 @@ describe('docsPushWithConfig — server-side bulk_create errors', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;

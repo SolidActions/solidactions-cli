@@ -1,6 +1,6 @@
 /**
- * Sidecar manifest (`.solidactions-docs.json`) shared by `docs pull` and
- * `docs push` to track which local files correspond to which SA-Docs docs,
+ * Sidecar manifest (`.solidactions-docs.json`) shared by `doc pull` and
+ * `doc push` to track which local files correspond to which SA-Docs docs,
  * and to detect local/server drift via a body sha256.
  */
 
@@ -41,8 +41,8 @@ export function sha256Hex(data: string | Buffer): string {
  * Read `<dir>/.solidactions-docs.json`. Absent or unparseable → null,
  * meaning nothing under `dir` is guarded (sidecar convention).
  *
- * `docs push` warns on unparseable JSON (files silently becoming untracked would
- * re-create every doc); `docs pull` stays silent (it is about to rewrite it anyway).
+ * `doc push` warns on unparseable JSON (files silently becoming untracked would
+ * re-create every doc); `doc pull` stays silent (it is about to rewrite it anyway).
  */
 export function readManifest(dir: string, opts: { warnOnParseError?: boolean } = {}): DocsManifest | null {
     const manifestPath = path.join(dir, DOCS_MANIFEST);

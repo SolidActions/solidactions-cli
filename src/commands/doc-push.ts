@@ -1,5 +1,5 @@
 /**
- * solidactions docs push <dir>
+ * solidactions doc push <dir>
  *
  * Recursively uploads a local markdown tree into SA-Docs via the docs MCP
  * server's `docs_vault bulk_create` tool, mirroring folder structure.
@@ -18,7 +18,7 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { DOCS_MANIFEST, DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
-export interface DocsPushOptions {
+export interface DocPushOptions {
     onConflict?: 'skip' | 'overwrite' | 'rename';
     type?: string;
     /** Nest the whole upload under this base folder path in SA-Docs. */
@@ -146,7 +146,7 @@ function walkMarkdownFiles(dir: string): string[] {
 
 /**
  * Recursively walk `dir` and collect relative paths of non-.md files that
- * are not present in the manifest — never uploaded by `docs push`; `docs
+ * are not present in the manifest — never uploaded by `doc push`; `doc
  * upload` is the way to create media docs from these. Dotfiles and
  * dot-directories are excluded (`entry.name.startsWith('.')` also covers the
  * `.solidactions-docs.json` sidecar itself).
@@ -234,9 +234,9 @@ function formatSummaryLine(summary: BulkCreateSummary, dryRun: boolean): string 
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
  */
-export async function docsPushWithConfig(
+export async function docPushWithConfig(
     dir: string,
-    options: DocsPushOptions,
+    options: DocPushOptions,
     config: Config,
 ): Promise<void> {
     const absDir = path.resolve(dir);
@@ -547,7 +547,7 @@ export async function docsPushWithConfig(
 
     if (untrackedMedia.length > 0) {
         for (const file of untrackedMedia.slice(0, 10)) {
-            process.stderr.write(chalk.yellow(`${file}: not pushed — use \`solidactions docs upload\`\n`));
+            process.stderr.write(chalk.yellow(`${file}: not pushed — use \`solidactions doc upload\`\n`));
         }
         if (untrackedMedia.length > 10) {
             process.stderr.write(chalk.yellow(`… and ${untrackedMedia.length - 10} more\n`));
@@ -600,7 +600,7 @@ export async function docsPushWithConfig(
 /**
  * Entry point called from index.ts.
  */
-export async function docsPush(dir: string, options: DocsPushOptions): Promise<void> {
+export async function docPush(dir: string, options: DocPushOptions): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    await docsPushWithConfig(dir, options, config);
+    await docPushWithConfig(dir, options, config);
 }
