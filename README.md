@@ -329,12 +329,15 @@ first three in one command.
    ```
 
    The script exits non-zero on the first failed check.
-5. **SDK docs pin** — `ai init` fetches `docs/sdk-reference.md` from the
-   `solidactions-ts-sdk` tag named in `src/utils/sdk-version.ts`, not from that
-   repo's `main`. When bumping the `@solidactions/sdk` dependency, bump
-   `SDK_DOCS_REF` to the matching `vX.Y.Z` tag — `tests/sdk-docs-ref.test.ts`
-   fails if the two drift apart.
-6. **Version bump** — update `package.json`, then publish.
+5. **SDK docs pin** — `ai init` fetches `docs/sdk-reference.md` from a
+   `solidactions-ts-sdk` tag, not from that repo's `main`. The tag is derived
+   at runtime from the `@solidactions/sdk` version this package declares (see
+   `src/utils/sdk-version.ts`), so bumping that dependency moves the docs ref
+   with it — nothing to update by hand. `tests/sdk-docs-ref.test.ts` fails if
+   the declared range has no explicit minimum version to derive from.
+6. **Version bump** — update `package.json`, then publish. Once the publish
+   flow from PR #78 lands, the GitHub release **tag** drives the published npm
+   version (semver-guarded); the bump commit stays conventional.
 
 ## License
 
