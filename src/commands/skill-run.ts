@@ -1,11 +1,11 @@
 /**
  * solidactions skill dev <dir> [--crew <c>] [--environment <env>] [--env-file <f>] -- <command...>
  *
- * Local analogue of the crews MCP exec_skill: runs <command> with cwd=<dir>
+ * Local analogue of the crews MCP sandbox_exec: runs <command> with cwd=<dir>
  * (matching the sandbox's cwd=/work/skills/<slug>), with crew variables
  * fetched at runtime from /api/v1/crews/{id}/variables/resolve. Secrets are
  * included only when the API key holds env:reveal; skipped names are printed.
- * DELIBERATE DIVERGENCE from remote exec_skill: default environment is `dev`
+ * DELIBERATE DIVERGENCE from remote sandbox_exec: default environment is `dev`
  * (this is a dev tool); remote defaults to production. Always prints the env.
  */
 import fs from 'fs';

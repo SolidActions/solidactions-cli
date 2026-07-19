@@ -228,7 +228,7 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                         });
                         return;
                     }
-                    if (toolName === 'crews_skills' && action === 'exec_skill') {
+                    if (toolName === 'crews_skills' && action === 'sandbox_exec') {
                         execSkillCalls.push(args);
                         respondText({ stdout: 'sandbox ran', exit_code: 0, status: 'ok' });
                         return;
