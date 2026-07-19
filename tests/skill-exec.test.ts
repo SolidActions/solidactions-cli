@@ -149,7 +149,7 @@ async function run(name: string, commandParts: string[], options: Record<string,
 }
 
 describe('skillExecWithConfig — shared skill (no --role)', () => {
-    it('posts tools/call with name:crews_skills and action:exec_skill, exits 0, prints remote stdout', async () => {
+    it('posts tools/call with name:crews_skills and action:sandbox_exec, exits 0, prints remote stdout', async () => {
         responseQueue = [makeMcpSuccess({ stdout: 'hi', stderr: '', exit_code: 0, status: 'ok' })];
 
         const { code, stdout } = await run('my-skill', ['node', 'scripts/q.js'], { target: 'sandbox' });
@@ -166,14 +166,14 @@ describe('skillExecWithConfig — shared skill (no --role)', () => {
         const body = lastCapture!.body;
         expect(body.method).toBe('tools/call');
         expect(body.params.name).toBe('crews_skills');
-        expect(body.params.arguments.action).toBe('exec_skill');
+        expect(body.params.arguments.action).toBe('sandbox_exec');
         expect(body.params.arguments.identifier).toBe('my-skill');
         expect(body.params.arguments.command).toBe("'node' 'scripts/q.js'");
     });
 });
 
 describe('skillExecWithConfig — role-scoped skill (--role)', () => {
-    it('posts tools/call with name:crews_roles and action:exec_skill, sends role and name arguments', async () => {
+    it('posts tools/call with name:crews_roles and action:sandbox_exec, sends role and name arguments', async () => {
         responseQueue = [makeMcpSuccess({ stdout: 'hi', stderr: '', exit_code: 0, status: 'ok', available_variables: [] })];
 
         const { code } = await run('my-skill', ['node', 'scripts/q.js'], { target: 'sandbox', role: 'writer' });
@@ -183,7 +183,7 @@ describe('skillExecWithConfig — role-scoped skill (--role)', () => {
 
         const body = lastCapture!.body;
         expect(body.params.name).toBe('crews_roles');
-        expect(body.params.arguments.action).toBe('exec_skill');
+        expect(body.params.arguments.action).toBe('sandbox_exec');
         expect(body.params.arguments.role).toBe('writer');
         expect(body.params.arguments.name).toBe('my-skill');
     });

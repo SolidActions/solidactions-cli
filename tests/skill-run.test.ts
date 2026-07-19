@@ -11,7 +11,7 @@
  *
  * 1. Spawn the built binary, don't call the function in-process. Production
  *    code runs the user's command with `stdio: 'inherit'` (real-time
- *    streaming + interactive stdin, matching the MCP exec_skill UX).
+ *    streaming + interactive stdin, matching the MCP sandbox_exec UX).
  *    `inherit` hands the grandchild the parent's raw file descriptor,
  *    bypassing `process.stdout.write` entirely — an in-process call can't
  *    capture it via a JS-level monkeypatch. Spawning the CLI as a subprocess

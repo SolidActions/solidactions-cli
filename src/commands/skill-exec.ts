@@ -3,7 +3,7 @@
  *
  * ALWAYS executes the server-stored skill (the artifact) — never local edits;
  * that's `skill dev <dir>`. --target picks WHERE the stored skill executes:
- *   sandbox — the server-managed sandbox via crews MCP exec_skill (v1.30 behavior)
+ *   sandbox — the server-managed sandbox via crews MCP sandbox_exec (v1.30 behavior)
  *   host    — this machine, from a transparent revision-checked cache under
  *             ~/.solidactions/cache/skills/ (no visible pull step)
  * --target is REQUIRED (no default): a half-remembered command errors instead
@@ -101,8 +101,8 @@ async function execInSandbox(
     const isRole = Boolean(options.role);
     const tool = isRole ? 'roles' : 'skills';
     const args: Record<string, unknown> = isRole
-        ? { action: 'exec_skill', role: options.role, name, command }
-        : { action: 'exec_skill', identifier: name, command };
+        ? { action: 'sandbox_exec', role: options.role, name, command }
+        : { action: 'sandbox_exec', identifier: name, command };
     if (options.environment) args.environment = options.environment;
     if (isRole && options.inCrew) args.in_crew = options.inCrew;
 
