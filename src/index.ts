@@ -120,6 +120,11 @@ program
     .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
+    .addHelpText('after', `
+Environment:
+  SOLIDACTIONS_API_KEY  When set, this key takes precedence over any saved
+                        credentials and is used directly — you do not need to run
+                        \`login\` (or \`login --device\`) at all in that setup.`)
     .action(async (apiKey, options) => {
         if (options.device) {
             const { deviceLogin } = await import('./commands/device-login');
@@ -494,9 +499,14 @@ workspace
     .command('set')
     .description('Set the active workspace and pin it')
     .argument('<id-or-slug-or-name>', 'Workspace ID, slug, or name')
-    .option('--local', 'pin to ./.solidactions/config.json')
-    .option('--global', 'pin to ~/.solidactions/config.json')
+    .option('--local', 'pin to ./.solidactions/config.json (this folder only)')
+    .option('--global', 'pin to ~/.solidactions/config.json (machine-wide)')
     .option('--gitignore', 'auto-add .solidactions/ to local .gitignore (skip prompt)')
+    .addHelpText('after', `
+Where the pin is saved (--local / --global):
+  --local and --global choose the target file and are mutually exclusive.
+  If neither is passed, you are prompted when interactive (default: global);
+  in non-interactive/CI use, the command exits with an error asking you to pass one.`)
     .action(async (input, opts) => {
         await workspaceSet(input, opts);
     });
