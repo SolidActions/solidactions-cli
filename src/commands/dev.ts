@@ -7,7 +7,7 @@ import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { SolidActionsConfig } from '../utils/env';
-import { Config } from '../utils/config';
+import { Config, findLocalConfigPath, getGlobalConfigPath } from '../utils/config';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -139,6 +139,123 @@ export interface RunDevOptions {
      *   "override shadows platform var: <KEY>"
      */
     varsOverride?: Record<string, string>;
+}
+
+/**
+ * Canonicalize a config path for identity comparison, so a project reached
+ * through a symlinked alias is not mistaken for a different project. Falls back
+ * to the given path when the file cannot be resolved (e.g. a broken symlink) —
+ * the caller is only comparing two paths, not dereferencing them.
+ */
+function realPath(p: string): string {
+    try {
+        return fs.realpathSync(p);
+    } catch {
+        return p;
+    }
+}
+
+/**
+ * Throw when a local config file exists but cannot be parsed as JSON.
+ *
+ * `readConfigFile()` swallows parse errors and returns null, which makes a
+ * corrupt local config indistinguishable from an absent one — resolution then
+ * falls through to the global config. Re-reading here lets us surface the
+ * actual parse error instead.
+ */
+function assertLocalConfigParses(configPath: string): void {
+    try {
+        JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (e: any) {
+        throw new Error(
+            `local config at ${configPath} is malformed: ${e?.message ?? e}\n`
+            + 'It exists but cannot be parsed, so config resolution would fall through to the global '
+            + `config ${getGlobalConfigPath()}, which usually points at production.\n`
+            + 'Fix: repair the file, or re-run `solidactions login --local` to rewrite it.',
+        );
+    }
+}
+
+/**
+ * Refuse to run `dev --env` against a config the user did not choose.
+ *
+ * `dev --env` builds its API client from `resolveConfig(process.cwd())`, which
+ * falls back to the GLOBAL `~/.solidactions/config.json` when no project-local
+ * `.solidactions/config.json` is reachable. That global config typically points
+ * at PRODUCTION, so a workflow run from outside its project's `.solidactions`
+ * tree used to silently fetch vars from — and target — the wrong tenant, with
+ * no diagnostic beyond a bare 404 (issue #30).
+ *
+ * Three situations are refused:
+ *   1. No project-local config above the cwd — the run WOULD fall back to the
+ *      global config.
+ *   2. A local config that EXISTS but does not parse — `readConfigFile()`
+ *      swallows the parse error and returns null, so a corrupt file resolves
+ *      exactly like an absent one and falls through to global. Same leak, but
+ *      it slips past a path-existence check.
+ *   3. The entry file's project-local config is NOT the one the cwd resolves to
+ *      — the run would target a different project's account. NOTE: this branch
+ *      only engages for entries run IN-PROCESS (`.js`/`.mjs`). A `.ts` entry is
+ *      re-exec'd by {@link reexecUnderTsx} with the child's cwd already set to
+ *      the entry's own project root, so by the time the guard runs in the child
+ *      the two paths are equal by construction — the child is correctly
+ *      anchored to the entry's project and there is nothing to mismatch.
+ *
+ * `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides bypass the guard
+ * ONLY when BOTH are set. `resolveConfig()` picks host and apiKey INDEPENDENTLY
+ * (env > local > global), so with just one var set the OTHER field still falls
+ * through to the global config — i.e. a partial override would send a run to
+ * the production host, or to production credentials, exactly the way #30
+ * describes. A partial override therefore refuses like any other unanchored
+ * run, naming the field that would fall through.
+ */
+export function assertProjectLocalConfig(entryPath: string, env: string): void {
+    const envHost = !!process.env.SOLIDACTIONS_HOST;
+    const envApiKey = !!process.env.SOLIDACTIONS_API_KEY;
+    if (envHost && envApiKey) {
+        // Both credential fields come from env — nothing can fall to global.
+        return;
+    }
+
+    const entryLocal = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    const cwdLocal = findLocalConfigPath(process.cwd());
+
+    if (!cwdLocal) {
+        // Exactly one env override set: name the field that would fall through.
+        let partial = '';
+        if (envHost !== envApiKey) {
+            const supplied = envHost ? 'SOLIDACTIONS_HOST' : 'SOLIDACTIONS_API_KEY';
+            const missing = envHost ? 'apiKey' : 'host';
+            const missingVar = envHost ? 'SOLIDACTIONS_API_KEY' : 'SOLIDACTIONS_HOST';
+            partial = `${supplied} is set, but host and apiKey resolve independently — `
+                + `\`${missing}\` would still come from the global config. `
+                + `Set ${missingVar} too to target a host explicitly.\n`;
+        }
+        const found = entryLocal
+            ? `The workflow's own project config is ${entryLocal}.\n`
+            : '';
+        throw new Error(
+            `no project-local .solidactions/config.json found from ${process.cwd()}.\n`
+            + `Refusing to run --env ${env} against the global config ${getGlobalConfigPath()}, `
+            + 'which usually points at production.\n'
+            + partial
+            + found
+            + 'Fix: cd into the project directory before running `solidactions dev`, '
+            + 'or run `solidactions login --local` there to create a project-local config.',
+        );
+    }
+
+    // Exists — but a file that doesn't parse resolves like an absent one.
+    assertLocalConfigParses(cwdLocal);
+
+    if (entryLocal && realPath(entryLocal) !== realPath(cwdLocal)) {
+        throw new Error(
+            `config mismatch: the workflow's project config is ${entryLocal}, `
+            + `but this directory resolves to ${cwdLocal}.\n`
+            + `Refusing to run --env ${env} against a config from a different project.\n`
+            + 'Fix: cd into the workflow\'s project directory before running `solidactions dev`.',
+        );
+    }
 }
 
 /**
@@ -348,6 +465,9 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         if (opts.api) {
             apiClient = opts.api;
         } else {
+            // Refuse BEFORE any config resolution / network work when the only
+            // reachable config is the global (usually production) one — see #30.
+            assertProjectLocalConfig(opts.entry, opts.env);
             // Production path: build from CLI config.
             // Lazy-import to keep tests fast (no config resolution needed).
             const { requireConfigWithWorkspace } = await import('../utils/api');
@@ -711,7 +831,7 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
 
     // .ts entry under plain node has no loader — re-exec under tsx, then return.
     if (!hasTsLoader() && /\.(ts|tsx|mts|cts)$/.test(filePath)) {
-        const projectDir = findProjectRoot(filePath) ?? process.cwd();
+        const projectDir = resolveDevProjectDir(filePath);
         // Surface a clear slug-resolution error here (before forking) rather
         // than letting the child fail with an opaque exit code. Only relevant
         // when an env was requested (bare runs do no platform fetch).
@@ -761,6 +881,31 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
     // failed
     console.error(chalk.red(`✗ failed (${r.phase ?? 'run'}):`), r.error?.message ?? String(r.error));
     process.exit(1);
+}
+
+/**
+ * Choose the cwd for the tsx re-exec child.
+ *
+ * The child's cwd decides which config `resolveConfig(process.cwd())` picks, so
+ * it must be anchored to the workflow's OWN `.solidactions/config.json` when one
+ * exists. Using the nearest `package.json` parent (the previous behaviour) is
+ * wrong in a monorepo: for `/repo/package.json` + `/repo/apps/a/.solidactions/`,
+ * an entry under `apps/a` would re-exec with cwd `/repo`, where no local config
+ * is reachable — so resolution fell back to the global (production) config and
+ * the #30 guard then refused a perfectly legitimate run.
+ *
+ * Preference order: the directory owning the entry's nearest local config, then
+ * the nearest `package.json` parent, then the current cwd. `npx` still resolves
+ * `tsx` by walking node_modules upward, so a package-less project directory is
+ * fine.
+ */
+export function resolveDevProjectDir(entryPath: string): string {
+    const localConfig = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    if (localConfig) {
+        // <dir>/.solidactions/config.json → <dir>
+        return path.dirname(path.dirname(localConfig));
+    }
+    return findProjectRoot(entryPath) ?? process.cwd();
 }
 
 function findProjectRoot(startPath: string): string | null {
