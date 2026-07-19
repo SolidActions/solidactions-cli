@@ -297,7 +297,47 @@ git clone https://github.com/SolidActions/solidactions-cli.git
 cd solidactions-cli
 npm install
 npm run build
+npm test          # vitest run
 ```
+
+## Release Checklist
+
+Run these before publishing a new version. `npm run check:release` covers the
+first three in one command.
+
+1. **Build** — `npm run build` (must be clean; `tsc` errors block the release).
+2. **Unit tests** — `npm test`. Covers config resolution, command wiring, and
+   the `oauth-actions show` snippet renderer (the highest-risk regression
+   surface — array query-param serialization and the proxy-managed header
+   filter both have fixture-backed tests under `tests/fixtures/`).
+3. **Init smoke** — `npm run smoke:init` scaffolds a project end to end.
+4. **oauth-actions smoke** — `bash scripts/smoke.sh` exercises
+   `oauth-actions list|search|show` (plus the 404 path) against a real local
+   stub server, so it needs no credentials:
+
+   ```bash
+   npm run build && bash scripts/smoke.sh
+   ```
+
+   To smoke a deployed server instead, pass `--live` with real credentials:
+
+   ```bash
+   SOLIDACTIONS_HOST=https://app.solidactions.com \
+   SOLIDACTIONS_API_KEY=... \
+   SOLIDACTIONS_WORKSPACE_ID=... \
+   bash scripts/smoke.sh --live
+   ```
+
+   The script exits non-zero on the first failed check.
+5. **SDK docs pin** — `ai init` fetches `docs/sdk-reference.md` from a
+   `solidactions-ts-sdk` tag, not from that repo's `main`. The tag is derived
+   at runtime from the `@solidactions/sdk` version this package declares (see
+   `src/utils/sdk-version.ts`), so bumping that dependency moves the docs ref
+   with it — nothing to update by hand. `tests/sdk-docs-ref.test.ts` fails if
+   the declared range has no explicit minimum version to derive from.
+6. **Version bump** — update `package.json`, then publish. Once the publish
+   flow from PR #78 lands, the GitHub release **tag** drives the published npm
+   version (semver-guarded); the bump commit stays conventional.
 
 ## License
 

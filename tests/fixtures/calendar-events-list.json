@@ -1,0 +1,24 @@
+{
+  "platform": "google-calendar",
+  "method": "GET",
+  "path": "/calendar/v3/calendars/{{calendarId}}/events",
+  "title": "List Events",
+  "action_id": "conn_mod_def::GJ6RlnIYK20::YzuWSmaVQgurletRDNJavA",
+  "tags": ["calendar", "events"],
+  "io_schema": {
+    "inputSchema": {
+      "description": "Returns events on the specified calendar."
+    },
+    "ioExample": {
+      "input": {
+        "path": { "calendarId": "primary" },
+        "query": {
+          "maxResults": "10",
+          "eventTypes": ["default", "outOfOffice"],
+          "privateExtendedProperty": ["team=alpha", "tier=1"],
+          "singleEvents": "true"
+        }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@ import prompts from 'prompts';
 import fsExtra from 'fs-extra';
 import path from 'path';
 import { fetchRawFile } from '../utils/github';
+import { sdkDocsRef } from '../utils/sdk-version';
 import { upsertMarkerSection } from '../utils/markers';
 import { AiHelperTarget, skillTargetDir, installSkills, fetchAiHelperContent } from '../utils/skills';
 
@@ -69,8 +70,15 @@ export async function aiInit(options: AiInitOptions = {}, resolvedTarget?: AiHel
         // Fetch slim helper content for the chosen target.
         const aiContent = await fetchAiHelperContent(targetFile);
 
-        // Fetch SDK reference (always).
-        const sdkContent = await fetchRawFile('SolidActions', 'solidactions-ts-sdk', 'docs/sdk-reference.md');
+        // Fetch SDK reference (always), pinned to the tag matching the
+        // @solidactions/sdk version this CLI declares, so scaffolded projects
+        // never get docs for an SDK newer than the one the CLI targets.
+        const sdkContent = await fetchRawFile(
+            'SolidActions',
+            'solidactions-ts-sdk',
+            'docs/sdk-reference.md',
+            sdkDocsRef(),
+        );
 
         // Save SDK reference to .solidactions/sdk-reference.md.
         fsExtra.ensureDirSync('.solidactions');
