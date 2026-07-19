@@ -37,6 +37,6 @@
 | --- | --- | --- |
 | `project` / `run` / `env` / `schedule` / `webhook` / `skill` / `role` / `crew` / `workspace` | Conformant | Singular from the start |
 | `doc` | Conformant since #63 | Shipped plural as `docs`; renamed `docs` → `doc` (BREAKING, no deprecation alias) per decision (2). Old `docs push` / `docs pull` / `docs upload` are gone — Commander emits an "unknown command" error with a `Did you mean doc?` hint. The `"docs"` OAuth ability, the `SA-Docs` product name, the `/mcp/docs` + `docs_*` API surface, and the `.solidactions-docs.json` sidecar are **not** part of this rename and stay as-is |
-| `oauth-actions` | **Not conformant** | Still plural. Out of scope for #63 (which was sanctioned for `docs` → `doc` only) and needs its own decision: unlike `docs`, the singular `oauth-action` reads awkwardly for a discovery surface, and decision (6) already has a pending `show` → `view` migration for this noun that a rename should ride along with. Tracked separately |
+| `oauth-actions` | **Not conformant** | Still plural. Out of scope for #63 (which was sanctioned for `docs` → `doc` only) and needs its own decision: unlike `docs`, the singular `oauth-action` reads awkwardly for a discovery surface, and decision (6) already has a pending `show` → `view` migration for this noun that a rename should ride along with. Tracked separately (cli#84) |
 
 `doc` was the last unconsidered plural; `oauth-actions` is the one remaining known exception, deliberately deferred rather than blessed.

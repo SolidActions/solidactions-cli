@@ -32,7 +32,7 @@ interface CapturedRequest {
 
 // ---------------------------------------------------------------------------
 // Minimal multipart/form-data parser — just enough to assert field names,
-// filenames, and values in tests. Pattern copied from docs-upload.test.ts.
+// filenames, and values in tests. Pattern copied from doc-upload.test.ts.
 // ---------------------------------------------------------------------------
 
 interface MultipartPart {

@@ -3,7 +3,7 @@
  *
  * Uses a real in-process HTTP server (Node's http.createServer) to stub the
  * unified /mcp endpoint. No mock/spy/stub libraries — follows the pattern in
- * tests/docs-push.test.ts.
+ * tests/doc-push.test.ts.
  */
 
 import * as fs from 'fs';
