@@ -82,7 +82,12 @@ describe('assertProjectLocalConfig — refusal', () => {
         } finally { orphan.cleanup(); env.cleanup(); }
     });
 
-    it('refuses when the entry belongs to a DIFFERENT project than the cwd', () => {
+    // Review round 1 (MEDIUM): this branch is reachable only for entries run
+    // IN-PROCESS (.js/.mjs). A .ts entry is re-exec'd with the child cwd already
+    // at the entry's own project root, so entryLocal === cwdLocal by
+    // construction there and the mismatch cannot fire — correctly so: the child
+    // is anchored to the right project. Entry named .mjs to reflect that.
+    it('refuses when the entry belongs to a DIFFERENT project than the cwd (in-process entries)', () => {
         const env = makeTmpEnv();
         const other = makeOrphanDir();
         try {
@@ -91,7 +96,7 @@ describe('assertProjectLocalConfig — refusal', () => {
             process.chdir(env.cwd);
 
             let msg = '';
-            try { assertProjectLocalConfig(path.join(other.dir, 'wf.ts'), 'staging'); }
+            try { assertProjectLocalConfig(path.join(other.dir, 'wf.mjs'), 'staging'); }
             catch (e: any) { msg = e.message; }
 
             expect(msg).toContain('config mismatch');
@@ -111,25 +116,96 @@ describe('assertProjectLocalConfig — legitimate flows are preserved', () => {
         } finally { env.cleanup(); }
     });
 
-    it('passes with an explicit SOLIDACTIONS_HOST override even with no local config', () => {
+    it('passes with BOTH env overrides set and no local config — nothing can fall to global', () => {
         const env = makeTmpEnv();
         const orphan = makeOrphanDir();
         try {
             process.env.SOLIDACTIONS_HOST = 'https://explicit.example';
-            process.chdir(orphan.dir);
-            expect(() => assertProjectLocalConfig(path.join(orphan.dir, 'wf.ts'), 'production')).not.toThrow();
-        } finally { orphan.cleanup(); env.cleanup(); }
-    });
-
-    it('passes with an explicit SOLIDACTIONS_API_KEY override even with no local config', () => {
-        const env = makeTmpEnv();
-        const orphan = makeOrphanDir();
-        try {
             process.env.SOLIDACTIONS_API_KEY = 'sk_explicit';
             process.chdir(orphan.dir);
             expect(() => assertProjectLocalConfig(path.join(orphan.dir, 'wf.ts'), 'production')).not.toThrow();
         } finally { orphan.cleanup(); env.cleanup(); }
     });
+
+    it('a partial env override does NOT suppress the guard when a local config exists', () => {
+        const env = makeTmpEnv();
+        try {
+            process.env.SOLIDACTIONS_API_KEY = 'sk_explicit';
+            writeLocal(env.cwd, { host: 'https://proj.example', apiKey: 'sk_proj' });
+            process.chdir(env.cwd);
+            // The local config supplies `host`; nothing falls to global.
+            expect(() => assertProjectLocalConfig(path.join(env.cwd, 'wf.ts'), 'production')).not.toThrow();
+        } finally { env.cleanup(); }
+    });
+});
+
+/**
+ * Review round 1 (HIGH): the bypass was OR-based, so setting EITHER var skipped
+ * the guard entirely — but resolveConfig() picks host and apiKey independently,
+ * so the unset field still fell through to the global (production) config. The
+ * reviewer drove a real request to the global host (401) from an orphan dir
+ * with only SOLIDACTIONS_API_KEY set. The bypass now requires BOTH vars.
+ */
+describe('assertProjectLocalConfig — partial env override still refuses', () => {
+    it('refuses with only SOLIDACTIONS_API_KEY set, naming host as the field falling to global', () => {
+        const env = makeTmpEnv();
+        const orphan = makeOrphanDir();
+        try {
+            process.env.SOLIDACTIONS_API_KEY = 'sk_explicit';
+            process.chdir(orphan.dir);
+
+            let msg = '';
+            try { assertProjectLocalConfig(path.join(orphan.dir, 'wf.ts'), 'production'); }
+            catch (e: any) { msg = e.message; }
+
+            expect(msg).toContain('SOLIDACTIONS_API_KEY is set');
+            expect(msg).toContain('`host` would still come from the global config');
+            expect(msg).toContain('Set SOLIDACTIONS_HOST too');
+            expect(msg).toContain(path.join(env.home, '.solidactions', 'config.json'));
+        } finally { orphan.cleanup(); env.cleanup(); }
+    });
+
+    it('refuses with only SOLIDACTIONS_HOST set, naming apiKey as the field falling to global', () => {
+        const env = makeTmpEnv();
+        const orphan = makeOrphanDir();
+        try {
+            process.env.SOLIDACTIONS_HOST = 'https://explicit.example';
+            process.chdir(orphan.dir);
+
+            let msg = '';
+            try { assertProjectLocalConfig(path.join(orphan.dir, 'wf.ts'), 'production'); }
+            catch (e: any) { msg = e.message; }
+
+            expect(msg).toContain('SOLIDACTIONS_HOST is set');
+            expect(msg).toContain('`apiKey` would still come from the global config');
+            expect(msg).toContain('Set SOLIDACTIONS_API_KEY too');
+        } finally { orphan.cleanup(); env.cleanup(); }
+    });
+
+    it('the full-refusal path (no env vars at all) carries no partial-override line', () => {
+        const env = makeTmpEnv();
+        const orphan = makeOrphanDir();
+        try {
+            process.chdir(orphan.dir);
+            let msg = '';
+            try { assertProjectLocalConfig(path.join(orphan.dir, 'wf.ts'), 'production'); }
+            catch (e: any) { msg = e.message; }
+
+            expect(msg).toContain('Refusing to run --env production');
+            expect(msg).not.toContain('resolve independently');
+        } finally { orphan.cleanup(); env.cleanup(); }
+    });
+
+    it('runDev rejects an --env run with only SOLIDACTIONS_API_KEY set', async () => {
+        const env = makeTmpEnv();
+        const orphan = makeOrphanDir();
+        try {
+            process.env.SOLIDACTIONS_API_KEY = 'sk_explicit';
+            process.chdir(orphan.dir);
+            await expect(runDev({ entry: ECHO_FIXTURE, input: '{"n":1}', env: 'production' }))
+                .rejects.toThrow(/host` would still come from the global config/);
+        } finally { orphan.cleanup(); env.cleanup(); }
+    }, 20_000);
 });
 
 describe('runDev — guard wiring', () => {

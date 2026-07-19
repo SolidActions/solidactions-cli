@@ -155,13 +155,26 @@ export interface RunDevOptions {
  *   1. No project-local config above the cwd — the run WOULD fall back to the
  *      global config.
  *   2. The entry file's project-local config is NOT the one the cwd resolves to
- *      — the run would target a different project's account.
+ *      — the run would target a different project's account. NOTE: this branch
+ *      only engages for entries run IN-PROCESS (`.js`/`.mjs`). A `.ts` entry is
+ *      re-exec'd by {@link reexecUnderTsx} with the child's cwd already set to
+ *      the entry's own project root, so by the time the guard runs in the child
+ *      the two paths are equal by construction — the child is correctly
+ *      anchored to the entry's project and there is nothing to mismatch.
  *
- * Explicit `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides are a
- * deliberate choice of target and are always allowed through.
+ * `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides bypass the guard
+ * ONLY when BOTH are set. `resolveConfig()` picks host and apiKey INDEPENDENTLY
+ * (env > local > global), so with just one var set the OTHER field still falls
+ * through to the global config — i.e. a partial override would send a run to
+ * the production host, or to production credentials, exactly the way #30
+ * describes. A partial override therefore refuses like any other unanchored
+ * run, naming the field that would fall through.
  */
 export function assertProjectLocalConfig(entryPath: string, env: string): void {
-    if (process.env.SOLIDACTIONS_HOST || process.env.SOLIDACTIONS_API_KEY) {
+    const envHost = !!process.env.SOLIDACTIONS_HOST;
+    const envApiKey = !!process.env.SOLIDACTIONS_API_KEY;
+    if (envHost && envApiKey) {
+        // Both credential fields come from env — nothing can fall to global.
         return;
     }
 
@@ -169,6 +182,16 @@ export function assertProjectLocalConfig(entryPath: string, env: string): void {
     const cwdLocal = findLocalConfigPath(process.cwd());
 
     if (!cwdLocal) {
+        // Exactly one env override set: name the field that would fall through.
+        let partial = '';
+        if (envHost !== envApiKey) {
+            const supplied = envHost ? 'SOLIDACTIONS_HOST' : 'SOLIDACTIONS_API_KEY';
+            const missing = envHost ? 'apiKey' : 'host';
+            const missingVar = envHost ? 'SOLIDACTIONS_API_KEY' : 'SOLIDACTIONS_HOST';
+            partial = `${supplied} is set, but host and apiKey resolve independently — `
+                + `\`${missing}\` would still come from the global config. `
+                + `Set ${missingVar} too to target a host explicitly.\n`;
+        }
         const found = entryLocal
             ? `The workflow's own project config is ${entryLocal}.\n`
             : '';
@@ -176,6 +199,7 @@ export function assertProjectLocalConfig(entryPath: string, env: string): void {
             `no project-local .solidactions/config.json found from ${process.cwd()}.\n`
             + `Refusing to run --env ${env} against the global config ${getGlobalConfigPath()}, `
             + 'which usually points at production.\n'
+            + partial
             + found
             + 'Fix: cd into the project directory before running `solidactions dev`, '
             + 'or run `solidactions init` there to create a project-local config.',
