@@ -7,7 +7,7 @@ import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { SolidActionsConfig } from '../utils/env';
-import { Config } from '../utils/config';
+import { Config, findLocalConfigPath, getGlobalConfigPath } from '../utils/config';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -139,6 +139,57 @@ export interface RunDevOptions {
      *   "override shadows platform var: <KEY>"
      */
     varsOverride?: Record<string, string>;
+}
+
+/**
+ * Refuse to run `dev --env` against a config the user did not choose.
+ *
+ * `dev --env` builds its API client from `resolveConfig(process.cwd())`, which
+ * falls back to the GLOBAL `~/.solidactions/config.json` when no project-local
+ * `.solidactions/config.json` is reachable. That global config typically points
+ * at PRODUCTION, so a workflow run from outside its project's `.solidactions`
+ * tree used to silently fetch vars from — and target — the wrong tenant, with
+ * no diagnostic beyond a bare 404 (issue #30).
+ *
+ * Two situations are refused:
+ *   1. No project-local config above the cwd — the run WOULD fall back to the
+ *      global config.
+ *   2. The entry file's project-local config is NOT the one the cwd resolves to
+ *      — the run would target a different project's account.
+ *
+ * Explicit `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides are a
+ * deliberate choice of target and are always allowed through.
+ */
+export function assertProjectLocalConfig(entryPath: string, env: string): void {
+    if (process.env.SOLIDACTIONS_HOST || process.env.SOLIDACTIONS_API_KEY) {
+        return;
+    }
+
+    const entryLocal = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    const cwdLocal = findLocalConfigPath(process.cwd());
+
+    if (!cwdLocal) {
+        const found = entryLocal
+            ? `The workflow's own project config is ${entryLocal}.\n`
+            : '';
+        throw new Error(
+            `no project-local .solidactions/config.json found from ${process.cwd()}.\n`
+            + `Refusing to run --env ${env} against the global config ${getGlobalConfigPath()}, `
+            + 'which usually points at production.\n'
+            + found
+            + 'Fix: cd into the project directory before running `solidactions dev`, '
+            + 'or run `solidactions init` there to create a project-local config.',
+        );
+    }
+
+    if (entryLocal && entryLocal !== cwdLocal) {
+        throw new Error(
+            `config mismatch: the workflow's project config is ${entryLocal}, `
+            + `but this directory resolves to ${cwdLocal}.\n`
+            + `Refusing to run --env ${env} against a config from a different project.\n`
+            + 'Fix: cd into the workflow\'s project directory before running `solidactions dev`.',
+        );
+    }
 }
 
 /**
@@ -348,6 +399,9 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         if (opts.api) {
             apiClient = opts.api;
         } else {
+            // Refuse BEFORE any config resolution / network work when the only
+            // reachable config is the global (usually production) one — see #30.
+            assertProjectLocalConfig(opts.entry, opts.env);
             // Production path: build from CLI config.
             // Lazy-import to keep tests fast (no config resolution needed).
             const { requireConfigWithWorkspace } = await import('../utils/api');
