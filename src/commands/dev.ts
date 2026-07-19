@@ -142,6 +142,41 @@ export interface RunDevOptions {
 }
 
 /**
+ * Canonicalize a config path for identity comparison, so a project reached
+ * through a symlinked alias is not mistaken for a different project. Falls back
+ * to the given path when the file cannot be resolved (e.g. a broken symlink) —
+ * the caller is only comparing two paths, not dereferencing them.
+ */
+function realPath(p: string): string {
+    try {
+        return fs.realpathSync(p);
+    } catch {
+        return p;
+    }
+}
+
+/**
+ * Throw when a local config file exists but cannot be parsed as JSON.
+ *
+ * `readConfigFile()` swallows parse errors and returns null, which makes a
+ * corrupt local config indistinguishable from an absent one — resolution then
+ * falls through to the global config. Re-reading here lets us surface the
+ * actual parse error instead.
+ */
+function assertLocalConfigParses(configPath: string): void {
+    try {
+        JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (e: any) {
+        throw new Error(
+            `local config at ${configPath} is malformed: ${e?.message ?? e}\n`
+            + 'It exists but cannot be parsed, so config resolution would fall through to the global '
+            + `config ${getGlobalConfigPath()}, which usually points at production.\n`
+            + 'Fix: repair the file, or re-run `solidactions login --local` to rewrite it.',
+        );
+    }
+}
+
+/**
  * Refuse to run `dev --env` against a config the user did not choose.
  *
  * `dev --env` builds its API client from `resolveConfig(process.cwd())`, which
@@ -151,10 +186,14 @@ export interface RunDevOptions {
  * tree used to silently fetch vars from — and target — the wrong tenant, with
  * no diagnostic beyond a bare 404 (issue #30).
  *
- * Two situations are refused:
+ * Three situations are refused:
  *   1. No project-local config above the cwd — the run WOULD fall back to the
  *      global config.
- *   2. The entry file's project-local config is NOT the one the cwd resolves to
+ *   2. A local config that EXISTS but does not parse — `readConfigFile()`
+ *      swallows the parse error and returns null, so a corrupt file resolves
+ *      exactly like an absent one and falls through to global. Same leak, but
+ *      it slips past a path-existence check.
+ *   3. The entry file's project-local config is NOT the one the cwd resolves to
  *      — the run would target a different project's account. NOTE: this branch
  *      only engages for entries run IN-PROCESS (`.js`/`.mjs`). A `.ts` entry is
  *      re-exec'd by {@link reexecUnderTsx} with the child's cwd already set to
@@ -202,11 +241,14 @@ export function assertProjectLocalConfig(entryPath: string, env: string): void {
             + partial
             + found
             + 'Fix: cd into the project directory before running `solidactions dev`, '
-            + 'or run `solidactions init` there to create a project-local config.',
+            + 'or run `solidactions login --local` there to create a project-local config.',
         );
     }
 
-    if (entryLocal && entryLocal !== cwdLocal) {
+    // Exists — but a file that doesn't parse resolves like an absent one.
+    assertLocalConfigParses(cwdLocal);
+
+    if (entryLocal && realPath(entryLocal) !== realPath(cwdLocal)) {
         throw new Error(
             `config mismatch: the workflow's project config is ${entryLocal}, `
             + `but this directory resolves to ${cwdLocal}.\n`
@@ -789,7 +831,7 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
 
     // .ts entry under plain node has no loader — re-exec under tsx, then return.
     if (!hasTsLoader() && /\.(ts|tsx|mts|cts)$/.test(filePath)) {
-        const projectDir = findProjectRoot(filePath) ?? process.cwd();
+        const projectDir = resolveDevProjectDir(filePath);
         // Surface a clear slug-resolution error here (before forking) rather
         // than letting the child fail with an opaque exit code. Only relevant
         // when an env was requested (bare runs do no platform fetch).
@@ -839,6 +881,31 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
     // failed
     console.error(chalk.red(`✗ failed (${r.phase ?? 'run'}):`), r.error?.message ?? String(r.error));
     process.exit(1);
+}
+
+/**
+ * Choose the cwd for the tsx re-exec child.
+ *
+ * The child's cwd decides which config `resolveConfig(process.cwd())` picks, so
+ * it must be anchored to the workflow's OWN `.solidactions/config.json` when one
+ * exists. Using the nearest `package.json` parent (the previous behaviour) is
+ * wrong in a monorepo: for `/repo/package.json` + `/repo/apps/a/.solidactions/`,
+ * an entry under `apps/a` would re-exec with cwd `/repo`, where no local config
+ * is reachable — so resolution fell back to the global (production) config and
+ * the #30 guard then refused a perfectly legitimate run.
+ *
+ * Preference order: the directory owning the entry's nearest local config, then
+ * the nearest `package.json` parent, then the current cwd. `npx` still resolves
+ * `tsx` by walking node_modules upward, so a package-less project directory is
+ * fine.
+ */
+export function resolveDevProjectDir(entryPath: string): string {
+    const localConfig = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    if (localConfig) {
+        // <dir>/.solidactions/config.json → <dir>
+        return path.dirname(path.dirname(localConfig));
+    }
+    return findProjectRoot(entryPath) ?? process.cwd();
 }
 
 function findProjectRoot(startPath: string): string | null {

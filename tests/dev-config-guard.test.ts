@@ -14,10 +14,11 @@
  * dev.test.ts / dev-env-404-hint.test.ts.
  */
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { assertProjectLocalConfig, runDev, type PlatformVar, type SaApiClient } from '../src/commands/dev';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { assertProjectLocalConfig, buildSaApiClient, resolveDevProjectDir, runDev } from '../src/commands/dev';
 import { makeTmpEnv, writeLocal } from './helpers';
 
 const ECHO_FIXTURE = path.resolve(__dirname, '../fixtures/echo.ts');
@@ -31,13 +32,36 @@ function makeOrphanDir(): { dir: string; cleanup: () => void } {
     return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
-function fakeApi(): SaApiClient {
-    return {
-        projectSlug: 'test-project',
-        async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
-            return [];
-        },
-    };
+// Real in-process HTTP server standing in for the SA API (repo convention —
+// same shape as env-set-global-guard.test.ts). The client under test is the
+// REAL buildSaApiClient(), so the request path, headers and response decoding
+// are all exercised; only the server on the other end is local.
+let server: http.Server;
+let port: number;
+
+beforeAll(async () => {
+    server = http.createServer((req, res) => {
+        if (req.method === 'GET' && req.url?.includes('/variable-mappings')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify([]));
+            return;
+        }
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ message: `unhandled ${req.method} ${req.url}` }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => {
+        port = (server.address() as any).port;
+        resolve();
+    }));
+});
+
+afterAll(() => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))));
+
+function realApi() {
+    return buildSaApiClient(
+        { host: `http://127.0.0.1:${port}`, apiKey: 'sk_test' } as any,
+        'test-project',
+    );
 }
 
 describe('assertProjectLocalConfig — refusal', () => {
@@ -63,7 +87,10 @@ describe('assertProjectLocalConfig — refusal', () => {
             expect(msg).toContain(path.join(env.home, '.solidactions', 'config.json'));
             expect(msg).toContain('usually points at production');
             expect(msg).toContain('cd into the project directory');
-            expect(msg).toContain('solidactions init');
+            // `solidactions init` does NOT write .solidactions/config.json —
+            // `login --local` is the documented command (README "login flags").
+            expect(msg).toContain('solidactions login --local');
+            expect(msg).not.toContain('solidactions init');
         } finally { orphan.cleanup(); env.cleanup(); }
     });
 
@@ -208,6 +235,124 @@ describe('assertProjectLocalConfig — partial env override still refuses', () =
     }, 20_000);
 });
 
+/**
+ * Review round 2 (FALSE-NEGATIVE): a local config that EXISTS but is malformed
+ * passed the guard (the path is there) while readConfigFile() returned null, so
+ * resolution fell through to the global production config — #30 surviving.
+ */
+describe('assertProjectLocalConfig — malformed local config', () => {
+    it('refuses a present-but-unparseable local config, naming path and parse error', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.cwd, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            const file = path.join(dir, 'config.json');
+            fs.writeFileSync(file, '{ "host": "https://proj.example", oops');
+            process.chdir(env.cwd);
+
+            let msg = '';
+            try { assertProjectLocalConfig(path.join(env.cwd, 'wf.mjs'), 'production'); }
+            catch (e: any) { msg = e.message; }
+
+            expect(msg).toContain(`local config at ${file} is malformed`);
+            expect(msg).toContain('would fall through to the global');
+            expect(msg).toContain('solidactions login --local');
+        } finally { env.cleanup(); }
+    });
+
+    it('an empty local config file is refused too (JSON.parse fails on "")', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.cwd, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'config.json'), '');
+            process.chdir(env.cwd);
+            expect(() => assertProjectLocalConfig(path.join(env.cwd, 'wf.mjs'), 'production'))
+                .toThrow(/is malformed/);
+        } finally { env.cleanup(); }
+    });
+
+    it('a well-formed local config is not affected', () => {
+        const env = makeTmpEnv();
+        try {
+            writeLocal(env.cwd, { host: 'https://proj.example', apiKey: 'sk_proj' });
+            process.chdir(env.cwd);
+            expect(() => assertProjectLocalConfig(path.join(env.cwd, 'wf.mjs'), 'production')).not.toThrow();
+        } finally { env.cleanup(); }
+    });
+});
+
+/**
+ * Review round 2 (FALSE-POSITIVE): the re-exec cwd used the nearest package.json
+ * parent, so in a monorepo (`/repo/package.json` + `/repo/apps/a/.solidactions/`)
+ * an entry under `apps/a` re-exec'd with cwd `/repo` — no local config reachable
+ * there, so the guard refused a legitimate run. The child cwd is now anchored to
+ * the entry's own local config.
+ */
+describe('resolveDevProjectDir — monorepo anchoring', () => {
+    it('prefers the directory owning the entry\'s local config over the nearest package.json', () => {
+        const env = makeTmpEnv();
+        try {
+            const repo = env.cwd;
+            const app = path.join(repo, 'apps', 'a');
+            fs.mkdirSync(path.join(app, 'src'), { recursive: true });
+            fs.writeFileSync(path.join(repo, 'package.json'), '{"name":"repo"}');
+            writeLocal(app, { host: 'https://a.example', apiKey: 'sk_a' });
+
+            expect(resolveDevProjectDir(path.join(app, 'src', 'wf.ts'))).toBe(app);
+        } finally { env.cleanup(); }
+    });
+
+    it('falls back to the nearest package.json parent when no local config exists', () => {
+        const env = makeTmpEnv();
+        try {
+            const repo = env.cwd;
+            const nested = path.join(repo, 'apps', 'b', 'src');
+            fs.mkdirSync(nested, { recursive: true });
+            fs.writeFileSync(path.join(repo, 'package.json'), '{"name":"repo"}');
+
+            expect(resolveDevProjectDir(path.join(nested, 'wf.ts'))).toBe(repo);
+        } finally { env.cleanup(); }
+    });
+
+    it('the guard passes from the anchored cwd in that monorepo layout', () => {
+        const env = makeTmpEnv();
+        try {
+            const repo = env.cwd;
+            const app = path.join(repo, 'apps', 'a');
+            fs.mkdirSync(path.join(app, 'src'), { recursive: true });
+            fs.writeFileSync(path.join(repo, 'package.json'), '{"name":"repo"}');
+            writeLocal(app, { host: 'https://a.example', apiKey: 'sk_a' });
+
+            const entry = path.join(app, 'src', 'wf.ts');
+            process.chdir(resolveDevProjectDir(entry)); // what the re-exec child does
+            expect(() => assertProjectLocalConfig(entry, 'production')).not.toThrow();
+        } finally { env.cleanup(); }
+    });
+});
+
+/**
+ * Review round 2 (mechanical): compare config identity by realpath so a project
+ * reached through a symlinked alias is not reported as a different project.
+ */
+describe('assertProjectLocalConfig — symlinked project alias', () => {
+    it('does not report a mismatch when entry and cwd reach the same config via a symlink', () => {
+        const env = makeTmpEnv();
+        try {
+            const real = path.join(env.cwd, 'real-project');
+            fs.mkdirSync(path.join(real, 'src'), { recursive: true });
+            writeLocal(real, { host: 'https://proj.example', apiKey: 'sk_proj' });
+
+            const alias = path.join(env.cwd, 'alias-project');
+            fs.symlinkSync(real, alias, 'dir');
+
+            process.chdir(real);
+            // Entry reached through the alias — same file, different path string.
+            expect(() => assertProjectLocalConfig(path.join(alias, 'src', 'wf.mjs'), 'production')).not.toThrow();
+        } finally { env.cleanup(); }
+    });
+});
+
 describe('runDev — guard wiring', () => {
     it('rejects an --env run from outside any project tree, before touching config', async () => {
         const env = makeTmpEnv();
@@ -223,7 +368,7 @@ describe('runDev — guard wiring', () => {
     // toolchain relative to the cwd), which has no project-local config of its
     // own — so the guard WOULD fire if it were reached.
     it('an injected api client (tests / embedders) bypasses the guard and the run completes', async () => {
-        const out = await runDev({ entry: ECHO_FIXTURE, input: '{"n":1}', env: 'production', api: fakeApi() });
+        const out = await runDev({ entry: ECHO_FIXTURE, input: '{"n":1}', env: 'production', api: realApi() });
         expect(out.result.status).toBe('completed');
     }, 20_000);
 
