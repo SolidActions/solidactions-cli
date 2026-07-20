@@ -37,9 +37,28 @@ beforeAll(() => {
         path.join(projectDir, 'package.json'),
         JSON.stringify({ name: 'project_b', type: 'module' }) + '\n',
     );
+    // The fixture must actually RUN, not merely get past path resolution, so the
+    // assertions below can require exit 0 and real output. That needs
+    // @solidactions/sdk resolvable from the fixture: link this repo's
+    // node_modules rather than paying an npm install per test run.
+    fs.symlinkSync(
+        path.resolve(__dirname, '../node_modules'),
+        path.join(projectDir, 'node_modules'),
+        'dir',
+    );
     fs.writeFileSync(
         path.join(projectDir, 'src', 'workflow.ts'),
-        'export default { name: "relative-entry", run: async () => 42 };\n',
+        [
+            "import { defineWorkflow } from '@solidactions/sdk';",
+            'export default defineWorkflow({',
+            "    name: 'relative-entry',",
+            '    run: async (ctx) => {',
+            '        const input = ctx.input as { n?: number };',
+            '        return (input.n ?? 0) + 1;',
+            '    },',
+            '});',
+            '',
+        ].join('\n'),
     );
 });
 
@@ -50,26 +69,41 @@ afterAll(() => {
 function runDevCli(entryArg: string, cwd: string) {
     return childProcess.spawnSync(
         process.execPath,
-        [CLI_BINARY, 'dev', entryArg, '--input', '{}'],
+        [CLI_BINARY, 'dev', entryArg, '--input', '{"n":41}'],
         { encoding: 'utf8', cwd, env: { ...process.env }, timeout: 60_000 },
     );
+}
+
+/**
+ * Assert the run actually SUCCEEDED.
+ *
+ * Asserting only the absence of "File not found" is too weak: a spawn error, a
+ * timeout, or a nonzero exit for some unrelated reason would all sail through.
+ * This fixture is built to run for real, so require the whole contract — no
+ * spawn error, exit 0, and the workflow's own output (41 + 1 = 42).
+ */
+function expectSuccessfulRun(result: childProcess.SpawnSyncReturns<string>) {
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+
+    expect(result.error).toBeUndefined();
+    expect(output).not.toMatch(/File not found/);
+    expect(result.status, `dev exited ${result.status}\n${output}`).toBe(0);
+    expect(output).toMatch(/completed/);
+    expect(output).toMatch(/Output:.*\b42\b/);
 }
 
 describe('solidactions dev — relative entry path from outside the project root', () => {
     it('does not double-resolve the entry against the re-exec child cwd', () => {
         const result = runDevCli(path.join('project_b', 'src', 'workflow.ts'), workRoot);
-        const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
 
         // The bug's signature: the project directory segment appearing twice.
-        expect(output).not.toMatch(/project_b[\\/]project_b/);
-        // And more generally, the entry must be found at all.
-        expect(output).not.toMatch(/File not found/);
+        expect(`${result.stdout ?? ''}${result.stderr ?? ''}`).not.toMatch(/project_b[\\/]project_b/);
+        expectSuccessfulRun(result);
     }, 90_000);
 
     it('still resolves an absolute entry path from outside the project root', () => {
         const result = runDevCli(path.join(projectDir, 'src', 'workflow.ts'), workRoot);
-        const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
 
-        expect(output).not.toMatch(/File not found/);
+        expectSuccessfulRun(result);
     }, 90_000);
 });

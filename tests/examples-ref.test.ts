@@ -137,3 +137,21 @@ describe('init TEMPLATE_FILES fetch', () => {
         expect(fetchCall![0]).toContain('EXAMPLES_REF');
     });
 });
+
+// `ai examples` walks the repo with listRepoContents + fetchRawFile. It is
+// interactive and network-driven, so it is guarded at the source level like
+// init's loop: every call in the file must carry the ref. The first pass at #86
+// missed this file entirely.
+describe('ai examples fetches', () => {
+    const source = fs.readFileSync(path.resolve(__dirname, '../src/commands/ai-examples.ts'), 'utf8');
+
+    it('pins every listRepoContents and fetchRawFile call to EXAMPLES_REF', () => {
+        const calls = source.match(/(?:listRepoContents|fetchRawFile)\([^;]*?\)/gs) ?? [];
+        // Guard the guard: if the calls are ever restructured away, fail loudly
+        // rather than vacuously passing over an empty list.
+        expect(calls.length).toBeGreaterThanOrEqual(3);
+        for (const call of calls) {
+            expect(call).toContain('EXAMPLES_REF');
+        }
+    });
+});

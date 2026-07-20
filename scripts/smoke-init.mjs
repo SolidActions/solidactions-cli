@@ -119,26 +119,88 @@ function assertSafeSourcePath(root, relativePath) {
   return relativePath;
 }
 
+// Resolved commit-ish per (checkout, ref). Resolution can hit the network, and
+// a run reads a dozen files per repo — resolve once, reuse.
+const resolvedRefs = new Map();
+
+function revParse(root, candidate) {
+  const result = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+/**
+ * Resolve a ref to a commit inside a sibling checkout, fetching it if the
+ * checkout does not already have it.
+ *
+ * CI clones the sibling repos at depth 1 with no tags, so a pinned ref the CLI
+ * asks for — the SDK's `v0.7.3` tag, or an EXAMPLES_REF SHA that is not the tip
+ * of the cloned branch — simply is not present locally, and the smoke failed
+ * with "File not found ... (branch: v0.7.3)". Fetching on demand keeps the CI
+ * checkouts cheap while still serving exactly the ref the CLI pins to.
+ *
+ * Remote-tracking refs are preferred over local ones so a stale local `main`
+ * cannot shadow the fetched one.
+ */
+function resolveRef(root, ref) {
+  const cacheKey = `${root}\0${ref}`;
+  const cached = resolvedRefs.get(cacheKey);
+  if (cached) return cached;
+
+  const attempts = [];
+  for (const candidate of [`origin/${ref}`, ref]) {
+    const commit = revParse(root, candidate);
+    if (commit) {
+      resolvedRefs.set(cacheKey, commit);
+      return commit;
+    }
+    attempts.push(candidate);
+  }
+
+  // Not present locally — ask the remote for it. Tags and SHAs both work as
+  // fetch arguments; FETCH_HEAD then names whatever came back.
+  const fetch = spawnSync('git', ['fetch', '--quiet', '--depth=1', 'origin', ref], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  if (fetch.status === 0) {
+    const commit = revParse(root, 'FETCH_HEAD');
+    if (commit) {
+      resolvedRefs.set(cacheKey, commit);
+      return commit;
+    }
+  }
+
+  throw new Error(
+    `could not resolve ref "${ref}" in ${root}\n` +
+    `  tried locally: ${attempts.join(', ')}\n` +
+    `  git fetch origin ${ref}: ${fetch.status === 0 ? 'succeeded but FETCH_HEAD was unusable' : String(fetch.stderr ?? '').trim()}\n` +
+    '  If this ref is a pin in the CLI (EXAMPLES_REF, or the SDK tag derived from package.json), ' +
+    'check that it exists and is pushed in the source repo.',
+  );
+}
+
 // Read a file at the ref the CLI actually asked for, out of the checkout's git
 // object store — NOT the working tree. Serving the working tree meant the smoke
 // silently tested whatever branch the sibling checkout happened to be parked on
 // (a feature branch, a stale main), which is why it failed even against real
 // checkouts. Reading by ref also makes the smoke a genuine check on the refs the
-// CLI pins to. Remote-tracking refs win over local ones so a stale local `main`
-// does not shadow the fetched one.
+// CLI pins to.
 function readAtRef(root, ref, relativePath) {
-  const candidates = [`origin/${ref}`, ref];
-  const failures = [];
-  for (const candidate of candidates) {
-    const result = spawnSync('git', ['show', `${candidate}:${relativePath}`], {
-      cwd: root,
-      encoding: 'buffer',
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    if (result.status === 0) return result.stdout;
-    failures.push(`${candidate}: ${String(result.stderr ?? '').trim()}`);
+  const commit = resolveRef(root, ref);
+  const result = spawnSync('git', ['show', `${commit}:${relativePath}`], {
+    cwd: root,
+    encoding: 'buffer',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `could not read ${relativePath} at ref ${ref} (${commit}) in ${root}\n${String(result.stderr ?? '').trim()}`,
+    );
   }
-  throw new Error(`could not read ${relativePath} at ref ${ref} in ${root}\n${failures.join('\n')}`);
+  return result.stdout;
 }
 
 async function startSourceServer() {
