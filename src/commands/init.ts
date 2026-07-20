@@ -3,6 +3,7 @@ import path from 'path';
 import chalk from 'chalk';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from '../utils/github';
+import { EXAMPLES_REF } from '../utils/examples-ref';
 import { aiInit, resolveAiHelperTarget } from './ai-init';
 import type { AiHelperTarget } from '../utils/skills';
 
@@ -77,7 +78,10 @@ export async function init(directory: string | undefined, options: InitOptions =
 
         for (const [remoteSuffix, localSuffix] of TEMPLATE_FILES) {
             const remotePath = `${TEMPLATE_PREFIX}/${remoteSuffix}`;
-            let content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
+            // Pinned to EXAMPLES_REF: unpinned, this loop scaffolded whatever
+            // was on the examples repo's default branch — including the
+            // @solidactions/sdk version the new project declares (#86).
+            let content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath, EXAMPLES_REF);
             content = content.replace(/__PROJECT_NAME__/g, projectName);
 
             const outPath = path.join(targetDir, localSuffix);

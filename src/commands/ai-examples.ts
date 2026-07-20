@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import fsExtra from 'fs-extra';
 import { fetchRawFile, listRepoContents } from '../utils/github';
+import { EXAMPLES_REF } from '../utils/examples-ref';
 import { findAiHelperFile, upsertMarkerSection } from '../utils/markers';
 
 interface AiExamplesOptions {
@@ -11,15 +12,23 @@ interface AiExamplesOptions {
     overwrite?: boolean;
 }
 
+/**
+ * Recursively download a directory from the examples repo.
+ *
+ * Every listing and fetch is pinned to EXAMPLES_REF (#86) so `ai examples`
+ * installs a consistent snapshot rather than whatever is on that repo's default
+ * branch mid-walk. Only ever called against solidactions-examples; the
+ * owner/repo parameters are structural, not a second supported source.
+ */
 async function downloadDirectory(owner: string, repo: string, remotePath: string, localPath: string): Promise<void> {
-    const contents = await listRepoContents(owner, repo, remotePath);
+    const contents = await listRepoContents(owner, repo, remotePath, EXAMPLES_REF);
     fsExtra.ensureDirSync(localPath);
 
     for (const item of contents) {
         const localItemPath = path.join(localPath, item.name);
 
         if (item.type === 'file') {
-            const content = await fetchRawFile(owner, repo, `${remotePath}/${item.name}`);
+            const content = await fetchRawFile(owner, repo, `${remotePath}/${item.name}`, EXAMPLES_REF);
             fs.writeFileSync(localItemPath, content, 'utf8');
         } else if (item.type === 'dir') {
             await downloadDirectory(owner, repo, `${remotePath}/${item.name}`, localItemPath);
@@ -32,7 +41,7 @@ export async function aiExamples(names: string[], options: AiExamplesOptions = {
         console.log(chalk.blue('Discovering available examples...'));
 
         // Discover available examples
-        const repoContents = await listRepoContents('SolidActions', 'solidactions-examples');
+        const repoContents = await listRepoContents('SolidActions', 'solidactions-examples', '', EXAMPLES_REF);
         const availableExamples = repoContents.filter(
             (item) => item.type === 'dir' && !item.name.startsWith('.')
         );

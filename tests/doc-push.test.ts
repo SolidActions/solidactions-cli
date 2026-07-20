@@ -2389,7 +2389,7 @@ describe('docPushWithConfig — untracked binaries', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await docsPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
+                await docPushWithConfig(dir, { onConflict: 'skip' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;

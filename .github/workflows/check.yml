@@ -39,7 +39,15 @@ jobs:
           cache-dependency-path: cli/package-lock.json
       - run: npm ci --ignore-scripts
         working-directory: cli
+      # smoke:init SKIPs (exit 0) when the sibling checkouts are missing, which
+      # keeps `check:release` usable on a clean local clone. That must never be
+      # able to false-green the release gate here, where the checkouts are
+      # cloned above and are always expected: make a missing one a hard failure.
       - run: npm run check:release
         working-directory: cli
+        env:
+          SOLIDACTIONS_SMOKE_REQUIRE_SOURCES: '1'
+          SOLIDACTIONS_EXAMPLES_DIR: ${{ github.workspace }}/examples
+          SOLIDACTIONS_SDK_DIR: ${{ github.workspace }}/ts-sdk
       - run: npm audit --omit=dev --audit-level=high
         working-directory: cli

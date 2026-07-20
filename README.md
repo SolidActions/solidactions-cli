@@ -311,6 +311,25 @@ first three in one command.
    surface — array query-param serialization and the proxy-managed header
    filter both have fixture-backed tests under `tests/fixtures/`).
 3. **Init smoke** — `npm run smoke:init` scaffolds a project end to end.
+
+   It serves template content from local `solidactions-examples` /
+   `solidactions-ts-sdk` checkouts, discovered beside your `solidactions-cli`
+   checkout (override with `SOLIDACTIONS_EXAMPLES_DIR` /
+   `SOLIDACTIONS_SDK_DIR`). Files are read from git **at the ref the CLI pins
+   to**, not from the checkout's working tree, so the branch a sibling happens
+   to be parked on does not affect the result; a pinned ref the checkout lacks
+   is fetched on demand.
+
+   **If a checkout is missing, the smoke SKIPs with a notice and exits 0** so a
+   clean clone can still run `check:release`. That means a local green does not
+   by itself prove the smoke ran. Set `SOLIDACTIONS_SMOKE_REQUIRE_SOURCES=1` to
+   turn a missing checkout back into a hard failure — CI's `release-candidate`
+   job sets it, so the release gate can never be skipped silently. Use it
+   locally too when you are verifying a release:
+
+   ```bash
+   SOLIDACTIONS_SMOKE_REQUIRE_SOURCES=1 npm run check:release
+   ```
 4. **oauth-actions smoke** — `bash scripts/smoke.sh` exercises
    `oauth-actions list|search|show` (plus the 404 path) against a real local
    stub server, so it needs no credentials:
@@ -335,7 +354,18 @@ first three in one command.
    `src/utils/sdk-version.ts`), so bumping that dependency moves the docs ref
    with it — nothing to update by hand. `tests/sdk-docs-ref.test.ts` fails if
    the declared range has no explicit minimum version to derive from.
-6. **Version bump** — update `package.json`, then publish. Once the publish
+6. **Examples pin** — every `solidactions-examples` fetch (`init`'s project
+   template, the installed skills, the `CLAUDE.md`/`AGENTS.md` helper content,
+   and `ai examples`) goes through `EXAMPLES_REF` in
+   `src/utils/examples-ref.ts`, so a scaffold never drifts with that repo's
+   `main`. Unlike the SDK pin above this is **not** derived — the examples repo
+   does not tag in step with the SDK — so it is a commit SHA that must be
+   bumped by hand when you want a newer template. To bump: set the constant to
+   the new commit and run `SOLIDACTIONS_SMOKE_REQUIRE_SOURCES=1 npm run
+   check:release`, which serves content at exactly that ref and so fails on a
+   bad or unreachable pin. `tests/examples-ref.test.ts` fails if any call site
+   stops passing the ref.
+7. **Version bump** — update `package.json`, then publish. Once the publish
    flow from PR #78 lands, the GitHub release **tag** drives the published npm
    version (semver-guarded); the bump commit stays conventional.
 

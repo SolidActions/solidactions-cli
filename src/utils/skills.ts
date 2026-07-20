@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from './github';
+import { EXAMPLES_REF } from './examples-ref';
 
 export const SOLIDACTIONS_SKILL_NAMES = [
     'solidactions-getting-started',
@@ -45,7 +46,7 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
 
     for (const skillName of SOLIDACTIONS_SKILL_NAMES) {
         const remotePath = `${SKILLS_PATH_PREFIX}/${skillName}.md`;
-        const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
+        const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath, EXAMPLES_REF);
 
         const filePath = path.join(targetDir, `${skillName}.md`);
         fs.writeFileSync(filePath, content, 'utf8');
@@ -60,7 +61,7 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
  * repo. Single source per target — no legacy fallback.
  */
 export async function fetchAiHelperContent(targetFile: AiHelperTarget): Promise<string> {
-    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile);
+    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile, EXAMPLES_REF);
 }
 
 /**
