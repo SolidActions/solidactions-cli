@@ -202,7 +202,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         selected = workspaces[0];
         console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
     } else {
-        console.log(chalk.blue('\nSelect a workspace:\n'));
+        console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
         workspaces.forEach((ws, i) => {
             console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`);
         });

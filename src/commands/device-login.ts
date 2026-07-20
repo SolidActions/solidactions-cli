@@ -101,11 +101,13 @@ export async function deviceLogin(
     console.log(chalk.blue('Requesting device authorization...'));
     const code = await requestDeviceCode(host);
 
-    const verifyUrl = code.verification_uri_complete || code.verification_uri;
+    // Deliberately the bare verification_uri, never verification_uri_complete:
+    // the server ignores prefilled codes (phishing defense) — the user types
+    // the code shown here.
     console.log('');
     console.log(chalk.green('To finish signing in, visit:'));
-    console.log('  ' + chalk.blue.underline(verifyUrl));
-    console.log(chalk.gray('  Enter code: ') + chalk.bold(code.user_code));
+    console.log('  ' + chalk.blue.underline(code.verification_uri));
+    console.log(chalk.gray('  and enter code: ') + chalk.bold(code.user_code));
     console.log('');
     console.log(chalk.gray('Waiting for approval in your browser...'));
 

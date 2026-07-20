@@ -153,7 +153,7 @@ async function selectWorkspaceInteractively(
         return workspaces[0];
     }
 
-    console.log(chalk.blue('\nSelect a workspace:\n'));
+    console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
     workspaces.forEach((ws, i) => {
         console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name}`);
     });
