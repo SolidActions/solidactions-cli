@@ -777,7 +777,13 @@ function hasTsLoader(): boolean {
 function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string): number {
     // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
     const cliEntry = path.resolve(__dirname, '..', 'index.js');
-    const args = ['tsx', cliEntry, 'dev', file, '--input', input];
+    // This function sets the child's cwd to projectDir, so the entry MUST be
+    // absolute by the time it is forwarded — a relative path would resolve
+    // against the parent's cwd here and the child's cwd there, yielding a
+    // doubled path when the run started outside the project root (#85).
+    // Resolved against the caller's cwd, which is still current.
+    const entry = path.resolve(file);
+    const args = ['tsx', cliEntry, 'dev', entry, '--input', input];
     if (env) {
         args.push('--env', env);
     }
@@ -843,7 +849,10 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
                 process.exit(1);
             }
         }
-        process.exit(reexecUnderTsx(file, env, input, projectDir));
+        // Forward the RESOLVED path, not the original argument: the child's cwd
+        // is projectDir, so a relative arg would be resolved a second time
+        // against a different directory (#85).
+        process.exit(reexecUnderTsx(filePath, env, input, projectDir));
     }
 
     // In-process path (already under a TS loader, or a .js/.mjs entry).
