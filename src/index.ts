@@ -25,10 +25,10 @@ import { webhookSecret } from './commands/webhook-secret';
 import { dev } from './commands/dev';
 import { aiInit } from './commands/ai-init';
 import { aiExamples } from './commands/ai-examples';
-import { oauthActionsSearch } from './commands/oauth-actions-search';
-import { oauthActionsList } from './commands/oauth-actions-list';
-import { oauthActionsShow } from './commands/oauth-actions-show';
-import { oauthActionsPlatforms } from './commands/oauth-actions-platforms';
+import { oauthActionSearch } from './commands/oauth-action-search';
+import { oauthActionList } from './commands/oauth-action-list';
+import { oauthActionView } from './commands/oauth-action-view';
+import { oauthActionPlatforms } from './commands/oauth-action-platforms';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
 import { skillPublish } from './commands/skill-publish';
@@ -512,46 +512,46 @@ Where the pin is saved (--local / --global):
     });
 
 // =============================================================================
-// oauth-actions <subcommand>
+// oauth-action <subcommand>
 // =============================================================================
 
-const oauthActionsCmd = program.command('oauth-actions').description('Discover OAuth-backed API operations callable via the SA proxy');
+const oauthActionCmd = program.command('oauth-action').description('Discover OAuth-backed API operations callable via the SA proxy');
 
-oauthActionsCmd
+oauthActionCmd
     .command('search <platform> [query]')
     .description('Search available actions for a connected platform')
     .option('--method <method>', 'Filter by HTTP method (GET, POST, etc.)')
     .option('--limit <n>', 'Maximum results to return', (v) => parseInt(v, 10))
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((platform, query, options) => {
-        oauthActionsSearch(platform, query, options);
+        oauthActionSearch(platform, query, options);
     });
 
-oauthActionsCmd
+oauthActionCmd
     .command('list <platform>')
     .description('List actions for a connected platform')
     .option('--limit <n>', 'Maximum results to return', (v) => parseInt(v, 10))
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((platform, options) => {
-        oauthActionsList(platform, options);
+        oauthActionList(platform, options);
     });
 
-oauthActionsCmd
-    .command('show <platform> <action-id>')
+oauthActionCmd
+    .command('view <platform> <action-id>')
     .description('Show full schema, example body, and a paste-ready fetch snippet for one action')
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .option('--var <NAME>', 'ctx.vars variable name for the connection (default: YOUR_CONNECTION)')
     .option('--legacy-env', 'Emit the deprecated process.env-based snippet (will be removed in a future release)')
     .action((platform, actionId, options) => {
-        oauthActionsShow(platform, actionId, options);
+        oauthActionView(platform, actionId, options);
     });
 
-oauthActionsCmd
+oauthActionCmd
     .command('platforms')
     .description('List available OAuth-backed platforms')
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((options) => {
-        oauthActionsPlatforms(options);
+        oauthActionPlatforms(options);
     });
 
 // =============================================================================

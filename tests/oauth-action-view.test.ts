@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSnippet } from '../src/commands/oauth-actions-show';
+import { buildSnippet } from '../src/commands/oauth-action-view';
 
 // ---------------------------------------------------------------------------
 // Fixtures

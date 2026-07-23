@@ -15,7 +15,7 @@
 3. **`push`/`pull` are the bridge verbs; `add` collapses into `push`.** CRUD (`create`/`edit`/`delete`) is a later, orthogonal axis: `push`/`pull` = "I have files," `create`/`edit`/`delete` = "I don't."
 4. **Flatten the SOP surface** to three peer top-level nouns — `skill` / `crew` / `role`, **no umbrella**. Role-scoping is a `--role <name>` flag. (`crews skill add <dir>` → `skill push <dir>`.)
 5. **Pillars are `--help` section headers + mental model only — never typed path segments** (the `gh` model; needs a Commander `configureHelp` customization).
-6. **Verb canon = `view`** for "show one"; migrate `oauth-actions show` → `view`.
+6. **Verb canon = `view`** for "show one"; migrate `oauth-actions show` → `view`. *(Executed in #84 — see the conformance table below.)*
 7. **Hot-path promotion** to bare top-level is limited to unambiguous actions (`deploy`, `dev`); `push`/`pull`/`list` stay noun-scoped.
 8. **Verbs come in families; each noun declares its family** — file-sync (`push`/`pull`), content-CRUD (`create`/`edit`/`delete`/`list`/`view`), execution-lifecycle (`start`/`invoke`/…), KV-upsert (`set`, e.g. `env`). "Full CRUD" is not "bolt create/edit/delete onto everything."
 
@@ -37,6 +37,8 @@
 | --- | --- | --- |
 | `project` / `run` / `env` / `schedule` / `webhook` / `skill` / `role` / `crew` / `workspace` | Conformant | Singular from the start |
 | `doc` | Conformant since #63 | Shipped plural as `docs`; renamed `docs` → `doc` (BREAKING, no deprecation alias) per decision (2). Old `docs push` / `docs pull` / `docs upload` are gone — Commander emits an "unknown command" error with a `Did you mean doc?` hint. The `"docs"` OAuth ability, the `SA-Docs` product name, the `/mcp/docs` + `docs_*` API surface, and the `.solidactions-docs.json` sidecar are **not** part of this rename and stay as-is |
-| `oauth-actions` | **Not conformant** | Still plural. Out of scope for #63 (which was sanctioned for `docs` → `doc` only) and needs its own decision: unlike `docs`, the singular `oauth-action` reads awkwardly for a discovery surface, and decision (6) already has a pending `show` → `view` migration for this noun that a rename should ride along with. Tracked separately (cli#84) |
+| `oauth-action` | Conformant since #84 | Shipped plural as `oauth-actions`; renamed `oauth-actions` → `oauth-action` (BREAKING, no deprecation alias) per decision (2), and the `show` subcommand migrated to `view` per decision (6) — both in one pass, as the #63 deferral anticipated. Old `oauth-actions <anything>` and `oauth-action show` are gone; Commander emits an "unknown command" error. The `/api/v1/oauth-actions` REST paths, the `oauth_actions` JSON response key, and the `solidactions-oauth-actions` bundled skill filename are **not** part of this rename and stay as-is |
 
-`doc` was the last unconsidered plural; `oauth-actions` is the one remaining known exception, deliberately deferred rather than blessed.
+Both known plurals are now reconciled: `doc` (#63) and `oauth-action` (#84). No
+top-level noun is currently non-conformant to decision (2), and decision (6) has
+no remaining pending migration.

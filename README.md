@@ -307,7 +307,7 @@ first three in one command.
 
 1. **Build** — `npm run build` (must be clean; `tsc` errors block the release).
 2. **Unit tests** — `npm test`. Covers config resolution, command wiring, and
-   the `oauth-actions show` snippet renderer (the highest-risk regression
+   the `oauth-action view` snippet renderer (the highest-risk regression
    surface — array query-param serialization and the proxy-managed header
    filter both have fixture-backed tests under `tests/fixtures/`).
 3. **Init smoke** — `npm run smoke:init` scaffolds a project end to end.
@@ -330,8 +330,8 @@ first three in one command.
    ```bash
    SOLIDACTIONS_SMOKE_REQUIRE_SOURCES=1 npm run check:release
    ```
-4. **oauth-actions smoke** — `bash scripts/smoke.sh` exercises
-   `oauth-actions list|search|show` (plus the 404 path) against a real local
+4. **oauth-action smoke** — `bash scripts/smoke.sh` exercises
+   `oauth-action list|search|view` (plus the 404 path) against a real local
    stub server, so it needs no credentials:
 
    ```bash

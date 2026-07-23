@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
-import { buildSnippet } from '../src/commands/oauth-actions-show';
+import { buildSnippet } from '../src/commands/oauth-action-view';
 
 /**
  * Fixture-driven coverage for the two `buildSnippet` behaviours that had no
@@ -22,7 +22,7 @@ const CALENDAR_EVENTS_LIST = loadFixture('calendar-events-list');
 const X_PICA_LEAK = loadFixture('synthetic-x-pica-leak');
 
 // ---------------------------------------------------------------------------
-// Array query params — repeated-key serialization (oauth-actions-show.ts:157)
+// Array query params — repeated-key serialization (oauth-action-view.ts:157)
 // ---------------------------------------------------------------------------
 
 describe('buildSnippet — array query params serialize as repeated keys', () => {
@@ -75,7 +75,7 @@ describe('buildSnippet — array query params serialize as repeated keys', () =>
 });
 
 // ---------------------------------------------------------------------------
-// Proxy-managed header filter (oauth-actions-show.ts:301-308)
+// Proxy-managed header filter (oauth-action-view.ts:301-308)
 // ---------------------------------------------------------------------------
 
 describe('buildSnippet — proxy-managed header filter strips leaked internals', () => {
