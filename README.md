@@ -365,9 +365,26 @@ first three in one command.
    check:release`, which serves content at exactly that ref and so fails on a
    bad or unreachable pin. `tests/examples-ref.test.ts` fails if any call site
    stops passing the ref.
-7. **Version bump** — update `package.json`, then publish. Once the publish
-   flow from PR #78 lands, the GitHub release **tag** drives the published npm
-   version (semver-guarded); the bump commit stays conventional.
+7. **Version** — the GitHub release **tag** is the single source of truth for
+   the published npm version. The publish flow from #78 has landed:
+   `.github/workflows/publish.yml` asserts the tag is a literal semver, then
+   derives the version from it with `npm version --no-git-tag-version`
+   immediately before publishing — deliberately *not* relying on a
+   `package.json` bump commit, so a release whose `package.json` was never
+   bumped can no longer collide with the registry and fail `npm publish`
+   silently (#77).
+
+   Consequences worth knowing before you cut a release:
+
+   - **`package.json`'s version is not the source of truth** and has drifted
+     from the published one. Read the registry (`npm view @solidactions/cli
+     version`) or the tag list, not the file.
+   - **Feature PRs do not bump it** — see PR #81, the `docs` → `doc` breaking
+     rename, which shipped without touching `package.json`.
+   - **A breaking change ships as a major tag.** Nothing in `check:release`
+     enforces this — the release destination is recorded in the PR and its
+     issue, and the releaser applies it when tagging. There is no changelog
+     file in this repo.
 
 ## License
 

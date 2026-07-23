@@ -92,3 +92,71 @@ describe('oauth-action noun + view verb rename (ADR 0001 decisions 2 and 6)', ()
         expect(result.stderr).toMatch(/unknown command 'show'/);
     });
 });
+
+/**
+ * Positive half: the assertions above prove the OLD forms are gone, which a
+ * broken build would also satisfy — "unknown command" is what you get when a
+ * command fails to register at all. These prove the NEW form actually parses
+ * and dispatches.
+ *
+ * Each case asserts on Commander's rendered usage line, which echoes the full
+ * resolved command path (`solidactions oauth-action view`). That string only
+ * appears if the parser walked the new noun *and* the new verb — so a
+ * dispatch regression fails here, not just in scripts/smoke.sh.
+ *
+ * Option text is asserted on flag names only. Descriptions wrap at the
+ * terminal width (`--var <NAME>`'s "(default: YOUR_CONNECTION)" splits across
+ * two lines), so matching prose would be brittle.
+ */
+describe('oauth-action subcommands positively parse and dispatch', () => {
+    it('`oauth-action view --help` exits 0 with the view usage line and its options', () => {
+        const result = runCli(['oauth-action', 'view', '--help']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Usage: solidactions oauth-action view [options] <platform> <action-id>');
+        expect(result.stdout).toContain('--json');
+        expect(result.stdout).toContain('--var <NAME>');
+        expect(result.stdout).toContain('--legacy-env');
+    });
+
+    it('`oauth-action list --help` exits 0 with the list usage line and its options', () => {
+        const result = runCli(['oauth-action', 'list', '--help']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Usage: solidactions oauth-action list [options] <platform>');
+        expect(result.stdout).toContain('--limit <n>');
+        expect(result.stdout).toContain('--json');
+    });
+
+    it('`oauth-action search --help` exits 0 with the search usage line and its options', () => {
+        const result = runCli(['oauth-action', 'search', '--help']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Usage: solidactions oauth-action search [options] <platform> [query]');
+        expect(result.stdout).toContain('--method <method>');
+        expect(result.stdout).toContain('--limit <n>');
+        expect(result.stdout).toContain('--json');
+    });
+
+    it('`oauth-action platforms --help` exits 0 with the platforms usage line', () => {
+        const result = runCli(['oauth-action', 'platforms', '--help']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Usage: solidactions oauth-action platforms [options]');
+        expect(result.stdout).toContain('--json');
+    });
+
+    /**
+     * Dispatch proof that does not go through --help (which Commander handles
+     * before argument validation) and needs no network or credentials: reaching
+     * `view`'s OWN argument parser produces a missing-argument error. Contrast
+     * with `oauth-action show`, which dies earlier at "unknown command 'show'".
+     */
+    it('`oauth-action view` with no args reaches view\'s argument parser', () => {
+        const result = runCli(['oauth-action', 'view']);
+
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toMatch(/missing required argument 'platform'/);
+        expect(result.stderr).not.toMatch(/unknown command/);
+    });
+});
