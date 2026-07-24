@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Smoke-test `solidactions oauth-actions list|search|show` end to end.
+# Smoke-test `solidactions oauth-action list|search|view` end to end.
 #
 # By default this runs the built CLI against a real local stub server
 # (scripts/smoke-oauth-actions-server.mjs), so it needs no credentials and is
@@ -88,27 +88,27 @@ else
 fi
 
 echo
-echo "1. oauth-actions list gmail --limit 5"
-OUT=$($CLI oauth-actions list gmail --limit 5)
+echo "1. oauth-action list gmail --limit 5"
+OUT=$($CLI oauth-action list gmail --limit 5)
 check_contains "$OUT" "/gmail/v1/users/me/messages/send" "lists the send-message path"
 check_contains "$OUT" "POST" "renders the HTTP method"
 
 echo
-echo "2. oauth-actions search gmail 'list messages unread' --limit 3"
-OUT=$($CLI oauth-actions search gmail "list messages unread" --limit 3)
+echo "2. oauth-action search gmail 'list messages unread' --limit 3"
+OUT=$($CLI oauth-action search gmail "list messages unread" --limit 3)
 check_contains "$OUT" "action_id:" "search output includes action_id lines"
 check_contains "$OUT" "List Messages" "search matches the List Messages action"
 
 echo
-echo "3. oauth-actions show gmail <modifier action>"
-OUT=$($CLI oauth-actions show gmail "$GMAIL_ACTION_ID")
-check_contains "$OUT" "Paste-ready snippet:" "show renders a paste-ready snippet"
+echo "3. oauth-action view gmail <modifier action>"
+OUT=$($CLI oauth-action view gmail "$GMAIL_ACTION_ID")
+check_contains "$OUT" "Paste-ready snippet:" "view renders a paste-ready snippet"
 check_contains "$OUT" "connectionKey: ctx.vars" "modifier body wires connectionKey from ctx.vars"
 check_absent   "$OUT" "process.env" "default snippet uses ctx.vars, not process.env"
 
 echo
-echo "4. oauth-actions show google-calendar <array-query action> --json"
-OUT=$($CLI oauth-actions show google-calendar "$CALENDAR_ACTION_ID" --json)
+echo "4. oauth-action view google-calendar <array-query action> --json"
+OUT=$($CLI oauth-action view google-calendar "$CALENDAR_ACTION_ID" --json)
 check_contains "$OUT" "eventTypes" "json output exposes the array query param"
 if command -v jq >/dev/null 2>&1; then
   KEYS=$(printf '%s' "$OUT" | jq -r '.io_schema.ioExample.input.query | keys[]' | head -3)
@@ -118,15 +118,15 @@ else
 fi
 
 echo
-echo "5. oauth-actions show google-calendar <array-query action> (human)"
-OUT=$($CLI oauth-actions show google-calendar "$CALENDAR_ACTION_ID")
+echo "5. oauth-action view google-calendar <array-query action> (human)"
+OUT=$($CLI oauth-action view google-calendar "$CALENDAR_ACTION_ID")
 check_contains "$OUT" 'eventTypes=${encodeURIComponent("default")}&eventTypes=' "array query params repeat the key"
 check_absent   "$OUT" "encodeURIComponent([" "array is not stringified into one value"
 
 echo
-echo "6. oauth-actions show gmail no-such-action (404 path)"
+echo "6. oauth-action view gmail no-such-action (404 path)"
 set +e
-OUT=$($CLI oauth-actions show gmail no-such-action 2>&1)
+OUT=$($CLI oauth-action view gmail no-such-action 2>&1)
 CODE=$?
 set -e
 check_contains "$OUT" "Action not found" "404 renders the friendly not-found message"

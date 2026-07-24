@@ -2,7 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-interface OAuthActionsSearchOptions {
+interface OAuthActionSearchOptions {
     method?: string;
     json?: boolean;
     limit?: number;
@@ -17,7 +17,7 @@ interface OAuthAction {
     tags?: string[];
 }
 
-export async function oauthActionsSearch(platform: string, query: string | undefined, options: OAuthActionsSearchOptions) {
+export async function oauthActionSearch(platform: string, query: string | undefined, options: OAuthActionSearchOptions) {
     const config = await requireConfigWithWorkspace();
 
     try {
@@ -56,10 +56,10 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         }
 
         console.log(chalk.gray(`${actions.length} action(s) found.`));
-        console.log(chalk.gray(`Run 'solidactions oauth-actions show ${platform} <action_id>' for full schema + paste-ready snippet.`));
+        console.log(chalk.gray(`Run 'solidactions oauth-action view ${platform} <action_id>' for full schema + paste-ready snippet.`));
     } catch (error: any) {
         if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
-            console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-actions platforms\` to see available platforms.`));
+            console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-action platforms\` to see available platforms.`));
         } else if (error.response?.status === 401) {
             console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response) {

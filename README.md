@@ -307,7 +307,7 @@ first three in one command.
 
 1. **Build** — `npm run build` (must be clean; `tsc` errors block the release).
 2. **Unit tests** — `npm test`. Covers config resolution, command wiring, and
-   the `oauth-actions show` snippet renderer (the highest-risk regression
+   the `oauth-action view` snippet renderer (the highest-risk regression
    surface — array query-param serialization and the proxy-managed header
    filter both have fixture-backed tests under `tests/fixtures/`).
 3. **Init smoke** — `npm run smoke:init` scaffolds a project end to end.
@@ -330,8 +330,8 @@ first three in one command.
    ```bash
    SOLIDACTIONS_SMOKE_REQUIRE_SOURCES=1 npm run check:release
    ```
-4. **oauth-actions smoke** — `bash scripts/smoke.sh` exercises
-   `oauth-actions list|search|show` (plus the 404 path) against a real local
+4. **oauth-action smoke** — `bash scripts/smoke.sh` exercises
+   `oauth-action list|search|view` (plus the 404 path) against a real local
    stub server, so it needs no credentials:
 
    ```bash
@@ -365,9 +365,26 @@ first three in one command.
    check:release`, which serves content at exactly that ref and so fails on a
    bad or unreachable pin. `tests/examples-ref.test.ts` fails if any call site
    stops passing the ref.
-7. **Version bump** — update `package.json`, then publish. Once the publish
-   flow from PR #78 lands, the GitHub release **tag** drives the published npm
-   version (semver-guarded); the bump commit stays conventional.
+7. **Version** — the GitHub release **tag** is the single source of truth for
+   the published npm version. The publish flow from #78 has landed:
+   `.github/workflows/publish.yml` asserts the tag is a literal semver, then
+   derives the version from it with `npm version --no-git-tag-version`
+   immediately before publishing — deliberately *not* relying on a
+   `package.json` bump commit, so a release whose `package.json` was never
+   bumped can no longer collide with the registry and fail `npm publish`
+   silently (#77).
+
+   Consequences worth knowing before you cut a release:
+
+   - **`package.json`'s version is not the source of truth** and has drifted
+     from the published one. Read the registry (`npm view @solidactions/cli
+     version`) or the tag list, not the file.
+   - **Feature PRs do not bump it** — see PR #81, the `docs` → `doc` breaking
+     rename, which shipped without touching `package.json`.
+   - **A breaking change ships as a major tag.** Nothing in `check:release`
+     enforces this — the release destination is recorded in the PR and its
+     issue, and the releaser applies it when tagging. There is no changelog
+     file in this repo.
 
 ## License
 

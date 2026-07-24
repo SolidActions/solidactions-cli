@@ -1,9 +1,9 @@
 /**
- * oauth-actions: distinguish an unknown platform (404, forward-compatible
+ * oauth-action: distinguish an unknown platform (404, forward-compatible
  * with the app-side `platform_unknown` error code) from a known platform
  * with zero matching actions (200, empty array) — both `list` and `search`
  * previously printed the same "No actions found." for both cases. Also
- * covers the new `oauth-actions platforms` subcommand.
+ * covers the `oauth-action platforms` subcommand.
  *
  * Test-double policy: real in-process HTTP server (Node's http.createServer),
  * ProcessExitError-throw pattern for process.exit, real console.log/error
@@ -12,9 +12,9 @@
  */
 import * as http from 'http';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { oauthActionsList } from '../src/commands/oauth-actions-list';
-import { oauthActionsSearch } from '../src/commands/oauth-actions-search';
-import { oauthActionsPlatforms } from '../src/commands/oauth-actions-platforms';
+import { oauthActionList } from '../src/commands/oauth-action-list';
+import { oauthActionSearch } from '../src/commands/oauth-action-search';
+import { oauthActionPlatforms } from '../src/commands/oauth-action-platforms';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 class ProcessExitError extends Error {
@@ -47,7 +47,7 @@ afterAll(() => {
     });
 });
 
-describe('oauth-actions: unknown platform vs. 0 matches', () => {
+describe('oauth-action: unknown platform vs. 0 matches', () => {
     let env: ReturnType<typeof makeTmpEnv>;
     let originalExit: typeof process.exit;
     let logLines: string[];
@@ -87,7 +87,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
         nextStatus = 200;
         nextBody = { oauth_actions: [] };
 
-        await oauthActionsList('gmail', {});
+        await oauthActionList('gmail', {});
 
         expect(logLines.some((l) => l.includes('No actions found'))).toBe(true);
         expect(errLines.join('\n')).not.toContain('Unknown platform');
@@ -99,7 +99,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         let caught: ProcessExitError | null = null;
         try {
-            await oauthActionsList('not-a-platform', {});
+            await oauthActionList('not-a-platform', {});
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;
@@ -107,7 +107,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         expect(caught?.code).toBe(1);
         expect(errLines.join('\n')).toContain('Unknown platform "not-a-platform"');
-        expect(errLines.join('\n')).toContain('oauth-actions platforms');
+        expect(errLines.join('\n')).toContain('oauth-action platforms');
         expect(logLines.some((l) => l.includes('No actions found'))).toBe(false);
     });
 
@@ -115,7 +115,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
         nextStatus = 200;
         nextBody = { oauth_actions: [] };
 
-        await oauthActionsSearch('gmail', 'send', {});
+        await oauthActionSearch('gmail', 'send', {});
 
         expect(logLines.some((l) => l.includes('No actions found'))).toBe(true);
         expect(errLines.join('\n')).not.toContain('Unknown platform');
@@ -127,7 +127,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         let caught: ProcessExitError | null = null;
         try {
-            await oauthActionsSearch('not-a-platform', 'send', {});
+            await oauthActionSearch('not-a-platform', 'send', {});
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;
@@ -135,7 +135,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         expect(caught?.code).toBe(1);
         expect(errLines.join('\n')).toContain('Unknown platform "not-a-platform"');
-        expect(errLines.join('\n')).toContain('oauth-actions platforms');
+        expect(errLines.join('\n')).toContain('oauth-action platforms');
     });
 
     it('list: a genuine 404 that is NOT platform_unknown still falls through to the generic "Failed: 404" path', async () => {
@@ -144,7 +144,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         let caught: ProcessExitError | null = null;
         try {
-            await oauthActionsList('gmail', {});
+            await oauthActionList('gmail', {});
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;
@@ -161,7 +161,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
 
         let caught: ProcessExitError | null = null;
         try {
-            await oauthActionsSearch('gmail', 'send', {});
+            await oauthActionSearch('gmail', 'send', {});
         } catch (e) {
             if (e instanceof ProcessExitError) caught = e;
             else throw e;
@@ -176,7 +176,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
         nextStatus = 200;
         nextBody = { platforms: ['gmail', 'slack', 'hubspot'] };
 
-        await oauthActionsPlatforms({});
+        await oauthActionPlatforms({});
 
         expect(logLines).toContain('gmail');
         expect(logLines).toContain('slack');
@@ -187,7 +187,7 @@ describe('oauth-actions: unknown platform vs. 0 matches', () => {
         nextStatus = 200;
         nextBody = { platforms: ['gmail', 'slack'] };
 
-        await oauthActionsPlatforms({ json: true });
+        await oauthActionPlatforms({ json: true });
 
         const parsed = JSON.parse(stdoutChunks.join(''));
         expect(parsed).toEqual(['gmail', 'slack']);

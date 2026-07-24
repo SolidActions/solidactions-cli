@@ -2,11 +2,11 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-interface OAuthActionsPlatformsOptions {
+interface OAuthActionPlatformsOptions {
     json?: boolean;
 }
 
-export async function oauthActionsPlatforms(options: OAuthActionsPlatformsOptions) {
+export async function oauthActionPlatforms(options: OAuthActionPlatformsOptions) {
     const config = await requireConfigWithWorkspace();
 
     try {
