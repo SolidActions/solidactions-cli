@@ -200,6 +200,10 @@ project
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
     .option('--no-cache', 'Force a fresh build, bypassing all build caches')
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
+    .option(
+        '--no-git-metadata',
+        'Do not transmit Git provenance (branch, commit subject, and remote hostname); also available as SOLIDACTIONS_NO_GIT_METADATA=1',
+    )
     .action((projectName, path, options) => {
         // Commander's negation convention maps --no-cache to options.cache === false
         // (NOT options.noCache). Normalize both flags to a single boolean.

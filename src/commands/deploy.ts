@@ -3,7 +3,6 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import archiver from 'archiver';
 import axios from 'axios';
-import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
@@ -12,6 +11,13 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
+import {
+    buildDeployForm,
+    collectSourceMetadata,
+    createDeployArchiveLocation,
+    parseDeployAcceptance,
+    shouldCollectGitMetadata,
+} from '../utils/source-provenance';
 
 /** Printed when a deploy target has no SolidActions skill files installed. */
 export const SKILLS_TIP_LINES = [
@@ -125,6 +131,7 @@ interface DeployOptions {
     create?: boolean;
     configOnly?: boolean;
     noCache?: boolean;
+    gitMetadata?: boolean;
 }
 
 /**
@@ -453,7 +460,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         return;
     }
 
-    const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');
+    // Provenance is optional, best effort, and collected before archiving so
+    // the deploy artifact itself can never make the source look dirty.
+    const sourceMetadata = shouldCollectGitMetadata(options)
+        ? collectSourceMetadata(sourceDir)
+        : null;
 
     // Plan the file list BEFORE creating the archive write stream so a walk error
     // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
@@ -465,6 +476,16 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.error(error.message);
         process.exit(1);
     }
+
+    const archiveLocation = createDeployArchiveLocation();
+    const archivePath = archiveLocation.archivePath;
+    let archiveCleaned = false;
+    const cleanupArchive = () => {
+        if (!archiveCleaned) {
+            archiveCleaned = true;
+            archiveLocation.cleanup();
+        }
+    };
 
     // Summary line so silent truncation never reads as "shipped everything".
     const parts: string[] = ['.env excluded'];
@@ -487,15 +508,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
-            const form = new FormData();
-            form.append('source', fs.createReadStream(archivePath));
+            const form = buildDeployForm(archivePath, sourceMetadata);
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
                 process.stderr.write(`[deploy-debug] POST ${config.host}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
             }
 
-            await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
+            const deployResponse = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
                 headers: {
                     ...form.getHeaders(),
                     ...getApiHeaders(config),
@@ -503,6 +523,17 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            const acceptedDeployment = parseDeployAcceptance(deployResponse.data);
+            if (acceptedDeployment.sourceMetadataRejected) {
+                console.log(chalk.yellow(
+                    `Warning: optional source metadata was not accepted (${acceptedDeployment.sourceMetadataRejected}); deployment continues.`,
+                ));
+            }
+            if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                process.stderr.write(
+                    `[deploy-debug] accepted deployment=${acceptedDeployment.deploymentId ?? '(legacy response)'} metadata=${acceptedDeployment.sourceMetadata ? 'normalized' : 'none'}\n`,
+                );
+            }
 
             console.log(chalk.green('Deployment successfully queued!'));
             console.log(chalk.yellow('Waiting for build to complete...\n'));
@@ -555,7 +586,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                         }
 
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(0);
                     } else if (status === 'error') {
                         clearInterval(poll);
@@ -565,12 +596,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(build_log));
                             console.log(chalk.yellow('--- End Build Log ---\n'));
                         }
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     }
                 } catch {
@@ -589,13 +620,23 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             } else {
                 console.error(error.message);
             }
-            if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+            cleanupArchive();
             process.exit(1);
         }
     });
 
     archive.on('error', (err) => {
-        throw err;
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
+    });
+
+    output.on('error', (err) => {
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
     });
 
     archive.pipe(output);
