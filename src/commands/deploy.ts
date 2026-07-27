@@ -8,6 +8,7 @@ import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
@@ -15,9 +16,15 @@ import {
     buildDeployForm,
     collectSourceMetadata,
     createDeployArchiveLocation,
+    formatRevisionSummary,
     parseDeployAcceptance,
+    sanitizeDisplayText,
     shouldCollectGitMetadata,
 } from '../utils/source-provenance';
+import {
+    formatDeploymentRevision,
+    type ProjectDeploymentDetail,
+} from './project-view';
 
 /** Printed when a deploy target has no SolidActions skill files installed. */
 export const SKILLS_TIP_LINES = [
@@ -132,6 +139,48 @@ interface DeployOptions {
     configOnly?: boolean;
     noCache?: boolean;
     gitMetadata?: boolean;
+}
+
+export function projectStatusUrl(host: string, projectSlug: string): string {
+    return `${host}/api/v1/projects/${encodeURIComponent(projectSlug)}`;
+}
+
+export async function fetchDeploymentConfirmation(
+    config: Config,
+    projectSlug: string,
+): Promise<ProjectDeploymentDetail> {
+    const response = await axios.get(
+        `${projectStatusUrl(config.host, projectSlug)}?include=deployment`,
+        { headers: getApiHeaders(config) },
+    );
+    return response.data;
+}
+
+export function formatDeploymentConfirmation(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+    sourceMetadataRejected: string | null,
+): string[] {
+    if (!acceptedDeploymentId) {
+        return ['Build finished; revision confirmation unavailable (legacy server response).'];
+    }
+
+    const deployment = project.latest_successful_deployment ?? null;
+    if (
+        project.deployment_matches_deployed_hash !== true
+        || !deployment
+        || deployment.id !== acceptedDeploymentId
+    ) {
+        return ['Build finished, but this deployment was not the recorded successful deployment.'];
+    }
+
+    const lines = ['Deployment revision confirmed.'];
+    if (sourceMetadataRejected) {
+        const safeReason = sanitizeDisplayText(sourceMetadataRejected, 100) ?? 'invalid_metadata';
+        lines.push(`Optional source metadata was rejected by the server (${safeReason}).`);
+    }
+    lines.push(...formatDeploymentRevision(deployment));
+    return lines;
 }
 
 /**
@@ -465,6 +514,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     const sourceMetadata = shouldCollectGitMetadata(options)
         ? collectSourceMetadata(sourceDir)
         : null;
+    if (sourceMetadata) {
+        console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
+    }
 
     // Plan the file list BEFORE creating the archive write stream so a walk error
     // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
@@ -549,7 +601,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             const poll = setInterval(async () => {
                 try {
                     attempts++;
-                    const statusRes = await axios.get(`${config.host}/api/v1/projects/${projectSlug}`, {
+                    const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
                         headers: getApiHeaders(config),
                     });
                     const { status, build_log } = statusRes.data;
@@ -573,6 +625,21 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     if (status === 'deployed') {
                         clearInterval(poll);
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
+
+                        try {
+                            const confirmedProject = await fetchDeploymentConfirmation(config, projectSlug);
+                            for (const line of formatDeploymentConfirmation(
+                                confirmedProject,
+                                acceptedDeployment.deploymentId,
+                                acceptedDeployment.sourceMetadataRejected,
+                            )) {
+                                console.log(line);
+                            }
+                        } catch {
+                            console.log(chalk.yellow(
+                                'Build finished; server revision confirmation was unavailable.',
+                            ));
+                        }
 
                         // Always sync YAML declarations (registers variables and their mappings)
                         if (yamlConfig) {

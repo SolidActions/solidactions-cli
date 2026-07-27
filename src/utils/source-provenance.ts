@@ -44,6 +44,36 @@ function displayValue(value: string | undefined, maxLength: number): string | nu
     return sanitized === '' ? null : sanitized;
 }
 
+export function sanitizeDisplayText(value: unknown, maxLength = 2048): string | null {
+    return typeof value === 'string' ? displayValue(value, maxLength) : null;
+}
+
+function dirtyLabel(dirty: boolean | null): string {
+    if (dirty === true) {
+        return 'DIRTY';
+    }
+    if (dirty === false) {
+        return 'clean';
+    }
+    return 'dirty state unknown';
+}
+
+export function formatRevisionSummary(metadata: {
+    commit_sha: string | null;
+    short_sha: string | null;
+    dirty: boolean | null;
+}): string {
+    const sha = sanitizeDisplayText(metadata.short_sha, 16)
+        ?? sanitizeDisplayText(metadata.commit_sha, 64);
+    if (!sha) {
+        return 'No source revision was reported.';
+    }
+
+    return `${sha} (${dirtyLabel(
+        typeof metadata.dirty === 'boolean' ? metadata.dirty : null,
+    )})`;
+}
+
 function shaValue(value: string | undefined): string | null {
     const sanitized = displayValue(value, 64);
     return sanitized && SHA_PATTERN.test(sanitized) ? sanitized : null;
