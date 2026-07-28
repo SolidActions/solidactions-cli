@@ -20,15 +20,15 @@
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
-import archiver from 'archiver';
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { pull } from '../src/commands/pull';
+import { createTarArchive } from '../src/utils/tar-archive';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 /** Build a gzip tar buffer mirroring deploy.ts's upload shape. */
-function buildFixtureArchive(): Promise<Buffer> {
+async function buildFixtureArchive(): Promise<Buffer> {
+    const archive = await createTarArchive({ gzip: true, gzipOptions: { level: 9 } });
     return new Promise((resolve, reject) => {
-        const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
         const chunks: Buffer[] = [];
         archive.on('data', (chunk) => chunks.push(chunk));
         archive.on('error', reject);

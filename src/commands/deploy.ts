@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import archiver from 'archiver';
 import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
@@ -12,6 +11,7 @@ import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
+import { createTarArchive } from '../utils/tar-archive';
 import {
     buildDeployForm,
     collectSourceMetadata,
@@ -553,8 +553,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.yellow(`⚠ Skipped ${plan.summary.symlinksSkipped.length} symlink(s) (not followed): ${plan.summary.symlinksSkipped.join(', ')}`));
     }
 
+    const archive = await createTarArchive({ gzip: true, gzipOptions: { level: 9 } });
     const output = fs.createWriteStream(archivePath);
-    const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
 
     output.on('close', async () => {
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));

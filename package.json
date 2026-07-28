@@ -32,7 +32,7 @@
     "deploy"
   ],
   "scripts": {
-    "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs",
+    "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs && cp src/utils/archiver-loader.cjs dist/utils/archiver-loader.cjs",
     "check:release": "npm run build && npm run test && npm run smoke:init",
     "prepublishOnly": "npm run build",
     "smoke:init": "node scripts/smoke-init.mjs",
@@ -40,7 +40,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "archiver": "^7.0.0",
+    "archiver": "^8.0.0",
     "axios": "^1.18.1",
     "chalk": "^4.1.2",
     "commander": "^11.0.0",
@@ -50,11 +50,11 @@
     "ignore": "^7.0.5",
     "js-yaml": "^4.3.0",
     "prompts": "^2.4.2",
-    "tar": "^7.5.20"
+    "tar": "^7.5.22"
   },
   "devDependencies": {
     "@solidactions/sdk": "^0.7.3",
-    "@types/archiver": "^6.0.0",
+    "@types/archiver": "^8.0.0",
     "@types/fs-extra": "^11.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.0.0",
