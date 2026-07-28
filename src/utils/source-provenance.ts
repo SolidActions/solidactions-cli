@@ -138,7 +138,7 @@ function localGitMetadata(sourceDir: string): SourceMetadata | null {
         commit_sha: commitSha,
         short_sha: shortSha,
         branch: displayValue(git(sourceDir, ['symbolic-ref', '--short', '-q', 'HEAD']) ?? undefined, 255),
-        tag: displayValue(git(sourceDir, ['describe', '--tags', '--abbrev=0', 'HEAD']) ?? undefined, 255),
+        tag: displayValue(git(sourceDir, ['describe', '--tags', '--exact-match', 'HEAD']) ?? undefined, 255),
         commit_subject: displayValue(git(sourceDir, ['show', '-s', '--format=%s', 'HEAD']) ?? undefined, 500),
         commit_author_date: authorDateValue(git(sourceDir, ['show', '-s', '--format=%aI', 'HEAD']) ?? undefined),
         remote_url: sanitizeRemoteUrl(git(sourceDir, ['config', '--get', 'remote.origin.url']) ?? undefined),

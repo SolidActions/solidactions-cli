@@ -113,7 +113,7 @@ describe('collectSourceMetadata — local Git', () => {
         });
     });
 
-    it('reports nearest tag and no invented branch for detached HEAD', () => {
+    it('reports a tag pointing exactly at HEAD and no invented branch for detached HEAD', () => {
         const root = repository();
         git(root, 'tag', 'v1.2.3');
         git(root, 'checkout', '--detach', 'HEAD');
@@ -121,6 +121,20 @@ describe('collectSourceMetadata — local Git', () => {
         expect(collectSourceMetadata(root, {})).toMatchObject({
             branch: null,
             tag: 'v1.2.3',
+            dirty: false,
+        });
+    });
+
+    it('does not report a tag that points only at an ancestor of HEAD', () => {
+        const root = repository();
+        git(root, 'tag', 'v1.2.3');
+        fs.writeFileSync(path.join(root, 'later.txt'), 'later clean commit\n');
+        git(root, 'add', 'later.txt');
+        git(root, 'commit', '-m', 'Later untagged commit');
+
+        expect(collectSourceMetadata(root, {})).toMatchObject({
+            commit_sha: git(root, 'rev-parse', 'HEAD'),
+            tag: null,
             dirty: false,
         });
     });

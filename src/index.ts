@@ -217,7 +217,7 @@ project
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .option(
         '--no-git-metadata',
-        'Do not transmit Git provenance (branch, commit subject, and remote hostname); also available as SOLIDACTIONS_NO_GIT_METADATA=1',
+        'Do not transmit Git provenance (branch, commit subject, and sanitized remote repository URL; credentials are stripped); also available as SOLIDACTIONS_NO_GIT_METADATA=1',
     )
     .action((projectName, path, options) => {
         // Commander's negation convention maps --no-cache to options.cache === false

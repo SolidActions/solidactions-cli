@@ -143,9 +143,10 @@ deploy:
 The CLI prints a one-line summary of what it bundled, e.g. `Bundling 312 files (.env excluded; .gitignore applied; 2 exclude rules)`, and warns about any symlinks it skipped.
 
 Deploys also transmit client-reported Git provenance when it can be collected:
-commit, branch/tag, subject/date, sanitized remote, and whether the deployed
-subtree was dirty. The CLI prints the local revision before upload and confirms
-the server-recorded revision after the build. Use `--no-git-metadata` or
+commit, branch/tag, subject/date, sanitized remote repository URL (with
+credentials stripped), and whether the deployed subtree was dirty. The CLI
+prints the local revision before upload and confirms the server-recorded
+revision after the build. Use `--no-git-metadata` or
 `SOLIDACTIONS_NO_GIT_METADATA=1` to opt out. Deploying a non-Git directory
 continues normally without revision metadata.
 
