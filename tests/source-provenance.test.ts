@@ -69,7 +69,9 @@ describe('collectSourceMetadata — local Git', () => {
             dirty: false,
             remote_url: 'https://example.test/acme/private.git',
         });
-        expect(metadata?.commit_author_date).toMatch(/^\d{4}-\d{2}-\d{2}T.*[+-]\d{2}:\d{2}$/);
+        expect(metadata?.commit_author_date).toMatch(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/,
+        );
     });
 
     it('includes tracked and untracked changes in the deployed subtree only', () => {
