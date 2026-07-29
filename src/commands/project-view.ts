@@ -6,6 +6,7 @@ import { buildProjectSlug } from '../utils/slug';
 import {
     formatRevisionSummary,
     sanitizeDisplayText,
+    sanitizeRemoteUrl,
     type MetadataSource,
 } from '../utils/source-provenance';
 
@@ -94,7 +95,11 @@ export function formatDeploymentRevision(deployment: DeploymentDetail): string[]
 
     const subject = sanitizeDisplayText(deployment.commit_subject, 500);
     const authorDate = sanitizeDisplayText(deployment.commit_author_date, 40);
-    const remote = sanitizeDisplayText(deployment.remote_url, 2048);
+    // Defense in depth: sanitizeRemoteUrl already strips credentials at
+    // collection time (source-provenance.ts), but a legacy or unnormalized
+    // server response could still carry them, so re-sanitize at this display
+    // boundary too — remote_url must never reach the terminal with a token.
+    const remote = sanitizeRemoteUrl(sanitizeDisplayText(deployment.remote_url, 2048) ?? undefined);
     if (subject) {
         lines.push(`Subject: ${subject}`);
     }

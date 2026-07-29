@@ -85,11 +85,21 @@ function authorDateValue(value: string | undefined): string | null {
 }
 
 const SCP_STYLE_PATTERN = /^[^@\s/]+@([^\s/:]+):(.+)$/;
+// Git remote helper syntax: `<helper>::<address>`, e.g. `hg::https://host/repo`.
+// https://git-scm.com/docs/gitremote-helpers
+const HELPER_PREFIX_PATTERN = /^([a-zA-Z0-9-]+::)(.*)$/;
 
 export function sanitizeRemoteUrl(value: string | undefined): string | null {
     const sanitized = displayValue(value, 2048);
     if (!sanitized) {
         return null;
+    }
+
+    const helperMatch = HELPER_PREFIX_PATTERN.exec(sanitized);
+    if (helperMatch) {
+        const [, prefix, remainder] = helperMatch;
+        const sanitizedRemainder = sanitizeRemoteUrl(remainder);
+        return sanitizedRemainder === null ? null : `${prefix}${sanitizedRemainder}`;
     }
 
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(sanitized)) {
@@ -103,6 +113,14 @@ export function sanitizeRemoteUrl(value: string | undefined): string | null {
         } catch {
             return null;
         }
+    }
+
+    if (/^\/\//.test(sanitized)) {
+        // Protocol-relative: //[user[:pass]@]host[:port]/path[?query][#fragment]
+        return sanitized
+            .split('#')[0]
+            .split('?')[0]
+            .replace(/^\/\/[^/@]*@/, '//');
     }
 
     const scpMatch = SCP_STYLE_PATTERN.exec(sanitized);

@@ -1,12 +1,20 @@
 /**
- * Pins the real deploy() wiring for source provenance. The existing suite
- * (see deploy-plan-limit.test.ts's header) deliberately tests only deploy()'s
- * extracted pure helpers, not deploy() itself — so nothing previously failed
- * if the `source_metadata` argument were dropped from the live multipart
- * POST, or if the real shouldCollectGitMetadata() gate (now inside
- * safeCollectSourceMetadata) were bypassed. This drives the real deploy()
- * function end-to-end against an in-process HTTP server and inspects the
- * raw bytes of the live upload request.
+ * Pins the real deploy() wiring — the existing suite (see
+ * deploy-plan-limit.test.ts's header) deliberately tests only deploy()'s
+ * extracted pure helpers, not deploy() itself, so nothing previously failed
+ * if a call site quietly reverted to the unguarded primitive it wraps. This
+ * drives the real deploy() function end-to-end against an in-process HTTP
+ * server and inspects both the raw live upload request and the printed
+ * confirmation output. Covers two call sites (round 3 review):
+ *   - deploy.ts ~593: must go through safeCollectSourceMetadata(), not a
+ *     direct collectSourceMetadata() call — pinned below by the opt-out
+ *     test, which fails if the guard is bypassed (a direct call ignores
+ *     `gitMetadata: false` and always attaches source_metadata).
+ *   - deploy.ts ~707: must go through confirmDeploymentWithRetry(), not a
+ *     single direct fetchDeploymentConfirmation() call — pinned below by
+ *     forcing one transient mismatch from the mock server and asserting the
+ *     deploy still ends up printing the confirmed message (a single fetch
+ *     would only ever see the first, mismatched response).
  */
 import * as http from 'http';
 import { execFileSync } from 'child_process';
@@ -43,6 +51,8 @@ const PROJECT_NAME = 'wiring-project';
 let server: http.Server;
 let port: number;
 let deployRequests: Array<{ body: string }> = [];
+let confirmationCallCount = 0;
+let mismatchesBeforeMatch = 0;
 
 function confirmationBody(): unknown {
     return {
@@ -82,8 +92,12 @@ beforeAll(async () => {
                 return;
             }
             if (req.method === 'GET' && url.includes('include=deployment')) {
+                confirmationCallCount++;
+                const body = confirmationCallCount <= mismatchesBeforeMatch
+                    ? { ...confirmationBody() as object, deployment_matches_deployed_hash: false }
+                    : confirmationBody();
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(confirmationBody()));
+                res.end(JSON.stringify(body));
                 return;
             }
             if (req.method === 'GET' && /^\/api\/v1\/projects\/[^/?]+$/.test(url)) {
@@ -115,6 +129,8 @@ let sourceDirs: string[] = [];
 beforeEach(() => {
     deployRequests = [];
     sourceDirs = [];
+    confirmationCallCount = 0;
+    mismatchesBeforeMatch = 0;
     process.env.SOLIDACTIONS_HOST = `http://127.0.0.1:${port}`;
     process.env.SOLIDACTIONS_API_KEY = 'test-key';
     process.env.SOLIDACTIONS_WORKSPACE_ID = 'workspace-1';
@@ -164,5 +180,25 @@ describe('deploy() live wiring — source provenance', () => {
 
         expect(deployRequests).toHaveLength(1);
         expect(deployRequests[0].body).not.toContain('name="source_metadata"');
+    }, 10_000);
+});
+
+describe('deploy() live wiring — confirmation retry', () => {
+    it('retries the live confirmation fetch through a transient mismatch and still prints confirmed (app #972 lag)', async () => {
+        mismatchesBeforeMatch = 1; // first confirmation GET mismatches; second (real retry) matches
+
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+        try {
+            await runDeploy();
+        } finally {
+            console.log = originalLog;
+        }
+
+        // A single direct fetch (no retry) would only ever see the first,
+        // mismatched response and never reach the confirmed message.
+        expect(confirmationCallCount).toBeGreaterThanOrEqual(2);
+        expect(logs.join('\n')).toContain('Deployment revision confirmed.');
     }, 10_000);
 });

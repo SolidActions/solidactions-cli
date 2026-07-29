@@ -90,6 +90,34 @@ describe('sanitizeRemoteUrl', () => {
             'example.test:acme/repo.git',
         );
     });
+
+    it('strips credentials behind a git remote-helper prefix', () => {
+        expect(sanitizeRemoteUrl('hg::https://token:secret@host.example/repo')).toBe(
+            'hg::https://host.example/repo',
+        );
+    });
+
+    it('drops a secret query string behind a git remote-helper prefix', () => {
+        expect(sanitizeRemoteUrl('hg::https://host.example/repo?access_token=secret')).toBe(
+            'hg::https://host.example/repo',
+        );
+    });
+
+    it('passes an unrecognized remainder behind a helper prefix through unchanged', () => {
+        expect(sanitizeRemoteUrl('fossil::/local/path')).toBe('fossil::/local/path');
+    });
+
+    it('strips credentials from a protocol-relative remote', () => {
+        expect(sanitizeRemoteUrl('//token:secret@host.example/repo')).toBe(
+            '//host.example/repo',
+        );
+    });
+
+    it('drops query and fragment from a protocol-relative remote', () => {
+        expect(sanitizeRemoteUrl('//host.example/repo?access_token=secret#frag')).toBe(
+            '//host.example/repo',
+        );
+    });
 });
 
 describe('collectSourceMetadata — local Git', () => {

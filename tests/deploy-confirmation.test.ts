@@ -89,6 +89,17 @@ describe('deploy polling and final confirmation', () => {
         expect(lines).toContain('clean');
     });
 
+    it('sanitizes credentials out of remote_url in the post-deploy confirmation, even from an unnormalized server payload', () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment.remote_url = 'https://user:secret@host.example/repo';
+
+        const lines = formatDeploymentConfirmation(body, 'accepted-deployment', null).join('\n');
+
+        expect(lines).toContain('Remote: https://host.example/repo');
+        expect(lines).not.toContain('secret');
+        expect(lines).not.toContain('user:secret@');
+    });
+
     it('reports a deployment-ID mismatch without displaying the other deployment revision', () => {
         const lines = formatDeploymentConfirmation(
             responseBody as any,

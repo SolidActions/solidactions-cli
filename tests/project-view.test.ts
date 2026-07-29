@@ -116,6 +116,16 @@ describe('project view request and rendering', () => {
         expect(output).not.toMatch(/[\u001b\u202e\u200b\u0000]/);
     });
 
+    it('sanitizes credentials out of remote_url even if an unnormalized server response carries them', () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment.remote_url = 'https://user:secret@host.example/repo';
+
+        const output = formatProjectView(body).join('\n');
+        expect(output).toContain('Remote: https://host.example/repo');
+        expect(output).not.toContain('secret');
+        expect(output).not.toContain('user:secret@');
+    });
+
     it('labels CI dirty state as unknown', () => {
         const body = structuredClone(responseBody) as any;
         body.latest_successful_deployment.metadata_source = 'github_actions';
