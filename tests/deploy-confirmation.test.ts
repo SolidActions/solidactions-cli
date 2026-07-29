@@ -96,8 +96,30 @@ describe('deploy polling and final confirmation', () => {
             null,
         ).join('\n');
 
-        expect(lines).toContain('this deployment was not the recorded successful deployment');
+        expect(lines).toContain('this deployment was not recorded as the latest successful deployment');
         expect(lines).not.toContain('abcdef123456');
+    });
+
+    it('reports a deployed-hash mismatch with a message distinct from a deployment-ID mismatch', () => {
+        const body = structuredClone(responseBody) as any;
+        body.deployment_matches_deployed_hash = false;
+
+        const lines = formatDeploymentConfirmation(body, 'accepted-deployment', null).join('\n');
+
+        expect(lines).toContain('running revision hash does not match');
+        expect(lines).not.toContain('this deployment was not recorded as the latest successful deployment');
+        expect(lines).not.toContain('abcdef123456');
+    });
+
+    it('reports no matching deployment row distinctly when the server has none recorded yet', () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment = null;
+
+        const lines = formatDeploymentConfirmation(body, 'accepted-deployment', null).join('\n');
+
+        expect(lines).toContain('has no successful deployment recorded yet');
+        expect(lines).not.toContain('running revision hash does not match');
+        expect(lines).not.toContain('this deployment was not recorded as the latest successful deployment');
     });
 
     it('renders metadata rejection safely after a confirmed build', () => {
@@ -112,9 +134,21 @@ describe('deploy polling and final confirmation', () => {
             'invalid_metadata',
         ).join('\n');
 
-        expect(lines).toContain('Deployment revision confirmed');
         expect(lines).toContain('source metadata was rejected');
         expect(lines).toContain('invalid_metadata');
+        expect(lines).toContain('no source revision was reported');
+    });
+
+    it('does not contradict itself when a matching deployment has no reported SHA', () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment.commit_sha = null;
+        body.latest_successful_deployment.short_sha = null;
+
+        const lines = formatDeploymentConfirmation(body, 'accepted-deployment', null);
+
+        // Must not both claim the revision is confirmed AND that none was reported.
+        expect(lines).not.toContain('Deployment revision confirmed.');
+        expect(lines.join('\n')).not.toContain('No source revision was reported.');
     });
 
     it('uses a legacy-safe message when the 202 response has no deployment ID', () => {

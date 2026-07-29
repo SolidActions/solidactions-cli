@@ -1,6 +1,6 @@
 {
   "name": "@solidactions/cli",
-  "version": "1.34.0",
+  "version": "1.33.0",
   "description": "SolidActions CLI - Deploy and manage workflow automation",
   "main": "dist/index.js",
   "bin": {
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "keywords": [
     "solidactions",

@@ -9,6 +9,7 @@ import {
     collectSourceMetadata,
     createDeployArchiveLocation,
     parseDeployAcceptance,
+    sanitizeRemoteUrl,
     shouldCollectGitMetadata,
 } from '../src/utils/source-provenance';
 
@@ -53,6 +54,42 @@ afterEach(() => {
     for (const root of roots.splice(0)) {
         fs.rmSync(root, { recursive: true, force: true });
     }
+});
+
+describe('sanitizeRemoteUrl', () => {
+    it('strips credentials from a ssh:// remote', () => {
+        expect(sanitizeRemoteUrl('ssh://token:secret@host.example/acme/repo.git')).toBe(
+            'ssh://host.example/acme/repo.git',
+        );
+    });
+
+    it('strips a credential-bearing user from an SCP-style remote', () => {
+        expect(sanitizeRemoteUrl('token@host.example:acme/repo.git')).toBe(
+            'host.example:acme/repo.git',
+        );
+    });
+
+    it('drops a secret carried in the query string of an https remote', () => {
+        expect(sanitizeRemoteUrl('https://host.example/acme/repo.git?access_token=secret')).toBe(
+            'https://host.example/acme/repo.git',
+        );
+    });
+
+    it('drops a fragment from a remote URL', () => {
+        expect(sanitizeRemoteUrl('https://host.example/acme/repo.git#readme')).toBe(
+            'https://host.example/acme/repo.git',
+        );
+    });
+
+    it('keeps a bracketed IPv6 canonical https remote valid', () => {
+        expect(sanitizeRemoteUrl('https://[::1]:443/repo')).toBe('https://[::1]/repo');
+    });
+
+    it('passes a benign SCP-style remote through with the host intact', () => {
+        expect(sanitizeRemoteUrl('git@example.test:acme/repo.git')).toBe(
+            'example.test:acme/repo.git',
+        );
+    });
 });
 
 describe('collectSourceMetadata — local Git', () => {
@@ -151,7 +188,7 @@ describe('collectSourceMetadata — local Git', () => {
         const metadata = collectSourceMetadata(root, {});
 
         expect(metadata?.commit_subject).toBe('Safe subject');
-        expect(metadata?.remote_url).toBe('git@example.test:acme/repo.git');
+        expect(metadata?.remote_url).toBe('example.test:acme/repo.git');
     });
 
     it('returns no metadata for a non-repository directory', () => {

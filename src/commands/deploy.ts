@@ -20,6 +20,7 @@ import {
     parseDeployAcceptance,
     sanitizeDisplayText,
     shouldCollectGitMetadata,
+    type SourceMetadata,
 } from '../utils/source-provenance';
 import {
     formatDeploymentRevision,
@@ -156,6 +157,52 @@ export async function fetchDeploymentConfirmation(
     return response.data;
 }
 
+/**
+ * True when the fetched project's recorded latest successful deployment is
+ * the one this deploy produced. A null `acceptedDeploymentId` (legacy server
+ * response) has nothing to confirm against, so it counts as a match.
+ */
+export function isConfirmationMatch(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+): boolean {
+    if (!acceptedDeploymentId) {
+        return true;
+    }
+    const deployment = project.latest_successful_deployment ?? null;
+    return project.deployment_matches_deployed_hash === true
+        && deployment !== null
+        && deployment.id === acceptedDeploymentId;
+}
+
+/**
+ * Rebuild provenance can lag server-side (app #972): the instant status
+ * flips to "deployed", the confirmation record may not have caught up yet,
+ * so a healthy deploy can transiently look like a mismatch. Retries a short,
+ * bounded number of times before accepting whatever the last fetch reported.
+ * Exit code is unaffected either way — this only changes which message prints.
+ */
+export async function confirmDeploymentWithRetry(
+    acceptedDeploymentId: string | null,
+    fetcher: () => Promise<ProjectDeploymentDetail>,
+    options: { attempts?: number; delayMs?: number; wait?: (ms: number) => Promise<void> } = {},
+): Promise<ProjectDeploymentDetail> {
+    const attempts = options.attempts ?? 3;
+    const delayMs = options.delayMs ?? 500;
+    const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+    let result: ProjectDeploymentDetail;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        result = await fetcher();
+        if (isConfirmationMatch(result, acceptedDeploymentId) || attempt === attempts) {
+            return result;
+        }
+        await wait(delayMs);
+    }
+    // Unreachable: the loop always returns on its final iteration.
+    return result!;
+}
+
 export function formatDeploymentConfirmation(
     project: ProjectDeploymentDetail,
     acceptedDeploymentId: string | null,
@@ -166,21 +213,53 @@ export function formatDeploymentConfirmation(
     }
 
     const deployment = project.latest_successful_deployment ?? null;
-    if (
-        project.deployment_matches_deployed_hash !== true
-        || !deployment
-        || deployment.id !== acceptedDeploymentId
-    ) {
-        return ['Build finished, but this deployment was not the recorded successful deployment.'];
+
+    if (!deployment) {
+        return ['Build finished, but the server has no successful deployment recorded yet for this project.'];
     }
 
-    const lines = ['Deployment revision confirmed.'];
+    if (project.deployment_matches_deployed_hash !== true) {
+        return ["Build finished, but the running revision hash does not match the server's recorded successful deployment."];
+    }
+
+    if (deployment.id !== acceptedDeploymentId) {
+        return ['Build finished, but this deployment was not recorded as the latest successful deployment.'];
+    }
+
+    const revisionLines = formatDeploymentRevision(deployment);
+    const noRevisionReported = revisionLines[0] === 'No source revision was reported.';
+    const lines = [
+        noRevisionReported
+            ? 'Deployment confirmed, but no source revision was reported for it.'
+            : 'Deployment revision confirmed.',
+    ];
     if (sourceMetadataRejected) {
         const safeReason = sanitizeDisplayText(sourceMetadataRejected, 100) ?? 'invalid_metadata';
         lines.push(`Optional source metadata was rejected by the server (${safeReason}).`);
     }
-    lines.push(...formatDeploymentRevision(deployment));
+    lines.push(...(noRevisionReported ? revisionLines.slice(1) : revisionLines));
     return lines;
+}
+
+/**
+ * Provenance collection is optional, best effort — a failure here must never
+ * fail the deploy. Wraps collectSourceMetadata() (or an injected collector,
+ * for testing) in a try/catch and degrades to null on throw.
+ */
+export function safeCollectSourceMetadata(
+    sourceDir: string,
+    options: { gitMetadata?: boolean },
+    collector: (sourceDir: string) => SourceMetadata | null = collectSourceMetadata,
+): SourceMetadata | null {
+    if (!shouldCollectGitMetadata(options)) {
+        return null;
+    }
+
+    try {
+        return collector(sourceDir);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -511,9 +590,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     // Provenance is optional, best effort, and collected before archiving so
     // the deploy artifact itself can never make the source look dirty.
-    const sourceMetadata = shouldCollectGitMetadata(options)
-        ? collectSourceMetadata(sourceDir)
-        : null;
+    const sourceMetadata = safeCollectSourceMetadata(sourceDir, options);
     if (sourceMetadata) {
         console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
     }
@@ -627,7 +704,10 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
                         try {
-                            const confirmedProject = await fetchDeploymentConfirmation(config, projectSlug);
+                            const confirmedProject = await confirmDeploymentWithRetry(
+                                acceptedDeployment.deploymentId,
+                                () => fetchDeploymentConfirmation(config, projectSlug),
+                            );
                             for (const line of formatDeploymentConfirmation(
                                 confirmedProject,
                                 acceptedDeployment.deploymentId,

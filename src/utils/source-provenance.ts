@@ -84,21 +84,31 @@ function authorDateValue(value: string | undefined): string | null {
     return sanitized && STRICT_ISO_PATTERN.test(sanitized) ? sanitized : null;
 }
 
+const SCP_STYLE_PATTERN = /^[^@\s/]+@([^\s/:]+):(.+)$/;
+
 export function sanitizeRemoteUrl(value: string | undefined): string | null {
     const sanitized = displayValue(value, 2048);
     if (!sanitized) {
         return null;
     }
 
-    if (/^https?:\/\//i.test(sanitized)) {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(sanitized)) {
         try {
             const remote = new URL(sanitized);
             remote.username = '';
             remote.password = '';
+            remote.search = '';
+            remote.hash = '';
             return remote.toString();
         } catch {
             return null;
         }
+    }
+
+    const scpMatch = SCP_STYLE_PATTERN.exec(sanitized);
+    if (scpMatch) {
+        const [, host, path] = scpMatch;
+        return `${host}:${path}`;
     }
 
     return sanitized;
