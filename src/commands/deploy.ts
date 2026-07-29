@@ -1,17 +1,31 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import archiver from 'archiver';
 import axios from 'axios';
-import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
+import { createTarArchive } from '../utils/tar-archive';
+import {
+    buildDeployForm,
+    collectSourceMetadata,
+    createDeployArchiveLocation,
+    formatRevisionSummary,
+    parseDeployAcceptance,
+    sanitizeDisplayText,
+    shouldCollectGitMetadata,
+    type SourceMetadata,
+} from '../utils/source-provenance';
+import {
+    formatDeploymentRevision,
+    type ProjectDeploymentDetail,
+} from './project-view';
 
 /** Printed when a deploy target has no SolidActions skill files installed. */
 export const SKILLS_TIP_LINES = [
@@ -125,6 +139,127 @@ interface DeployOptions {
     create?: boolean;
     configOnly?: boolean;
     noCache?: boolean;
+    gitMetadata?: boolean;
+}
+
+export function projectStatusUrl(host: string, projectSlug: string): string {
+    return `${host}/api/v1/projects/${encodeURIComponent(projectSlug)}`;
+}
+
+export async function fetchDeploymentConfirmation(
+    config: Config,
+    projectSlug: string,
+): Promise<ProjectDeploymentDetail> {
+    const response = await axios.get(
+        `${projectStatusUrl(config.host, projectSlug)}?include=deployment`,
+        { headers: getApiHeaders(config) },
+    );
+    return response.data;
+}
+
+/**
+ * True when the fetched project's recorded latest successful deployment is
+ * the one this deploy produced. A null `acceptedDeploymentId` (legacy server
+ * response) has nothing to confirm against, so it counts as a match.
+ */
+export function isConfirmationMatch(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+): boolean {
+    if (!acceptedDeploymentId) {
+        return true;
+    }
+    const deployment = project.latest_successful_deployment ?? null;
+    return project.deployment_matches_deployed_hash === true
+        && deployment !== null
+        && deployment.id === acceptedDeploymentId;
+}
+
+/**
+ * Rebuild provenance can lag server-side (app #972): the instant status
+ * flips to "deployed", the confirmation record may not have caught up yet,
+ * so a healthy deploy can transiently look like a mismatch. Retries a short,
+ * bounded number of times before accepting whatever the last fetch reported.
+ * Exit code is unaffected either way — this only changes which message prints.
+ */
+export async function confirmDeploymentWithRetry(
+    acceptedDeploymentId: string | null,
+    fetcher: () => Promise<ProjectDeploymentDetail>,
+    options: { attempts?: number; delayMs?: number; wait?: (ms: number) => Promise<void> } = {},
+): Promise<ProjectDeploymentDetail> {
+    const attempts = options.attempts ?? 3;
+    const delayMs = options.delayMs ?? 500;
+    const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+    let result: ProjectDeploymentDetail;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        result = await fetcher();
+        if (isConfirmationMatch(result, acceptedDeploymentId) || attempt === attempts) {
+            return result;
+        }
+        await wait(delayMs);
+    }
+    // Unreachable: the loop always returns on its final iteration.
+    return result!;
+}
+
+export function formatDeploymentConfirmation(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+    sourceMetadataRejected: string | null,
+): string[] {
+    if (!acceptedDeploymentId) {
+        return ['Build finished; revision confirmation unavailable (legacy server response).'];
+    }
+
+    const deployment = project.latest_successful_deployment ?? null;
+
+    if (!deployment) {
+        return ['Build finished, but the server has no successful deployment recorded yet for this project.'];
+    }
+
+    if (project.deployment_matches_deployed_hash !== true) {
+        return ["Build finished, but the running revision hash does not match the server's recorded successful deployment."];
+    }
+
+    if (deployment.id !== acceptedDeploymentId) {
+        return ['Build finished, but this deployment was not recorded as the latest successful deployment.'];
+    }
+
+    const revisionLines = formatDeploymentRevision(deployment);
+    const noRevisionReported = revisionLines[0] === 'No source revision was reported.';
+    const lines = [
+        noRevisionReported
+            ? 'Deployment confirmed, but no source revision was reported for it.'
+            : 'Deployment revision confirmed.',
+    ];
+    if (sourceMetadataRejected) {
+        const safeReason = sanitizeDisplayText(sourceMetadataRejected, 100) ?? 'invalid_metadata';
+        lines.push(`Optional source metadata was rejected by the server (${safeReason}).`);
+    }
+    lines.push(...(noRevisionReported ? revisionLines.slice(1) : revisionLines));
+    return lines;
+}
+
+/**
+ * Provenance collection is optional, best effort — a failure here must never
+ * fail the deploy. Wraps collectSourceMetadata() (or an injected collector,
+ * for testing) in a try/catch and degrades to null on throw.
+ */
+export function safeCollectSourceMetadata(
+    sourceDir: string,
+    options: { gitMetadata?: boolean },
+    collector: (sourceDir: string) => SourceMetadata | null = collectSourceMetadata,
+): SourceMetadata | null {
+    if (!shouldCollectGitMetadata(options)) {
+        return null;
+    }
+
+    try {
+        return collector(sourceDir);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -453,7 +588,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         return;
     }
 
-    const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');
+    // Provenance is optional, best effort, and collected before archiving so
+    // the deploy artifact itself can never make the source look dirty.
+    const sourceMetadata = safeCollectSourceMetadata(sourceDir, options);
+    if (sourceMetadata) {
+        console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
+    }
 
     // Plan the file list BEFORE creating the archive write stream so a walk error
     // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
@@ -465,6 +605,16 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.error(error.message);
         process.exit(1);
     }
+
+    const archiveLocation = createDeployArchiveLocation();
+    const archivePath = archiveLocation.archivePath;
+    let archiveCleaned = false;
+    const cleanupArchive = () => {
+        if (!archiveCleaned) {
+            archiveCleaned = true;
+            archiveLocation.cleanup();
+        }
+    };
 
     // Summary line so silent truncation never reads as "shipped everything".
     const parts: string[] = ['.env excluded'];
@@ -480,22 +630,21 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.yellow(`⚠ Skipped ${plan.summary.symlinksSkipped.length} symlink(s) (not followed): ${plan.summary.symlinksSkipped.join(', ')}`));
     }
 
+    const archive = await createTarArchive({ gzip: true, gzipOptions: { level: 9 } });
     const output = fs.createWriteStream(archivePath);
-    const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
 
     output.on('close', async () => {
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
-            const form = new FormData();
-            form.append('source', fs.createReadStream(archivePath));
+            const form = buildDeployForm(archivePath, sourceMetadata);
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
                 process.stderr.write(`[deploy-debug] POST ${config.host}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
             }
 
-            await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
+            const deployResponse = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
                 headers: {
                     ...form.getHeaders(),
                     ...getApiHeaders(config),
@@ -503,6 +652,17 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            const acceptedDeployment = parseDeployAcceptance(deployResponse.data);
+            if (acceptedDeployment.sourceMetadataRejected) {
+                console.log(chalk.yellow(
+                    `Warning: optional source metadata was not accepted (${acceptedDeployment.sourceMetadataRejected}); deployment continues.`,
+                ));
+            }
+            if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                process.stderr.write(
+                    `[deploy-debug] accepted deployment=${acceptedDeployment.deploymentId ?? '(legacy response)'} metadata=${acceptedDeployment.sourceMetadata ? 'normalized' : 'none'}\n`,
+                );
+            }
 
             console.log(chalk.green('Deployment successfully queued!'));
             console.log(chalk.yellow('Waiting for build to complete...\n'));
@@ -518,7 +678,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             const poll = setInterval(async () => {
                 try {
                     attempts++;
-                    const statusRes = await axios.get(`${config.host}/api/v1/projects/${projectSlug}`, {
+                    const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
                         headers: getApiHeaders(config),
                     });
                     const { status, build_log } = statusRes.data;
@@ -543,6 +703,24 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         clearInterval(poll);
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
+                        try {
+                            const confirmedProject = await confirmDeploymentWithRetry(
+                                acceptedDeployment.deploymentId,
+                                () => fetchDeploymentConfirmation(config, projectSlug),
+                            );
+                            for (const line of formatDeploymentConfirmation(
+                                confirmedProject,
+                                acceptedDeployment.deploymentId,
+                                acceptedDeployment.sourceMetadataRejected,
+                            )) {
+                                console.log(line);
+                            }
+                        } catch {
+                            console.log(chalk.yellow(
+                                'Build finished; server revision confirmation was unavailable.',
+                            ));
+                        }
+
                         // Always sync YAML declarations (registers variables and their mappings)
                         if (yamlConfig) {
                             await pushYamlDeclarations(config, projectSlug, yamlConfig);
@@ -555,7 +733,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                         }
 
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(0);
                     } else if (status === 'error') {
                         clearInterval(poll);
@@ -565,12 +743,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(build_log));
                             console.log(chalk.yellow('--- End Build Log ---\n'));
                         }
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     }
                 } catch {
@@ -589,13 +767,23 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             } else {
                 console.error(error.message);
             }
-            if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+            cleanupArchive();
             process.exit(1);
         }
     });
 
     archive.on('error', (err) => {
-        throw err;
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
+    });
+
+    output.on('error', (err) => {
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
     });
 
     archive.pipe(output);

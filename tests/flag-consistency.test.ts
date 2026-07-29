@@ -194,6 +194,14 @@ describe('flag consistency (F-C4)', () => {
         expect(result.stdout).toMatch(/--wait/);
     });
 
+    it('project deploy: --no-git-metadata help accurately describes remote repository provenance', async () => {
+        const result = await runCliHelp(['project', 'deploy', '--help']);
+
+        expect(result.stdout).toMatch(/sanitized remote repository (?:URL|identity)/i);
+        expect(result.stdout).toMatch(/credentials (?:are )?stripped/i);
+        expect(result.stdout).not.toMatch(/remote hostname\)/i);
+    });
+
     it('run start: --wait (long form) waits for completion and reports success', async () => {
         const home = tmpHomeWithConfig();
         const result = await runCli(['run', 'start', 'my-project', 'my-workflow', '--wait'], home);

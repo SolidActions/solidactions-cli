@@ -7,6 +7,7 @@ import { init } from './commands/init';
 import { pull } from './commands/pull';
 import { projectList } from './commands/project-list';
 import { projectCreate } from './commands/project-create';
+import { projectView } from './commands/project-view';
 import { logsBuild } from './commands/project-logs';
 import { run } from './commands/run-start';
 import { runs } from './commands/run-list';
@@ -182,6 +183,20 @@ program
 const project = program.command('project').description('Manage projects');
 
 project
+    .command('view')
+    .description('View project status and the client-reported deployed revision')
+    .argument('<project>', 'Exact project slug (or project family/name when --env is explicit)')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .addHelpText('after', `
+Without --env, <project> is used as an exact slug. With --env production it is
+used unchanged; staging/dev use the same "-<env>" suffix rule as deploy.
+Unlike historical commands such as \`run start\`, project view has no implicit
+dev environment default.`)
+    .action(async (projectName, options) => {
+        await projectView(projectName, options);
+    });
+
+project
     .command('create')
     .description('Create an empty project (and environment) without deploying source')
     .argument('<name>', 'Project name')
@@ -200,6 +215,10 @@ project
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
     .option('--no-cache', 'Force a fresh build, bypassing all build caches')
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
+    .option(
+        '--no-git-metadata',
+        'Do not transmit Git provenance (branch, commit subject, and sanitized remote repository URL; credentials are stripped); also available as SOLIDACTIONS_NO_GIT_METADATA=1',
+    )
     .action((projectName, path, options) => {
         // Commander's negation convention maps --no-cache to options.cache === false
         // (NOT options.noCache). Normalize both flags to a single boolean.

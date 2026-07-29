@@ -142,6 +142,14 @@ deploy:
 
 The CLI prints a one-line summary of what it bundled, e.g. `Bundling 312 files (.env excluded; .gitignore applied; 2 exclude rules)`, and warns about any symlinks it skipped.
 
+Deploys also transmit client-reported Git provenance when it can be collected:
+commit, branch/tag, subject/date, sanitized remote repository URL (with
+credentials stripped), and whether the deployed subtree was dirty. The CLI
+prints the local revision before upload and confirms the server-recorded
+revision after the build. Use `--no-git-metadata` or
+`SOLIDACTIONS_NO_GIT_METADATA=1` to opt out. Deploying a non-Git directory
+continues normally without revision metadata.
+
 ## Commands
 
 Use `solidactions <command> --help` for full flag details on any command.
@@ -161,10 +169,17 @@ Use `solidactions <command> --help` for full flag details on any command.
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
 | `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
-| `project deploy <name> [path]` | `-e`, `--create`, `--config-only` | Deploy or sync config only |
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--no-git-metadata` | Deploy or sync config only |
+| `project view <project>` | `-e` | View status and client-reported deployed revision |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
 | `project list` | | List all projects |
+
+For `project view`, omitting `--env` treats `<project>` as an exact slug.
+Passing `--env production` uses the supplied production name/slug unchanged;
+`--env staging` and `--env dev` derive the same suffixed slug as deploy. This
+is deliberately different from historical commands such as `run start`,
+which default to dev.
 
 ### run
 
