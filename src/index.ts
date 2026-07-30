@@ -358,6 +358,7 @@ env
     .description('Reset a project variable mapping to its YAML-declared source')
     .argument('<project>', 'Project name')
     .argument('<KEY>', 'Variable key')
+    .allowExcessArguments(false)
     .option('-e, --env <environment>', 'Environment to reset in', 'dev')
     .action(async (projectName, key, options) => {
         await envReset(projectName, key, options);

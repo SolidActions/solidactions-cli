@@ -175,6 +175,22 @@ describe('env reset', () => {
         });
     });
 
+    it('rejects excess positional arguments before making an API request', async () => {
+        const result = await runCli([
+            'env',
+            'reset',
+            'mail-worker',
+            'GMAIL_TOKEN',
+            'extra',
+        ], home, cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain('too many arguments');
+        expect(result.stderr).toContain("Expected 2 arguments but got 3");
+        expect(requests).toHaveLength(0);
+    });
+
     it('is registered with project, key, and environment help', async () => {
         const result = await runCli(['env', 'reset', '--help'], home, cwd);
 
