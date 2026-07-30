@@ -17,6 +17,7 @@ import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
 import { envPull } from './commands/env-pull';
 import { envPush } from './commands/env-push';
+import { envReset } from './commands/env-reset';
 import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
@@ -350,6 +351,16 @@ env
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((keyOrProject, key, options) => {
         envDelete(keyOrProject, key, options);
+    });
+
+env
+    .command('reset')
+    .description('Reset a project variable mapping to its YAML-declared source')
+    .argument('<project>', 'Project name')
+    .argument('<KEY>', 'Variable key')
+    .option('-e, --env <environment>', 'Environment to reset in', 'dev')
+    .action(async (projectName, key, options) => {
+        await envReset(projectName, key, options);
     });
 
 env
