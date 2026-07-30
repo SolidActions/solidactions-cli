@@ -30,6 +30,7 @@ import { oauthActionSearch } from './commands/oauth-action-search';
 import { oauthActionList } from './commands/oauth-action-list';
 import { oauthActionView } from './commands/oauth-action-view';
 import { oauthActionPlatforms } from './commands/oauth-action-platforms';
+import { connectionList } from './commands/connection-list';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
 import { skillPublish } from './commands/skill-publish';
@@ -571,6 +572,19 @@ oauthActionCmd
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((options) => {
         oauthActionPlatforms(options);
+    });
+
+// =============================================================================
+// connection <subcommand>
+// =============================================================================
+
+const connection = program.command('connection').description('Manage OAuth connections');
+
+connection
+    .command('list')
+    .description('List OAuth connections in the active workspace')
+    .action(() => {
+        connectionList();
     });
 
 // =============================================================================
