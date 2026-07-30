@@ -175,7 +175,7 @@ describe('login — validates before writing (F-C2)', () => {
         expect(out).toContain('Nonexistent Team');
     });
 
-    it('non-interactive, no --workspace: writes the config ONCE without a workspaceId and warns', async () => {
+    it('non-interactive, no --workspace: auto-selects and persists the sole workspace', async () => {
         nextStatus = 200;
         nextBody = { data: [{ id: 'ws-1', name: 'Some Workspace', slug: 'some-workspace' }] };
 
@@ -191,10 +191,29 @@ describe('login — validates before writing (F-C2)', () => {
         expect(writeCount).toBe(1);
         const globalPath = path.join(env.home, '.solidactions', 'config.json');
         const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(config.workspaceId).toBe('ws-1');
+        expect(config.workspace).toBe('some-workspace');
+        const out = logLines.join(' ');
+        expect(out).toContain('Auto-selected workspace: Some Workspace');
+        expect(out).toContain('Logged in successfully!');
+    });
+
+    it('non-interactive, no --workspace: leaves multiple workspaces unset with recovery guidance', async () => {
+        nextStatus = 200;
+        nextBody = {
+            data: [
+                { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+                { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+            ],
+        };
+
+        await login('good-key', { global: true, host: HOST() });
+
+        const config = JSON.parse(fs.readFileSync(path.join(env.home, '.solidactions', 'config.json'), 'utf-8'));
         expect(config.workspaceId).toBeUndefined();
         const out = logLines.join(' ');
-        expect(out).toContain('No workspace set');
-        expect(out).toContain('Logged in successfully!');
+        expect(out).toContain('solidactions workspace list');
+        expect(out).toContain('solidactions workspace set <name>');
     });
 
     it('a scoped /v1/workspaces response (device-flow token) persists scopeMode + scopedWorkspaceIds through completeLogin', async () => {

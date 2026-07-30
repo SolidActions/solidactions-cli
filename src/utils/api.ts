@@ -152,7 +152,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
     const resolved = resolveConfig();
     const workspaceSource = resolved?.sources.workspaceId ?? null;
 
-    let workspaces: Array<{ id: string; name: string; org_name: string; role: string }>;
+    let workspaces: Array<{ id: string; name: string; slug?: string; org_name: string; role: string }>;
     try {
         const response = await axios.get(`${config.host}/api/v1/workspaces`, {
             headers: {
@@ -168,6 +168,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
                     workspaces.push({
                         id: ws.id,
                         name: ws.name,
+                        slug: ws.slug,
                         org_name: ws.tenant_name || orgName,
                         role: ws.role,
                     });
@@ -202,6 +203,14 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         selected = workspaces[0];
         console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
     } else {
+        if (!process.stdin.isTTY) {
+            console.error(chalk.red(
+                'Multiple workspaces are available and no workspace is set for this config. '
+                + 'Run `solidactions workspace set <name-or-id> --local` (or --global).',
+            ));
+            process.exit(1);
+        }
+
         console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
         workspaces.forEach((ws, i) => {
             console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`);
@@ -222,6 +231,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         selected = workspaces[index];
     }
 
+    config.workspace = selected.slug ?? selected.name;
     config.workspaceId = selected.id;
 
     if (workspaceSource !== 'env') {
@@ -244,13 +254,6 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
         const ws = await resolveWorkspaceInput(config, config.workspace!);
         config = { ...config, workspace: ws.slug ?? ws.name, workspaceId: ws.id };
         return config;
-    }
-
-    if (!config.workspaceId && !process.stdin.isTTY) {
-        console.error(chalk.red(
-            'No workspace set for this config. Run `solidactions workspace set <name-or-id> --local` (or --global).',
-        ));
-        process.exit(1);
     }
 
     return ensureWorkspaceSelected(config);

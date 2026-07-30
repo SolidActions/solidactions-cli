@@ -47,4 +47,11 @@ describe('device-auth follow-up --help docs', () => {
         // Makes the (device) login flow unnecessary.
         expect(out).toMatch(/login --device/);
     });
+
+    it('#1002 login --help explains sole-workspace auto-selection and multiple-workspace choice', () => {
+        const out = help(['login']);
+        expect(out).toMatch(/sole\s+workspace is auto-selected/i);
+        expect(out).toMatch(/--workspace.*multiple workspaces/is);
+        expect(out).not.toMatch(/without this flag leave the workspace unset/i);
+    });
 });
