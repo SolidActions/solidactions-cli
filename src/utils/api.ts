@@ -9,6 +9,99 @@ import { resolveWorkspaceInput } from './workspace-lookup';
 // like "Project files not found ..." don't false-match.
 const NOT_FOUND_IN_WORKSPACE = /Project '.+' not found in your active workspace/;
 
+export const SANDBOX_EGRESS_MESSAGE =
+    'Sandbox network egress appears to be blocking app.solidactions.com. '
+    + "Allow-list app.solidactions.com in your provider's network settings, "
+    + 'start a new agent session if required, then retry. '
+    + 'See https://www.solidactions.com/docs/troubleshooting/#sandbox-egress';
+
+const SANDBOX_EGRESS_PHRASES = [
+    /\bhost (?:is )?not permitted\b/i,
+    /\bnetwork access denied\b/i,
+    /\bnetwork egress\b[\s\S]*?\b(?:blocked|disabled)\b/i,
+    /\bdestination\b[\s\S]*?\bnot allowed\b/i,
+];
+
+function responseServerHeader(headers: any): string {
+    if (!headers) {
+        return '';
+    }
+
+    if (typeof headers.get === 'function') {
+        const value = headers.get('server') ?? headers.get('Server');
+        return value == null ? '' : String(value).trim();
+    }
+
+    for (const [name, value] of Object.entries(headers)) {
+        if (name.toLowerCase() === 'server') {
+            return value == null ? '' : String(value).trim();
+        }
+    }
+
+    return '';
+}
+
+function flattenProxyResponseText(data: unknown): string {
+    if (typeof data === 'string') {
+        return data;
+    }
+    if (data instanceof Error) {
+        return data.message;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return '';
+    }
+
+    return ['error', 'message']
+        .map((field) => flattenProxyResponseText((data as Record<string, unknown>)[field]))
+        .filter(Boolean)
+        .join('\n');
+}
+
+/**
+ * Diagnose a provider proxy's observed Cloud-host 403 without rewriting
+ * SolidActions authorization errors or failures against custom hosts.
+ */
+export function augmentSandboxEgressMessage(error: any): any {
+    const response = error?.response;
+    if (response?.status !== 403 || responseServerHeader(response.headers)) {
+        return error;
+    }
+
+    const data = response.data;
+    const responseCode = data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as Record<string, unknown>).code
+        : null;
+    if (responseCode != null && String(responseCode).trim() !== '') {
+        return error;
+    }
+
+    const requestConfig = error.config ?? response.config;
+    let hostname = '';
+    try {
+        hostname = new URL(requestConfig?.url, requestConfig?.baseURL).hostname;
+    } catch {
+        return error;
+    }
+    if (hostname !== 'app.solidactions.com') {
+        return error;
+    }
+
+    const proxyText = flattenProxyResponseText(data).trim();
+    if (!proxyText || !SANDBOX_EGRESS_PHRASES.some((phrase) => phrase.test(proxyText))) {
+        return error;
+    }
+
+    error.message = SANDBOX_EGRESS_MESSAGE;
+    response.data = {
+        ...(data && typeof data === 'object' && !Array.isArray(data) ? data : {}),
+        message: `${SANDBOX_EGRESS_MESSAGE}\n\nProvider response: ${proxyText}`,
+        providerResponse: data,
+    };
+
+    return error;
+}
+
 /**
  * Inspect an axios error and, if its response message matches the new
  * workspace-not-found 404 from solidactions-app PR #128, append a
@@ -47,7 +140,13 @@ export function augmentWorkspaceForbiddenMessage(error: any): any {
 
 axios.interceptors.response.use(
     (response) => response,
-    (error) => Promise.reject(augmentWorkspaceForbiddenMessage(augmentNotFoundMessage(error))),
+    (error) => Promise.reject(
+        augmentWorkspaceForbiddenMessage(
+            augmentNotFoundMessage(
+                augmentSandboxEgressMessage(error),
+            ),
+        ),
+    ),
 );
 
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {

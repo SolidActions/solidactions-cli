@@ -1,5 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import '../utils/api';
 import { Config } from '../utils/config';
 import { fetchWorkspaces, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
 import {
