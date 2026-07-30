@@ -54,12 +54,15 @@ beforeAll(async () => {
             if (request.method === 'POST' && request.url?.endsWith('/variable-mappings/17/reset')) {
                 response.writeHead(200, { 'Content-Type': 'application/json' });
                 response.end(JSON.stringify({
-                    id: 17,
-                    env_name: 'GMAIL_TOKEN',
-                    source_type: 'oauth_connection',
-                    source: 'oauth_connection',
-                    oauth_connection_id: 'connection-1',
-                    oauth_connection_name: 'Primary Gmail',
+                    message: 'Variable mapping reset successfully.',
+                    mapping: {
+                        id: 17,
+                        env_name: 'GMAIL_TOKEN',
+                        source_type: 'oauth_connection',
+                        source: 'oauth_connection',
+                        oauth_connection_id: 'connection-1',
+                        oauth_connection_name: 'Primary Gmail',
+                    },
                 }));
                 return;
             }

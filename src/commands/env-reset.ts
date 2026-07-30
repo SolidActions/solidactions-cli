@@ -49,7 +49,7 @@ export async function envReset(projectName: string, key: string, options: EnvRes
             {},
             { headers: getApiHeaders(config, 'application/json') }
         );
-        const restored = resetResponse.data;
+        const restored = resetResponse.data.mapping;
 
         console.log(chalk.green(
             `Variable "${key}" reset to ${describeRestoredSource(restored)} ` +
