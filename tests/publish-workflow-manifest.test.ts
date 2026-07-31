@@ -5,18 +5,22 @@
 import { describe, expect, it } from 'vitest';
 import path from 'path';
 import fs from 'fs';
+import yaml from 'js-yaml';
 
 const WORKFLOW_PATH = path.resolve(__dirname, '../.github/workflows/publish.yml');
 const workflow = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+const parsedWorkflow = yaml.load(workflow) as {
+    jobs: { publish: { permissions: Record<string, string> } };
+};
+const permissions = parsedWorkflow.jobs.publish.permissions;
 
 describe('publish workflow — command manifest release asset', () => {
-    it('grants contents: write so the asset can be uploaded', () => {
-        expect(workflow).toMatch(/contents:\s*write/);
-        expect(workflow).not.toMatch(/contents:\s*read/);
+    it('grants contents: write (not read) so the asset can be uploaded', () => {
+        expect(permissions.contents).toBe('write');
     });
 
     it('keeps id-token: write for npm provenance', () => {
-        expect(workflow).toMatch(/id-token:\s*write/);
+        expect(permissions['id-token']).toBe('write');
     });
 
     it('uploads dist/command-manifest.json to the release', () => {
@@ -28,7 +32,9 @@ describe('publish workflow — command manifest release asset', () => {
     it('builds after the tag-derived version rewrite so the manifest carries the released version', () => {
         const versionRewrite = workflow.indexOf('npm version --no-git-tag-version');
         const build = workflow.indexOf('npm run build');
-        const publish = workflow.indexOf('npm publish');
+        // Anchor on the step invocation, not the bare phrase — the restored
+        // #77 comment above the version-rewrite step also mentions "npm publish".
+        const publish = workflow.indexOf('- run: npm publish');
         const upload = workflow.indexOf('gh release upload');
 
         expect(versionRewrite).toBeGreaterThan(-1);
