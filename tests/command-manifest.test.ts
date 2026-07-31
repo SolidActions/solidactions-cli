@@ -153,6 +153,28 @@ describe('buildCommandManifest — synthetic trees', () => {
         expect(findCommand(manifest, 'remove')!.aliases).toEqual(['rm', 'del']);
     });
 
+    it('includes the implicit commander help option in a command manifest entry', () => {
+        const program = new Command().name('demo');
+        program.command('go').option('--flag', 'A flag');
+
+        const options = findCommand(buildCommandManifest(program, '0.0.0'), 'go')!.options;
+        const help = options.find((o) => o.long === '--help');
+
+        expect(help).toBeDefined();
+        expect(help!.short).toBe('-h');
+        expect(help!.flags.length).toBeGreaterThan(0);
+        expect(help!.description.length).toBeGreaterThan(0);
+    });
+
+    it('omits the help option when it is disabled with .helpOption(false)', () => {
+        const program = new Command().name('demo');
+        program.command('go').helpOption(false).option('--flag', 'A flag');
+
+        const options = findCommand(buildCommandManifest(program, '0.0.0'), 'go')!.options;
+
+        expect(options.find((o) => o.long === '--help')).toBeUndefined();
+    });
+
     it('produces output that survives a JSON round-trip unchanged', () => {
         const program = new Command().name('demo');
         program.command('go').alias('g').option('-e, --env <e>', 'Env', 'dev').argument('<name>', 'Name');
@@ -182,6 +204,7 @@ describe('buildCommandManifest — the real solidactions program', () => {
         expect(deploy.options.find((o) => o.long === '--env')!.short).toBe('-e');
         expect(deploy.options.find((o) => o.long === '--create')).toBeDefined();
         expect(deploy.options.find((o) => o.long === '--no-cache')!.negated).toBe(true);
+        expect(deploy.options.find((o) => o.long === '--help')).toBeDefined();
         expect(deploy.arguments.map((a) => a.name)).toEqual(['project-name', 'path']);
 
         expect(findCommand(manifest, 'crew', 'env', 'set')).toBeDefined();

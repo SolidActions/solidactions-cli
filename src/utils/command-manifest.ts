@@ -61,7 +61,12 @@ export interface CommandManifest {
     schema_version: typeof COMMAND_MANIFEST_SCHEMA_VERSION;
     cli_name: string;
     cli_version: string;
-    /** Options declared on the program itself; they apply to every command. */
+    /**
+     * Options declared on the program itself. Most (e.g. `-w, --workspace-override`)
+     * apply to every command, but `--version` is a commander-root-only special
+     * case: `solidactions --version` works, `solidactions project deploy --version`
+     * does not.
+     */
     global_options: ManifestOption[];
     commands: ManifestCommand[];
 }
@@ -142,8 +147,54 @@ function isHiddenCommand(command: Command): boolean {
     return (command as unknown as { _hidden?: boolean })._hidden === true;
 }
 
+/**
+ * commander auto-adds a `-h, --help` option to every command, but it is
+ * synthesized at help-render time (see lib/help.js `visibleOptions`) rather
+ * than being a real `Option` living in `command.options` — so the plain
+ * `command.options.map(describeOption)` walk below silently drops it from
+ * the manifest. Downstream doc validators need it (real prose documents
+ * `--help`), so read the same private fields commander's own help renderer
+ * reads (`_hasHelpOption`, `_helpFlags`, `_helpShortFlag`, `_helpLongFlag`,
+ * `_helpDescription` — there is no public getter for any of them) and
+ * synthesize an equivalent manifest entry by hand.
+ */
+function describeHelpOption(command: Command): ManifestOption | null {
+    const cmd = command as unknown as {
+        _hasHelpOption?: boolean;
+        _helpFlags?: string;
+        _helpShortFlag?: string;
+        _helpLongFlag?: string;
+        _helpDescription?: string;
+    };
+    if (cmd._hasHelpOption !== true) {
+        return null;
+    }
+    const short = cmd._helpShortFlag ?? null;
+    const long = cmd._helpLongFlag ?? null;
+    if (!short && !long) {
+        return null;
+    }
+    return {
+        flags: cmd._helpFlags ?? [short, long].filter((flag): flag is string => flag !== null).join(', '),
+        long,
+        short,
+        description: cmd._helpDescription ?? '',
+        required: false,
+        value_required: false,
+        value_optional: false,
+        variadic: false,
+        negated: false,
+        hidden: false,
+    };
+}
+
 function describeCommand(command: Command, parentPath: string[]): ManifestCommand[] {
     const path = [...parentPath, command.name()];
+    const options = command.options.map(describeOption);
+    const helpOption = describeHelpOption(command);
+    if (helpOption) {
+        options.push(helpOption);
+    }
     const entry: ManifestCommand = {
         path,
         name: command.name(),
@@ -151,7 +202,7 @@ function describeCommand(command: Command, parentPath: string[]): ManifestComman
         description: command.description(),
         hidden: isHiddenCommand(command),
         arguments: command.registeredArguments.map(describeArgument),
-        options: command.options.map(describeOption),
+        options,
     };
     return [entry, ...command.commands.flatMap((child) => describeCommand(child, path))];
 }
