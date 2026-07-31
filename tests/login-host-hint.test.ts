@@ -21,11 +21,11 @@ describe('resolveLoginHost', () => {
 });
 
 describe('loginHostLines', () => {
-    it('default host prints the cloud callout and the --host/--dev hint', () => {
+    it('default host prints only the cloud callout, with no --host/--dev mention (they are internal-only, #994)', () => {
         const lines = loginHostLines(resolveLoginHost({}));
-        expect(lines[0]).toBe('Logging into https://app.solidactions.com (SolidActions Cloud)');
-        expect(lines[1]).toContain('--host <url>');
-        expect(lines[1]).toContain('--dev');
+        expect(lines).toEqual(['Logging into https://app.solidactions.com (SolidActions Cloud)']);
+        expect(lines.join('\n')).not.toContain('--host');
+        expect(lines.join('\n')).not.toContain('--dev');
     });
 
     it('explicit host prints the plain Host line with no hint', () => {
