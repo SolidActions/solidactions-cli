@@ -32,15 +32,22 @@ describe('publish workflow — command manifest release asset', () => {
     it('builds after the tag-derived version rewrite so the manifest carries the released version', () => {
         const versionRewrite = workflow.indexOf('npm version --no-git-tag-version');
         const build = workflow.indexOf('npm run build');
-        // Anchor on the step invocation, not the bare phrase — the restored
+        const publishGuard = workflow.indexOf('npm view "@solidactions/cli@$VERSION"');
+        // Anchor on the flagged invocation, not the bare phrase — the restored
         // #77 comment above the version-rewrite step also mentions "npm publish".
-        const publish = workflow.indexOf('- run: npm publish');
+        const publish = workflow.indexOf('npm publish --provenance');
         const upload = workflow.indexOf('gh release upload');
 
         expect(versionRewrite).toBeGreaterThan(-1);
         expect(build).toBeGreaterThan(versionRewrite);
-        expect(publish).toBeGreaterThan(build);
+        expect(publishGuard).toBeGreaterThan(build);
+        expect(publish).toBeGreaterThan(publishGuard);
         expect(upload).toBeGreaterThan(publish);
+    });
+
+    it('guards npm publish with an already-published check so a rerun after a failed upload can proceed', () => {
+        expect(workflow).toContain('npm view "@solidactions/cli@$VERSION" version');
+        expect(workflow).toContain('npm publish --provenance --access public');
     });
 
     it('still asserts the release tag is a literal semver before rewriting the version', () => {
