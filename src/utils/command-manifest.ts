@@ -117,7 +117,14 @@ function describeOption(option: Option): ManifestOption {
         negated: option.negate === true,
         hidden: option.hidden === true,
     };
-    applyDefault(entry, option.defaultValue, option.defaultValueDescription);
+    // commander's Command.addOption() (lib/command.js ~:548) defaults a negated
+    // option's positive attribute to `true` when no explicit defaultValue was
+    // given (and no positive counterpart option is registered) — e.g.
+    // `--no-cache` implicitly defaults `cache` to `true`. That implicit default
+    // lives in the Command's option-processing, not on Option.defaultValue, so
+    // it's otherwise invisible here.
+    const defaultValue = option.negate === true && option.defaultValue === undefined ? true : option.defaultValue;
+    applyDefault(entry, defaultValue, option.defaultValueDescription);
     if (option.argChoices) {
         entry.choices = [...option.argChoices];
     }
@@ -157,6 +164,12 @@ function isHiddenCommand(command: Command): boolean {
  * reads (`_hasHelpOption`, `_helpFlags`, `_helpShortFlag`, `_helpLongFlag`,
  * `_helpDescription` — there is no public getter for any of them) and
  * synthesize an equivalent manifest entry by hand.
+ *
+ * commander also suppresses a help flag form when a real option on the
+ * command already owns that exact flag (`Help.visibleOptions` in
+ * lib/help.js, via `Command._findOption`/`Option.is`) — e.g.
+ * `.option('-h, --human')` steals `-h` from the synthesized help option, so
+ * only `--help` is shown. Mirror that per-form check here.
  */
 function describeHelpOption(command: Command): ManifestOption | null {
     const cmd = command as unknown as {
@@ -169,13 +182,21 @@ function describeHelpOption(command: Command): ManifestOption | null {
     if (cmd._hasHelpOption !== true) {
         return null;
     }
-    const short = cmd._helpShortFlag ?? null;
-    const long = cmd._helpLongFlag ?? null;
-    if (!short && !long) {
+    const ownsFlag = (flag: string | undefined): boolean =>
+        flag !== undefined && command.options.some((option) => option.short === flag || option.long === flag);
+    const showShort = cmd._helpShortFlag !== undefined && !ownsFlag(cmd._helpShortFlag);
+    const showLong = !ownsFlag(cmd._helpLongFlag);
+    if (!showShort && !showLong) {
         return null;
     }
+    const short = showShort ? (cmd._helpShortFlag ?? null) : null;
+    const long = showLong ? (cmd._helpLongFlag ?? null) : null;
+    const flags =
+        showShort && showLong
+            ? (cmd._helpFlags ?? [short, long].filter((flag): flag is string => flag !== null).join(', '))
+            : ((long ?? short) as string);
     return {
-        flags: cmd._helpFlags ?? [short, long].filter((flag): flag is string => flag !== null).join(', '),
+        flags,
         long,
         short,
         description: cmd._helpDescription ?? '',

@@ -86,6 +86,24 @@ describe('buildCommandManifest — synthetic trees', () => {
         expect(opt.negated).toBe(true);
     });
 
+    it('records the implicit `true` default of a negated option with no explicit default', () => {
+        const program = new Command().name('demo');
+        program.command('deploy').option('--no-cache', 'Force a fresh build');
+
+        const opt = findCommand(buildCommandManifest(program, '0.0.0'), 'deploy')!.options[0];
+
+        expect(opt.default).toBe(true);
+    });
+
+    it('keeps an explicit default on a negated option instead of the implicit `true`', () => {
+        const program = new Command().name('demo');
+        program.command('deploy').option('--no-verify', 'Skip verification', false);
+
+        const opt = findCommand(buildCommandManifest(program, '0.0.0'), 'deploy')!.options[0];
+
+        expect(opt.default).toBe(false);
+    });
+
     it('records JSON-safe defaults and omits unserializable ones', () => {
         const program = new Command().name('demo');
         program
@@ -168,6 +186,21 @@ describe('buildCommandManifest — synthetic trees', () => {
         expect(help!.short).toBe('-h');
         expect(help!.flags.length).toBeGreaterThan(0);
         expect(help!.description.length).toBeGreaterThan(0);
+    });
+
+    it('omits a help flag form claimed by a real option on the same command', () => {
+        const program = new Command().name('demo');
+        program.command('go').option('-h, --human', 'Human-readable output');
+
+        const options = findCommand(buildCommandManifest(program, '0.0.0'), 'go')!.options;
+        const help = options.find((o) => o.long === '--help');
+        const human = options.find((o) => o.long === '--human');
+
+        expect(help).toBeDefined();
+        expect(help!.short).toBeNull();
+        expect(help!.flags).toBe('--help');
+        expect(human!.short).toBe('-h');
+        expect(options.filter((o) => o.short === '-h')).toEqual([human]);
     });
 
     it('omits the help option when it is disabled with .helpOption(false)', () => {
