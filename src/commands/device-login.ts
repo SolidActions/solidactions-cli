@@ -1,8 +1,14 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import '../utils/api';
 import { Config } from '../utils/config';
 import { fetchWorkspaces, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
-import { completeLogin, resolveLoginHost } from './login';
+import {
+    completeLogin,
+    persistPreflightedLoginCredential,
+    preflightDeviceLoginWrite,
+    resolveLoginHost,
+} from './login';
 
 // Public device-flow client id — not a secret; matches the server-seeded
 // oauth_clients row (config('services.cli.oauth_client_id') on the app side).
@@ -97,6 +103,7 @@ export async function deviceLogin(
 ): Promise<void> {
     const resolved = resolveLoginHost(options);
     const host = resolved.host;
+    const preflight = await preflightDeviceLoginWrite(options);
 
     console.log(chalk.blue('Requesting device authorization...'));
     const code = await requestDeviceCode(host);
@@ -121,22 +128,24 @@ export async function deviceLogin(
     }
 
     const config: Config = { host, apiKey: token.access_token };
+    await persistPreflightedLoginCredential(config, preflight, options);
 
-    // Same tail as login(): fetch workspaces, then resolve + write + report
-    // exactly as login() does via the shared completeLogin() helper.
     let workspaces: WorkspaceLookupRecord[];
     let scope: WorkspaceScope | null;
     try {
         ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (e: any) {
         if (e.response?.status === 401) {
-            console.error(chalk.red(`Invalid API key for ${host}.`));
+            console.error(chalk.red(`Authentication was saved to ${preflight.targetPath}, but the server rejected it during workspace discovery.`));
         } else {
-            console.error(chalk.red(`Could not reach ${host}: ${e.message}`));
+            console.error(chalk.red(
+                `Authentication was saved to ${preflight.targetPath}, but workspace discovery failed: ${e.message}`,
+            ));
         }
+        console.error(chalk.yellow('Run `solidactions workspace set <name>` when workspace access is available.'));
         process.exit(1);
         return;
     }
 
-    await completeLogin(config, workspaces, options, scope);
+    await completeLogin(config, workspaces, options, scope, preflight);
 }

@@ -119,7 +119,7 @@ program
     .option('--device', 'Authenticate via browser using OAuth device authorization')
     .addOption(new Option('--dev', 'Use local development server (http://localhost:8000)').hideHelp())
     .addOption(new Option('--host <url>', 'Custom API host URL').hideHelp())
-    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID (skips interactive prompt). Non-interactive logins without this flag leave the workspace unset.')
+    .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID. A sole workspace is auto-selected; use --workspace to choose among multiple workspaces.')
     .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')
     .option('--gitignore', 'With --local, add .solidactions/ to .gitignore without prompting')
