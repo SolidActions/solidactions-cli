@@ -17,6 +17,7 @@ import { envDelete } from './commands/env-delete';
 import { envMap } from './commands/env-map';
 import { envPull } from './commands/env-pull';
 import { envPush } from './commands/env-push';
+import { envReset } from './commands/env-reset';
 import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
@@ -30,6 +31,7 @@ import { oauthActionSearch } from './commands/oauth-action-search';
 import { oauthActionList } from './commands/oauth-action-list';
 import { oauthActionView } from './commands/oauth-action-view';
 import { oauthActionPlatforms } from './commands/oauth-action-platforms';
+import { connectionList } from './commands/connection-list';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
 import { skillPublish } from './commands/skill-publish';
@@ -318,6 +320,7 @@ env
     .argument('[value]', 'Variable value (when first arg is project)')
     .option('-s, --secret', 'Mark as encrypted secret')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev)', 'dev')
+    .option('--oauth-connection <name>', 'Bind the project key to an OAuth connection')
     .option('--global', 'Set a global variable (no project) — required for the 2-arg form')
     .option('--staging-value <value>', 'Staging environment value (global only)')
     .option('--dev-value <value>', 'Dev environment value (global only)')
@@ -348,6 +351,17 @@ env
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((keyOrProject, key, options) => {
         envDelete(keyOrProject, key, options);
+    });
+
+env
+    .command('reset')
+    .description('Reset a project variable mapping to its YAML-declared source')
+    .argument('<project>', 'Project name')
+    .argument('<KEY>', 'Variable key')
+    .allowExcessArguments(false)
+    .option('-e, --env <environment>', 'Environment to reset in', 'dev')
+    .action(async (projectName, key, options) => {
+        await envReset(projectName, key, options);
     });
 
 env
@@ -571,6 +585,19 @@ oauthActionCmd
     .option('--json', 'Emit raw JSON for AI/script consumption')
     .action((options) => {
         oauthActionPlatforms(options);
+    });
+
+// =============================================================================
+// connection <subcommand>
+// =============================================================================
+
+const connection = program.command('connection').description('Manage OAuth connections');
+
+connection
+    .command('list')
+    .description('List OAuth connections in the active workspace')
+    .action(() => {
+        connectionList();
     });
 
 // =============================================================================
