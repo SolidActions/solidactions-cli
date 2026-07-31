@@ -124,6 +124,10 @@ describe('buildCommandManifest — synthetic trees', () => {
 
     it('separates program-level global options from command options', () => {
         const program = new Command().name('demo');
+        // Disable both commander-synthesized entries so this assertion stays
+        // focused on the global/per-command split; they have their own tests.
+        program.helpOption(false);
+        program.addHelpCommand(false);
         program.option('-w, --workspace-override <id>', 'Override workspace');
         program.command('go').option('--flag', 'A flag');
 
@@ -183,6 +187,61 @@ describe('buildCommandManifest — synthetic trees', () => {
 
         expect(JSON.parse(JSON.stringify(manifest))).toEqual(manifest);
     });
+
+    it('includes the root program help option in global_options', () => {
+        const program = new Command().name('demo');
+        program.command('go');
+
+        const help = buildCommandManifest(program, '0.0.0').global_options.find((o) => o.long === '--help');
+
+        expect(help).toBeDefined();
+        expect(help!.short).toBe('-h');
+        expect(help!.description.length).toBeGreaterThan(0);
+    });
+
+    it('omits the root help option from global_options when disabled with .helpOption(false)', () => {
+        const program = new Command().name('demo');
+        program.helpOption(false);
+        program.command('go');
+
+        const globalOptions = buildCommandManifest(program, '0.0.0').global_options;
+
+        expect(globalOptions.find((o) => o.long === '--help')).toBeUndefined();
+    });
+
+    it('records the implicit help command with a path, description, and empty aliases/options', () => {
+        const program = new Command().name('demo');
+        program.command('go').description('Go somewhere');
+
+        const help = findCommand(buildCommandManifest(program, '0.0.0'), 'help')!;
+
+        expect(help.name).toBe('help');
+        expect(help.aliases).toEqual([]);
+        expect(help.hidden).toBe(false);
+        expect(help.description.length).toBeGreaterThan(0);
+        expect(help.options).toEqual([]);
+        expect(help.arguments).toMatchObject([{ name: 'command', required: false, variadic: false }]);
+    });
+
+    it('omits the implicit help command when disabled with .addHelpCommand(false)', () => {
+        const program = new Command().name('demo');
+        program.addHelpCommand(false);
+        program.command('go');
+
+        const manifest = buildCommandManifest(program, '0.0.0');
+
+        expect(findCommand(manifest, 'help')).toBeUndefined();
+    });
+
+    it('records a nested implicit help command under a subcommand group that has its own children', () => {
+        const program = new Command().name('demo');
+        const project = program.command('project').description('Manage projects');
+        project.command('view').description('View a project');
+
+        const manifest = buildCommandManifest(program, '0.0.0');
+
+        expect(findCommand(manifest, 'project', 'help')).toBeDefined();
+    });
 });
 
 describe('buildCommandManifest — the real solidactions program', () => {
@@ -210,5 +269,14 @@ describe('buildCommandManifest — the real solidactions program', () => {
         expect(findCommand(manifest, 'crew', 'env', 'set')).toBeDefined();
         expect(manifest.global_options.map((o) => o.long)).toContain('--workspace-override');
         expect(manifest.cli_name).toBe('solidactions');
+    });
+
+    it('captures the root --help option and the implicit help command (cleanroom QA regressions)', () => {
+        const { program } = require(CLI_BINARY);
+
+        const manifest = buildCommandManifest(program, pkg.version);
+
+        expect(manifest.global_options.map((o) => o.long)).toContain('--help');
+        expect(findCommand(manifest, 'help')).toBeDefined();
     });
 });

@@ -188,6 +188,48 @@ function describeHelpOption(command: Command): ManifestOption | null {
     };
 }
 
+/**
+ * commander adds an implicit `help [command]` (sub)command to any command
+ * that has children, no action handler of its own, and no explicit `help`
+ * command already registered (`_hasImplicitHelpCommand()` in command.js) —
+ * but, like the `-h, --help` option above, it is synthesized at help-render
+ * time (see `Help.visibleCommands` in lib/help.js) rather than living in
+ * `command.commands`, so the recursive walk in `describeCommand` never sees
+ * it. It is real and typable at every level it applies — both
+ * `solidactions help project` and `solidactions project help view` work —
+ * so downstream doc validators need an entry for it too. Reconstruct it the
+ * same way commander's own help renderer does (there is no public API for
+ * any of `_hasImplicitHelpCommand`, `_helpCommandnameAndArgs`,
+ * `_helpCommandDescription`): build a throwaway `Command` from those private
+ * fields, then run it through the normal `describeCommand` walk so its shape
+ * (path, aliases, options via `describeHelpOption`, etc.) matches every
+ * other command for free.
+ */
+function describeImplicitHelpCommand(command: Command, path: string[]): ManifestCommand[] {
+    const cmd = command as unknown as {
+        _hasImplicitHelpCommand?: () => boolean;
+        _helpCommandnameAndArgs?: string;
+        _helpCommandDescription?: string;
+    };
+    if (typeof cmd._hasImplicitHelpCommand !== 'function' || !cmd._hasImplicitHelpCommand()) {
+        return [];
+    }
+    const nameAndArgs = cmd._helpCommandnameAndArgs ?? 'help [command]';
+    const match = nameAndArgs.match(/([^ ]+) *(.*)/);
+    const helpName = match?.[1] ?? 'help';
+    const helpArgs = match?.[2] ?? '';
+    // Same construction as commander's Help.visibleCommands: a fresh command
+    // with its own help option turned off (commander never lists "-h, --help"
+    // twice for the same invocation) and, when the nameAndArgs spec carries
+    // one (e.g. "[command]"), the optional target-command argument.
+    const helpCommand = command.createCommand(helpName).helpOption(false);
+    helpCommand.description(cmd._helpCommandDescription ?? '');
+    if (helpArgs) {
+        helpCommand.arguments(helpArgs);
+    }
+    return describeCommand(helpCommand, path);
+}
+
 function describeCommand(command: Command, parentPath: string[]): ManifestCommand[] {
     const path = [...parentPath, command.name()];
     const options = command.options.map(describeOption);
@@ -204,7 +246,11 @@ function describeCommand(command: Command, parentPath: string[]): ManifestComman
         arguments: command.registeredArguments.map(describeArgument),
         options,
     };
-    return [entry, ...command.commands.flatMap((child) => describeCommand(child, path))];
+    return [
+        entry,
+        ...command.commands.flatMap((child) => describeCommand(child, path)),
+        ...describeImplicitHelpCommand(command, path),
+    ];
 }
 
 /**
@@ -212,11 +258,25 @@ function describeCommand(command: Command, parentPath: string[]): ManifestComman
  * preserved throughout: it is already deterministic and mirrors help ordering.
  */
 export function buildCommandManifest(program: Command, cliVersion: string): CommandManifest {
+    // The root program's `-h, --help` is the same commander-synthesized
+    // option as describeHelpOption handles per-command (see that function's
+    // comment) — commander keeps it outside `program.options` too, so the
+    // plain `program.options.map(describeOption)` walk below would otherwise
+    // silently drop it from global_options even though `solidactions --help`
+    // works (README.md documents it).
+    const globalOptions = program.options.map(describeOption);
+    const rootHelpOption = describeHelpOption(program);
+    if (rootHelpOption) {
+        globalOptions.push(rootHelpOption);
+    }
     return {
         schema_version: COMMAND_MANIFEST_SCHEMA_VERSION,
         cli_name: program.name(),
         cli_version: cliVersion,
-        global_options: program.options.map(describeOption),
-        commands: program.commands.flatMap((command) => describeCommand(command, [])),
+        global_options: globalOptions,
+        commands: [
+            ...program.commands.flatMap((command) => describeCommand(command, [])),
+            ...describeImplicitHelpCommand(program, []),
+        ],
     };
 }
