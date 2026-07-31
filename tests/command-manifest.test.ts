@@ -133,9 +133,29 @@ describe('buildCommandManifest — synthetic trees', () => {
         expect(manifest.commands.map((c) => c.path.join(' '))).toEqual(['go']);
     });
 
+    it('records a single alias declared with .alias() and an empty array when none is declared', () => {
+        const program = new Command().name('demo');
+        program.command('deploy').alias('d');
+        program.command('go');
+
+        const manifest = buildCommandManifest(program, '0.0.0');
+
+        expect(findCommand(manifest, 'deploy')!.aliases).toEqual(['d']);
+        expect(findCommand(manifest, 'go')!.aliases).toEqual([]);
+    });
+
+    it('records multiple aliases declared with .aliases() in declaration order', () => {
+        const program = new Command().name('demo');
+        program.command('remove').aliases(['rm', 'del']);
+
+        const manifest = buildCommandManifest(program, '0.0.0');
+
+        expect(findCommand(manifest, 'remove')!.aliases).toEqual(['rm', 'del']);
+    });
+
     it('produces output that survives a JSON round-trip unchanged', () => {
         const program = new Command().name('demo');
-        program.command('go').option('-e, --env <e>', 'Env', 'dev').argument('<name>', 'Name');
+        program.command('go').alias('g').option('-e, --env <e>', 'Env', 'dev').argument('<name>', 'Name');
 
         const manifest = buildCommandManifest(program, '0.0.0');
 

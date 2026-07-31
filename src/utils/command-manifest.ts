@@ -48,6 +48,8 @@ export interface ManifestCommand {
     /** Noun-verb path from the program root, e.g. ["crew", "env", "set"]. */
     path: string[];
     name: string;
+    /** Alternate names accepted for this command, e.g. from .alias()/.aliases(); empty if none. */
+    aliases: string[];
     description: string;
     /** Declared with { hidden: true } — parses, but is not part of the public surface. */
     hidden: boolean;
@@ -145,6 +147,7 @@ function describeCommand(command: Command, parentPath: string[]): ManifestComman
     const entry: ManifestCommand = {
         path,
         name: command.name(),
+        aliases: [...command.aliases()],
         description: command.description(),
         hidden: isHiddenCommand(command),
         arguments: command.registeredArguments.map(describeArgument),
