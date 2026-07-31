@@ -32,7 +32,7 @@
     "deploy"
   ],
   "scripts": {
-    "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs && cp src/utils/archiver-loader.cjs dist/utils/archiver-loader.cjs",
+    "build": "tsc && cp src/commands/dev-shim.mjs dist/commands/dev-shim.mjs && cp src/utils/archiver-loader.cjs dist/utils/archiver-loader.cjs && node scripts/generate-command-manifest.mjs",
     "check:release": "npm run build && npm run test && npm run smoke:init",
     "prepublishOnly": "npm run build",
     "smoke:init": "node scripts/smoke-init.mjs",
