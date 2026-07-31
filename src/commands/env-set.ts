@@ -20,6 +20,7 @@ export const GLOBAL_ENV_SCOPE_NOTE = [
 interface EnvSetOptions {
     secret?: boolean;
     env?: string;
+    oauthConnection?: string;
     yes?: boolean;
     stagingValue?: string;
     devValue?: string;
@@ -31,7 +32,15 @@ interface EnvSetOptions {
 
 export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfProject?: string, options: EnvSetOptions = {}): Promise<void> {
     // Detect mode based on arguments
-    const isProjectMode = valueIfProject !== undefined;
+    const isOauthConnectionMode = options.oauthConnection !== undefined;
+    const isProjectMode = valueIfProject !== undefined || isOauthConnectionMode;
+
+    if (isOauthConnectionMode && (valueIfProject !== undefined || options.global)) {
+        process.stderr.write(chalk.red(
+            'env set: --oauth-connection binds a project key; give <project> <KEY> and no value\n'
+        ));
+        process.exit(1);
+    }
 
     // Jordan Wall #4 (Sweep C, → 1.23.0): a 2-positional-arg call used to fall
     // through to GLOBAL scope silently, so a typo'd `env set KEY VALUE` (meant
@@ -86,6 +95,25 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         const isSecret = options.secret || /secret|key|token|password|credential/i.test(key);
 
         try {
+            if (isOauthConnectionMode) {
+                await axios.post(
+                    `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,
+                    {
+                        project_key: key,
+                        oauth_connection_name: options.oauthConnection,
+                    },
+                    {
+                        headers: getApiHeaders(config, 'application/json'),
+                    }
+                );
+
+                console.log(chalk.green(
+                    `Variable "${key}" bound to OAuth connection "${options.oauthConnection}" ` +
+                    `in project "${projectName}" (${environment}).`
+                ));
+                return;
+            }
+
             // Check if variable already has a value
             if (!options.yes) {
                 const mappingsResponse = await axios.get(

@@ -276,10 +276,7 @@ export async function persistPreflightedLoginCredential(
 
 export function loginHostLines(resolved: { host: string; isDefault: boolean }): string[] {
     if (resolved.isDefault) {
-        return [
-            `Logging into ${resolved.host} (SolidActions Cloud)`,
-            '  Self-hosted or local dev? Pass --host <url> (or --dev for http://localhost:8000)',
-        ];
+        return [`Logging into ${resolved.host} (SolidActions Cloud)`];
     }
     return [`Host: ${resolved.host}`];
 }
