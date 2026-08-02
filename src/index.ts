@@ -54,7 +54,7 @@ import { setCliWorkspaceOverride } from './utils/config';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
 
-const program = new Command();
+export const program = new Command();
 
 if (process.env.SOLIDACTIONS_DEBUG === '1') {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -781,7 +781,12 @@ doc
         await docUpload(files, { folder: options.folder, title: options.title, replace: options.replace });
     });
 
-program.parseAsync().catch((err) => {
-    console.error(chalk.red(err.message ?? String(err)));
-    process.exit(1);
-});
+// Only parse argv when this file IS the process entry point (the `solidactions`
+// bin). The #1004 command-manifest generator requires this module to walk the
+// assembled command tree; that must not consume the caller's argv or exit.
+if (require.main === module) {
+    program.parseAsync().catch((err) => {
+        console.error(chalk.red(err.message ?? String(err)));
+        process.exit(1);
+    });
+}

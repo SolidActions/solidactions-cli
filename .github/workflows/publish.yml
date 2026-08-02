@@ -8,7 +8,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # contents: write — the build attaches dist/command-manifest.json to the
+      # release as the artifact the content repo pins (#1004).
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v6
@@ -18,7 +20,6 @@ jobs:
           node-version: '24'
 
       - run: npm ci
-      - run: npm run build
 
       # `npm version` resolves increment KEYWORDS (patch/minor/major/…), so a
       # release tagged e.g. `patch` would silently publish a bumped version
@@ -37,4 +38,27 @@ jobs:
       # tag is created — this only rewrites the in-workspace package.json version.
       - run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
-      - run: npm publish --provenance --access public
+      # Build after the version rewrite so the explicitly-built dist/ — including
+      # the command manifest uploaded below — carries the tag-derived version
+      # without relying on the prepublishOnly hook's rebuild. It also skips the
+      # build entirely when the semver assertion above rejects the tag.
+      - run: npm run build
+
+      # A transient failure in the upload step below (network blip, etc.) must
+      # be rerunnable — but `npm publish` rejects a version that is already on
+      # the registry, so a bare rerun would fail before ever reaching the
+      # upload. Skip the publish when the version is already there and let the
+      # rerun fall through to the upload.
+      - name: Publish to npm (skip if this version is already published)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@solidactions/cli@$VERSION" version >/dev/null 2>&1; then
+            echo "@solidactions/cli@$VERSION is already published — skipping npm publish (rerun after a failed release-asset upload)"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Attach command manifest to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/command-manifest.json --clobber
