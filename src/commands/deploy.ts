@@ -739,8 +739,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
                         if (options.paused) {
                             console.log('');
-                            console.log(chalk.green('Schedules deployed paused.'));
-                            console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                            if (acceptedDeployment.schedulesPaused === true) {
+                                console.log(chalk.green('Schedules deployed paused.'));
+                                console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                            } else {
+                                console.log(chalk.yellow(
+                                    'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
+                                ));
+                            }
                         }
 
                         cleanupArchive();

@@ -54,6 +54,7 @@ let deployRequests: Array<{ body: string }> = [];
 let confirmationCallCount = 0;
 let mismatchesBeforeMatch = 0;
 let projectStatus = 'deployed';
+let acceptedSchedulesPaused: boolean | undefined = true;
 
 function confirmationBody(): unknown {
     return {
@@ -88,8 +89,13 @@ beforeAll(async () => {
 
             if (req.method === 'POST' && url.endsWith('/deploy')) {
                 deployRequests.push({ body });
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ deployment_id: 'dep-1' }));
+                res.writeHead(202, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    deployment_id: 'dep-1',
+                    ...(acceptedSchedulesPaused === undefined
+                        ? {}
+                        : { schedules_paused: acceptedSchedulesPaused }),
+                }));
                 return;
             }
             if (req.method === 'GET' && url.includes('include=deployment')) {
@@ -133,6 +139,7 @@ beforeEach(() => {
     confirmationCallCount = 0;
     mismatchesBeforeMatch = 0;
     projectStatus = 'deployed';
+    acceptedSchedulesPaused = true;
     process.env.SOLIDACTIONS_HOST = `http://127.0.0.1:${port}`;
     process.env.SOLIDACTIONS_API_KEY = 'test-key';
     process.env.SOLIDACTIONS_WORKSPACE_ID = 'workspace-1';
@@ -202,6 +209,23 @@ describe('deploy() live wiring — paused schedules', () => {
         expect(logs.join('\n')).toContain('solidactions schedule enable');
         expect(logs.findIndex((line) => line.includes('Schedules deployed paused')))
             .toBeGreaterThan(logs.findIndex((line) => line.includes('Deployed to')));
+    }, 10_000);
+
+    it('warns instead of claiming schedules are paused when the server does not acknowledge the flag', async () => {
+        acceptedSchedulesPaused = undefined;
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+        try {
+            await runDeploy({ paused: true });
+        } finally {
+            console.log = originalLog;
+        }
+
+        const output = logs.join('\n');
+        expect(output).not.toContain('Schedules deployed paused');
+        expect(output).toContain('server did not acknowledge paused schedules');
+        expect(output).toContain('verify schedules');
     }, 10_000);
 
     it('omits paused from ordinary deploys', async () => {
