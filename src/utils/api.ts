@@ -1,8 +1,12 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import readline from 'readline';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
-import { resolveWorkspaceInput } from './workspace-lookup';
+import {
+    resolveWorkspaceInput,
+    selectWorkspaceInteractively,
+    WorkspaceLookupRecord,
+    WorkspaceSelectionDependencies,
+} from './workspace-lookup';
 
 // Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
 // We require the literal single-quotes around the slug so plausible future error messages
@@ -242,7 +246,10 @@ export function authFailureMessage(config: Config, sources: ResolvedConfig['sour
     return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
 }
 
-export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
+export async function ensureWorkspaceSelected(
+    config: Config,
+    dependencies: WorkspaceSelectionDependencies = {},
+): Promise<Config> {
     if (config.workspaceId) {
         return config;
     }
@@ -296,7 +303,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         process.exit(1);
     }
 
-    let selected: typeof workspaces[0];
+    let selected: WorkspaceLookupRecord;
 
     if (workspaces.length === 1) {
         selected = workspaces[0];
@@ -310,24 +317,14 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
             process.exit(1);
         }
 
-        console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
-        workspaces.forEach((ws, i) => {
-            console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`);
+        const chosen = await selectWorkspaceInteractively(workspaces, {
+            ...dependencies,
+            label: (ws) => `${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`,
         });
-        console.log('');
-
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-            rl.question(chalk.blue('Enter number: '), resolve);
-        });
-        rl.close();
-
-        const index = parseInt(answer, 10) - 1;
-        if (isNaN(index) || index < 0 || index >= workspaces.length) {
-            console.error(chalk.red('Invalid selection.'));
+        if (!chosen) {
             process.exit(1);
         }
-        selected = workspaces[index];
+        selected = chosen;
     }
 
     config.workspace = selected.slug ?? selected.name;
