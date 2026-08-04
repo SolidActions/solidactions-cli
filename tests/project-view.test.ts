@@ -69,12 +69,12 @@ function config(): Config {
 }
 
 describe('project slug resolution for view', () => {
-    it('defaults an omitted environment to the normalized dev project family', () => {
-        expect(projectSlugForView('Billing API', undefined)).toBe('billing-api-dev');
-    });
-
-    it('treats an exact-suffixed positional value as a family when --env is absent', () => {
-        expect(projectSlugForView('billing-dev', undefined)).toBe('billing-dev-dev');
+    it('passes through the exact project when the environment is omitted', () => {
+        // #970's six schedule commands share this helper and intentionally pass undefined;
+        // defaulting here would silently retarget their reads and writes to another project.
+        expect(projectSlugForView('Billing API', undefined)).toBe('Billing API');
+        expect(projectSlugForView('billing-dev', undefined)).toBe('billing-dev');
+        expect(projectSlugForView('!!!', undefined)).toBe('!!!');
     });
 
     it('uses the supplied production slug unchanged', () => {
@@ -90,7 +90,7 @@ describe('project slug resolution for view', () => {
         expect(() => projectSlugForView('billing', 'qa')).toThrow(/production.*staging.*dev/i);
     });
 
-    it.each([undefined, 'dev', 'staging', 'production'])(
+    it.each(['dev', 'staging', 'production'])(
         'rejects a project with no usable slug before resolving %s',
         (environment) => {
             expect(() => projectSlugForView('!!!', environment)).toThrow(/letter or number/i);
@@ -116,6 +116,12 @@ describe('project view request and rendering', () => {
         expect(lines.join('\n')).toContain('abcdef123456');
         expect(lines.join('\n')).toContain('clean');
         expect(lines.join('\n')).toContain('Client-reported');
+    });
+
+    it('treats an exact-suffixed project as a family on the default-dev view surface', async () => {
+        await projectViewWithConfig('billing-dev', {}, config(), () => undefined);
+
+        expect(requests).toEqual(['/api/v1/projects/billing-dev-dev?include=deployment']);
     });
 
     it.each([

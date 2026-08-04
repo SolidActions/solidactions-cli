@@ -41,9 +41,11 @@ export interface ProjectViewOptions {
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
-    const resolvedEnvironment = environment ?? 'dev';
+    if (environment === undefined) {
+        return project;
+    }
 
-    if (!['production', 'staging', 'dev'].includes(resolvedEnvironment)) {
+    if (!['production', 'staging', 'dev'].includes(environment)) {
         throw new Error('Environment must be production, staging, or dev.');
     }
 
@@ -51,9 +53,9 @@ export function projectSlugForView(project: string, environment?: string): strin
         throw new Error('Project must contain at least one letter or number.');
     }
 
-    return resolvedEnvironment === 'production'
+    return environment === 'production'
         ? project
-        : buildProjectSlug(project, resolvedEnvironment);
+        : buildProjectSlug(project, environment);
 }
 
 function metadataSourceLabel(source: unknown): string | null {
@@ -147,7 +149,7 @@ export async function projectViewWithConfig(
 ): Promise<void> {
     let slug: string;
     try {
-        slug = projectSlugForView(project, options.env);
+        slug = projectSlugForView(project, options.env ?? 'dev');
     } catch (error: any) {
         console.error(chalk.red(error.message));
         process.exit(1);
