@@ -299,6 +299,9 @@ describe('buildCommandManifest — the real solidactions program', () => {
         expect(deploy.options.find((o) => o.long === '--help')).toBeDefined();
         expect(deploy.arguments.map((a) => a.name)).toEqual(['project-name', 'path']);
 
+        const view = findCommand(manifest, 'project', 'view')!;
+        expect(view.options.find((o) => o.long === '--env')!.default).toBe('dev');
+
         expect(findCommand(manifest, 'crew', 'env', 'set')).toBeDefined();
         expect(manifest.global_options.map((o) => o.long)).toContain('--workspace-override');
         expect(manifest.cli_name).toBe('solidactions');

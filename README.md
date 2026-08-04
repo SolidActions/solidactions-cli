@@ -172,16 +172,19 @@ Use `solidactions <command> --help` for full flag details on any command.
 | `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--no-git-metadata` | Deploy or sync config only |
 | `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
 | `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
-| `project view <project>` | `-e` | View status, `Enabled: on|off`, and client-reported deployed revision |
+| `project view <project>` | `-e` (default `dev`) | View status, `Enabled: on|off`, and client-reported deployed revision |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
 | `project list` | `--json` | List project families; environments render as `environment:on/off` |
 
-For `project view`, omitting `--env` treats `<project>` as an exact slug.
-Passing `--env production` uses the supplied production name/slug unchanged;
-`--env staging` and `--env dev` derive the same suffixed slug as deploy. This
-is deliberately different from historical commands such as `run start`,
-which default to dev.
+For `project view`, `<project>` is a project family slug or name and omitting
+`--env` targets dev (`billing` resolves to `billing-dev`). Use `--env production`
+to pass the supplied production name/slug unchanged; `--env staging` and
+`--env dev` derive the same suffixed slug as deploy.
+
+This changes exact-suffixed positional input: `project view billing-dev` now
+targets `billing-dev-dev`. Use `project view billing` for the dev target, or
+pass `--env production` when `billing-dev` is the legitimate production slug.
 
 Project enable/disable is an explicit, non-interactive operator action. It does
 not cascade to workflows or schedules, and deploy does not undo the manual

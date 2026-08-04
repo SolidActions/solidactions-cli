@@ -46,4 +46,16 @@ describe('public README setup contract', () => {
         expect(COMMAND_TAXONOMY).toMatch(/activation-lifecycle/i);
         expect(COMMAND_TAXONOMY).toMatch(/`enable`\s*\/\s*`disable`/);
     });
+
+    it('documents project view default-dev targeting and exact-suffix migration', () => {
+        expect(README).toContain('`project view <project>` | `-e` (default `dev`)');
+        expect(README).toMatch(/omitting\s+`--env` targets dev/);
+        expect(README).toContain('`billing` resolves to `billing-dev`');
+        expect(README).toContain('Use `--env production`');
+        expect(README).toMatch(/`project view billing-dev` now\s+targets `billing-dev-dev`/);
+        expect(README).toContain('legitimate production slug');
+
+        expect(README).not.toContain('omitting `--env` treats `<project>` as an exact slug');
+        expect(README).not.toContain('project view has no implicit');
+    });
 });

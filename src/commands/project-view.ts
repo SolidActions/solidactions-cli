@@ -2,7 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
-import { buildProjectSlug } from '../utils/slug';
+import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
     formatRevisionSummary,
     sanitizeDisplayText,
@@ -41,17 +41,19 @@ export interface ProjectViewOptions {
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
-    if (environment === undefined) {
-        return project;
-    }
+    const resolvedEnvironment = environment ?? 'dev';
 
-    if (!['production', 'staging', 'dev'].includes(environment)) {
+    if (!['production', 'staging', 'dev'].includes(resolvedEnvironment)) {
         throw new Error('Environment must be production, staging, or dev.');
     }
 
-    return environment === 'production'
+    if (slugifyName(project) === '') {
+        throw new Error('Project must contain at least one letter or number.');
+    }
+
+    return resolvedEnvironment === 'production'
         ? project
-        : buildProjectSlug(project, environment);
+        : buildProjectSlug(project, resolvedEnvironment);
 }
 
 function metadataSourceLabel(source: unknown): string | null {
