@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import readline from 'readline';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import {
@@ -20,7 +19,15 @@ import {
     WriteTarget,
     WritePromptDependencies,
 } from '../utils/config-write-target';
-import { fetchWorkspaces, matchWorkspace, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
+import {
+    fetchWorkspaces,
+    matchWorkspace,
+    selectWorkspaceInteractively,
+    WorkspaceLookupRecord,
+    WorkspaceScope,
+} from '../utils/workspace-lookup';
+
+export { selectWorkspaceInteractively } from '../utils/workspace-lookup';
 
 export type { Config };
 
@@ -279,74 +286,6 @@ export function loginHostLines(resolved: { host: string; isDefault: boolean }): 
         return [`Logging into ${resolved.host} (SolidActions Cloud)`];
     }
     return [`Host: ${resolved.host}`];
-}
-
-/**
- * Prompt the user to pick a workspace from an already-fetched list. Auto-
- * selects when there's exactly one. Invalid answers re-prompt; EOF or a
- * closed input returns undefined without selecting anything.
- */
-interface WorkspaceSelectionDependencies {
-    question?: () => Promise<string | undefined>;
-}
-
-export async function selectWorkspaceInteractively(
-    workspaces: WorkspaceLookupRecord[],
-    dependencies: WorkspaceSelectionDependencies = {},
-): Promise<WorkspaceLookupRecord | undefined> {
-    if (workspaces.length === 0) {
-        console.log(chalk.yellow('No workspaces found. Create one at your SolidActions dashboard, then run `solidactions workspace set <name>`.'));
-        return undefined;
-    }
-    if (workspaces.length === 1) {
-        console.log(chalk.gray(`Auto-selected workspace: ${workspaces[0].name}`));
-        return workspaces[0];
-    }
-
-    console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
-    workspaces.forEach((ws, i) => {
-        console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name}`);
-    });
-    console.log('');
-
-    const rl = dependencies.question
-        ? null
-        : readline.createInterface({ input: process.stdin, output: process.stdout });
-    const question = dependencies.question ?? (async () => {
-        if (!rl || (rl as any).closed) return undefined;
-        return new Promise<string | undefined>((resolve) => {
-            let answered = false;
-            const onClose = () => {
-                if (!answered) resolve(undefined);
-            };
-            rl.once('close', onClose);
-            rl.question(chalk.blue('Enter number: '), (answer) => {
-                answered = true;
-                rl.removeListener('close', onClose);
-                resolve(answer);
-            });
-        });
-    });
-
-    try {
-        while (true) {
-            const answer = await question();
-            if (answer === undefined) {
-                console.log(chalk.yellow(
-                    'Workspace selection cancelled. Run `solidactions workspace list`, then '
-                    + '`solidactions workspace set <name>` when ready.',
-                ));
-                return undefined;
-            }
-            const index = parseInt(answer, 10) - 1;
-            if (!isNaN(index) && index >= 0 && index < workspaces.length) {
-                return workspaces[index];
-            }
-            console.error(chalk.red('Invalid selection. Enter one of the numbers shown.'));
-        }
-    } finally {
-        rl?.close();
-    }
 }
 
 /**
