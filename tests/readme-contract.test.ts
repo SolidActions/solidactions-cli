@@ -39,11 +39,14 @@ describe('public README setup contract', () => {
         expect(README).toContain('project disable <project>');
         expect(README).toContain('workflow enable <project> <workflow>');
         expect(README).toContain('workflow disable <project> <workflow>');
+        expect(README).toContain('workflow view <project> <workflow>');
+        expect(README).toContain('Enabled source:');
         expect(README).toContain('environment:on/off');
         expect(README).toContain('Enabled: on|off');
         expect(README).toContain('blocked (project off)');
 
         expect(COMMAND_TAXONOMY).toMatch(/activation-lifecycle/i);
         expect(COMMAND_TAXONOMY).toMatch(/`enable`\s*\/\s*`disable`/);
+        expect(COMMAND_TAXONOMY).toMatch(/workflow[\s\S]*single-resource[\s\S]*`view`/i);
     });
 });

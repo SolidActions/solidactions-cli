@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatJson, formatTable } from '../src/utils/webhook-formatters';
+import { workflowEffectiveState } from '../src/utils/workflow-state';
 
 const rows = [
     {
@@ -53,6 +54,15 @@ describe('webhook enabled-state formatting', () => {
         expect(lines.find((line) => line.includes('off-flow'))).toMatch(/off-flow\s+off\s+/);
         expect(lines.find((line) => line.includes('blocked-flow'))).toContain('blocked (project off)');
         expect(lines.find((line) => line.includes('on-flow'))).toMatch(/on-flow\s+on\s+/);
+    });
+
+    it('uses the neutral shared workflow-state helper for the same dataset', () => {
+        expect(rows.map(workflowEffectiveState)).toEqual([
+            'retired',
+            'off',
+            'blocked (project off)',
+            'on',
+        ]);
     });
 
     it('includes derived and raw state in JSON while redacting secrets by default', () => {

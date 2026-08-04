@@ -191,10 +191,15 @@ state.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
+| `workflow view <project> <workflow>` | `-e` (default `dev`), `--json` | Inspect stored workflow/project gates, retirement, enabled source, and effective state |
 | `workflow enable <project> <workflow>` | `-e` (default `dev`) | Enable the workflow gate; direct starts still require the project, and scheduled starts also require the schedule |
 | `workflow disable <project> <workflow>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
 
-Workflow enable/disable accepts a workflow name or slug and does not prompt.
+Workflow view/enable/disable accepts an exact workflow slug or an exact name and
+does not prompt. View defaults to dev like the mutation commands, and reports
+`Enabled source: manual override (deploy will not change it)` or
+`Enabled source: YAML declaration`; use `--json` for the unmodified
+machine-queryable state.
 The manual state is sticky across deploys; enabling a workflow does not enable
 its project or schedule.
 

@@ -55,6 +55,7 @@ import {
     workflowDisable,
     workflowEnable,
 } from './commands/state';
+import { workflowView } from './commands/workflow-view';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -286,6 +287,22 @@ project
 // =============================================================================
 
 const workflow = program.command('workflow').description('Manage deployed workflows');
+
+workflow
+    .command('view')
+    .description('View a deployed workflow\'s enabled state')
+    .argument('<project>', 'Project name')
+    .argument('<workflow>', 'Exact workflow slug or name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev). Defaults to dev.', 'dev')
+    .option('--json', 'Output the server workflow state as JSON')
+    .addHelpText('after', `
+The environment defaults to dev. The project argument is normalized and dev or
+staging appends the corresponding "-<env>" suffix; production uses the base
+slug. This differs from \`project view\`, which treats its project argument as
+an exact slug when --env is omitted.`)
+    .action(async (projectName, workflowName, options) => {
+        await workflowView(projectName, workflowName, options);
+    });
 
 workflow
     .command('enable')

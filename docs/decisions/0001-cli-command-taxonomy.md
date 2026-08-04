@@ -22,6 +22,10 @@
    an executable resource admits new work without deleting its configuration.
    They are distinct from content CRUD and from execution-lifecycle verbs that
    start or invoke one individual run.
+10. **The `workflow` noun also declares the single-resource `view` verb.** It
+    exposes the stored activation gates and their effective precedence for one
+    deployed workflow. This is an inspection operation in the canonical
+    "show one" family, not an activation-lifecycle mutation.
 
 ### Deferred
 
