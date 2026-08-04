@@ -76,14 +76,75 @@ describe('project list / env list --json', () => {
         env.cleanup();
     });
 
-    it('project list --json prints the raw project array, not the table', async () => {
-        nextBody = { data: [{ name: 'demo', status: 'ready', slug: 'demo' }] };
+    it('project list --json passes through compatibility environments and environment details', async () => {
+        nextBody = {
+            data: [{
+                name: 'demo',
+                status: 'ready',
+                slug: 'demo',
+                environments: ['production', 'dev'],
+                environment_details: [
+                    { environment: 'production', slug: 'demo', enabled: true },
+                    { environment: 'dev', slug: 'demo-dev', enabled: false },
+                ],
+            }],
+        };
 
         await projectList({ json: true });
 
         const parsed = JSON.parse(logLines.join('\n'));
-        expect(parsed).toEqual([{ name: 'demo', status: 'ready', slug: 'demo' }]);
+        expect(parsed).toEqual((nextBody as any).data);
         expect(logLines.some((l) => l.includes('Projects:'))).toBe(false);
+    });
+
+    it('project list renders environment details as environment:on/off and preserves legacy fallback rows', async () => {
+        nextBody = {
+            data: [
+                {
+                    name: 'stateful',
+                    status: 'ready',
+                    environments: ['production', 'staging', 'dev'],
+                    environment_details: [
+                        { environment: 'production', slug: 'stateful', enabled: true },
+                        { environment: 'staging', slug: 'stateful-staging', enabled: false },
+                        { environment: 'dev', slug: 'stateful-dev', enabled: true },
+                    ],
+                },
+                {
+                    name: 'legacy',
+                    status: 'ready',
+                    environments: ['production', 'dev'],
+                },
+            ],
+        };
+
+        await projectList({});
+
+        const output = logLines.join('\n');
+        expect(output).toContain('production:on, staging:off, dev:on');
+        expect(output).toMatch(/legacy.*production, dev/);
+    });
+
+    it('project list colors the exact sanitized and truncated environment cell', async () => {
+        nextBody = {
+            data: [{
+                name: 'bounded-row',
+                status: 'ready',
+                environment_details: [{
+                    environment: `${'x'.repeat(80)}\ninjected-tail`,
+                    slug: 'bounded-row',
+                    enabled: true,
+                }],
+            }],
+        };
+
+        await projectList({});
+
+        const dataLine = logLines.find((line) => line.includes('bounded-row'));
+        expect(dataLine).toBeDefined();
+        expect(dataLine).not.toContain('\n');
+        expect(dataLine).toContain('…');
+        expect(dataLine).not.toContain('injected-tail');
     });
 
     it('project list prints "Projects:" only after a successful fetch, not before an auth failure', async () => {

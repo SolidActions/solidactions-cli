@@ -84,6 +84,14 @@ describe('project slug resolution for view', () => {
 });
 
 describe('project view request and rendering', () => {
+    it('renders enabled state immediately after deployment status', () => {
+        const enabled = formatProjectView({ slug: 'billing', status: 'deployed', enabled: true } as any);
+        const disabled = formatProjectView({ slug: 'billing', status: 'deployed', enabled: false } as any);
+
+        expect(enabled.slice(0, 3)).toEqual(['Project: billing', 'Status: deployed', 'Enabled: on']);
+        expect(disabled.slice(0, 3)).toEqual(['Project: billing', 'Status: deployed', 'Enabled: off']);
+    });
+
     it('requests the exact slug with the bounded deployment include', async () => {
         const lines: string[] = [];
         await projectViewWithConfig('billing-dev', {}, config(), (line) => lines.push(line));
