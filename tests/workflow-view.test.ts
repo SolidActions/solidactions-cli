@@ -239,6 +239,35 @@ describe('workflow view rendering', () => {
         expect(result.stdout).toContain(`Enabled source: ${label}`);
     });
 
+    it('gives the retired+non-overridden state distinct wording instead of a bare YAML declaration claim', async () => {
+        // Retirement nulls the app's yaml_enabled column, but enabled_source
+        // still reports 'yaml' for a non-overridden retired workflow (the API
+        // shape is unchanged — see app plan decision ledger for #1098's PM fix
+        // round). "YAML declaration" alone would contradict `Retired: yes`.
+        responses.push({
+            status: 200,
+            body: { data: { ...baseData, enabled_source: 'yaml', retired: true, effective_enabled: false } },
+        });
+
+        const result = await runCli(['workflow', 'view', 'billing', 'daily-report']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Enabled source: YAML-managed (retired)');
+        expect(result.stdout).toContain('Retired: yes');
+    });
+
+    it('keeps the manual override wording for a retired workflow with a manual override', async () => {
+        responses.push({
+            status: 200,
+            body: { data: { ...baseData, enabled_source: 'manual', retired: true, effective_enabled: false } },
+        });
+
+        const result = await runCli(['workflow', 'view', 'billing', 'daily-report']);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Enabled source: manual override (deploy will not change it)');
+    });
+
     it('treats a retired workflow as readable state, not an error', async () => {
         responses.push({
             status: 200,
@@ -304,11 +333,25 @@ describe('workflow view failures', () => {
         expect(result.stderr).toMatch(expected);
     });
 
+    it('tells the operator to re-authenticate on HTTP 401', async () => {
+        responses.push({
+            status: 401,
+            body: { code: 'unauthenticated', message: 'Unauthenticated.' },
+        });
+
+        const result = await runCli(['workflow', 'view', 'billing', 'daily-report']);
+
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain('Authentication failed. Run "solidactions login --global" to re-configure.');
+    });
+
     it('prints safe ambiguity candidates and tells the operator to retry with a slug', async () => {
         responses.push({
             status: 409,
             body: {
-                error: 'ambiguous_workflow',
+                // The GET workflow endpoint uses the v1 {code, message} convention.
+                code: 'ambiguous_workflow',
                 message: 'More than one workflow has that name.',
                 candidates: [
                     { slug: 'daily\n-report', retired: false },
@@ -326,6 +369,23 @@ describe('workflow view failures', () => {
         expect(result.stderr).toContain('daily-old[31m (retired)');
         expect(result.stderr).toMatch(/re-run.*exact slug/i);
         expect(result.stderr).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f\u202e\u200b]/);
+    });
+
+    it('falls back to the legacy error key for ambiguity detection defensively', async () => {
+        responses.push({
+            status: 409,
+            body: {
+                error: 'ambiguous_workflow',
+                message: 'More than one workflow has that name.',
+                candidates: [{ slug: 'daily-report', retired: false }],
+            },
+        });
+
+        const result = await runCli(['workflow', 'view', 'billing', 'Daily Report']);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('More than one workflow has that name.');
+        expect(result.stderr).toContain('daily-report (active)');
     });
 
     it('reports network failures and exits non-zero', async () => {

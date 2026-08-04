@@ -35,9 +35,15 @@ function display(value: unknown, fallback = 'unknown', maxLength = 255): string 
     return sanitizeDisplayText(value, maxLength) ?? fallback;
 }
 
-function enabledSourceLabel(source: unknown): string {
+// The API's `enabled_source` stays `manual|yaml` even when a workflow is
+// retired: retirement (app WorkflowSyncService.php:80) nulls `yaml_enabled`
+// but the projection doesn't special-case retirement, so a non-overridden
+// retired workflow still reports 'yaml'. Decided NOT to add a third API
+// value for this (see app plan decision ledger for #1098's PM fix round) —
+// fix the contradictory wording here instead.
+function enabledSourceLabel(source: unknown, retired: boolean): string {
     if (source === 'manual') return 'manual override (deploy will not change it)';
-    if (source === 'yaml') return 'YAML declaration';
+    if (source === 'yaml') return retired ? 'YAML-managed (retired)' : 'YAML declaration';
     return display(source);
 }
 
@@ -49,7 +55,7 @@ export function formatWorkflowView(workflow: WorkflowViewData): string[] {
         `Project slug: ${display(workflow.project_slug)}`,
         `Environment: ${display(workflow.environment, 'unknown', 32)}`,
         `Workflow enabled: ${workflow.enabled ? 'on' : 'off'}`,
-        `Enabled source: ${enabledSourceLabel(workflow.enabled_source)}`,
+        `Enabled source: ${enabledSourceLabel(workflow.enabled_source, workflow.retired)}`,
         `Project enabled: ${workflow.project_enabled ? 'on' : 'off'}`,
         `Retired: ${workflow.retired ? 'yes' : 'no'}`,
         `Effective state: ${workflowEffectiveState(workflow)}`,
@@ -85,7 +91,11 @@ function printWorkflowViewError(error: any): void {
         return;
     }
 
-    if (error.response.status === 409 && error.response.data?.error === 'ambiguous_workflow') {
+    // The GET workflow endpoint uses the v1 {code, message} convention;
+    // fall back to the legacy `error` key defensively (e.g. older servers,
+    // or the sibling PUT .../enabled route, which still uses `error`).
+    const errorCode = error.response.data?.code ?? error.response.data?.error;
+    if (error.response.status === 409 && errorCode === 'ambiguous_workflow') {
         printAmbiguity(error);
         return;
     }
