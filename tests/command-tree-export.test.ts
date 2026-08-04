@@ -24,6 +24,16 @@ describe('command tree export', () => {
         const verbs = project.commands.map((c: any) => c.name());
         expect(verbs).toContain('deploy');
         expect(verbs).toContain('view');
+
+        const schedule = program.commands.find((c: any) => c.name() === 'schedule');
+        const scheduleVerbs = schedule.commands.map((c: any) => c.name());
+        expect(scheduleVerbs).toEqual(expect.arrayContaining(['set', 'list', 'enable', 'disable', 'reset', 'delete']));
+
+        const deploy = project.commands.find((c: any) => c.name() === 'deploy');
+        expect(deploy.options.map((o: any) => o.long)).toContain('--paused');
+
+        const scheduleSet = schedule.commands.find((c: any) => c.name() === 'set');
+        expect(scheduleSet.options.map((o: any) => o.long)).toContain('--paused');
     });
 
     it('exposes the program-level global option', () => {
