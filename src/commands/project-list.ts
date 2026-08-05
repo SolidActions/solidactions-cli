@@ -1,10 +1,33 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { renderTable } from '../utils/table';
+import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
 
 interface ProjectListOptions {
     json?: boolean;
+}
+
+interface EnvironmentDetail {
+    environment: string;
+    slug: string;
+    enabled: boolean;
+}
+
+function projectEnvironments(project: any): string {
+    const details: EnvironmentDetail[] | undefined = project.environment_details;
+    if (Array.isArray(details) && details.length > 0) {
+        return details
+            .map((detail) => `${detail.environment}:${detail.enabled ? 'on' : 'off'}`)
+            .join(', ');
+    }
+
+    return (project.environments || [project.environment || 'production']).join(', ');
+}
+
+function colorizeEnvironmentStates(value: string): string {
+    return value.replace(/\b(on|off)\b/g, (state) => (
+        state === 'on' ? chalk.green(state) : chalk.red(state)
+    ));
 }
 
 export async function projectList(options: ProjectListOptions = {}) {
@@ -31,18 +54,29 @@ export async function projectList(options: ProjectListOptions = {}) {
             return;
         }
 
-        const rows = projects.map((project: any) => {
-            const envs = (project.environments || [project.environment || 'production']).join(', ');
-            return [project.name || '?', project.status || '?', project.snapshot_name || '-', envs];
-        });
+        // Reconstruction below colorizes only the final ENVIRONMENTS cell. Use
+        // the renderer's exact sanitized/truncated value so adding ANSI color
+        // can never reintroduce discarded content or corrupt prefix slicing.
+        const environmentCells = projects.map((project: any) => (
+            truncateCell(sanitizeCell(projectEnvironments(project)))
+        ));
+        const rows = projects.map((project: any, index: number) => [
+            project.name || '?',
+            project.status || '?',
+            project.snapshot_name || '-',
+            environmentCells[index],
+        ]);
 
         const lines = renderTable(['NAME', 'STATUS', 'SNAPSHOT', 'ENVIRONMENTS'], rows, {
             minWidths: [25, 15, 30],
         });
         console.log(chalk.gray(lines[0]));
         console.log(chalk.gray(lines[1]));
-        for (const line of lines.slice(2)) {
-            console.log(line);
+        for (let index = 0; index < projects.length; index++) {
+            const line = lines[index + 2];
+            const environmentCell = environmentCells[index];
+            const prefix = line.slice(0, line.length - environmentCell.length);
+            console.log(prefix + colorizeEnvironmentStates(environmentCell));
         }
 
         console.log('');
