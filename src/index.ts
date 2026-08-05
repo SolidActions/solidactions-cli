@@ -22,6 +22,7 @@ import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
+import { scheduleDisable, scheduleEnable, scheduleReset } from './commands/schedule-state';
 import { webhookList } from './commands/webhook-list';
 import { webhookSecret } from './commands/webhook-secret';
 import { dev } from './commands/dev';
@@ -194,13 +195,12 @@ const project = program.command('project').description('Manage projects');
 project
     .command('view')
     .description('View project status and the client-reported deployed revision')
-    .argument('<project>', 'Exact project slug (or project family/name when --env is explicit)')
-    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .argument('<project>', 'Project family slug or name')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev). Defaults to dev.', 'dev')
     .addHelpText('after', `
-Without --env, <project> is used as an exact slug. With --env production it is
-used unchanged; staging/dev use the same "-<env>" suffix rule as deploy.
-Unlike historical commands such as \`run start\`, project view has no implicit
-dev environment default.`)
+Defaults to dev: <project> is normalized as a project family and "-dev" is
+appended. Use --env staging for the "-staging" target. Use --env production to
+pass the supplied production slug or name through unchanged.`)
     .action(async (projectName, options) => {
         await projectView(projectName, options);
     });
@@ -222,6 +222,7 @@ project
     .option('-e, --env <environment>', 'Target environment (production/staging/dev). Required on first deploy of a new project.')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
+    .option('--paused', 'Deploy with all YAML-declared schedules initially paused')
     .option('--no-cache', 'Force a fresh build, bypassing all build caches')
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .option(
@@ -298,8 +299,8 @@ workflow
     .addHelpText('after', `
 The environment defaults to dev. The project argument is normalized and dev or
 staging appends the corresponding "-<env>" suffix; production uses the base
-slug. This differs from \`project view\`, which treats its project argument as
-an exact slug when --env is omitted.`)
+slug. This matches \`project view\`, which also defaults to dev and normalizes
+its project argument the same way.`)
     .action(async (projectName, workflowName, options) => {
         await workflowView(projectName, workflowName, options);
     });
@@ -531,6 +532,8 @@ schedule
     .option('--workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
     .option('-z, --timezone <iana>', 'IANA timezone the cron is evaluated in (e.g. America/Chicago); defaults to UTC')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .option('--paused', 'Create or replace the schedule disabled')
     .option('-y, --yes', 'Skip confirmation if schedule already exists')
     .action((projectName, cron, options) => {
         scheduleSet(projectName, cron, options);
@@ -540,8 +543,39 @@ schedule
     .command('list')
     .description('List schedules for a project')
     .argument('<project>', 'Project name')
-    .action((projectName) => {
-        scheduleList(projectName);
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, options) => {
+        scheduleList(projectName, options);
+    });
+
+schedule
+    .command('enable')
+    .description('Enable a schedule with a sticky operator override')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleEnable(projectName, scheduleId, options);
+    });
+
+schedule
+    .command('disable')
+    .description('Disable a schedule with a sticky operator override')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleDisable(projectName, scheduleId, options);
+    });
+
+schedule
+    .command('reset')
+    .description('Return a schedule to its last declared YAML configuration')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleReset(projectName, scheduleId, options);
     });
 
 schedule
@@ -549,6 +583,7 @@ schedule
     .description('Delete a schedule')
     .argument('<project>', 'Project name')
     .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((projectName, scheduleId, options) => {
         scheduleDelete(projectName, scheduleId, options);

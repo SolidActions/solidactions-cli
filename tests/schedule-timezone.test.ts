@@ -8,6 +8,12 @@ describe('buildSchedulePayload', () => {
         expect(buildSchedulePayload('0 7 * * 1', {})).toEqual({ cron: '0 7 * * 1' });
     });
 
+    it('sends an explicit disabled target only for --paused', () => {
+        expect(buildSchedulePayload('0 7 * * 1', { paused: true })).toEqual({ cron: '0 7 * * 1', enabled: false });
+        expect(buildSchedulePayload('0 7 * * 1', { paused: false })).toEqual({ cron: '0 7 * * 1' });
+        expect(buildSchedulePayload('0 7 * * 1', {})).toEqual({ cron: '0 7 * * 1' });
+    });
+
     it('keeps workflow and input alongside timezone', () => {
         expect(buildSchedulePayload('0 7 * * 1', { workflow: 'report', timezone: 'UTC' }, { mode: 'weekly' }))
             .toEqual({ cron: '0 7 * * 1', workflow: 'report', input: { mode: 'weekly' }, timezone: 'UTC' });

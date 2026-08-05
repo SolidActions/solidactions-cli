@@ -151,7 +151,7 @@ describe('workflow view registration and resolution', () => {
         expect(result.stdout).toContain('--json');
         expect(result.stdout).toMatch(/defaults? to dev/i);
         expect(result.stdout).toMatch(/project view/i);
-        expect(result.stdout).toMatch(/exact slug/i);
+        expect(result.stdout).toMatch(/also defaults to dev/i);
     });
 
     it('appears in the generated command manifest with its arguments and flags', () => {
@@ -190,7 +190,7 @@ describe('workflow view registration and resolution', () => {
         expect(requests).toEqual([expect.objectContaining({ method: 'GET', url })]);
     });
 
-    it('keeps project view exact-slug behavior while workflow view defaults to dev', async () => {
+    it('matches project view dev-default behavior when workflow view defaults to dev', async () => {
         const workflow = await runCli(['workflow', 'view', 'billing', 'daily-report']);
         const project = await runCli(['project', 'view', 'billing']);
 
@@ -198,7 +198,7 @@ describe('workflow view registration and resolution', () => {
         expect(project.status).toBe(0);
         expect(requests.map((request) => request.url)).toEqual([
             '/api/v1/projects/billing-dev/workflows/daily-report',
-            '/api/v1/projects/billing?include=deployment',
+            '/api/v1/projects/billing-dev?include=deployment',
         ]);
     });
 });

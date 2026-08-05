@@ -169,19 +169,22 @@ Use `solidactions <command> --help` for full flag details on any command.
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
 | `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
-| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--no-git-metadata` | Deploy or sync config only |
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused |
 | `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
 | `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
-| `project view <project>` | `-e` | View status, `Enabled: on|off`, and client-reported deployed revision |
+| `project view <project>` | `-e` (default `dev`) | View status, `Enabled: on|off`, and client-reported deployed revision |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
 | `project list` | `--json` | List project families; environments render as `environment:on/off` |
 
-For `project view`, omitting `--env` treats `<project>` as an exact slug.
-Passing `--env production` uses the supplied production name/slug unchanged;
-`--env staging` and `--env dev` derive the same suffixed slug as deploy. This
-is deliberately different from historical commands such as `run start`,
-which default to dev.
+For `project view`, `<project>` is a project family slug or name and omitting
+`--env` targets dev (`billing` resolves to `billing-dev`). Use `--env production`
+to pass the supplied production name/slug unchanged; `--env staging` and
+`--env dev` derive the same suffixed slug as deploy.
+
+This changes exact-suffixed positional input: `project view billing-dev` now
+targets `billing-dev-dev`. Use `project view billing` for the dev target, or
+pass `--env production` when `billing-dev` is the legitimate production slug.
 
 Project enable/disable is an explicit, non-interactive operator action. It does
 not cascade to workflows or schedules, and deploy does not undo the manual
@@ -227,12 +230,17 @@ its project or schedule.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `schedule set <project> <cron>` | `--workflow`, `-i`, `-z`, `-y` | Set cron schedule and optional IANA timezone (warns if exists) |
-| `schedule list <project>` | | List schedules |
-| `schedule delete <project> <id>` | `-y` | Delete a schedule |
+| `schedule set <project> <cron>` | `--workflow`, `-i`, `-z`, `-e`, `--paused`, `-y` | Set cron schedule and optional IANA timezone (warns if exists) |
+| `schedule list <project>` | `-e` | List effective state and operator/YAML disagreement |
+| `schedule enable <project> <id>` | `-e` | Enable a schedule with a sticky override |
+| `schedule disable <project> <id>` | `-e` | Disable a schedule with a sticky override |
+| `schedule reset <project> <id>` | `-e` | Return a schedule to its last declared YAML state |
+| `schedule delete <project> <id>` | `-e`, `-y` | Delete a schedule |
 
 ```bash
 solidactions schedule set my-project '0 9 * * 1-5' --workflow daily-summary --timezone America/Chicago
+solidactions project deploy my-project -e production --paused
+solidactions schedule enable my-project 42 -e production
 ```
 
 ### webhook
