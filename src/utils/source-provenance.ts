@@ -27,6 +27,7 @@ export interface DeployAcceptance {
     deploymentId: string | null;
     sourceMetadata: SourceMetadata | null;
     sourceMetadataRejected: string | null;
+    schedulesPaused: boolean | null;
 }
 
 type Environment = Record<string, string | undefined>;
@@ -314,5 +315,8 @@ export function parseDeployAcceptance(data: unknown): DeployAcceptance {
         deploymentId: nullableString(body.deployment_id),
         sourceMetadata,
         sourceMetadataRejected: nullableString(body.source_metadata_rejected),
+        schedulesPaused: typeof body.schedules_paused === 'boolean'
+            ? body.schedules_paused
+            : null,
     };
 }

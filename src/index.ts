@@ -22,6 +22,7 @@ import { envSet } from './commands/env-set';
 import { scheduleSet } from './commands/schedule-set';
 import { scheduleList } from './commands/schedule-list';
 import { scheduleDelete } from './commands/schedule-delete';
+import { scheduleDisable, scheduleEnable, scheduleReset } from './commands/schedule-state';
 import { webhookList } from './commands/webhook-list';
 import { webhookSecret } from './commands/webhook-secret';
 import { dev } from './commands/dev';
@@ -220,6 +221,7 @@ project
     .option('-e, --env <environment>', 'Target environment (production/staging/dev). Required on first deploy of a new project.')
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
+    .option('--paused', 'Deploy with all YAML-declared schedules initially paused')
     .option('--no-cache', 'Force a fresh build, bypassing all build caches')
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .option(
@@ -513,6 +515,8 @@ schedule
     .option('--workflow <name>', 'Workflow name (if project has multiple)')
     .option('-i, --input <json>', 'JSON input to pass to scheduled runs')
     .option('-z, --timezone <iana>', 'IANA timezone the cron is evaluated in (e.g. America/Chicago); defaults to UTC')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .option('--paused', 'Create or replace the schedule disabled')
     .option('-y, --yes', 'Skip confirmation if schedule already exists')
     .action((projectName, cron, options) => {
         scheduleSet(projectName, cron, options);
@@ -522,8 +526,39 @@ schedule
     .command('list')
     .description('List schedules for a project')
     .argument('<project>', 'Project name')
-    .action((projectName) => {
-        scheduleList(projectName);
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, options) => {
+        scheduleList(projectName, options);
+    });
+
+schedule
+    .command('enable')
+    .description('Enable a schedule with a sticky operator override')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleEnable(projectName, scheduleId, options);
+    });
+
+schedule
+    .command('disable')
+    .description('Disable a schedule with a sticky operator override')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleDisable(projectName, scheduleId, options);
+    });
+
+schedule
+    .command('reset')
+    .description('Return a schedule to its last declared YAML configuration')
+    .argument('<project>', 'Project name')
+    .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .action((projectName, scheduleId, options) => {
+        scheduleReset(projectName, scheduleId, options);
     });
 
 schedule
@@ -531,6 +566,7 @@ schedule
     .description('Delete a schedule')
     .argument('<project>', 'Project name')
     .argument('<schedule-id>', 'Schedule ID')
+    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
     .option('-y, --yes', 'Skip confirmation prompt')
     .action((projectName, scheduleId, options) => {
         scheduleDelete(projectName, scheduleId, options);

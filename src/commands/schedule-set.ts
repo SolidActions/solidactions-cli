@@ -2,10 +2,20 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { projectSlugForView } from './project-view';
+
+export interface ScheduleSetOptions {
+    workflow?: string;
+    input?: string;
+    timezone?: string;
+    yes?: boolean;
+    paused?: boolean;
+    env?: string;
+}
 
 export function buildSchedulePayload(
     cron: string,
-    options: { workflow?: string; input?: string; timezone?: string },
+    options: Pick<ScheduleSetOptions, 'workflow' | 'input' | 'timezone' | 'paused'>,
     inputData?: Record<string, any>,
 ): Record<string, any> {
     const payload: Record<string, any> = { cron };
@@ -17,6 +27,9 @@ export function buildSchedulePayload(
     }
     if (options.timezone) {
         payload.timezone = options.timezone;
+    }
+    if (options.paused) {
+        payload.enabled = false;
     }
     return payload;
 }
@@ -39,8 +52,16 @@ export const EXISTING_SCHEDULE_CHOICES = [
     { title: 'Cancel', value: 'cancel' },
 ];
 
-export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; timezone?: string; yes?: boolean }) {
+export async function scheduleSet(projectName: string, cron: string, options: ScheduleSetOptions) {
     const config = await requireConfigWithWorkspace();
+    let projectSlug: string;
+    try {
+        projectSlug = projectSlugForView(projectName, options.env);
+    } catch (error: any) {
+        console.error(chalk.red(error.message));
+        process.exit(1);
+        return;
+    }
 
     // Parse input JSON if provided
     let inputData: Record<string, any> | undefined;
@@ -56,7 +77,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     // Check for existing schedule on the same workflow
     if (!options.yes) {
         try {
-            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/schedules`, {
+            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
                 headers: getApiHeaders(config),
             });
             const schedules = listResponse.data.data || listResponse.data || [];
@@ -94,7 +115,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     try {
         const payload = buildSchedulePayload(cron, options, inputData);
 
-        const response = await axios.post(`${config.host}/api/v1/projects/${projectName}/schedules`, payload, {
+        const response = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/schedules`, payload, {
             headers: getApiHeaders(config, 'application/json'),
         });
 
@@ -119,6 +140,9 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
         }
         if (inputData) {
             console.log(chalk.gray(`  Input: ${JSON.stringify(inputData)}`));
+        }
+        if (options.paused) {
+            console.log(chalk.gray('  Enabled: no (sticky override; survives redeploy)'));
         }
     } catch (error: any) {
         if (error.response) {

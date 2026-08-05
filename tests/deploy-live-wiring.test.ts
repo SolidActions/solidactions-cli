@@ -53,6 +53,8 @@ let port: number;
 let deployRequests: Array<{ body: string }> = [];
 let confirmationCallCount = 0;
 let mismatchesBeforeMatch = 0;
+let projectStatus = 'deployed';
+let acceptedSchedulesPaused: boolean | undefined = true;
 
 function confirmationBody(): unknown {
     return {
@@ -87,8 +89,13 @@ beforeAll(async () => {
 
             if (req.method === 'POST' && url.endsWith('/deploy')) {
                 deployRequests.push({ body });
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ deployment_id: 'dep-1' }));
+                res.writeHead(202, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    deployment_id: 'dep-1',
+                    ...(acceptedSchedulesPaused === undefined
+                        ? {}
+                        : { schedules_paused: acceptedSchedulesPaused }),
+                }));
                 return;
             }
             if (req.method === 'GET' && url.includes('include=deployment')) {
@@ -104,7 +111,7 @@ beforeAll(async () => {
                 // Shared by the pre-deploy existence check and every poll tick —
                 // only the poll reads `status`; the existence check reads `slug`.
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ slug: PROJECT_NAME, status: 'deployed' }));
+                res.end(JSON.stringify({ slug: PROJECT_NAME, status: projectStatus }));
                 return;
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -131,6 +138,8 @@ beforeEach(() => {
     sourceDirs = [];
     confirmationCallCount = 0;
     mismatchesBeforeMatch = 0;
+    projectStatus = 'deployed';
+    acceptedSchedulesPaused = true;
     process.env.SOLIDACTIONS_HOST = `http://127.0.0.1:${port}`;
     process.env.SOLIDACTIONS_API_KEY = 'test-key';
     process.env.SOLIDACTIONS_WORKSPACE_ID = 'workspace-1';
@@ -154,7 +163,7 @@ afterEach(() => {
  * deploy-plan-limit.test.ts's header comment). So completion must be
  * observed via the eventual process.exit() call, not via awaiting deploy().
  */
-async function runDeploy(options: { gitMetadata?: boolean } = {}): Promise<void> {
+async function runDeploy(options: { gitMetadata?: boolean; paused?: boolean } = {}): Promise<void> {
     const dir = makeSourceDir();
     sourceDirs.push(dir);
 
@@ -180,6 +189,69 @@ describe('deploy() live wiring — source provenance', () => {
 
         expect(deployRequests).toHaveLength(1);
         expect(deployRequests[0].body).not.toContain('name="source_metadata"');
+    }, 10_000);
+});
+
+describe('deploy() live wiring — paused schedules', () => {
+    it('sends the exact multipart paused=1 field and reports the pause only after deployed', async () => {
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+        try {
+            await runDeploy({ paused: true });
+        } finally {
+            console.log = originalLog;
+        }
+
+        expect(deployRequests).toHaveLength(1);
+        expect(deployRequests[0].body).toMatch(/name="paused"\r\n\r\n1\r\n/);
+        expect(logs.join('\n')).toContain('Schedules deployed paused');
+        expect(logs.join('\n')).toContain('solidactions schedule enable');
+        expect(logs.findIndex((line) => line.includes('Schedules deployed paused')))
+            .toBeGreaterThan(logs.findIndex((line) => line.includes('Deployed to')));
+    }, 10_000);
+
+    it('warns instead of claiming schedules are paused when the server does not acknowledge the flag', async () => {
+        acceptedSchedulesPaused = undefined;
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+        try {
+            await runDeploy({ paused: true });
+        } finally {
+            console.log = originalLog;
+        }
+
+        const output = logs.join('\n');
+        expect(output).not.toContain('Schedules deployed paused');
+        expect(output).toContain('server did not acknowledge paused schedules');
+        expect(output).toContain('verify schedules');
+    }, 10_000);
+
+    it('omits paused from ordinary deploys', async () => {
+        await runDeploy();
+
+        expect(deployRequests).toHaveLength(1);
+        expect(deployRequests[0].body).not.toContain('name="paused"');
+    }, 10_000);
+
+    it('never prints paused success copy when the build fails', async () => {
+        projectStatus = 'error';
+        const logs: string[] = [];
+        const errors: string[] = [];
+        const originalLog = console.log;
+        const originalError = console.error;
+        console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+        console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+        try {
+            await runDeploy({ paused: true });
+        } finally {
+            console.log = originalLog;
+            console.error = originalError;
+        }
+
+        expect(errors.join('\n')).toContain('Build Failed');
+        expect(logs.join('\n')).not.toContain('Schedules deployed paused');
     }, 10_000);
 });
 
