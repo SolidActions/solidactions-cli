@@ -1,5 +1,6 @@
 // src/utils/webhook-formatters.ts
 import chalk from 'chalk';
+import { workflowEffectiveState, type WorkflowEffectiveState } from './workflow-state';
 
 export interface WebhookRow {
     workflow_name?: string;
@@ -21,13 +22,10 @@ function columnWidth(min: number, values: string[]): number {
     return Math.max(min, ...values.map(v => v.length)) + 2;
 }
 
-export type WebhookState = 'retired' | 'off' | 'blocked (project off)' | 'on';
+export type WebhookState = WorkflowEffectiveState;
 
 export function webhookState(webhook: WebhookRow): WebhookState {
-    if (webhook.retired === true) return 'retired';
-    if (webhook.enabled === false) return 'off';
-    if (webhook.project_enabled === false) return 'blocked (project off)';
-    return 'on';
+    return workflowEffectiveState(webhook);
 }
 
 function colorizeState(state: WebhookState, width: number): string {
