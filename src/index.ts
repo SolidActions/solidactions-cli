@@ -194,13 +194,12 @@ const project = program.command('project').description('Manage projects');
 project
     .command('view')
     .description('View project status and the client-reported deployed revision')
-    .argument('<project>', 'Exact project slug (or project family/name when --env is explicit)')
-    .option('-e, --env <environment>', 'Resolve an explicit environment (production/staging/dev)')
+    .argument('<project>', 'Project family slug or name')
+    .option('-e, --env <environment>', 'Target environment (production/staging/dev). Defaults to dev.', 'dev')
     .addHelpText('after', `
-Without --env, <project> is used as an exact slug. With --env production it is
-used unchanged; staging/dev use the same "-<env>" suffix rule as deploy.
-Unlike historical commands such as \`run start\`, project view has no implicit
-dev environment default.`)
+Defaults to dev: <project> is normalized as a project family and "-dev" is
+appended. Use --env staging for the "-staging" target. Use --env production to
+pass the supplied production slug or name through unchanged.`)
     .action(async (projectName, options) => {
         await projectView(projectName, options);
     });

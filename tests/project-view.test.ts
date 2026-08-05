@@ -1,5 +1,5 @@
 import * as http from 'http';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     formatProjectView,
     projectSlugForView,
@@ -56,6 +56,10 @@ beforeEach(() => {
     };
 });
 
+afterEach(() => {
+    vi.restoreAllMocks();
+});
+
 function config(): Config {
     return {
         host: `http://127.0.0.1:${port}`,
@@ -65,12 +69,16 @@ function config(): Config {
 }
 
 describe('project slug resolution for view', () => {
-    it('treats the positional value as an exact slug when --env is absent', () => {
-        expect(projectSlugForView('Already-Exact_slug', undefined)).toBe('Already-Exact_slug');
+    it('passes through the exact project when the environment is omitted', () => {
+        // #970's six schedule commands share this helper and intentionally pass undefined;
+        // defaulting here would silently retarget their reads and writes to another project.
+        expect(projectSlugForView('Billing API', undefined)).toBe('Billing API');
+        expect(projectSlugForView('billing-dev', undefined)).toBe('billing-dev');
+        expect(projectSlugForView('!!!', undefined)).toBe('!!!');
     });
 
     it('uses the supplied production slug unchanged', () => {
-        expect(projectSlugForView('billing-api', 'production')).toBe('billing-api');
+        expect(projectSlugForView('Billing API', 'production')).toBe('Billing API');
     });
 
     it('derives staging and dev slugs with the deploy slug rule', () => {
@@ -81,6 +89,13 @@ describe('project slug resolution for view', () => {
     it('rejects unsupported explicit environments', () => {
         expect(() => projectSlugForView('billing', 'qa')).toThrow(/production.*staging.*dev/i);
     });
+
+    it.each(['dev', 'staging', 'production'])(
+        'rejects a project with no usable slug before resolving %s',
+        (environment) => {
+            expect(() => projectSlugForView('!!!', environment)).toThrow(/letter or number/i);
+        },
+    );
 });
 
 describe('project view request and rendering', () => {
@@ -92,15 +107,35 @@ describe('project view request and rendering', () => {
         expect(disabled.slice(0, 3)).toEqual(['Project: billing', 'Status: deployed', 'Enabled: off']);
     });
 
-    it('requests the exact slug with the bounded deployment include', async () => {
+    it('requests the default dev project with the bounded deployment include', async () => {
         const lines: string[] = [];
-        await projectViewWithConfig('billing-dev', {}, config(), (line) => lines.push(line));
+        await projectViewWithConfig('billing', {}, config(), (line) => lines.push(line));
 
         expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
         expect(lines.join('\n')).toContain('Status: deployed');
         expect(lines.join('\n')).toContain('abcdef123456');
         expect(lines.join('\n')).toContain('clean');
         expect(lines.join('\n')).toContain('Client-reported');
+    });
+
+    it('treats an exact-suffixed project as a family on the default-dev view surface', async () => {
+        await projectViewWithConfig('billing-dev', {}, config(), () => undefined);
+
+        expect(requests).toEqual(['/api/v1/projects/billing-dev-dev?include=deployment']);
+    });
+
+    it.each([
+        ['the default dev environment', {}],
+        ['explicit production', { env: 'production' }],
+    ])('rejects punctuation-only input before HTTP for %s', async (_label, options) => {
+        const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+        const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        await projectViewWithConfig('!!!', options, config());
+
+        expect(exit).toHaveBeenCalledWith(1);
+        expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/letter or number/i));
+        expect(requests).toEqual([]);
     });
 
     it('renders dirty as a prominent warning and preserves ordinary Unicode', () => {

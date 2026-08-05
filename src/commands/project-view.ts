@@ -2,7 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
-import { buildProjectSlug } from '../utils/slug';
+import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
     formatRevisionSummary,
     sanitizeDisplayText,
@@ -47,6 +47,10 @@ export function projectSlugForView(project: string, environment?: string): strin
 
     if (!['production', 'staging', 'dev'].includes(environment)) {
         throw new Error('Environment must be production, staging, or dev.');
+    }
+
+    if (slugifyName(project) === '') {
+        throw new Error('Project must contain at least one letter or number.');
     }
 
     return environment === 'production'
@@ -145,7 +149,7 @@ export async function projectViewWithConfig(
 ): Promise<void> {
     let slug: string;
     try {
-        slug = projectSlugForView(project, options.env);
+        slug = projectSlugForView(project, options.env ?? 'dev');
     } catch (error: any) {
         console.error(chalk.red(error.message));
         process.exit(1);
