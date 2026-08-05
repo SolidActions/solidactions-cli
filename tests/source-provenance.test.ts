@@ -403,16 +403,19 @@ describe('deploy provenance transport', () => {
             deployment_id: 'deployment-123',
             source_metadata: metadata,
             source_metadata_rejected: 'invalid_commit_sha',
+            schedules_paused: true,
         })).toEqual({
             deploymentId: 'deployment-123',
             sourceMetadata: metadata,
             sourceMetadataRejected: 'invalid_commit_sha',
+            schedulesPaused: true,
         });
 
         expect(parseDeployAcceptance({ message: 'queued' })).toEqual({
             deploymentId: null,
             sourceMetadata: null,
             sourceMetadataRejected: null,
+            schedulesPaused: null,
         });
     });
 });

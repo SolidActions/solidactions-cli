@@ -169,6 +169,8 @@ Use `solidactions <command> --help` for full flag details on any command.
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
 | `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused |
+| `project view <project>` | `-e` | View status and client-reported deployed revision |
 | `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--no-git-metadata` | Deploy or sync config only |
 | `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
 | `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
@@ -222,12 +224,17 @@ its project or schedule.
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `schedule set <project> <cron>` | `--workflow`, `-i`, `-z`, `-y` | Set cron schedule and optional IANA timezone (warns if exists) |
-| `schedule list <project>` | | List schedules |
-| `schedule delete <project> <id>` | `-y` | Delete a schedule |
+| `schedule set <project> <cron>` | `--workflow`, `-i`, `-z`, `-e`, `--paused`, `-y` | Set cron schedule and optional IANA timezone (warns if exists) |
+| `schedule list <project>` | `-e` | List effective state and operator/YAML disagreement |
+| `schedule enable <project> <id>` | `-e` | Enable a schedule with a sticky override |
+| `schedule disable <project> <id>` | `-e` | Disable a schedule with a sticky override |
+| `schedule reset <project> <id>` | `-e` | Return a schedule to its last declared YAML state |
+| `schedule delete <project> <id>` | `-e`, `-y` | Delete a schedule |
 
 ```bash
 solidactions schedule set my-project '0 9 * * 1-5' --workflow daily-summary --timezone America/Chicago
+solidactions project deploy my-project -e production --paused
+solidactions schedule enable my-project 42 -e production
 ```
 
 ### webhook

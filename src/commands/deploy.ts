@@ -140,6 +140,7 @@ interface DeployOptions {
     configOnly?: boolean;
     noCache?: boolean;
     gitMetadata?: boolean;
+    paused?: boolean;
 }
 
 export function projectStatusUrl(host: string, projectSlug: string): string {
@@ -638,6 +639,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
         try {
             const form = buildDeployForm(archivePath, sourceMetadata);
+            if (options.paused) {
+                form.append('paused', '1');
+            }
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
@@ -731,6 +735,18 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log('');
                             console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}${envFlag}\` to retrieve the generated secret.`));
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
+                        }
+
+                        if (options.paused) {
+                            console.log('');
+                            if (acceptedDeployment.schedulesPaused === true) {
+                                console.log(chalk.green('Schedules deployed paused.'));
+                                console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                            } else {
+                                console.log(chalk.yellow(
+                                    'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
+                                ));
+                            }
                         }
 
                         cleanupArchive();
