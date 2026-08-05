@@ -171,15 +171,34 @@ Use `solidactions <command> --help` for full flag details on any command.
 | `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
 | `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused |
 | `project view <project>` | `-e` | View status and client-reported deployed revision |
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--no-git-metadata` | Deploy or sync config only |
+| `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
+| `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
+| `project view <project>` | `-e` | View status, `Enabled: on|off`, and client-reported deployed revision |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
-| `project list` | | List all projects |
+| `project list` | `--json` | List project families; environments render as `environment:on/off` |
 
 For `project view`, omitting `--env` treats `<project>` as an exact slug.
 Passing `--env production` uses the supplied production name/slug unchanged;
 `--env staging` and `--env dev` derive the same suffixed slug as deploy. This
 is deliberately different from historical commands such as `run start`,
 which default to dev.
+
+Project enable/disable is an explicit, non-interactive operator action. It does
+not cascade to workflows or schedules, and deploy does not undo the manual
+state.
+
+### workflow
+
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `workflow enable <project> <workflow>` | `-e` (default `dev`) | Enable the workflow gate; direct starts still require the project, and scheduled starts also require the schedule |
+| `workflow disable <project> <workflow>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
+
+Workflow enable/disable accepts a workflow name or slug and does not prompt.
+The manual state is sticky across deploys; enabling a workflow does not enable
+its project or schedule.
 
 ### run
 
@@ -222,7 +241,7 @@ solidactions schedule enable my-project 42 -e production
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `webhook list <project>` | `-e`, `--show-secrets` | List webhook URLs |
+| `webhook list <project>` | `-e`, `--format table|json`, `--show-secrets` | List webhook URLs and state: `retired`, `off`, `blocked (project off)`, or `on` |
 
 ### skill
 

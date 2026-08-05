@@ -30,6 +30,7 @@ export interface ProjectDeploymentDetail {
     slug?: string;
     name?: string;
     status?: string;
+    enabled?: boolean;
     deployed_hash?: string | null;
     deployment_matches_deployed_hash?: boolean;
     latest_successful_deployment?: DeploymentDetail | null;
@@ -117,6 +118,9 @@ export function formatProjectView(project: ProjectDeploymentDetail): string[] {
     const slug = sanitizeDisplayText(project.slug ?? project.name, 255) ?? 'unknown';
     const status = sanitizeDisplayText(project.status, 64) ?? 'unknown';
     const lines = [`Project: ${slug}`, `Status: ${status}`];
+    if (typeof project.enabled === 'boolean') {
+        lines.push(`Enabled: ${project.enabled ? 'on' : 'off'}`);
+    }
     const deployment = project.latest_successful_deployment ?? null;
 
     if (!project.deployed_hash && !deployment) {

@@ -18,6 +18,10 @@
 6. **Verb canon = `view`** for "show one"; migrate `oauth-actions show` → `view`. *(Executed in #84 — see the conformance table below.)*
 7. **Hot-path promotion** to bare top-level is limited to unambiguous actions (`deploy`, `dev`); `push`/`pull`/`list` stay noun-scoped.
 8. **Verbs come in families; each noun declares its family** — file-sync (`push`/`pull`), content-CRUD (`create`/`edit`/`delete`/`list`/`view`), execution-lifecycle (`start`/`invoke`/…), KV-upsert (`set`, e.g. `env`). "Full CRUD" is not "bolt create/edit/delete onto everything."
+9. **Activation-lifecycle uses `enable` / `disable`.** These verbs gate whether
+   an executable resource admits new work without deleting its configuration.
+   They are distinct from content CRUD and from execution-lifecycle verbs that
+   start or invoke one individual run.
 
 ### Deferred
 

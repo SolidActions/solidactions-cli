@@ -4,6 +4,10 @@ import { describe, expect, it } from 'vitest';
 import { SOLIDACTIONS_SKILL_NAMES } from '../src/utils/skills';
 
 const README = fs.readFileSync(path.resolve(__dirname, '../README.md'), 'utf8');
+const COMMAND_TAXONOMY = fs.readFileSync(
+    path.resolve(__dirname, '../docs/decisions/0001-cli-command-taxonomy.md'),
+    'utf8',
+);
 
 describe('public README setup contract', () => {
     it('uses the secret-safe current login, deploy, and run commands', () => {
@@ -28,5 +32,18 @@ describe('public README setup contract', () => {
         for (const skillName of SOLIDACTIONS_SKILL_NAMES) {
             expect(README).toContain(`\`${skillName}\``);
         }
+    });
+
+    it('documents activation lifecycle commands and state visibility', () => {
+        expect(README).toContain('project enable <project>');
+        expect(README).toContain('project disable <project>');
+        expect(README).toContain('workflow enable <project> <workflow>');
+        expect(README).toContain('workflow disable <project> <workflow>');
+        expect(README).toContain('environment:on/off');
+        expect(README).toContain('Enabled: on|off');
+        expect(README).toContain('blocked (project off)');
+
+        expect(COMMAND_TAXONOMY).toMatch(/activation-lifecycle/i);
+        expect(COMMAND_TAXONOMY).toMatch(/`enable`\s*\/\s*`disable`/);
     });
 });

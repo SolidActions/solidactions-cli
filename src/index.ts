@@ -50,6 +50,12 @@ import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
 import { crewEnvDelete } from './commands/crew-env-delete';
 import { crewEnvPush } from './commands/crew-env-push';
+import {
+    projectDisable,
+    projectEnable,
+    workflowDisable,
+    workflowEnable,
+} from './commands/state';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -257,6 +263,50 @@ project
     .option('--json', 'Output as JSON')
     .action((options) => {
         projectList(options);
+    });
+
+project
+    .command('enable')
+    .description('Allow new workflow starts for a project environment')
+    .argument('<project>', 'Project name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev). Defaults to dev.', 'dev')
+    .action(async (projectName, options) => {
+        await projectEnable(projectName, options);
+    });
+
+project
+    .command('disable')
+    .description('Block new workflow starts for a project environment')
+    .argument('<project>', 'Project name')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev). Defaults to dev.', 'dev')
+    .action(async (projectName, options) => {
+        await projectDisable(projectName, options);
+    });
+
+// =============================================================================
+// workflow <subcommand>
+// =============================================================================
+
+const workflow = program.command('workflow').description('Manage deployed workflows');
+
+workflow
+    .command('enable')
+    .description('Allow new starts for a deployed workflow')
+    .argument('<project>', 'Project name')
+    .argument('<workflow>', 'Workflow name or slug')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev). Defaults to dev.', 'dev')
+    .action(async (projectName, workflowName, options) => {
+        await workflowEnable(projectName, workflowName, options);
+    });
+
+workflow
+    .command('disable')
+    .description('Block new starts for a deployed workflow')
+    .argument('<project>', 'Project name')
+    .argument('<workflow>', 'Workflow name or slug')
+    .option('-e, --env <environment>', 'Environment (production/staging/dev). Defaults to dev.', 'dev')
+    .action(async (projectName, workflowName, options) => {
+        await workflowDisable(projectName, workflowName, options);
     });
 
 // =============================================================================
