@@ -101,22 +101,24 @@ interface DeployOptions {
 /**
  * Push YAML env declarations to the project.
  * This registers all YAML-declared vars and their mappings.
+ *
+ * Always POSTs, even when `parsedVars` is empty: the endpoint prunes stale
+ * mappings on an explicit `declarations: []`, so removing the last YAML env
+ * declaration must still reach it (spec #1127 §4B).
  */
-async function pushYamlDeclarations(
+export async function pushYamlDeclarations(
     config: { host: string; apiKey: string; workspaceId?: string },
     projectSlug: string,
     yamlConfig: SolidActionsConfig
 ): Promise<void> {
     const parsedVars = parseYamlEnvVars(yamlConfig);
-    if (parsedVars.length === 0) {
-        return;
-    }
 
     // Build the declarations array
     const declarations = parsedVars.map(v => ({
         env_name: v.key,
         yaml_default_global_key: v.mappedTo,
         yaml_default_oauth_name: v.oauthName,
+        yaml_default_database_name: v.databaseName,
         source: 'yaml' as const,
     }));
 
