@@ -187,6 +187,82 @@ program
     });
 
 // =============================================================================
+// database <subcommand>
+// =============================================================================
+
+// Register the complete public surface up front so help and the generated
+// command manifest stay authoritative while handlers land in focused slices.
+const database = program.command('database').description('Manage workspace databases');
+
+database
+    .command('list')
+    .description('List workspace databases')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('create')
+    .description('Create a workspace database')
+    .argument('<name>', 'Database name')
+    .option('--from <file.sql>', 'Import a SQL file after creation')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('delete')
+    .description('Delete a workspace database')
+    .argument('<name>', 'Database name')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('undelete')
+    .description('Restore a deleted workspace database')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('schema')
+    .description('Show a database schema')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('query')
+    .description('Run a read-only SQL query')
+    .argument('<name>', 'Database name')
+    .argument('<sql>', 'SQL query')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('exec')
+    .description('Execute a SQL statement')
+    .argument('<name>', 'Database name')
+    .argument('<sql>', 'SQL statement')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON');
+
+database
+    .command('dump')
+    .description('Download a database SQL dump')
+    .argument('<name>', 'Database name')
+    .argument('[file]', 'Destination file')
+    .option('-y, --yes', 'Overwrite without confirmation');
+
+database
+    .command('pull')
+    .description('Pull a database into a local file')
+    .argument('<name>', 'Database name')
+    .argument('[path]', 'Destination path')
+    .option('-y, --yes', 'Overwrite without confirmation')
+    .option('--writable', 'Open a foreground writable session');
+
+database
+    .command('import')
+    .description('Import a SQL file into a database')
+    .argument('<name>', 'Database name')
+    .argument('<file.sql>', 'SQL file')
+    .option('-y, --yes', 'Skip confirmation');
+
+// =============================================================================
 // project <subcommand>
 // =============================================================================
 

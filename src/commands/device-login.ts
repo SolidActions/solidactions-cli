@@ -16,7 +16,7 @@ const CLI_OAUTH_CLIENT_ID = '9f1b6e2a-9c1e-4b6e-8f0a-6c9f2b1e7d4c';
 
 // CLI capability scopes requested at device-code issuance — the server
 // rejects any scope not pre-registered via Passport::tokensCan().
-const CLI_SCOPES = 'env deploy runs docs';
+const CLI_SCOPES = 'env deploy runs docs databases';
 
 interface DeviceCodeResponse {
     device_code: string;
