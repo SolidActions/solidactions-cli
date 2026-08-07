@@ -285,6 +285,87 @@ describe('database direct-client lifecycle', () => {
         expect(close).toHaveBeenCalledOnce();
     });
 
+    it('maps a close-only rejection to a safe generic error without leaking cleanup details', async () => {
+        const withDatabaseClient = await requireExport('withDatabaseClient');
+        const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const close = vi.fn(async () => {
+            throw new Error(`close failed for ${ACCESS.url} using ${ACCESS.token}`);
+        });
+        let caught: any;
+        let renderedOutput = '';
+
+        try {
+            await withDatabaseClient(
+                APP_CONFIG,
+                'analytics',
+                'read',
+                async () => 'operation-completed',
+                dependencies({
+                    loadClient: async () => ({ createClient: () => ({ close }) }),
+                }),
+            );
+        } catch (error) {
+            caught = error;
+        } finally {
+            renderedOutput = [
+                ...stdout.mock.calls.flat(),
+                ...stderr.mock.calls.flat(),
+            ].map(String).join('\n');
+            stdout.mockRestore();
+            stderr.mockRestore();
+        }
+
+        expect(close).toHaveBeenCalledOnce();
+        expect({ code: caught?.code, message: caught?.message }).toEqual({
+            code: 'upstream_unavailable',
+            message: 'Database operation failed.',
+        });
+
+        const serializedFailure = JSON.stringify(caught);
+        for (const sentinel of [ACCESS.url, 'physical-db.sentinel.invalid', ACCESS.token]) {
+            expect(renderedOutput).not.toContain(sentinel);
+            expect(String(caught)).not.toContain(sentinel);
+            expect(serializedFailure).not.toContain(sentinel);
+        }
+    });
+
+    it('keeps the primary safe operation failure when close also throws', async () => {
+        const withDatabaseClient = await requireExport('withDatabaseClient');
+        const close = vi.fn(async () => {
+            throw new Error(`CLOSE_FAILURE_SENTINEL ${ACCESS.url} ${ACCESS.token}`);
+        });
+        let caught: any;
+
+        try {
+            await withDatabaseClient(
+                APP_CONFIG,
+                'analytics',
+                'read',
+                async () => {
+                    throw new Error(`PRIMARY_FAILURE_SENTINEL ${ACCESS.url} ${ACCESS.token}`);
+                },
+                dependencies({
+                    loadClient: async () => ({ createClient: () => ({ close }) }),
+                }),
+            );
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(close).toHaveBeenCalledOnce();
+        expect({ code: caught?.code, message: caught?.message }).toEqual({
+            code: 'upstream_unavailable',
+            message: 'Database operation failed.',
+        });
+
+        const renderedFailure = `${String(caught)}\n${JSON.stringify(caught)}`;
+        expect(renderedFailure).not.toContain('PRIMARY_FAILURE_SENTINEL');
+        expect(renderedFailure).not.toContain('CLOSE_FAILURE_SENTINEL');
+        expect(renderedFailure).not.toContain(ACCESS.url);
+        expect(renderedFailure).not.toContain(ACCESS.token);
+    });
+
     it.each(['connect', 'query', 'sync'])('closes the client after a %s failure', async (phase) => {
         const withDatabaseClient = await requireExport('withDatabaseClient');
         const close = vi.fn();
@@ -318,6 +399,22 @@ describe('database result normalization', () => {
         expect(formatDatabaseTableValue(blob)).toBe('<blob 3 bytes>');
         expect(normalizeDatabaseValue(null)).toBeNull();
         expect(formatDatabaseTableValue(null)).toBe('NULL');
+    });
+
+    it('normalizes Buffer and offset views without encoding unrelated backing bytes', async () => {
+        const normalizeDatabaseValue = await requireExport('normalizeDatabaseValue');
+        const formatDatabaseTableValue = await requireExport('formatDatabaseTableValue');
+        const buffer = Buffer.from([0x00, 0xff, 0x10]);
+        const backing = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+        const dataView = new DataView(backing.buffer, 1, 3);
+        const slicedView = new Uint8Array(backing.buffer, 2, 2);
+
+        expect(normalizeDatabaseValue(buffer)).toEqual({ base64: 'AP8Q' });
+        expect(formatDatabaseTableValue(buffer)).toBe('<blob 3 bytes>');
+        expect(normalizeDatabaseValue(dataView)).toEqual({ base64: 'u8zd' });
+        expect(formatDatabaseTableValue(dataView)).toBe('<blob 3 bytes>');
+        expect(normalizeDatabaseValue(slicedView)).toEqual({ base64: 'zN0=' });
+        expect(formatDatabaseTableValue(slicedView)).toBe('<blob 2 bytes>');
     });
 });
 
