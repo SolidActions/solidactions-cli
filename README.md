@@ -165,7 +165,7 @@ env:
 ```
 
 - A global key, an `oauth:` name, and a `database:` name are **mutually exclusive**: bind each variable to exactly one. The platform enforces that server-side (HTTP 422), but do not rely on seeing that error: through CLI v3.6.0 the YAML parser keeps only the first form it recognizes — `oauth:` beats `database:` — so a declaration carrying both deploys silently as the wrong binding instead of failing.
-- `project deploy` (including `--config-only`) syncs the *complete* `env:` list to the server on every run. Any previously YAML-sourced mapping whose name no longer appears in the list is deleted — removing or emptying `env:` prunes those mappings on the next deploy. Mappings configured manually via `env set`/`env map` are not YAML-sourced and are unaffected.
+- `project deploy` (including `--config-only`) syncs the *complete* `env:` list to the server on every run. Any previously YAML-sourced mapping whose name no longer appears in the list is deleted — removing or emptying `env:` prunes those mappings on the next deploy. Only mappings that were never YAML-declared survive: overriding a YAML-declared variable with `env set`/`env map` doesn't change its provenance, so removing its declaration still deletes the mapping.
 - For a `database:` entry, the workflow receives a `DatabaseVar` at `ctx.vars.<NAME>` at runtime, typically wrapped with the SDK's `createDatabaseClient()`. See the SDK reference's [Workspace Databases](https://github.com/SolidActions/solidactions-ts-sdk/blob/main/docs/sdk-reference.md#workspace-databases) section for details.
 
 ## Commands
