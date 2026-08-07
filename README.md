@@ -150,6 +150,24 @@ revision after the build. Use `--no-git-metadata` or
 `SOLIDACTIONS_NO_GIT_METADATA=1` to opt out. Deploying a non-Git directory
 continues normally without revision metadata.
 
+### Env declarations (`solidactions.yaml`)
+
+Declare the variables a workflow needs with an `env:` list in `solidactions.yaml`. Each entry uses one of four forms:
+
+```yaml
+env:
+  - LOG_LEVEL                    # plain: declared only, configure with `env set`
+  - API_KEY: SHARED_API_KEY      # global mapping: defaults to a workspace global variable
+  - GCAL_TOKEN:
+      oauth: "Google Calendar"   # defaults to a workspace OAuth connection
+  - ANALYTICS_DB:
+      database: "analytics"      # defaults to a workspace database
+```
+
+- A global key, an `oauth:` name, and a `database:` name are **mutually exclusive** — combining more than one on the same entry is rejected on deploy.
+- `project deploy` (including `--config-only`) syncs the *complete* `env:` list to the server on every run. Any previously YAML-sourced mapping whose name no longer appears in the list is deleted — removing or emptying `env:` prunes those mappings on the next deploy. Mappings configured manually via `env set`/`env map` are not YAML-sourced and are unaffected.
+- For a `database:` entry, the workflow receives a `DatabaseVar` at `ctx.vars.<NAME>` at runtime, typically wrapped with the SDK's `createDatabaseClient()`. See the SDK reference's [Workspace Databases](https://github.com/SolidActions/solidactions-ts-sdk/blob/main/docs/sdk-reference.md#workspace-databases) section for details.
+
 ## Commands
 
 Use `solidactions <command> --help` for full flag details on any command.
