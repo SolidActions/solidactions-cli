@@ -7,6 +7,10 @@
  *      explicit empty array, and the CLI used to skip the request entirely
  *      on an empty parsed list, so removing the last YAML database
  *      declaration never reached the endpoint's prune (round-7 spec fix).
+ *   3. (PM round #1127 finding 14) throw on a failed sync instead of
+ *      swallowing the error internally — deploy() call sites must be able
+ *      to see the failure and report it, rather than the request silently
+ *      failing while the CLI reports success.
  *
  * Test-double policy: a real in-process HTTP server (Node's http.createServer)
  * captures the POST body. No mock/spy/stub libraries — matches the pattern
@@ -27,6 +31,11 @@ beforeAll(async () => {
         req.on('data', (chunk) => { raw += chunk; });
         req.on('end', () => {
             lastRequest = { path: req.url ?? '', body: raw ? JSON.parse(raw) : null };
+            if (req.url?.includes('/projects/fail-project/')) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ message: 'Sync target unreachable.' }));
+                return;
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ message: 'YAML declarations synced.' }));
         });
@@ -93,5 +102,13 @@ describe('pushYamlDeclarations: empty declaration list still POSTs [] (round-7 s
 
         expect(lastRequest).not.toBeNull();
         expect(lastRequest?.body).toEqual({ declarations: [] });
+    });
+});
+
+describe('pushYamlDeclarations: a failed sync throws instead of being swallowed (PM round #1127 finding 14)', () => {
+    it('rejects when the server responds with a non-2xx status, instead of resolving silently', async () => {
+        const yamlConfig: SolidActionsConfig = { workflows: [], env: [] };
+
+        await expect(pushYamlDeclarations(config(), 'fail-project', yamlConfig)).rejects.toThrow();
     });
 });
