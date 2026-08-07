@@ -192,6 +192,63 @@ describe('database lifecycle control-plane contract', () => {
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
         expect(test.stderr).toEqual([]);
     });
+
+    it.each([
+        {
+            label: 'create',
+            exportName: 'databaseCreateWithConfig',
+            name: 'Analytics',
+            options: {},
+            response: { database: ACTIVE },
+            operation: 'create',
+            success: /creat/i,
+            requiredValues: ['Analytics', 'ready'],
+        },
+        {
+            label: 'delete',
+            exportName: 'databaseDeleteWithConfig',
+            name: 'Retired',
+            options: { yes: true },
+            response: { database: DELETED },
+            operation: 'delete',
+            success: /delet/i,
+            requiredValues: ['Retired', 'ready', DELETED.deleted_at, DELETED.purge_at],
+        },
+        {
+            label: 'undelete',
+            exportName: 'databaseUndeleteWithConfig',
+            name: 'Analytics',
+            options: {},
+            response: { database: ACTIVE },
+            operation: 'undelete',
+            success: /restor|undelet/i,
+            requiredValues: ['Analytics', 'ready'],
+        },
+    ])('renders safe, operation-appropriate human output for $label', async (scenario) => {
+        const handler = await requireExport(scenario.exportName);
+        const response = {
+            ...scenario.response,
+            transport_debug: 'RAW_AXIOS_TRANSPORT_SENTINEL',
+            token: 'SUCCESS_RESPONSE_CREDENTIAL_SENTINEL',
+        };
+        const test = harness(response);
+
+        await handler(scenario.name, scenario.options, CONFIG, test.dependencies);
+
+        expect(test.calls).toHaveLength(1);
+        expectControlPost(test.calls[0], { operation: scenario.operation, name: scenario.name });
+        const output = test.stdout.join('\n');
+        expect(output).toMatch(scenario.success);
+        for (const value of scenario.requiredValues) {
+            expect(output).toContain(value);
+        }
+        expect(() => JSON.parse(output)).toThrow();
+        expect(output).not.toMatch(/\u001b\[/);
+        expect(output).not.toContain(CONFIG.apiKey);
+        expect(output).not.toContain('RAW_AXIOS_TRANSPORT_SENTINEL');
+        expect(output).not.toContain('SUCCESS_RESPONSE_CREDENTIAL_SENTINEL');
+        expect(test.stderr).toEqual([]);
+    });
 });
 
 describe('database delete confirmation safety', () => {
@@ -219,6 +276,7 @@ describe('database delete confirmation safety', () => {
 
         expect(test.calls).toEqual([]);
         expect(test.stdout.join('\n')).toMatch(/cancelled/i);
+        expect(test.stderr).toEqual([]);
     });
 
     it('refuses non-interactive deletion without --yes and performs no POST', async () => {
