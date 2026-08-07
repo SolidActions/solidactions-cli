@@ -93,12 +93,27 @@ describe('database access control-plane request', () => {
     it('retains stable product codes and messages returned by the app', async () => {
         const requestDatabaseAccess = await requireExport('requestDatabaseAccess');
         const appError: any = new Error('Request failed with status 409');
+        appError.config = {
+            url: `${APP_CONFIG.host}/api/v1/databases`,
+            method: 'post',
+            headers: {
+                Authorization: `Bearer ${APP_CONFIG.apiKey}`,
+                'X-Request-Metadata': 'CONTROL_REQUEST_SENTINEL',
+            },
+        };
+        appError.request = {
+            socket: 'CONTROL_REQUEST_SENTINEL',
+            authorization: `Bearer ${APP_CONFIG.apiKey}`,
+        };
+        appError.cause = new Error(`transport cause contained ${APP_CONFIG.apiKey}`);
         appError.response = {
             status: 409,
             data: {
                 code: 'read_only_mode',
                 message: 'Database writes are temporarily unavailable for this workspace.',
             },
+            config: appError.config,
+            request: appError.request,
         };
 
         let caught: any;
@@ -113,7 +128,17 @@ describe('database access control-plane request', () => {
         expect(caught).toMatchObject({
             code: 'read_only_mode',
             message: 'Database writes are temporarily unavailable for this workspace.',
+            status: 409,
         });
+        expect(caught).not.toHaveProperty('config');
+        expect(caught).not.toHaveProperty('request');
+        expect(caught).not.toHaveProperty('response');
+        expect(caught).not.toHaveProperty('cause');
+
+        const publicFailure = JSON.stringify(caught);
+        expect(String(caught)).not.toContain(APP_CONFIG.apiKey);
+        expect(publicFailure).not.toContain(APP_CONFIG.apiKey);
+        expect(publicFailure).not.toContain('CONTROL_REQUEST_SENTINEL');
     });
 });
 
@@ -187,6 +212,60 @@ describe('database direct-client lifecycle', () => {
         )).rejects.toMatchObject({ code: 'database_client_unsupported' });
 
         expect(mintCount).toBe(0);
+    });
+
+    it('scrubs a direct-client constructor failure after mint without claiming a close', async () => {
+        const withDatabaseClient = await requireExport('withDatabaseClient');
+        const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const events: string[] = [];
+        let caught: any;
+        let renderedOutput = '';
+
+        try {
+            await withDatabaseClient(
+                APP_CONFIG,
+                'analytics',
+                'read',
+                async () => undefined,
+                dependencies({
+                    loadClient: async () => ({
+                        createClient: () => {
+                            events.push('create');
+                            throw new Error(
+                                `connect failed for ${ACCESS.url} on physical-db.sentinel.invalid using ${ACCESS.token}`,
+                            );
+                        },
+                    }),
+                    post: async () => {
+                        events.push('mint');
+                        return { data: ACCESS };
+                    },
+                }),
+            );
+        } catch (error) {
+            caught = error;
+        } finally {
+            renderedOutput = [
+                ...stdout.mock.calls.flat(),
+                ...stderr.mock.calls.flat(),
+            ].map(String).join('\n');
+            stdout.mockRestore();
+            stderr.mockRestore();
+        }
+
+        expect(events).toEqual(['mint', 'create']);
+        expect({ code: caught?.code, message: caught?.message }).toEqual({
+            code: 'upstream_unavailable',
+            message: 'Database operation failed.',
+        });
+
+        const serializedFailure = JSON.stringify(caught);
+        for (const sentinel of [ACCESS.url, 'physical-db.sentinel.invalid', ACCESS.token]) {
+            expect(renderedOutput).not.toContain(sentinel);
+            expect(String(caught)).not.toContain(sentinel);
+            expect(serializedFailure).not.toContain(sentinel);
+        }
     });
 
     it('closes the client in finally after success', async () => {
