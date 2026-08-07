@@ -12,13 +12,14 @@ export interface ParsedEnvVar {
     key: string;
     mappedTo: string | null;
     oauthName: string | null;
+    databaseName: string | null;
 }
 
 export interface SolidActionsConfig {
     /** Project name declared at the top of solidactions.yaml (e.g. "sdk-test"). */
     project?: string;
     workflows: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
-    env?: (string | { [key: string]: string | { oauth: string } })[];
+    env?: (string | { [key: string]: string | { oauth: string } | { database: string } })[];
     deploy?: {
         exclude?: string[];
         gitignore?: boolean;
@@ -68,8 +69,10 @@ export function parseEnvFile(filePath: string): Map<string, string> {
 /**
  * Parse YAML env declarations into structured format.
  * Handles the new simplified format:
- *   - VAR_NAME           -> { key: "VAR_NAME", mappedTo: null }
- *   - VAR_NAME: GLOBAL   -> { key: "VAR_NAME", mappedTo: "GLOBAL" }
+ *   - VAR_NAME                     -> { key: "VAR_NAME", mappedTo: null }
+ *   - VAR_NAME: GLOBAL              -> { key: "VAR_NAME", mappedTo: "GLOBAL" }
+ *   - VAR_NAME:\n    oauth: "Name"    -> { key: "VAR_NAME", oauthName: "Name" }
+ *   - VAR_NAME:\n    database: "Name" -> { key: "VAR_NAME", databaseName: "Name" }
  */
 export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
     const parsedVars: ParsedEnvVar[] = [];
@@ -81,9 +84,10 @@ export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
     for (const item of config.env) {
         if (typeof item === 'string') {
             // Simple string: - VAR_NAME (declared only, needs configuration)
-            parsedVars.push({ key: item, mappedTo: null, oauthName: null });
+            parsedVars.push({ key: item, mappedTo: null, oauthName: null, databaseName: null });
         } else if (typeof item === 'object' && item !== null) {
-            // Object: - VAR_NAME: GLOBAL_NAME or - VAR_NAME: { oauth: connection-name }
+            // Object: - VAR_NAME: GLOBAL_NAME, - VAR_NAME: { oauth: connection-name },
+            // or - VAR_NAME: { database: database-name }
             const keys = Object.keys(item);
             if (keys.length === 1) {
                 const key = keys[0];
@@ -92,9 +96,14 @@ export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
                     if (typeof value.oauth !== 'string' || !value.oauth) {
                         throw new Error(`Invalid env config for ${key}: 'oauth' must be a non-empty string`);
                     }
-                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth });
+                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth, databaseName: null });
+                } else if (typeof value === 'object' && value !== null && 'database' in value) {
+                    if (typeof value.database !== 'string' || !value.database) {
+                        throw new Error(`Invalid env config for ${key}: 'database' must be a non-empty string`);
+                    }
+                    parsedVars.push({ key, mappedTo: null, oauthName: null, databaseName: value.database });
                 } else {
-                    parsedVars.push({ key, mappedTo: value || null, oauthName: null });
+                    parsedVars.push({ key, mappedTo: value || null, oauthName: null, databaseName: null });
                 }
             }
         }

@@ -266,37 +266,39 @@ export function safeCollectSourceMetadata(
 /**
  * Push YAML env declarations to the project.
  * This registers all YAML-declared vars and their mappings.
+ *
+ * Always POSTs, even when `parsedVars` is empty: the endpoint prunes stale
+ * mappings on an explicit `declarations: []`, so removing the last YAML env
+ * declaration must still reach it (spec #1127 §4B).
+ *
+ * Throws the raw axios error on failure — callers decide how to handle it
+ * (PM round #1127 finding 14: a failed sync must never be reported as
+ * success by the caller).
  */
-async function pushYamlDeclarations(
+export async function pushYamlDeclarations(
     config: { host: string; apiKey: string; workspaceId?: string },
     projectSlug: string,
     yamlConfig: SolidActionsConfig
 ): Promise<void> {
     const parsedVars = parseYamlEnvVars(yamlConfig);
-    if (parsedVars.length === 0) {
-        return;
-    }
 
     // Build the declarations array
     const declarations = parsedVars.map(v => ({
         env_name: v.key,
         yaml_default_global_key: v.mappedTo,
         yaml_default_oauth_name: v.oauthName,
+        yaml_default_database_name: v.databaseName,
         source: 'yaml' as const,
     }));
 
-    try {
-        await axios.post(
-            `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
-            { declarations },
-            {
-                headers: getApiHeaders(config, 'application/json'),
-            }
-        );
-        console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations`));
-    } catch (error: any) {
-        console.error(chalk.yellow('Warning: Failed to sync YAML declarations:'), error.response?.data?.message || error.message);
-    }
+    await axios.post(
+        `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
+        { declarations },
+        {
+            headers: getApiHeaders(config, 'application/json'),
+        }
+    );
+    console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations`));
 }
 
 /**
@@ -584,7 +586,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             process.exit(1);
         }
 
-        await pushYamlDeclarations(config, projectSlug, yamlConfig);
+        try {
+            await pushYamlDeclarations(config, projectSlug, yamlConfig);
+        } catch (error: any) {
+            console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+            process.exit(1);
+        }
         console.log(chalk.green(`✓ Config synced for ${projectSlug}${envLabel}`));
         return;
     }
@@ -727,7 +734,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
                         // Always sync YAML declarations (registers variables and their mappings)
                         if (yamlConfig) {
-                            await pushYamlDeclarations(config, projectSlug, yamlConfig);
+                            try {
+                                await pushYamlDeclarations(config, projectSlug, yamlConfig);
+                            } catch (error: any) {
+                                console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                                cleanupArchive();
+                                process.exit(1);
+                            }
                         }
 
                         if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
