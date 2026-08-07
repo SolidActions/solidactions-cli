@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
 
 interface RunListOptions {
     limit?: number;
@@ -11,25 +12,36 @@ interface RunListOptions {
     detailed?: boolean;
     hasErrors?: boolean;
     json?: boolean;
+    environment?: string;
+}
+
+/**
+ * Build the params object for GET /api/v1/runs.
+ * Extracted as a pure function so it can be unit-tested without mocking axios.
+ */
+export function buildRunListParams(projectName?: string, options: RunListOptions = {}): Record<string, any> {
+    const defaultLimit = options.detailed ? 5 : 20;
+    const limit = options.limit || defaultLimit;
+
+    const params: Record<string, any> = { limit };
+
+    if (projectName) params.project = projectName;
+    if (options.environment) params.environment = options.environment;
+    if (options.offset) params.offset = options.offset;
+    if (options.status) params.status = options.status;
+    if (options.since) params.since = parseSince(options.since);
+    if (options.workflow) params.workflow = options.workflow;
+    if (options.detailed) params.detailed = '1';
+    if (options.hasErrors) params.has_errors = '1';
+
+    return params;
 }
 
 export async function runs(projectName?: string, options: RunListOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
-    // Default limit is lower for --detailed (more data per run)
-    const defaultLimit = options.detailed ? 5 : 20;
-    const limit = options.limit || defaultLimit;
-
     try {
-        const params: Record<string, any> = { limit };
-
-        if (projectName) params.project = projectName;
-        if (options.offset) params.offset = options.offset;
-        if (options.status) params.status = options.status;
-        if (options.since) params.since = parseSince(options.since);
-        if (options.workflow) params.workflow = options.workflow;
-        if (options.detailed) params.detailed = '1';
-        if (options.hasErrors) params.has_errors = '1';
+        const params = buildRunListParams(projectName, options);
 
         const response = await axios.get(`${config.host}/api/v1/runs`, {
             headers: getApiHeaders(config),
@@ -37,6 +49,13 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         });
 
         const runsList = response.data.data || response.data;
+
+        // Check server-side error fields FIRST (project_not_found comes back as 200 with data:[])
+        const serverError = response.data.error;
+        if (serverError === 'project_not_found') {
+            console.error(chalk.red(response.data.message || `Project '${projectName}' not found.`));
+            process.exit(1);
+        }
 
         if (!runsList || runsList.length === 0) {
             if (options.json) {
@@ -60,8 +79,13 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
         }
     } catch (error: any) {
         if (error.response) {
-            if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            // ambiguous_project is 422 — axios throws, so handle here
+            if (error.response.status === 422 && error.response.data?.error === 'ambiguous_project') {
+                const envs = ((error.response.data.environments ?? []) as string[]).join(', ');
+                console.error(chalk.yellow(`Ambiguous project '${projectName}': found in environments: ${envs}.`));
+                console.error(chalk.yellow(`Pass -e <env> to disambiguate, e.g.: solidactions run list ${projectName} -e dev`));
+            } else if (error.response.status === 401) {
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }
@@ -74,26 +98,65 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
 
 // ─── Display modes ─────────────────────────────────────────────────────────
 
+/**
+ * Summary-table status label for a run. Recovered/degraded runs share SUCCESS's
+ * execution_status, so without this they'd be indistinguishable from a clean success in
+ * the summary view. Returns the label to display and whether it's an "attention" outcome
+ * (rendered yellow). Falls back to the raw status for servers that don't send `outcome`.
+ */
+export function summaryStatusLabel(run: { outcome?: string; execution_status?: string; status?: string }): {
+    label: string;
+    attention: boolean;
+} {
+    if (run.outcome === 'recovered') return { label: 'recovered', attention: true };
+    if (run.outcome === 'degraded') return { label: 'degraded', attention: true };
+    return { label: run.execution_status || run.status || '?', attention: false };
+}
+
+/**
+ * Detailed-view tag appended to a run header ('' when none). Prefers the API `outcome`;
+ * falls back to the local hasRunErrors heuristic for servers that don't send `outcome`.
+ */
+export function detailedOutcomeTag(run: any): string {
+    if (run.outcome === 'recovered') return ' [RECOVERED]';
+    if (run.outcome === 'degraded') return ' [DEGRADED]';
+    if (hasRunErrors(run) && isSuccessStatus(run.execution_status || run.status || '')) return ' [DEGRADED]';
+    return '';
+}
+
 function displaySummaryTable(runsList: any[], projectName?: string) {
     const header = projectName ? `Recent runs for "${projectName}":` : 'Recent runs:';
     console.log(chalk.blue(header));
     console.log('');
-    console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'STATUS'.padEnd(12) + 'TRIGGERED'.padEnd(22) + 'TRIGGERED BY'));
-    console.log(chalk.gray('-'.repeat(90)));
 
-    for (const run of runsList) {
-        const id = String(run.id || '?').padEnd(8);
-        const workflow = truncate(run.workflow_name || '?', 24).padEnd(25);
-        const status = run.execution_status || run.status || '?';
-        const statusColor = getStatusColor(status);
+    const headers = ['ID', 'WORKFLOW', 'STATUS', 'TRIGGERED', 'TRIGGERED BY'];
+    const rows = runsList.map((run) => {
+        const { label: status } = summaryStatusLabel(run);
         const triggeredAt = run.triggered_at ? new Date(run.triggered_at).toLocaleString() : '-';
-        const triggeredBy = run.triggered_by || '-';
+        return [
+            String(run.id || '?'),
+            sanitizeCell(truncateCell(run.workflow_name || '?', 24)),
+            status,
+            triggeredAt,
+            sanitizeCell(run.triggered_by || '-'),
+        ];
+    });
+    const widths = computeColumnWidths(headers, rows, { minWidths: [8, 25, 12, 22, 0] });
+
+    console.log(chalk.gray(headers.map((h, i) => h.padEnd(widths[i])).join('')));
+    console.log(chalk.gray('-'.repeat(widths.reduce((a, b) => a + b, 0))));
+
+    for (let i = 0; i < runsList.length; i++) {
+        const run = runsList[i];
+        const [id, workflow, status, triggeredAt, triggeredBy] = rows[i];
+        const { attention } = summaryStatusLabel(run);
+        const statusColor = attention ? chalk.yellow : getStatusColor(status);
 
         console.log(
-            chalk.gray(id) +
-            workflow +
-            statusColor(status.padEnd(12)) +
-            chalk.gray(triggeredAt.padEnd(22)) +
+            chalk.gray(id.padEnd(widths[0])) +
+            workflow.padEnd(widths[1]) +
+            statusColor(status.padEnd(widths[2])) +
+            chalk.gray(triggeredAt.padEnd(widths[3])) +
             chalk.gray(triggeredBy)
         );
     }
@@ -110,10 +173,10 @@ function displayDetailedList(runsList: any[], projectName?: string) {
         const status = run.execution_status || run.status || '?';
         const statusColor = getStatusColor(status);
         const exitStr = run.exit_code !== null && run.exit_code !== undefined ? ` (exit ${run.exit_code})` : '';
-        const isSilentFailure = hasRunErrors(run) && isSuccessStatus(status);
 
         console.log('');
-        const silentTag = isSilentFailure ? chalk.yellow(' [DEGRADED]') : '';
+        const outcomeTag = detailedOutcomeTag(run);
+        const silentTag = outcomeTag ? chalk.yellow(outcomeTag) : '';
         console.log(chalk.bold(`  Run #${run.id}`) + chalk.gray(` — ${run.workflow_name || '?'} (${run.project_name || '?'})`) + silentTag);
         console.log(`    Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
         console.log(`    Trigger:   ${chalk.gray(run.triggered_by || '-')}`);

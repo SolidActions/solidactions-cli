@@ -59,7 +59,7 @@ export async function webhookList(projectName: string, options: WebhookListOptio
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else {

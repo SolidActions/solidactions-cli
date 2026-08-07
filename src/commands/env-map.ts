@@ -2,9 +2,15 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
 
 export async function envMap(projectName: string, projectKey: string, globalKey: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
+
+    if (isReservedEnvName(projectKey)) {
+        console.error(chalk.red(reservedEnvNameError(projectKey)));
+        process.exit(1);
+    }
 
     console.log(chalk.blue(`Mapping global variable "${globalKey}" to project key "${projectKey}" in "${projectName}"...`));
 
@@ -19,7 +25,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
 
         if (!globalVar) {
             console.error(chalk.red(`Global variable "${globalKey}" not found.`));
-            console.log(chalk.gray('Create it with: solidactions env set ' + globalKey + ' <value>'));
+            console.log(chalk.gray('Create it with: solidactions env set ' + globalKey + ' <value> --global'));
             process.exit(1);
         }
 
@@ -63,7 +69,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {

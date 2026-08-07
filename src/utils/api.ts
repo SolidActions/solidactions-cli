@@ -1,13 +1,110 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import readline from 'readline';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
-import { resolveWorkspaceInput } from './workspace-lookup';
+import {
+    resolveWorkspaceInput,
+    selectWorkspaceInteractively,
+    WorkspaceLookupRecord,
+    WorkspaceSelectionDependencies,
+} from './workspace-lookup';
 
 // Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
 // We require the literal single-quotes around the slug so plausible future error messages
 // like "Project files not found ..." don't false-match.
 const NOT_FOUND_IN_WORKSPACE = /Project '.+' not found in your active workspace/;
+
+export const SANDBOX_EGRESS_MESSAGE =
+    'Sandbox network egress appears to be blocking app.solidactions.com. '
+    + "Allow-list app.solidactions.com in your provider's network settings, "
+    + 'start a new agent session if required, then retry. '
+    + 'See https://www.solidactions.com/docs/troubleshooting/#sandbox-egress';
+
+const SANDBOX_EGRESS_PHRASES = [
+    /\bhost (?:is )?not permitted\b/i,
+    /\bnetwork access denied\b/i,
+    /\bnetwork egress\b[\s\S]*?\b(?:blocked|disabled)\b/i,
+    /\bdestination\b[\s\S]*?\bnot allowed\b/i,
+];
+
+function responseServerHeader(headers: any): string {
+    if (!headers) {
+        return '';
+    }
+
+    if (typeof headers.get === 'function') {
+        const value = headers.get('server') ?? headers.get('Server');
+        return value == null ? '' : String(value).trim();
+    }
+
+    for (const [name, value] of Object.entries(headers)) {
+        if (name.toLowerCase() === 'server') {
+            return value == null ? '' : String(value).trim();
+        }
+    }
+
+    return '';
+}
+
+function flattenProxyResponseText(data: unknown): string {
+    if (typeof data === 'string') {
+        return data;
+    }
+    if (data instanceof Error) {
+        return data.message;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return '';
+    }
+
+    return ['error', 'message']
+        .map((field) => flattenProxyResponseText((data as Record<string, unknown>)[field]))
+        .filter(Boolean)
+        .join('\n');
+}
+
+/**
+ * Diagnose a provider proxy's observed Cloud-host 403 without rewriting
+ * SolidActions authorization errors or failures against custom hosts.
+ */
+export function augmentSandboxEgressMessage(error: any): any {
+    const response = error?.response;
+    if (response?.status !== 403 || responseServerHeader(response.headers)) {
+        return error;
+    }
+
+    const data = response.data;
+    const responseCode = data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as Record<string, unknown>).code
+        : null;
+    if (responseCode != null && String(responseCode).trim() !== '') {
+        return error;
+    }
+
+    const requestConfig = error.config ?? response.config;
+    let hostname = '';
+    try {
+        hostname = new URL(requestConfig?.url, requestConfig?.baseURL).hostname;
+    } catch {
+        return error;
+    }
+    if (hostname !== 'app.solidactions.com') {
+        return error;
+    }
+
+    const proxyText = flattenProxyResponseText(data).trim();
+    if (!proxyText || !SANDBOX_EGRESS_PHRASES.some((phrase) => phrase.test(proxyText))) {
+        return error;
+    }
+
+    error.message = SANDBOX_EGRESS_MESSAGE;
+    response.data = {
+        ...(data && typeof data === 'object' && !Array.isArray(data) ? data : {}),
+        message: `${SANDBOX_EGRESS_MESSAGE}\n\nProvider response: ${proxyText}`,
+        providerResponse: data,
+    };
+
+    return error;
+}
 
 /**
  * Inspect an axios error and, if its response message matches the new
@@ -28,9 +125,32 @@ export function augmentNotFoundMessage(error: any): any {
     return error;
 }
 
+/**
+ * Inspect an axios error and, if it's a 403 with the app's `workspace_forbidden`
+ * error code (device-flow-scoped token targeting a workspace outside its
+ * scope), replace the raw server message with actionable guidance similar in
+ * spirit to `workspaceSet`'s local pre-check (wording isn't kept in sync
+ * verbatim) — so slug/name inputs (which can't be pre-checked locally) still
+ * surface a clear message instead of a raw axios/HTTP error.
+ */
+export function augmentWorkspaceForbiddenMessage(error: any): any {
+    if (error?.response?.status === 403 && error.response.data?.code === 'workspace_forbidden') {
+        error.response.data.message =
+            'This session is scoped to a limited set of workspaces. '
+            + 'Re-run `solidactions login --device` to change scope.';
+    }
+    return error;
+}
+
 axios.interceptors.response.use(
     (response) => response,
-    (error) => Promise.reject(augmentNotFoundMessage(error)),
+    (error) => Promise.reject(
+        augmentWorkspaceForbiddenMessage(
+            augmentNotFoundMessage(
+                augmentSandboxEgressMessage(error),
+            ),
+        ),
+    ),
 );
 
 export function getApiHeaders(config: Config, contentType?: string): Record<string, string> {
@@ -44,12 +164,69 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
 }
 
 /**
+ * Best-effort lookup of the environments a project family actually has
+ * (e.g. "production, dev"), for a friendlier 404 message. Returns null on
+ * any failure — callers should treat that as "no extra detail available."
+ */
+export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+    try {
+        const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
+        const rows = res.data?.data ?? res.data ?? [];
+        const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
+        const envs: string[] | undefined = hit?.environments;
+        return envs?.length ? envs.join(', ') : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Render a Laravel-style 422 validation error body as plain readable text —
+ * never a raw JSON dump. Prefers `data.errors` (flattened, one message per
+ * line, with the internal `variables.N.` index prefix stripped and the bare
+ * `key` attribute renamed to `variable key` for clarity); falls back to
+ * `data.message`.
+ */
+export function formatValidationError(data: unknown): string {
+    const errors = (data as any)?.errors;
+    let messages: string[] = [];
+
+    if (errors && typeof errors === 'object' && !Array.isArray(errors)) {
+        for (const value of Object.values(errors)) {
+            if (Array.isArray(value)) {
+                messages.push(...value.map((v) => String(v)));
+            } else if (value) {
+                messages.push(String(value));
+            }
+        }
+    }
+
+    if (messages.length === 0) {
+        const message = (data as any)?.message;
+        if (typeof message === 'string' && message) {
+            messages = [message];
+        }
+    }
+
+    if (messages.length === 0) {
+        return 'Validation failed.';
+    }
+
+    return messages
+        .map((msg) => msg
+            .replace(/variables\.\d+\.key/gi, 'variable key')
+            .replace(/variable key field/gi, 'variable key')
+            .replace(/variables\.\d+\.(\w+)/gi, '$1'))
+        .join('\n');
+}
+
+/**
  * Get the full resolution (config + sources + activePath). Exits if nothing resolvable.
  */
 export function requireResolvedConfig(): ResolvedConfig {
     const resolved = resolveConfig();
     if (!resolved || !resolved.config.apiKey) {
-        console.error(chalk.red('Not initialized. Run `solidactions login <api-key>` first.'));
+        console.error(chalk.red('Not initialized. Run `solidactions login --global` first.'));
         process.exit(1);
     }
     return resolved;
@@ -59,7 +236,20 @@ export function requireConfig(): Config {
     return requireResolvedConfig().config;
 }
 
-export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
+/**
+ * Contextual 401 message — names the host being called and where the (now
+ * apparently invalid/expired) API key came from, instead of a bare
+ * "Authentication failed" that gives no clue which config is at fault.
+ */
+export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
+    const keySource = sources?.apiKey ?? 'config';
+    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
+}
+
+export async function ensureWorkspaceSelected(
+    config: Config,
+    dependencies: WorkspaceSelectionDependencies = {},
+): Promise<Config> {
     if (config.workspaceId) {
         return config;
     }
@@ -68,7 +258,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
     const resolved = resolveConfig();
     const workspaceSource = resolved?.sources.workspaceId ?? null;
 
-    let workspaces: Array<{ id: string; name: string; org_name: string; role: string }>;
+    let workspaces: Array<{ id: string; name: string; slug?: string; org_name: string; role: string }>;
     try {
         const response = await axios.get(`${config.host}/api/v1/workspaces`, {
             headers: {
@@ -84,6 +274,7 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
                     workspaces.push({
                         id: ws.id,
                         name: ws.name,
+                        slug: ws.slug,
                         org_name: ws.tenant_name || orgName,
                         role: ws.role,
                     });
@@ -92,9 +283,15 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         } else {
             workspaces = Array.isArray(grouped) ? grouped : [];
         }
+
+        const scope = response.data.scope as { mode: 'all' | 'subset' | 'single'; workspace_ids: string[] } | null;
+        if (scope) {
+            config.scopeMode = scope.mode;
+            config.scopedWorkspaceIds = scope.workspace_ids;
+        }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run `solidactions login <api-key>` to reconfigure.'));
+            console.error(chalk.red(authFailureMessage(config, resolved?.sources ?? null)));
         } else {
             console.error(chalk.red('Failed to fetch workspaces:'), error.response?.data?.message || error.message);
         }
@@ -106,32 +303,31 @@ export async function ensureWorkspaceSelected(config: Config): Promise<Config> {
         process.exit(1);
     }
 
-    let selected: typeof workspaces[0];
+    let selected: WorkspaceLookupRecord;
 
     if (workspaces.length === 1) {
         selected = workspaces[0];
         console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
     } else {
-        console.log(chalk.blue('\nSelect a workspace:\n'));
-        workspaces.forEach((ws, i) => {
-            console.log(`  ${chalk.white(`${i + 1}.`)} ${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`);
-        });
-        console.log('');
-
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-            rl.question(chalk.blue('Enter number: '), resolve);
-        });
-        rl.close();
-
-        const index = parseInt(answer, 10) - 1;
-        if (isNaN(index) || index < 0 || index >= workspaces.length) {
-            console.error(chalk.red('Invalid selection.'));
+        if (!process.stdin.isTTY) {
+            console.error(chalk.red(
+                'Multiple workspaces are available and no workspace is set for this config. '
+                + 'Run `solidactions workspace set <name-or-id> --local` (or --global).',
+            ));
             process.exit(1);
         }
-        selected = workspaces[index];
+
+        const chosen = await selectWorkspaceInteractively(workspaces, {
+            ...dependencies,
+            label: (ws) => `${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`,
+        });
+        if (!chosen) {
+            process.exit(1);
+        }
+        selected = chosen;
     }
 
+    config.workspace = selected.slug ?? selected.name;
     config.workspaceId = selected.id;
 
     if (workspaceSource !== 'env') {

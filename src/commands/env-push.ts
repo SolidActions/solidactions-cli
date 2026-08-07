@@ -4,7 +4,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig } from '../utils/env';
+import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig, isReservedEnvName, RESERVED_ENV_PREFIX } from '../utils/env';
 
 interface EnvPushOptions {
     env?: string;
@@ -44,7 +44,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
 
     if (!fs.existsSync(envFilePath)) {
         console.error(chalk.red(`${envFileName} not found in ${sourceDir}`));
-        console.log(chalk.gray(`Create ${envFileName} with your environment variables, or use a different --env.`));
+        console.log(chalk.gray(`Create ${envFileName} with your variables, or use a different --env.`));
         process.exit(1);
     }
 
@@ -62,7 +62,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         keysToProcess = Array.from(envValues.keys());
     } else {
         if (declaredVars.size === 0) {
-            console.log(chalk.yellow('No environment variables declared in solidactions.yaml.'));
+            console.log(chalk.yellow('No variables declared in solidactions.yaml.'));
             console.log(chalk.gray('Use --include-undeclared to push all vars from the .env file.'));
             process.exit(0);
         }
@@ -84,12 +84,24 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         process.exit(0);
     }
 
+    // Hard-reject reserved names among the keys that would actually be pushed
+    // (the server rejects them too — fail here, before any network call).
+    const reservedKeys = keysToProcess.filter(isReservedEnvName);
+    if (reservedKeys.length > 0) {
+        console.error(chalk.red(`Refusing to push — reserved ${RESERVED_ENV_PREFIX} names found: ${reservedKeys.join(', ')}`));
+        console.error(chalk.red(
+            'These names are set by the platform at runtime (API credentials, run context) and a custom variable would clobber them, causing authentication failures. ' +
+            `Rename them (e.g. "${reservedKeys[0].replace(/^SOLIDACTIONS_/, 'MY_')}") and retry. Nothing was pushed.`
+        ));
+        process.exit(1);
+    }
+
     // Build project slug
     const projectSlug = environment === 'production'
         ? projectName
         : `${projectName}-${environment}`;
 
-    console.log(chalk.blue(`Pushing env vars to "${projectName}" (${environment})...`));
+    console.log(chalk.blue(`Pushing variables to "${projectName}" (${environment})...`));
 
     // Fetch current server state
     let serverMappings: any[] = [];
@@ -100,11 +112,11 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         serverMappings = response.data || [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             process.exit(1);
         } else if (error.response?.status === 404) {
             console.error(chalk.red(`Project "${projectSlug}" not found.`));
-            console.log(chalk.gray(`Deploy first with: solidactions project deploy ${projectName} --env ${environment}` + (environment !== 'production' ? ' --create' : '')));
+            console.log(chalk.gray(`Deploy first with: solidactions project deploy ${projectName} -e ${environment}` + (environment !== 'production' ? ' --create' : '')));
             process.exit(1);
         }
         throw error;
@@ -228,7 +240,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         console.log(chalk.green(`\n✓ Pushed ${toPush.length} variable(s) to ${projectSlug}`));
         console.log(chalk.gray(`  ${created} created, ${updated} updated` + (toSkip.length > 0 ? `, ${toSkip.length} skipped` : '')));
     } catch (error: any) {
-        console.error(chalk.red('Failed to push environment variables:'), error.response?.data?.message || error.message);
+        console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
         process.exit(1);
     }
 }

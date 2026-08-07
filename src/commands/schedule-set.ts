@@ -2,9 +2,66 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { projectSlugForView } from './project-view';
 
-export async function scheduleSet(projectName: string, cron: string, options: { workflow?: string; input?: string; yes?: boolean }) {
+export interface ScheduleSetOptions {
+    workflow?: string;
+    input?: string;
+    timezone?: string;
+    yes?: boolean;
+    paused?: boolean;
+    env?: string;
+}
+
+export function buildSchedulePayload(
+    cron: string,
+    options: Pick<ScheduleSetOptions, 'workflow' | 'input' | 'timezone' | 'paused'>,
+    inputData?: Record<string, any>,
+): Record<string, any> {
+    const payload: Record<string, any> = { cron };
+    if (options.workflow) {
+        payload.workflow = options.workflow;
+    }
+    if (inputData) {
+        payload.input = inputData;
+    }
+    if (options.timezone) {
+        payload.timezone = options.timezone;
+    }
+    if (options.paused) {
+        payload.enabled = false;
+    }
+    return payload;
+}
+
+/** True when the user asked for a timezone the server did not apply (pre-item-5-App server). */
+export function timezoneMismatch(requested: string | undefined, returned: string | undefined): boolean {
+    return requested !== undefined && returned !== requested;
+}
+
+/**
+ * Remediation text for a timezoneMismatch. `schedule delete` takes a numeric
+ * <schedule-id>, not a workflow name — point at `schedule list` first to find it.
+ */
+export function timezoneMismatchRemedy(projectName: string): string {
+    return `Your server may not support schedule timezones yet; update the server, or run 'solidactions schedule list ${projectName}' to find the schedule ID and remove it with: solidactions schedule delete ${projectName} <schedule-id>`;
+}
+
+export const EXISTING_SCHEDULE_CHOICES = [
+    { title: 'Replace existing schedule', value: 'replace' },
+    { title: 'Cancel', value: 'cancel' },
+];
+
+export async function scheduleSet(projectName: string, cron: string, options: ScheduleSetOptions) {
     const config = await requireConfigWithWorkspace();
+    let projectSlug: string;
+    try {
+        projectSlug = projectSlugForView(projectName, options.env);
+    } catch (error: any) {
+        console.error(chalk.red(error.message));
+        process.exit(1);
+        return;
+    }
 
     // Parse input JSON if provided
     let inputData: Record<string, any> | undefined;
@@ -20,7 +77,7 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     // Check for existing schedule on the same workflow
     if (!options.yes) {
         try {
-            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}/schedules`, {
+            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
                 headers: getApiHeaders(config),
             });
             const schedules = listResponse.data.data || listResponse.data || [];
@@ -38,23 +95,15 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
                     type: 'select',
                     name: 'action',
                     message: 'What would you like to do?',
-                    choices: [
-                        { title: 'Replace existing schedule', value: 'replace' },
-                        { title: 'Add another schedule', value: 'add' },
-                        { title: 'Cancel', value: 'cancel' },
-                    ],
+                    choices: EXISTING_SCHEDULE_CHOICES,
                 });
                 if (confirm.action === 'cancel' || confirm.action === undefined) {
                     console.log(chalk.gray('Cancelled.'));
                     return;
                 }
-                if (confirm.action === 'replace') {
-                    // Delete the existing schedule first
-                    await axios.delete(`${config.host}/api/v1/projects/${projectName}/schedules/${existing.id}`, {
-                        headers: getApiHeaders(config),
-                    });
-                    console.log(chalk.gray(`Removed old schedule (${existing.cron_expression}).`));
-                }
+                // The API owns the one-schedule-per-workflow invariant and
+                // updates the existing row. Do not delete first: deletion
+                // loses YAML provenance and any persistent override state.
             }
         } catch {
             // If we can't check, proceed anyway
@@ -64,34 +113,41 @@ export async function scheduleSet(projectName: string, cron: string, options: { 
     console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
     try {
-        const payload: Record<string, any> = {
-            cron,
-        };
+        const payload = buildSchedulePayload(cron, options, inputData);
 
-        if (options.workflow) {
-            payload.workflow = options.workflow;
-        }
-
-        if (inputData) {
-            payload.input = inputData;
-        }
-
-        await axios.post(`${config.host}/api/v1/projects/${projectName}/schedules`, payload, {
+        const response = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/schedules`, payload, {
             headers: getApiHeaders(config, 'application/json'),
         });
 
+        // Verify, don't trust: a server predating timezone support silently
+        // strips the field, but the schedule is already persisted by this point —
+        // it's live and running in the wrong timezone. Report the persisted fact
+        // and the remedy, not a hypothetical.
+        const returnedTz: string | undefined = response.data?.schedule?.timezone;
+        if (timezoneMismatch(options.timezone, returnedTz)) {
+            console.error(chalk.red(`A schedule was created but is running in ${returnedTz ?? 'UTC'} — not ${options.timezone} as requested.`));
+            console.error(chalk.red(timezoneMismatchRemedy(projectName)));
+            process.exit(1);
+        }
+
         console.log(chalk.green(`Schedule set successfully!`));
         console.log(chalk.gray(`  Cron: ${cron}`));
+        if (options.timezone) {
+            console.log(chalk.gray(`  Timezone: ${options.timezone}`));
+        }
         if (options.workflow) {
             console.log(chalk.gray(`  Workflow: ${options.workflow}`));
         }
         if (inputData) {
             console.log(chalk.gray(`  Input: ${JSON.stringify(inputData)}`));
         }
+        if (options.paused) {
+            console.log(chalk.gray('  Enabled: no (sticky override; survives redeploy)'));
+        }
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {

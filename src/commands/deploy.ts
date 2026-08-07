@@ -1,12 +1,38 @@
 import fs from 'fs';
 import path from 'path';
-import archiver from 'archiver';
+import { randomUUID } from 'crypto';
 import axios from 'axios';
-import FormData from 'form-data';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
+import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import type { Config } from '../utils/config';
+import { planDeployFiles } from '../utils/deploy-ignore';
+import { buildProjectSlug } from '../utils/slug';
+import { hasSolidActionsSkills } from '../utils/skills';
+import { createTarArchive } from '../utils/tar-archive';
+import {
+    buildDeployForm,
+    collectSourceMetadata,
+    createDeployArchiveLocation,
+    formatRevisionSummary,
+    parseDeployAcceptance,
+    sanitizeDisplayText,
+    shouldCollectGitMetadata,
+    type SourceMetadata,
+} from '../utils/source-provenance';
+import {
+    formatDeploymentRevision,
+    type ProjectDeploymentDetail,
+} from './project-view';
+
+/** Printed when a deploy target has no SolidActions skill files installed. */
+export const SKILLS_TIP_LINES = [
+    'Tip: no SolidActions skill files found (.claude/skills/solidactions-*). Your AI assistant',
+    'works much better with them — run `solidactions ai init --claude` (or --agents) in this',
+    'directory to add them.',
+];
 
 /**
  * Validate project structure before deployment.
@@ -92,10 +118,149 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
 }
 
 
+/**
+ * When `noCache` is true, returns an archive entry with a unique name and
+ * random content that busts the build-layer content hash (Blaxel/Daytona S3
+ * MD5 and BuildKit COPY . layer). Returns null when noCache is false/undefined.
+ */
+export function cacheBusterEntry(noCache: boolean): { name: string; content: string } | null {
+    if (!noCache) {
+        return null;
+    }
+    const uuid = randomUUID();
+    return {
+        name: `tenantcode/sa-nocache-${uuid}`,
+        content: `force-rebuild ${uuid} ${Date.now()}`,
+    };
+}
+
 interface DeployOptions {
     env?: string;
     create?: boolean;
     configOnly?: boolean;
+    noCache?: boolean;
+    gitMetadata?: boolean;
+    paused?: boolean;
+}
+
+export function projectStatusUrl(host: string, projectSlug: string): string {
+    return `${host}/api/v1/projects/${encodeURIComponent(projectSlug)}`;
+}
+
+export async function fetchDeploymentConfirmation(
+    config: Config,
+    projectSlug: string,
+): Promise<ProjectDeploymentDetail> {
+    const response = await axios.get(
+        `${projectStatusUrl(config.host, projectSlug)}?include=deployment`,
+        { headers: getApiHeaders(config) },
+    );
+    return response.data;
+}
+
+/**
+ * True when the fetched project's recorded latest successful deployment is
+ * the one this deploy produced. A null `acceptedDeploymentId` (legacy server
+ * response) has nothing to confirm against, so it counts as a match.
+ */
+export function isConfirmationMatch(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+): boolean {
+    if (!acceptedDeploymentId) {
+        return true;
+    }
+    const deployment = project.latest_successful_deployment ?? null;
+    return project.deployment_matches_deployed_hash === true
+        && deployment !== null
+        && deployment.id === acceptedDeploymentId;
+}
+
+/**
+ * Rebuild provenance can lag server-side (app #972): the instant status
+ * flips to "deployed", the confirmation record may not have caught up yet,
+ * so a healthy deploy can transiently look like a mismatch. Retries a short,
+ * bounded number of times before accepting whatever the last fetch reported.
+ * Exit code is unaffected either way — this only changes which message prints.
+ */
+export async function confirmDeploymentWithRetry(
+    acceptedDeploymentId: string | null,
+    fetcher: () => Promise<ProjectDeploymentDetail>,
+    options: { attempts?: number; delayMs?: number; wait?: (ms: number) => Promise<void> } = {},
+): Promise<ProjectDeploymentDetail> {
+    const attempts = options.attempts ?? 3;
+    const delayMs = options.delayMs ?? 500;
+    const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+    let result: ProjectDeploymentDetail;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        result = await fetcher();
+        if (isConfirmationMatch(result, acceptedDeploymentId) || attempt === attempts) {
+            return result;
+        }
+        await wait(delayMs);
+    }
+    // Unreachable: the loop always returns on its final iteration.
+    return result!;
+}
+
+export function formatDeploymentConfirmation(
+    project: ProjectDeploymentDetail,
+    acceptedDeploymentId: string | null,
+    sourceMetadataRejected: string | null,
+): string[] {
+    if (!acceptedDeploymentId) {
+        return ['Build finished; revision confirmation unavailable (legacy server response).'];
+    }
+
+    const deployment = project.latest_successful_deployment ?? null;
+
+    if (!deployment) {
+        return ['Build finished, but the server has no successful deployment recorded yet for this project.'];
+    }
+
+    if (project.deployment_matches_deployed_hash !== true) {
+        return ["Build finished, but the running revision hash does not match the server's recorded successful deployment."];
+    }
+
+    if (deployment.id !== acceptedDeploymentId) {
+        return ['Build finished, but this deployment was not recorded as the latest successful deployment.'];
+    }
+
+    const revisionLines = formatDeploymentRevision(deployment);
+    const noRevisionReported = revisionLines[0] === 'No source revision was reported.';
+    const lines = [
+        noRevisionReported
+            ? 'Deployment confirmed, but no source revision was reported for it.'
+            : 'Deployment revision confirmed.',
+    ];
+    if (sourceMetadataRejected) {
+        const safeReason = sanitizeDisplayText(sourceMetadataRejected, 100) ?? 'invalid_metadata';
+        lines.push(`Optional source metadata was rejected by the server (${safeReason}).`);
+    }
+    lines.push(...(noRevisionReported ? revisionLines.slice(1) : revisionLines));
+    return lines;
+}
+
+/**
+ * Provenance collection is optional, best effort — a failure here must never
+ * fail the deploy. Wraps collectSourceMetadata() (or an injected collector,
+ * for testing) in a try/catch and degrades to null on throw.
+ */
+export function safeCollectSourceMetadata(
+    sourceDir: string,
+    options: { gitMetadata?: boolean },
+    collector: (sourceDir: string) => SourceMetadata | null = collectSourceMetadata,
+): SourceMetadata | null {
+    if (!shouldCollectGitMetadata(options)) {
+        return null;
+    }
+
+    try {
+        return collector(sourceDir);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -136,6 +301,112 @@ export async function pushYamlDeclarations(
     }
 }
 
+/**
+ * Returns true only when a 404 on the environment-specific project lookup
+ * will cause the deploy command to abort (non-production environment and
+ * --create was not passed). On these paths the workspace-mismatch warning
+ * should print. On all success/create paths it must be suppressed.
+ */
+export function shouldPrintWorkspaceMismatch(environment: string, willCreate: boolean): boolean {
+    return environment !== 'production' && !willCreate;
+}
+
+/**
+ * Printed (after the server's own message) when a free-plan tenant hits the
+ * dev/staging environment gate in a non-interactive context, or declines the
+ * interactive fallback prompt.
+ */
+export const PLAN_LIMIT_NON_INTERACTIVE_HINT = 'Hint: pass -e production, or upgrade your plan for dev/staging environments.';
+
+/**
+ * True when `error` is the app's 422 response for a free-plan tenant hitting
+ * the multi-environment gate on project auto-create:
+ * `{ error: { code: 'plan_limit_reached', limit: 'multi_env', plan, max } }`.
+ */
+export function isPlanLimitReachedError(error: any): boolean {
+    const data = error?.response?.data;
+    return error?.response?.status === 422
+        && data?.error?.code === 'plan_limit_reached'
+        && data?.error?.limit === 'multi_env';
+}
+
+/**
+ * POST /api/v1/projects to create a new environment-project record. Returns
+ * the resolved slug (server-echoed slug, falling back to the requested one).
+ * Throws the raw axios error on failure — callers decide how to handle it.
+ */
+async function createEnvironmentProject(
+    config: { host: string; apiKey: string; workspaceId?: string },
+    projectName: string,
+    environment: string
+): Promise<string> {
+    const requestedSlug = buildProjectSlug(projectName, environment);
+    const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
+        name: projectName,
+        slug: requestedSlug,
+        environment: environment,
+    }, {
+        headers: getApiHeaders(config, 'application/json'),
+    });
+    const slug = createResponse.data.slug || requestedSlug;
+    if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+        process.stderr.write(`[deploy-debug] requestedSlug=${requestedSlug} responseSlug=${createResponse.data.slug ?? '(missing)'} responseName=${createResponse.data.name ?? '(missing)'} resolvedSlug=${slug}\n`);
+    }
+    return slug;
+}
+
+/**
+ * Handles a 422 plan_limit_reached/multi_env error from the env-project
+ * auto-create call (billing v0.5: free-plan tenants only get production).
+ *
+ * Interactive TTYs are offered a y/N fallback to production; declining exits
+ * 1 with an upgrade hint. Non-interactive callers (CI, agents) never see a
+ * prompt — they get the same hint and exit 1 immediately, so the command
+ * never hangs waiting for input that will never arrive.
+ *
+ * On confirmed fallback, resolves (and creates if necessary) the production
+ * project and returns its slug. Every other path calls process.exit(1) and
+ * never returns.
+ */
+export async function handlePlanLimitReached(
+    config: { host: string; apiKey: string; workspaceId?: string },
+    projectName: string,
+    error: any,
+    productionExists: boolean | null,
+    productionSlug: string | null
+): Promise<string> {
+    const serverMessage: string = error.response?.data?.message || 'Your plan does not support additional environments.';
+    console.error(chalk.red(serverMessage));
+
+    if (!process.stdin.isTTY) {
+        console.error(chalk.yellow(PLAN_LIMIT_NON_INTERACTIVE_HINT));
+        process.exit(1);
+    }
+
+    const response = await prompts({
+        type: 'confirm',
+        name: 'proceed',
+        message: 'Your plan has a single production environment — deploy to production instead?',
+        initial: false,
+    });
+
+    if (!response.proceed) {
+        console.error(chalk.yellow(PLAN_LIMIT_NON_INTERACTIVE_HINT));
+        process.exit(1);
+    }
+
+    if (productionExists === true && productionSlug !== null) {
+        return productionSlug;
+    }
+
+    try {
+        return await createEnvironmentProject(config, projectName, 'production');
+    } catch (prodError: any) {
+        console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
+        process.exit(1);
+    }
+}
+
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -161,10 +432,19 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         process.exit(1);
     }
 
+    // Non-blocking: AI assistants work measurably better with the skill files
+    // (field report: a 600-line skill file cracked the env-scope bug).
+    if (!hasSolidActionsSkills(sourceDir)) {
+        for (const line of SKILLS_TIP_LINES) {
+            console.log(chalk.yellow(line));
+        }
+    }
+
     // -------------------------------------------------------------------------
-    // Production-existence check — must happen BEFORE we apply any env default
-    // so that first-time deploys without -e get a helpful error instead of
-    // silently creating a dev-only project with no production root.
+    // First-deploy check — must happen BEFORE we apply any env default so that
+    // first-time deploys without -e get a helpful error prompting a deliberate
+    // environment choice, instead of silently defaulting. (Any environment can
+    // stand alone — production is not required to exist first.)
     // -------------------------------------------------------------------------
     let productionExists: boolean | null = null; // null = unknown (error path)
     let productionSlug: string | null = null;
@@ -178,11 +458,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     } catch (error: any) {
         if (error.response?.status === 404) {
             productionExists = false;
-            // App PR #128 returns "Project '<slug>' not found in your active workspace '<ws>'." on 404.
-            // The axios interceptor (utils/api.ts) already appended the "Did you mean to switch workspaces?"
-            // hint. Surface that augmented message so the user sees the hint before falling through to
-            // the first-deploy flow.
-            printWorkspaceMismatchOnce(error);
+            // Project doesn't exist yet — this is the normal first-deploy path.
+            // Do NOT print a warning here; the deploy proceeds to create/deploy successfully.
         } else {
             // 5xx, network error, auth failure, etc. — fail conservatively rather
             // than treating the project as non-existent and potentially creating it.
@@ -191,22 +468,25 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     }
 
-    // Decision: if production does not exist and no -e flag was given, the user
-    // must pick an environment explicitly to avoid creating a broken dev-only project.
+    // Decision: if this is the first deploy (project doesn't exist yet) and no -e
+    // flag was given, prompt the user to choose an environment explicitly so the
+    // first deploy is deliberate. Any environment can be the first one.
     if (productionExists === false && explicitEnv === undefined) {
         console.error(chalk.red(`\nThis is the first deploy of "${projectName}" — please pick an environment explicitly:\n`));
         console.error(`  solidactions project deploy ${projectName} <path> -e production    # most projects start here`);
-        console.error(`  solidactions project deploy ${projectName} <path> -e dev            # dev-only (uncommon; no production root will exist)`);
-        console.error(`  solidactions project deploy ${projectName} <path> -e staging        # staging-only (uncommon)`);
-        console.error(chalk.gray('\nTip: most projects should start with `-e production`. A project needs a production root before dev/staging children can attach to it.'));
+        console.error(`  solidactions project deploy ${projectName} <path> -e dev            # start in dev (no production required first)`);
+        console.error(`  solidactions project deploy ${projectName} <path> -e staging        # start in staging`);
+        console.error(chalk.gray('\nTip: production is the usual default, but any environment can stand alone — pick whichever you want this project to start with.'));
         process.exit(1);
     }
 
     // Apply default: if production already exists and the user didn't pass -e,
     // use 'dev' — this preserves existing behavior for mature projects.
-    const environment = explicitEnv ?? 'dev';
+    // `let`, not `const`: a free-plan 422 (plan_limit_reached/multi_env) on the
+    // env-project auto-create below can fall the deploy back to production.
+    let environment = explicitEnv ?? 'dev';
 
-    const envLabel = environment !== 'production' ? ` (${environment})` : '';
+    let envLabel = environment !== 'production' ? ` (${environment})` : '';
     console.log(chalk.blue(`Deploying to project "${projectName}"${envLabel}...`));
     console.log(chalk.gray(`Source: ${sourceDir}`));
 
@@ -262,13 +542,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     } catch (error: any) {
         if (error.response?.status === 404) {
-            // App PR #128 returns "Project '<slug>' not found in your active workspace '<ws>'." on 404.
-            // Surface the augmented message (axios interceptor already appended the hint) before
-            // falling through to the --create / first-deploy flow.
-            printWorkspaceMismatchOnce(error);
-
-            // For non-production environments, require --create or give a clear hint
-            if (environment !== 'production' && !options.create) {
+            // For non-production environments, require --create or give a clear hint.
+            // Only print the workspace-mismatch warning on this abort path — not on
+            // the success/create path (shouldPrintWorkspaceMismatch guards this).
+            if (shouldPrintWorkspaceMismatch(environment, options.create ?? false)) {
+                printWorkspaceMismatchOnce(error);
                 console.error(chalk.red(`\nProject "${projectName}" doesn't have a ${environment} environment.\n`));
                 console.error(`  If production is the intended target:`);
                 console.error(`    solidactions project deploy ${projectName} <path> -e production`);
@@ -279,27 +557,21 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             console.log(chalk.yellow(`Project "${projectName}"${envLabel} not found. Creating...`));
-            const requestedSlug = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-') + (environment !== 'production' ? `-${environment}` : '');
             try {
-                const createResponse = await axios.post(`${config.host}/api/v1/projects`, {
-                    name: projectName,
-                    slug: requestedSlug,
-                    environment: environment,
-                }, {
-                    headers: getApiHeaders(config, 'application/json'),
-                });
-                // Fallback chain: prefer the server-echoed slug; if absent, use the slug we
-                // *requested* in the POST body (server stored that value). Falling back to
-                // `name` strips the env suffix and causes the polling GET to 404 with
-                // "Project 'X' not found in your active workspace 'Y'.".
-                projectSlug = createResponse.data.slug || requestedSlug;
-                if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
-                    process.stderr.write(`[deploy-debug] requestedSlug=${requestedSlug} responseSlug=${createResponse.data.slug ?? '(missing)'} responseName=${createResponse.data.name ?? '(missing)'} resolvedSlug=${projectSlug}\n`);
-                }
+                projectSlug = await createEnvironmentProject(config, projectName, environment);
                 console.log(chalk.green(`Project "${projectName}"${envLabel} created.`));
             } catch (createError: any) {
-                console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
-                process.exit(1);
+                if (isPlanLimitReachedError(createError)) {
+                    // Free-plan tenant hit the multi_env gate. handlePlanLimitReached()
+                    // exits(1) on every path except a confirmed fallback to production.
+                    projectSlug = await handlePlanLimitReached(config, projectName, createError, productionExists, productionSlug);
+                    environment = 'production';
+                    envLabel = '';
+                    console.log(chalk.blue(`Deploying to project "${projectName}" (production) instead.`));
+                } else {
+                    console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
+                    process.exit(1);
+                }
             }
         } else {
             console.error(chalk.red('Failed to check project:'), error.response?.data?.message || error.message);
@@ -319,23 +591,66 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         return;
     }
 
-    const archivePath = path.join(sourceDir, '.steps-deploy.tar.gz');
+    // Provenance is optional, best effort, and collected before archiving so
+    // the deploy artifact itself can never make the source look dirty.
+    const sourceMetadata = safeCollectSourceMetadata(sourceDir, options);
+    if (sourceMetadata) {
+        console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
+    }
+
+    // Plan the file list BEFORE creating the archive write stream so a walk error
+    // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
+    let plan: ReturnType<typeof planDeployFiles>;
+    try {
+        plan = planDeployFiles(sourceDir, yamlConfig);
+    } catch (error: any) {
+        console.error(chalk.red('Deployment failed:'));
+        console.error(error.message);
+        process.exit(1);
+    }
+
+    const archiveLocation = createDeployArchiveLocation();
+    const archivePath = archiveLocation.archivePath;
+    let archiveCleaned = false;
+    const cleanupArchive = () => {
+        if (!archiveCleaned) {
+            archiveCleaned = true;
+            archiveLocation.cleanup();
+        }
+    };
+
+    // Summary line so silent truncation never reads as "shipped everything".
+    const parts: string[] = ['.env excluded'];
+    if (plan.summary.gitignoreApplied) {
+        parts.push('.gitignore applied');
+    }
+    if (plan.summary.excludeRuleCount > 0) {
+        parts.push(`${plan.summary.excludeRuleCount} exclude rule${plan.summary.excludeRuleCount === 1 ? '' : 's'}`);
+    }
+    console.log(chalk.gray(`Bundling ${plan.files.length} files (${parts.join('; ')})`));
+
+    if (plan.summary.symlinksSkipped.length > 0) {
+        console.log(chalk.yellow(`⚠ Skipped ${plan.summary.symlinksSkipped.length} symlink(s) (not followed): ${plan.summary.symlinksSkipped.join(', ')}`));
+    }
+
+    const archive = await createTarArchive({ gzip: true, gzipOptions: { level: 9 } });
     const output = fs.createWriteStream(archivePath);
-    const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
 
     output.on('close', async () => {
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
-            const form = new FormData();
-            form.append('source', fs.createReadStream(archivePath));
+            const form = buildDeployForm(archivePath, sourceMetadata);
+            if (options.paused) {
+                form.append('paused', '1');
+            }
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
                 process.stderr.write(`[deploy-debug] POST ${config.host}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
             }
 
-            await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
+            const deployResponse = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
                 headers: {
                     ...form.getHeaders(),
                     ...getApiHeaders(config),
@@ -343,6 +658,17 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            const acceptedDeployment = parseDeployAcceptance(deployResponse.data);
+            if (acceptedDeployment.sourceMetadataRejected) {
+                console.log(chalk.yellow(
+                    `Warning: optional source metadata was not accepted (${acceptedDeployment.sourceMetadataRejected}); deployment continues.`,
+                ));
+            }
+            if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
+                process.stderr.write(
+                    `[deploy-debug] accepted deployment=${acceptedDeployment.deploymentId ?? '(legacy response)'} metadata=${acceptedDeployment.sourceMetadata ? 'normalized' : 'none'}\n`,
+                );
+            }
 
             console.log(chalk.green('Deployment successfully queued!'));
             console.log(chalk.yellow('Waiting for build to complete...\n'));
@@ -358,7 +684,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             const poll = setInterval(async () => {
                 try {
                     attempts++;
-                    const statusRes = await axios.get(`${config.host}/api/v1/projects/${projectSlug}`, {
+                    const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
                         headers: getApiHeaders(config),
                     });
                     const { status, build_log } = statusRes.data;
@@ -383,12 +709,49 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         clearInterval(poll);
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
-                        // Always sync YAML declarations (registers env vars and their mappings)
+                        try {
+                            const confirmedProject = await confirmDeploymentWithRetry(
+                                acceptedDeployment.deploymentId,
+                                () => fetchDeploymentConfirmation(config, projectSlug),
+                            );
+                            for (const line of formatDeploymentConfirmation(
+                                confirmedProject,
+                                acceptedDeployment.deploymentId,
+                                acceptedDeployment.sourceMetadataRejected,
+                            )) {
+                                console.log(line);
+                            }
+                        } catch {
+                            console.log(chalk.yellow(
+                                'Build finished; server revision confirmation was unavailable.',
+                            ));
+                        }
+
+                        // Always sync YAML declarations (registers variables and their mappings)
                         if (yamlConfig) {
                             await pushYamlDeclarations(config, projectSlug, yamlConfig);
                         }
 
-                        fs.unlinkSync(archivePath);
+                        if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
+                            const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
+                            console.log('');
+                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}${envFlag}\` to retrieve the generated secret.`));
+                            console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
+                        }
+
+                        if (options.paused) {
+                            console.log('');
+                            if (acceptedDeployment.schedulesPaused === true) {
+                                console.log(chalk.green('Schedules deployed paused.'));
+                                console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                            } else {
+                                console.log(chalk.yellow(
+                                    'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
+                                ));
+                            }
+                        }
+
+                        cleanupArchive();
                         process.exit(0);
                     } else if (status === 'error') {
                         clearInterval(poll);
@@ -398,12 +761,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.gray(build_log));
                             console.log(chalk.yellow('--- End Build Log ---\n'));
                         }
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        fs.unlinkSync(archivePath);
+                        cleanupArchive();
                         process.exit(1);
                     }
                 } catch {
@@ -422,28 +785,33 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             } else {
                 console.error(error.message);
             }
-            if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+            cleanupArchive();
             process.exit(1);
         }
     });
 
     archive.on('error', (err) => {
-        throw err;
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
+    });
+
+    output.on('error', (err) => {
+        cleanupArchive();
+        console.error(chalk.red('Deployment failed:'));
+        console.error(err.message);
+        process.exit(1);
     });
 
     archive.pipe(output);
 
-    // Glob patterns to ignore
-    const ignore = ['node_modules/**', '.git/**', '.steps-deploy.tar.gz', '.steps-deploy.zip', 'dist/**', 'vendor/**', '**/node_modules/**'];
-
-    // User code goes under tenantcode/ so it never conflicts with our Dockerfile
-    archive.glob('**/*', {
-        cwd: sourceDir,
-        ignore: ignore,
-        dot: true
-    }, {
-        prefix: 'tenantcode'
-    });
+    // User code goes under tenantcode/ so it never conflicts with our Dockerfile.
+    // Add each planned file explicitly (per-file walk computed above).
+    for (const relPosixPath of plan.files) {
+        const absPath = path.join(sourceDir, relPosixPath);
+        archive.file(absPath, { name: 'tenantcode/' + relPosixPath });
+    }
 
     // Dockerfile always at archive root, referencing tenantcode/
     const universalDockerfile = [
@@ -457,5 +825,31 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     archive.append(universalDockerfile, { name: 'Dockerfile' });
 
+    // --no-cache / --force-rebuild: inject a unique random-content file so all
+    // cache layers (Blaxel content hash, S3 context.tar MD5, BuildKit COPY .)
+    // see a new directory fingerprint and are forced to rebuild from scratch.
+    const buster = cacheBusterEntry(options.noCache ?? false);
+    if (buster) {
+        console.log(chalk.yellow('🔄 --no-cache: injecting cache-buster, forcing a fresh build'));
+        archive.append(buster.content, { name: buster.name });
+    }
+
     await archive.finalize();
+}
+
+/**
+ * Returns true if any workflow in the project has a webhook trigger that
+ * uses HMAC or header authentication (i.e. requires a shared secret).
+ * Used to gate the post-deploy notice pointing authors to `webhook secret`.
+ */
+export function shouldPrintWebhookSecretNotice(
+    workflows: { trigger?: string; webhook?: { auth?: string } }[]
+): boolean {
+    return workflows.some(wf => {
+        if (wf.trigger !== 'webhook') {
+            return false;
+        }
+        const auth = wf.webhook?.auth ?? 'hmac';
+        return auth === 'hmac' || auth === 'header';
+    });
 }

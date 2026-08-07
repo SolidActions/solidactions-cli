@@ -1,14 +1,42 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { projectSlugForView } from './project-view';
 
-export async function scheduleList(projectName: string) {
+export interface ScheduleListItem {
+    enabled: boolean;
+    enabled_override?: boolean;
+    yaml_enabled?: boolean | null;
+}
+
+export function formatScheduleState(schedule: ScheduleListItem): string {
+    const effective = schedule.enabled ? 'yes' : 'no';
+    if (!schedule.enabled_override) {
+        return effective;
+    }
+    if (schedule.yaml_enabled !== null
+        && schedule.yaml_enabled !== undefined
+        && schedule.yaml_enabled !== schedule.enabled) {
+        return `${effective} (override; last declared YAML: ${schedule.yaml_enabled ? 'yes' : 'no'})`;
+    }
+    return `${effective} (override)`;
+}
+
+export async function scheduleList(projectName: string, options: { env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
+    let projectSlug: string;
+    try {
+        projectSlug = projectSlugForView(projectName, options.env);
+    } catch (error: any) {
+        console.error(chalk.red(error.message));
+        process.exit(1);
+        return;
+    }
 
     console.log(chalk.blue(`Schedules for project "${projectName}":`));
 
     try {
-        const response = await axios.get(`${config.host}/api/v1/projects/${projectName}/schedules`, {
+        const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
             headers: getApiHeaders(config),
         });
 
@@ -20,14 +48,16 @@ export async function scheduleList(projectName: string) {
         }
 
         console.log('');
-        console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'CRON'.padEnd(18) + 'ENABLED'.padEnd(10) + 'NEXT RUN'));
-        console.log(chalk.gray('-'.repeat(95)));
+        console.log(chalk.gray('ID'.padEnd(8) + 'WORKFLOW'.padEnd(25) + 'CRON'.padEnd(18) + 'TIMEZONE'.padEnd(20) + 'ENABLED'.padEnd(48) + 'NEXT RUN'));
+        console.log(chalk.gray('-'.repeat(143)));
 
         for (const schedule of schedules) {
             const id = schedule.id?.toString() || '?';
             const workflow = schedule.workflow_name || schedule.workflow_slug || '?';
             const cron = schedule.cron_expression || '?';
+            const timezone = schedule.timezone || 'UTC';
             const enabled = schedule.enabled;
+            const enabledState = formatScheduleState(schedule);
             const nextRun = schedule.next_run_at ? formatRelativeTime(schedule.next_run_at) : '-';
 
             const enabledColor = enabled ? chalk.green : chalk.red;
@@ -36,7 +66,8 @@ export async function scheduleList(projectName: string) {
                 chalk.gray(id.padEnd(8)) +
                 workflow.padEnd(25) +
                 chalk.cyan(cron.padEnd(18)) +
-                enabledColor((enabled ? 'yes' : 'no').padEnd(10)) +
+                chalk.gray(timezone.padEnd(20)) +
+                enabledColor(enabledState.padEnd(48)) +
                 chalk.gray(nextRun)
             );
         }
@@ -46,7 +77,7 @@ export async function scheduleList(projectName: string) {
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else {

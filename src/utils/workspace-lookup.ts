@@ -1,11 +1,25 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import readline from 'readline';
 import { Config } from './config';
 
 export interface WorkspaceLookupRecord {
     id: string;
     slug?: string;
     name: string;
+    org_name?: string;
+    role?: string;
+}
+
+/** Device-flow token scope, as returned by GET /api/v1/workspaces. Null for user-scoped Sanctum PATs. */
+export interface WorkspaceScope {
+    mode: 'all' | 'subset' | 'single';
+    workspace_ids: string[];
+}
+
+export interface FetchWorkspacesResult {
+    workspaces: WorkspaceLookupRecord[];
+    scope: WorkspaceScope | null;
 }
 
 /**
@@ -25,7 +39,7 @@ export function matchWorkspace(
  * Network: fetch the full list of workspaces the current API key can see.
  * Normalizes the API's grouped/array response shapes.
  */
-export async function fetchWorkspaces(config: Config): Promise<WorkspaceLookupRecord[]> {
+export async function fetchWorkspaces(config: Config): Promise<FetchWorkspacesResult> {
     const response = await axios.get(`${config.host}/api/v1/workspaces`, {
         headers: {
             'Authorization': `Bearer ${config.apiKey}`,
@@ -41,7 +55,79 @@ export async function fetchWorkspaces(config: Config): Promise<WorkspaceLookupRe
     } else if (Array.isArray(grouped)) {
         out.push(...(grouped as WorkspaceLookupRecord[]));
     }
-    return out;
+    const scope = (response.data.scope as WorkspaceScope | null) ?? null;
+    return { workspaces: out, scope };
+}
+
+/**
+ * Prompt the user to pick a workspace from an already-fetched list. Auto-
+ * selects when there's exactly one. Invalid answers re-prompt; EOF or a
+ * closed input returns undefined without selecting anything.
+ */
+export interface WorkspaceSelectionDependencies {
+    question?: () => Promise<string | undefined>;
+    label?: (ws: WorkspaceLookupRecord) => string;
+}
+
+export async function selectWorkspaceInteractively(
+    workspaces: WorkspaceLookupRecord[],
+    dependencies: WorkspaceSelectionDependencies = {},
+): Promise<WorkspaceLookupRecord | undefined> {
+    if (workspaces.length === 0) {
+        console.log(chalk.yellow('No workspaces found. Create one at your SolidActions dashboard, then run `solidactions workspace set <name>`.'));
+        return undefined;
+    }
+    if (workspaces.length === 1) {
+        console.log(chalk.gray(`Auto-selected workspace: ${workspaces[0].name}`));
+        return workspaces[0];
+    }
+
+    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => ws.name);
+
+    console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
+    workspaces.forEach((ws, i) => {
+        console.log(`  ${chalk.white(`${i + 1}.`)} ${label(ws)}`);
+    });
+    console.log('');
+
+    const rl = dependencies.question
+        ? null
+        : readline.createInterface({ input: process.stdin, output: process.stdout });
+    const question = dependencies.question ?? (async () => {
+        if (!rl || (rl as any).closed) return undefined;
+        return new Promise<string | undefined>((resolve) => {
+            let answered = false;
+            const onClose = () => {
+                if (!answered) resolve(undefined);
+            };
+            rl.once('close', onClose);
+            rl.question(chalk.blue('Enter number: '), (answer) => {
+                answered = true;
+                rl.removeListener('close', onClose);
+                resolve(answer);
+            });
+        });
+    });
+
+    try {
+        while (true) {
+            const answer = await question();
+            if (answer === undefined) {
+                console.log(chalk.yellow(
+                    'Workspace selection cancelled. Run `solidactions workspace list`, then '
+                    + '`solidactions workspace set <name>` when ready.',
+                ));
+                return undefined;
+            }
+            const index = parseInt(answer, 10) - 1;
+            if (!isNaN(index) && index >= 0 && index < workspaces.length) {
+                return workspaces[index];
+            }
+            console.error(chalk.red('Invalid selection. Enter one of the numbers shown.'));
+        }
+    } finally {
+        rl?.close();
+    }
 }
 
 /**
@@ -53,15 +139,28 @@ export async function resolveWorkspaceInput(
     input: string,
 ): Promise<WorkspaceLookupRecord> {
     let workspaces: WorkspaceLookupRecord[];
+    let scope: WorkspaceScope | null = null;
     try {
-        workspaces = await fetchWorkspaces(config);
+        ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (error: any) {
         console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
         process.exit(1);
     }
     const match = matchWorkspace(input, workspaces);
     if (!match) {
-        console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+        // A scoped (single/subset) session only ever lists the workspaces its
+        // OAuth grant covers, so a miss can mean either "doesn't exist" OR
+        // "exists but out of this session's scope" — disambiguate so the user
+        // knows re-auth with broader scope may be the fix, not a typo.
+        if (scope && (scope.mode === 'single' || scope.mode === 'subset')) {
+            console.error(chalk.red(
+                `Workspace "${input}" not found in this session's authorized workspaces `
+                + `(scope: ${scope.mode}${scope.workspace_ids.length ? `, covering ${scope.workspace_ids.join(', ')}` : ''}). `
+                + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login --device`.',
+            ));
+        } else {
+            console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+        }
         process.exit(1);
     }
     return match;

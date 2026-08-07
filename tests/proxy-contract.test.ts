@@ -14,7 +14,7 @@
 
 import * as http from 'http';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
-import { buildSnippet } from '../src/commands/oauth-actions-show';
+import { buildSnippet } from '../src/commands/oauth-action-view';
 
 // ---------------------------------------------------------------------------
 // Stub HTTP server that mirrors ProxyController's header validation

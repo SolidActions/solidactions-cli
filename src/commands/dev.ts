@@ -1,11 +1,13 @@
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { SolidActionsConfig } from '../utils/env';
+import { Config, findLocalConfigPath, getGlobalConfigPath } from '../utils/config';
 
 // ---------------------------------------------------------------------------
 // runDev — programmatic entry point (testable, no process.exit)
@@ -28,6 +30,8 @@ export interface PlatformVar {
     proxy_token?: string | null;
     /** Connection key (set when source_type === 'oauth_connection') */
     connection_key?: string | null;
+    /** Whether this mapping is a secret — a valueless secret is not fetchable locally, unlike a plain var. */
+    is_secret?: boolean;
 }
 
 /**
@@ -40,6 +44,39 @@ export interface SaApiClient {
     projectSlug: string;
     /** Fetch declared variable-mappings for the given env from the SA API. */
     fetchVarsAndConnections(env: string): Promise<PlatformVar[]>;
+    /** Set true when the API token lacks `env:reveal` and the reveal request had to fall back. */
+    revealDenied?: boolean;
+}
+
+/**
+ * Build the production `SaApiClient`: fetches `variable-mappings` with
+ * `reveal=true` so secret values are populated on `ctx.vars`. When the token
+ * lacks the `env:reveal` ability, the API responds 403
+ * `{ code: 'token_missing_ability' }` — retry once without `reveal` and mark
+ * `revealDenied` so the caller can tell the user secrets were withheld.
+ */
+export function buildSaApiClient(config: Config, projectSlug: string): SaApiClient {
+    const client: SaApiClient = {
+        projectSlug,
+        revealDenied: false,
+        async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
+            const axios = (await import('axios')).default;
+            const { getApiHeaders } = await import('../utils/api');
+            const base = `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`;
+            try {
+                const response = await axios.get(`${base}&reveal=true`, { headers: getApiHeaders(config) });
+                return response.data || [];
+            } catch (e: any) {
+                if (e?.response?.status === 403 && e.response.data?.code === 'token_missing_ability') {
+                    client.revealDenied = true;
+                    const response = await axios.get(base, { headers: getApiHeaders(config) });
+                    return response.data || [];
+                }
+                throw e;
+            }
+        },
+    };
+    return client;
 }
 
 /** Structured return value of runDev — never calls process.exit. */
@@ -48,6 +85,35 @@ export interface RunDevResult {
     stderr: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     result: any; // InvokeResult from @solidactions/sdk
+}
+
+/**
+ * Context passed to dev-shim.mjs via SOLIDACTIONS_DEV_SHIM_CONTEXT env var
+ * as a JSON string. Every field must be JSON-serialisable.
+ */
+export interface DevShimContext {
+    /** Absolute path to the user's workflow entry file (.ts). */
+    entryPath: string;
+    /** JSON-serialised workflow input (e.g. '{"n":2}'). */
+    input: string;
+    /** ctx.vars built from platform vars + overrides. */
+    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>;
+    /** baseUrl of the mock server started by the parent. */
+    mockBaseUrl: string;
+    /** API key for the mock server. */
+    mockApiKey: string;
+    /** Pre-generated run UUID. */
+    runUuid: string;
+    /** workerSessionId for ctx.run. */
+    workerSessionId: string;
+    /** Path to the private temp file the shim writes its result JSON to. */
+    resultPath: string;
+}
+
+/** Result the shim writes to the result temp file. */
+export interface DevShimResult {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    result: any;
 }
 
 export interface RunDevOptions {
@@ -73,6 +139,123 @@ export interface RunDevOptions {
      *   "override shadows platform var: <KEY>"
      */
     varsOverride?: Record<string, string>;
+}
+
+/**
+ * Canonicalize a config path for identity comparison, so a project reached
+ * through a symlinked alias is not mistaken for a different project. Falls back
+ * to the given path when the file cannot be resolved (e.g. a broken symlink) —
+ * the caller is only comparing two paths, not dereferencing them.
+ */
+function realPath(p: string): string {
+    try {
+        return fs.realpathSync(p);
+    } catch {
+        return p;
+    }
+}
+
+/**
+ * Throw when a local config file exists but cannot be parsed as JSON.
+ *
+ * `readConfigFile()` swallows parse errors and returns null, which makes a
+ * corrupt local config indistinguishable from an absent one — resolution then
+ * falls through to the global config. Re-reading here lets us surface the
+ * actual parse error instead.
+ */
+function assertLocalConfigParses(configPath: string): void {
+    try {
+        JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (e: any) {
+        throw new Error(
+            `local config at ${configPath} is malformed: ${e?.message ?? e}\n`
+            + 'It exists but cannot be parsed, so config resolution would fall through to the global '
+            + `config ${getGlobalConfigPath()}, which usually points at production.\n`
+            + 'Fix: repair the file, or re-run `solidactions login --local` to rewrite it.',
+        );
+    }
+}
+
+/**
+ * Refuse to run `dev --env` against a config the user did not choose.
+ *
+ * `dev --env` builds its API client from `resolveConfig(process.cwd())`, which
+ * falls back to the GLOBAL `~/.solidactions/config.json` when no project-local
+ * `.solidactions/config.json` is reachable. That global config typically points
+ * at PRODUCTION, so a workflow run from outside its project's `.solidactions`
+ * tree used to silently fetch vars from — and target — the wrong tenant, with
+ * no diagnostic beyond a bare 404 (issue #30).
+ *
+ * Three situations are refused:
+ *   1. No project-local config above the cwd — the run WOULD fall back to the
+ *      global config.
+ *   2. A local config that EXISTS but does not parse — `readConfigFile()`
+ *      swallows the parse error and returns null, so a corrupt file resolves
+ *      exactly like an absent one and falls through to global. Same leak, but
+ *      it slips past a path-existence check.
+ *   3. The entry file's project-local config is NOT the one the cwd resolves to
+ *      — the run would target a different project's account. NOTE: this branch
+ *      only engages for entries run IN-PROCESS (`.js`/`.mjs`). A `.ts` entry is
+ *      re-exec'd by {@link reexecUnderTsx} with the child's cwd already set to
+ *      the entry's own project root, so by the time the guard runs in the child
+ *      the two paths are equal by construction — the child is correctly
+ *      anchored to the entry's project and there is nothing to mismatch.
+ *
+ * `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides bypass the guard
+ * ONLY when BOTH are set. `resolveConfig()` picks host and apiKey INDEPENDENTLY
+ * (env > local > global), so with just one var set the OTHER field still falls
+ * through to the global config — i.e. a partial override would send a run to
+ * the production host, or to production credentials, exactly the way #30
+ * describes. A partial override therefore refuses like any other unanchored
+ * run, naming the field that would fall through.
+ */
+export function assertProjectLocalConfig(entryPath: string, env: string): void {
+    const envHost = !!process.env.SOLIDACTIONS_HOST;
+    const envApiKey = !!process.env.SOLIDACTIONS_API_KEY;
+    if (envHost && envApiKey) {
+        // Both credential fields come from env — nothing can fall to global.
+        return;
+    }
+
+    const entryLocal = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    const cwdLocal = findLocalConfigPath(process.cwd());
+
+    if (!cwdLocal) {
+        // Exactly one env override set: name the field that would fall through.
+        let partial = '';
+        if (envHost !== envApiKey) {
+            const supplied = envHost ? 'SOLIDACTIONS_HOST' : 'SOLIDACTIONS_API_KEY';
+            const missing = envHost ? 'apiKey' : 'host';
+            const missingVar = envHost ? 'SOLIDACTIONS_API_KEY' : 'SOLIDACTIONS_HOST';
+            partial = `${supplied} is set, but host and apiKey resolve independently — `
+                + `\`${missing}\` would still come from the global config. `
+                + `Set ${missingVar} too to target a host explicitly.\n`;
+        }
+        const found = entryLocal
+            ? `The workflow's own project config is ${entryLocal}.\n`
+            : '';
+        throw new Error(
+            `no project-local .solidactions/config.json found from ${process.cwd()}.\n`
+            + `Refusing to run --env ${env} against the global config ${getGlobalConfigPath()}, `
+            + 'which usually points at production.\n'
+            + partial
+            + found
+            + 'Fix: cd into the project directory before running `solidactions dev`, '
+            + 'or run `solidactions login --local` there to create a project-local config.',
+        );
+    }
+
+    // Exists — but a file that doesn't parse resolves like an absent one.
+    assertLocalConfigParses(cwdLocal);
+
+    if (entryLocal && realPath(entryLocal) !== realPath(cwdLocal)) {
+        throw new Error(
+            `config mismatch: the workflow's project config is ${entryLocal}, `
+            + `but this directory resolves to ${cwdLocal}.\n`
+            + `Refusing to run --env ${env} against a config from a different project.\n`
+            + 'Fix: cd into the workflow\'s project directory before running `solidactions dev`.',
+        );
+    }
 }
 
 /**
@@ -120,6 +303,140 @@ function findSolidActionsRoot(startPath: string): string | null {
 }
 
 /**
+ * Run the user workflow entry by spawning `npx tsx dist/commands/dev-shim.mjs`.
+ *
+ * WHY THE CHILD PROCESS (not in-process import):
+ *   The CLI tsconfig compiles "module": "commonjs", so tsc rewrites await import(x)
+ *   to require(x) in every .ts file it compiles. tsx's CJS hook does NOT remap
+ *   .js→.ts in require() calls. A hand-written .mjs shim bypasses tsc entirely,
+ *   so its import() stays a real ESM dynamic import. When tsx loads .mjs, it uses
+ *   the ESM loader, which DOES remap .js→.ts for all transitive imports.
+ *
+ * SECRETS: context is passed as a JSON env var — OAuth proxyToken values never
+ * touch disk. The result uses a private temp file (mode 0o600, UUID name).
+ */
+async function runDevViaShim(
+    entryPath: string,
+    input: string,
+    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>,
+    mockBaseUrl: string,
+    runUuid: string,
+    workerSessionId: string,
+    stdoutLines: string[],
+    stderrLines: string[],
+): Promise<{ result: any }> {
+    const shimPath = path.resolve(__dirname, 'dev-shim.mjs');
+
+    // Private temp file for the result (mode 0o600, UUID name).
+    const resultPath = path.join(os.tmpdir(), `sa-dev-result-${runUuid}-${randomUUID()}.json`);
+
+    // Write placeholder so the shim can overwrite it.
+    fs.writeFileSync(resultPath, '', { mode: 0o600 });
+
+    const shimCtx: DevShimContext = {
+        entryPath,
+        input,
+        vars,
+        mockBaseUrl,
+        mockApiKey: 'local-dev',
+        runUuid,
+        workerSessionId,
+        resultPath,
+    };
+
+    try {
+        // Use async spawn (NOT spawnSync): the SDK mock backend runs in THIS
+        // process's event loop, and the shim makes HTTP calls back to it
+        // (run-row creation, step/sleep/recv routes). spawnSync would block the
+        // parent's event loop, deadlocking the mock server — so we await an
+        // async child and pump its stdout/stderr while the loop stays live.
+        let timedOut = false;
+        const spawnError = await new Promise<NodeJS.ErrnoException | undefined>((resolve) => {
+            const child = spawn(
+                'npx',
+                ['tsx', shimPath],
+                {
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    env: {
+                        ...process.env,
+                        SOLIDACTIONS_DEV_SHIM_CONTEXT: JSON.stringify(shimCtx),
+                    },
+                },
+            );
+
+            let stdoutBuf = '';
+            let stderrBuf = '';
+            child.stdout.setEncoding('utf8');
+            child.stderr.setEncoding('utf8');
+            child.stdout.on('data', (chunk: string) => { stdoutBuf += chunk; });
+            child.stderr.on('data', (chunk: string) => { stderrBuf += chunk; });
+
+            const timer = setTimeout(() => {
+                timedOut = true;
+                child.kill('SIGKILL');
+            }, 120_000);
+
+            child.on('error', (e: NodeJS.ErrnoException) => {
+                clearTimeout(timer);
+                if (stdoutBuf.trim()) { stdoutLines.push(stdoutBuf.trimEnd()); }
+                if (stderrBuf.trim()) { stderrLines.push(stderrBuf.trimEnd()); }
+                resolve(e);
+            });
+
+            child.on('close', () => {
+                clearTimeout(timer);
+                if (stdoutBuf.trim()) { stdoutLines.push(stdoutBuf.trimEnd()); }
+                if (stderrBuf.trim()) { stderrLines.push(stderrBuf.trimEnd()); }
+                resolve(undefined);
+            });
+        });
+
+        if (spawnError) {
+            const code = spawnError.code;
+            const msg = code === 'ENOENT'
+                ? 'npx not found. Make sure Node.js is installed.'
+                : `Failed to spawn tsx shim: ${spawnError.message}`;
+            return {
+                result: { status: 'failed', error: { message: msg, name: 'Error' }, phase: 'run' },
+            };
+        }
+
+        let resultContent = '';
+        try {
+            resultContent = fs.readFileSync(resultPath, 'utf8');
+        } catch {
+            // shim crashed before writing — stderr already captured above
+            return {
+                result: {
+                    status: 'failed',
+                    error: { message: 'dev-shim did not write a result file (check stderr above)', name: 'Error' },
+                    phase: 'run',
+                },
+            };
+        }
+
+        if (!resultContent.trim()) {
+            const msg = timedOut
+                ? 'dev-shim timed out after 120s'
+                : 'dev-shim wrote an empty result file (check stderr above)';
+            return {
+                result: {
+                    status: 'failed',
+                    error: { message: msg, name: 'Error' },
+                    phase: 'run',
+                },
+            };
+        }
+
+        const shimResult: DevShimResult = JSON.parse(resultContent);
+        return { result: shimResult.result };
+    } finally {
+        // Clean up result temp file on all exit paths.
+        try { fs.unlinkSync(resultPath); } catch { /* ignore */ }
+    }
+}
+
+/**
  * Run a workflow entry file in local-dev mode:
  *   1. Fetch declared vars + connections from the platform (via api seam).
  *   2. Apply any varsOverride, warning when a key shadows a platform var.
@@ -148,25 +465,17 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         if (opts.api) {
             apiClient = opts.api;
         } else {
+            // Refuse BEFORE any config resolution / network work when the only
+            // reachable config is the global (usually production) one — see #30.
+            assertProjectLocalConfig(opts.entry, opts.env);
             // Production path: build from CLI config.
             // Lazy-import to keep tests fast (no config resolution needed).
             const { requireConfigWithWorkspace } = await import('../utils/api');
-            const { getApiHeaders } = await import('../utils/api');
-            const axios = (await import('axios')).default;
             const config = await requireConfigWithWorkspace();
             // Real project resolution: read the project name from the workflow
             // file's solidactions.yaml and apply the deploy env→slug rule.
             const projectSlug = resolveProjectSlug(opts.entry, opts.env);
-            apiClient = {
-                projectSlug,
-                async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
-                    const response = await axios.get(
-                        `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`,
-                        { headers: getApiHeaders(config) },
-                    );
-                    return response.data || [];
-                },
-            };
+            apiClient = buildSaApiClient(config, projectSlug);
         }
     }
 
@@ -176,17 +485,24 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         try {
             platformVars = await apiClient.fetchVarsAndConnections(opts.env);
         } catch (e: any) {
-            err(`failed to fetch platform vars: ${e?.message ?? e}`);
+            let msg = `failed to fetch platform vars: ${e?.message ?? e}`;
+            if (e?.response?.status === 404 && opts.env !== 'production') {
+                msg += `\nThe '${opts.env}' environment project doesn't exist — staging/dev environments require a paid plan. On the free plan, use --env production.`;
+            }
+            err(msg);
         }
     }
 
     // 3. Build ctx.vars from platform vars. A declared mapping is only readable
     //    on ctx.vars when it is an OAuth connection (with proxy fields) OR has a
     //    non-null resolved_value. Mappings with no value in this env are DROPPED
-    //    — and must NOT be counted in the summary (BUG #1).
+    //    — and must NOT be counted in the summary (BUG #1). A dropped SECRET is
+    //    reported separately (it's genuinely unavailable to local dev, not
+    //    merely "unset" — the platform never resolves secret values to the CLI).
     const vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }> = {};
     let connectionCount = 0;
     let droppedCount = 0;
+    let droppedSecretCount = 0;
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -197,6 +513,8 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             connectionCount++;
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
+        } else if (pv.is_secret) {
+            droppedSecretCount++;
         } else {
             droppedCount++;
         }
@@ -221,6 +539,13 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         if (droppedCount > 0) {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
         }
+        if (droppedSecretCount > 0) {
+            if (apiClient!.revealDenied) {
+                summary += ` — ${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var' : 'vars'} unavailable: your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, or set a test value with \`solidactions env set\`.`;
+            } else {
+                summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
+            }
+        }
         out(summary);
     } else {
         out('Loaded 0 platform vars (no --env) — running locally');
@@ -239,14 +564,64 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     const entryPath = path.resolve(opts.entry);
     const _require = createRequire(entryPath);
     // Resolve via the installed (or linked) @solidactions/sdk package.
-    const sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    let sdkTestingMain: string;
+    try {
+        sdkTestingMain = _require.resolve('@solidactions/sdk/testing');
+    } catch (e: any) {
+        if (e.code === 'MODULE_NOT_FOUND') {
+            err('Dependencies not installed — run `npm install` in the project directory first.');
+            return {
+                stdout: stdoutLines.join('\n'),
+                stderr: stderrLines.join('\n'),
+                result: { status: 'failed', error: e, phase: 'setup' },
+            };
+        }
+        throw e;
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { createMockServer } = _require(sdkTestingMain) as { createMockServer: (port?: number) => Promise<{ baseUrl: string; stop: () => Promise<void> }> };
 
     const mockServer = await createMockServer();
 
+    // Pre-generate run IDs so they can be passed to the shim (for .ts entries)
+    // or used in-process (for .js/.mjs entries).
+    const runUuid = randomUUID();
+    const workerSessionId = randomUUID();
+
     try {
-        // 7. Import the workflow entry file. Prefer the module's default export
+        // 7. Load and invoke the workflow.
+        //
+        // For .ts entries: spawn `npx tsx dist/commands/dev-shim.mjs`. The .mjs shim
+        // is NOT compiled by tsc, so its import() stays a real ESM dynamic import.
+        // tsx's ESM loader remaps .js-extension imports to .ts files, fixing the
+        // Cannot-find-module bug on multi-file NodeNext projects.
+        //
+        // The shim creates the run-row (it has the descriptor name) and invokes.
+        // stdio: pipe — child stdout/stderr are captured into stdoutLines/stderrLines.
+        //
+        // For .js/.mjs entries: original in-process import path (no change).
+        const isTs = /\.(ts|tsx|mts|cts)$/.test(entryPath);
+
+        if (isTs) {
+            const shimInvokeResult = await runDevViaShim(
+                entryPath,
+                opts.input,
+                vars,
+                mockServer.baseUrl,
+                runUuid,
+                workerSessionId,
+                stdoutLines,
+                stderrLines,
+            );
+            return {
+                stdout: stdoutLines.join('\n'),
+                stderr: stderrLines.join('\n'),
+                result: shimInvokeResult.result,
+            };
+        }
+
+        // JS/MJS path: in-process import (original behaviour, no change).
+        // 8. Import the workflow entry file. Prefer the module's default export
         //    (a WorkflowDescriptor returned by defineWorkflow) so that repeated
         //    runDev() calls in the same test process don't need to clear and
         //    re-register from a cached module (cached CJS modules don't re-run
@@ -277,8 +652,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             };
         }
 
-        // 8. Build InvokeCtx.
-        const runUuid = randomUUID();
+        // 9. Build InvokeCtx.
         const ctx = {
             input: JSON.parse(opts.input || '{}'),
             vars: Object.freeze(vars),
@@ -286,7 +660,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
                 triggerId: 'local-dev',
                 runUuid,
                 runSecret: 'local-dev',
-                workerSessionId: randomUUID(),
+                workerSessionId,
             },
             app: {
                 appVersion: '0',
@@ -300,7 +674,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             mode: 'local' as const,
         };
 
-        // 9. Create the run-row BEFORE invoking. invoke() itself never creates
+        // 10. Create the run-row BEFORE invoking. invoke() itself never creates
         //    the durable run record — the production launcher (SolidActions.run
         //    → #initOneShotStatusRow) does that first, and step/sleep/recv
         //    sub-routes (`/runs/status/<id>/...`) 404 ("Workflow not found")
@@ -338,7 +712,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             err(`failed to create local run-row: ${e?.message ?? e}`);
         }
 
-        // 10. Invoke via internal SDK path (invoke() is not in the public index).
+        // 11. Invoke via internal SDK path (invoke() is not in the public index).
         const invokePath = path.resolve(sdkMainForInvoke, '..', 'invoke', 'invoke.js');
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { invoke } = _require(invokePath) as { invoke: (wf: any, ctx: any) => Promise<any> };
@@ -369,13 +743,25 @@ const TSX_REEXEC_GUARD = 'SOLIDACTIONS_DEV_TSX_REEXEC';
  * Detect whether the current Node process already has a TypeScript loader
  * registered (tsx / ts-node). When true, `await import('<file>.ts')` works
  * in-process and we can run `runDev` directly without re-exec.
+ *
+ * NOTE: Boolean(process._preload_modules) is intentionally NOT used here —
+ * an empty array is truthy, causing a false positive that always skips the
+ * re-exec path even when no TypeScript loader is active.
  */
 function hasTsLoader(): boolean {
     if (process.env[TSX_REEXEC_GUARD] === '1') {
         return true;
     }
     const execArgv = process.execArgv.join(' ');
-    return /tsx|ts-node/.test(execArgv) || Boolean((process as { _preload_modules?: unknown })._preload_modules);
+    if (/tsx|ts-node/.test(execArgv)) {
+        return true;
+    }
+    // Check _preload_modules for tsx/ts-node entries (non-empty array check).
+    const preload = (process as { _preload_modules?: unknown[] })._preload_modules;
+    if (Array.isArray(preload) && preload.length > 0) {
+        return preload.some((m) => typeof m === 'string' && /tsx|ts-node/i.test(m));
+    }
+    return false;
 }
 
 /**
@@ -391,7 +777,13 @@ function hasTsLoader(): boolean {
 function reexecUnderTsx(file: string, env: string | undefined, input: string, projectDir: string): number {
     // dist/src/commands/dev.js → CLI entry is dist/index.js (two dirs up).
     const cliEntry = path.resolve(__dirname, '..', 'index.js');
-    const args = ['tsx', cliEntry, 'dev', file, '--input', input];
+    // This function sets the child's cwd to projectDir, so the entry MUST be
+    // absolute by the time it is forwarded — a relative path would resolve
+    // against the parent's cwd here and the child's cwd there, yielding a
+    // doubled path when the run started outside the project root (#85).
+    // Resolved against the caller's cwd, which is still current.
+    const entry = path.resolve(file);
+    const args = ['tsx', cliEntry, 'dev', entry, '--input', input];
     if (env) {
         args.push('--env', env);
     }
@@ -445,7 +837,7 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
 
     // .ts entry under plain node has no loader — re-exec under tsx, then return.
     if (!hasTsLoader() && /\.(ts|tsx|mts|cts)$/.test(filePath)) {
-        const projectDir = findProjectRoot(filePath) ?? process.cwd();
+        const projectDir = resolveDevProjectDir(filePath);
         // Surface a clear slug-resolution error here (before forking) rather
         // than letting the child fail with an opaque exit code. Only relevant
         // when an env was requested (bare runs do no platform fetch).
@@ -457,7 +849,10 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
                 process.exit(1);
             }
         }
-        process.exit(reexecUnderTsx(file, env, input, projectDir));
+        // Forward the RESOLVED path, not the original argument: the child's cwd
+        // is projectDir, so a relative arg would be resolved a second time
+        // against a different directory (#85).
+        process.exit(reexecUnderTsx(filePath, env, input, projectDir));
     }
 
     // In-process path (already under a TS loader, or a .js/.mjs entry).
@@ -495,6 +890,31 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
     // failed
     console.error(chalk.red(`✗ failed (${r.phase ?? 'run'}):`), r.error?.message ?? String(r.error));
     process.exit(1);
+}
+
+/**
+ * Choose the cwd for the tsx re-exec child.
+ *
+ * The child's cwd decides which config `resolveConfig(process.cwd())` picks, so
+ * it must be anchored to the workflow's OWN `.solidactions/config.json` when one
+ * exists. Using the nearest `package.json` parent (the previous behaviour) is
+ * wrong in a monorepo: for `/repo/package.json` + `/repo/apps/a/.solidactions/`,
+ * an entry under `apps/a` would re-exec with cwd `/repo`, where no local config
+ * is reachable — so resolution fell back to the global (production) config and
+ * the #30 guard then refused a perfectly legitimate run.
+ *
+ * Preference order: the directory owning the entry's nearest local config, then
+ * the nearest `package.json` parent, then the current cwd. `npx` still resolves
+ * `tsx` by walking node_modules upward, so a package-less project directory is
+ * fine.
+ */
+export function resolveDevProjectDir(entryPath: string): string {
+    const localConfig = findLocalConfigPath(path.dirname(path.resolve(entryPath)));
+    if (localConfig) {
+        // <dir>/.solidactions/config.json → <dir>
+        return path.dirname(path.dirname(localConfig));
+    }
+    return findProjectRoot(entryPath) ?? process.cwd();
 }
 
 function findProjectRoot(startPath: string): string | null {

@@ -10,6 +10,12 @@ interface RunViewOptions {
 }
 
 export async function runView(runId: string, options: RunViewOptions) {
+    if (!/^\d+$/.test(runId)) {
+        console.error(chalk.red(`Invalid run id: "${runId}" (run ids are numeric — see \`solidactions run list\`).`));
+        process.exit(1);
+        return;
+    }
+
     const config = await requireConfigWithWorkspace();
 
     try {
@@ -105,7 +111,7 @@ export async function runView(runId: string, options: RunViewOptions) {
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
                 console.error(chalk.red('Run not found.'));
             } else {
@@ -158,7 +164,7 @@ function displayFullView(runData: any, timeline: any, steps: any[], logsData: an
     if (runData.error) {
         console.log('');
         console.log(chalk.bold.red('  Error:'));
-        console.log(chalk.red(`    ${runData.error}`));
+        console.log(chalk.red(`    ${errorMessage(runData.error)}`));
     }
 
     // Logs snippet
@@ -209,7 +215,7 @@ function displayTimeline(runData: any, timeline: any, steps: any[] = []) {
     console.log(`  Duration:  ${chalk.gray(timeline.durationMs ? formatDuration(timeline.durationMs) : '-')}`);
 }
 
-function displayStepsTable(steps: any[], indent: string = '  ') {
+export function displayStepsTable(steps: any[], indent: string = '  ') {
     if (steps.length === 0) {
         console.log(chalk.gray(`${indent}(no steps)`));
         return;
@@ -220,20 +226,32 @@ function displayStepsTable(steps: any[], indent: string = '  ') {
 
     for (const step of steps) {
         const name = (step.name || '?').padEnd(24);
-        const status = step.completedAt ? 'completed' : step.startedAt ? 'running' : 'pending';
+        const status = stepDisplayStatus(step);
         const statusColor = getStatusColor(status);
         const duration = formatDuration(step.durationMs);
-        const output = step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-';
+        // A failed step's error is more useful than its (null) output — show it, red.
+        const output = step.error
+            ? chalk.red(truncate(errorMessage(step.error).replace(/\s+/g, ' ').trim(), 40))
+            : chalk.gray(step.output ? truncate(JSON.stringify(unwrapOutput(step.output)), 40) : '-');
 
         console.log(
-            `${indent}${name}${statusColor(status.padEnd(12))}${chalk.gray(duration.padEnd(12))}${chalk.gray(output)}`
+            `${indent}${name}${statusColor(status.padEnd(12))}${chalk.gray(duration.padEnd(12))}${output}`
         );
+    }
+
+    // Untruncated first failure below the table: `run view` alone must be
+    // enough to diagnose (Wall #5 — failed steps used to render "completed").
+    const firstFailed = steps.find((s) => stepDisplayStatus(s).toLowerCase() === 'failed' && s.error);
+    if (firstFailed) {
+        console.log('');
+        console.log(chalk.bold.red(`${indent}Step "${firstFailed.name}" failed:`));
+        console.log(chalk.red(`${indent}  ${errorMessage(firstFailed.error)}`));
     }
 }
 
 // ─── Utility ───────────────────────────────────────────────────────────────
 
-function flattenSteps(workers: any[]): any[] {
+export function flattenSteps(workers: any[]): any[] {
     const steps: any[] = [];
     for (const worker of workers) {
         for (const step of worker.steps || []) {
@@ -243,10 +261,17 @@ function flattenSteps(workers: any[]): any[] {
                 completedAt: step.completed_at || null,
                 durationMs: step.duration_ms ?? null,
                 output: step.output ?? null,
+                status: step.status ?? null,
+                error: step.error ?? null,
             });
         }
     }
     return steps;
+}
+
+/** Server-derived status wins; timestamp heuristic only for pre-status API responses. */
+export function stepDisplayStatus(step: { status?: string | null; startedAt?: string | null; completedAt?: string | null }): string {
+    return step.status ?? (step.completedAt ? 'completed' : step.startedAt ? 'running' : 'pending');
 }
 
 function unwrapOutput(output: any): any {
@@ -254,6 +279,37 @@ function unwrapOutput(output: any): any {
         return output.json;
     }
     return output;
+}
+
+/**
+ * Normalize a step/run `error` field to a readable string. Errors arrive in
+ * one of three shapes: a plain string (legacy servers), a superjson-wrapped
+ * `{ json: { name, message, stack }, __solidactions_serializer: 'superjson' }`
+ * object (steps endpoint), or that same shape JSON.stringified into a string
+ * (run-level `error` field) — confirmed live via GET /api/v1/runs/{id} and
+ * .../steps. Without this, a thrown Error renders as "[object Object]".
+ */
+export function errorMessage(error: unknown): string {
+    if (error === null || error === undefined) return '';
+
+    let value: any = error;
+    if (typeof value === 'string') {
+        try {
+            value = JSON.parse(value);
+        } catch {
+            return value;
+        }
+    }
+
+    if (value && typeof value === 'object' && value.__solidactions_serializer === 'superjson' && value.json) {
+        const inner = value.json;
+        if (inner && typeof inner === 'object' && (inner.name || inner.message)) {
+            return inner.name && inner.message ? `${inner.name}: ${inner.message}` : String(inner.name || inner.message);
+        }
+        return JSON.stringify(inner);
+    }
+
+    return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
 function formatDuration(ms: number | null): string {

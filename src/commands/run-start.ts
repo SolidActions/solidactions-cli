@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
     const config = await requireConfigWithWorkspace();
@@ -73,9 +73,16 @@ export async function run(projectName: string, workflowName: string, options: { 
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else if (error.response.status === 404) {
-                console.error(chalk.red('Project or workflow not found.'));
+                const envsList = await describeProjectEnvironments(config, projectName);
+                if (envsList) {
+                    console.error(chalk.red(
+                        `Project "${projectName}" has no ${environment} environment (exists in: ${envsList}). Pass -e <env> to target a different environment.`
+                    ));
+                } else {
+                    console.error(chalk.red('Project or workflow not found.'));
+                }
             } else if (error.response.status === 422) {
                 console.error(chalk.red('Validation error:'), error.response.data.message);
             } else {

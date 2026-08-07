@@ -11,9 +11,10 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { parseSkillFile, readTopLevelReferences, skillPushWithConfig } from '../src/commands/skill-push';
+import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill, parseCommandFile } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
+import { SKILL_SIDECAR } from '../src/commands/skill-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server — records the last request and returns a canned response
@@ -240,10 +241,10 @@ describe('parseSkillFile', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unit tests: readTopLevelReferences
+// Unit tests: readReferences
 // ---------------------------------------------------------------------------
 
-describe('readTopLevelReferences', () => {
+describe('readReferences', () => {
     it('reads top-level files and excludes SKILL.md', () => {
         const { dir, cleanup } = makeTmpSkillDir(
             '---\nname: S\ndescription: D\n---\nbody',
@@ -254,7 +255,7 @@ describe('readTopLevelReferences', () => {
         );
 
         try {
-            const refs = readTopLevelReferences(dir);
+            const refs = readReferences(dir);
             expect(refs).toEqual({
                 'example.ts': 'const x = 1;',
                 'notes.txt': 'some notes',
@@ -265,22 +266,45 @@ describe('readTopLevelReferences', () => {
         }
     });
 
-    it('does not recurse into subdirectories', () => {
+    it('recurses into subdirectories, keyed by relative path', () => {
         const { dir, cleanup } = makeTmpSkillDir(
             '---\nname: S\ndescription: D\n---\nbody',
             { 'top.ts': 'top' },
         );
 
         try {
-            // Create a subdirectory with a file
+            // Create a nested subdirectory with a file
             const sub = path.join(dir, 'subdir');
             fs.mkdirSync(sub);
             fs.writeFileSync(path.join(sub, 'nested.ts'), 'nested', 'utf8');
 
-            const refs = readTopLevelReferences(dir);
-            expect(refs).toHaveProperty('top.ts');
-            expect(refs).not.toHaveProperty('nested.ts');
-            expect(Object.keys(refs)).not.toContain('subdir');
+            const refs = readReferences(dir);
+            expect(refs).toHaveProperty('top.ts', 'top');
+            // nested file is included, keyed by its POSIX relative path
+            expect(refs).toHaveProperty('subdir/nested.ts', 'nested');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('recurses into a references/ subfolder, keyed by path relative to the skill dir (#247)', () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            '---\nname: S\ndescription: D\n---\nbody references references/member-roles.md',
+            { 'top.md': 'top content' },
+        );
+
+        try {
+            const sub = path.join(dir, 'references');
+            fs.mkdirSync(sub);
+            fs.writeFileSync(path.join(sub, 'member-roles.md'), 'roles content', 'utf8');
+
+            const refs = readReferences(dir);
+            // top-level files keep bare-filename keys (backward compatible)
+            expect(refs).toHaveProperty('top.md', 'top content');
+            // subfolder files are keyed by their POSIX path relative to the skill dir,
+            // matching how SKILL.md cites them (references/member-roles.md)
+            expect(refs).toHaveProperty('references/member-roles.md', 'roles content');
+            expect(refs).not.toHaveProperty('SKILL.md');
         } finally {
             cleanup();
         }
@@ -290,8 +314,31 @@ describe('readTopLevelReferences', () => {
         const { dir, cleanup } = makeTmpSkillDir('---\nname: S\ndescription: D\n---\nbody');
 
         try {
-            const refs = readTopLevelReferences(dir);
+            const refs = readReferences(dir);
             expect(refs).toEqual({});
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('excludes the skill-pull provenance sidecar and the skill-run .sa-state/ runtime dir', () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            '---\nname: S\ndescription: D\n---\nbody',
+            {
+                'real-reference.md': 'a real reference',
+                [SKILL_SIDECAR]: JSON.stringify({ identifier: 'S', doc_id: 1, head_revision_id: 1, role: null }),
+            },
+        );
+
+        try {
+            const stateDir = path.join(dir, '.sa-state');
+            fs.mkdirSync(stateDir);
+            fs.writeFileSync(path.join(stateDir, 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const refs = readReferences(dir);
+            expect(refs).toEqual({ 'real-reference.md': 'a real reference' });
+            expect(refs).not.toHaveProperty(SKILL_SIDECAR);
+            expect(refs).not.toHaveProperty('.sa-state/cache.json');
         } finally {
             cleanup();
         }
@@ -337,7 +384,7 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             // Assert HTTP request was made
             expect(lastCapture).not.toBeNull();
             expect(lastCapture!.method).toBe('POST');
-            expect(lastCapture!.path).toBe('/mcp/crews');
+            expect(lastCapture!.path).toBe('/mcp');
 
             // Assert X-Workspace-Id header
             expect(lastCapture!.headers['x-workspace-id']).toBe('ws-123');
@@ -349,13 +396,14 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             const body = lastCapture!.body;
             expect(body.jsonrpc).toBe('2.0');
             expect(body.method).toBe('tools/call');
-            expect(body.params.name).toBe('skills');
+            expect(body.params.name).toBe('crews_skills');
             expect(body.params.arguments.action).toBe('create');
             expect(body.params.arguments.name).toBe('My Cool Skill');
             expect(body.params.arguments.description).toBe('Does cool things');
 
-            // catalog_advertised should be in properties
-            expect(body.params.arguments.properties).toMatchObject({ catalog_advertised: false });
+            // catalog_advertised should be sent top-level, not wrapped in properties
+            expect(body.params.arguments.catalog_advertised).toBe(false);
+            expect(body.params.arguments).not.toHaveProperty('properties');
 
             // references should include the sibling file
             expect(body.params.arguments.references).toHaveProperty('usage.ts', 'export const usage = "example";');
@@ -364,6 +412,79 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             expect(body.params.arguments.references).not.toHaveProperty('SKILL.md');
         } finally {
             restoreExit();
+            cleanup();
+        }
+    });
+
+    it('sends license and allowed-tools frontmatter extras top-level on create, with no properties wrapper', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            [
+                '---',
+                'name: Licensed Skill',
+                'description: Has license and allowed-tools extras',
+                'license: MIT',
+                'allowed-tools: Read',
+                '---',
+                '',
+                'body content',
+            ].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(lastCapture).not.toBeNull();
+
+            const args = lastCapture!.body.params.arguments;
+            expect(args.license).toBe('MIT');
+            expect(args['allowed-tools']).toBe('Read');
+            expect(args).not.toHaveProperty('properties');
+        } finally {
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('sends only the real reference — excludes the pull sidecar and .sa-state runtime dir from the wire payload', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            {
+                'real-reference.md': 'a real reference',
+                [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }),
+            },
+        );
+
+        try {
+            fs.mkdirSync(path.join(dir, '.sa-state'));
+            fs.writeFileSync(path.join(dir, '.sa-state', 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const restoreExit = patchProcessExit();
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            restoreExit();
+
+            expect(caughtExit?.code).toBe(0);
+            // A sidecar is present, so a successful "created" push (no collision) also triggers the
+            // best-effort sidecar-revision refresh (item 2), which may issue a follow-up read call —
+            // find the create call specifically rather than assuming it's the last one captured.
+            const createCapture = allCaptures.find((c) => c.body.params.arguments.action === 'create');
+            expect(createCapture).toBeDefined();
+            expect(createCapture!.body.params.arguments.references).toEqual({ 'real-reference.md': 'a real reference' });
+        } finally {
             cleanup();
         }
     });
@@ -399,7 +520,7 @@ describe('skillPushWithConfig — with --role', () => {
             expect(lastCapture).not.toBeNull();
 
             const body = lastCapture!.body;
-            expect(body.params.name).toBe('roles');
+            expect(body.params.name).toBe('crews_roles');
             expect(body.params.arguments.action).toBe('create_skill');
             expect(body.params.arguments.role).toBe('senior-engineer');
             expect(body.params.arguments.name).toBe('Role Skill');
@@ -417,7 +538,7 @@ describe('skillPushWithConfig — with --role', () => {
 // ---------------------------------------------------------------------------
 
 describe('skillPushWithConfig — error cases', () => {
-    it('exits non-zero without making any HTTP request when SKILL.md is missing', async () => {
+    it('exits non-zero without making any HTTP request when directory has no SKILL.md, skills/, or commands/', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-crews-test-empty-'));
 
         const restoreExit = patchProcessExit();
@@ -442,8 +563,8 @@ describe('skillPushWithConfig — error cases', () => {
             expect(caughtExit).not.toBeNull();
             expect(caughtExit!.code).not.toBe(0);
 
-            // Error message should mention SKILL.md
-            expect(stderrLines.join('')).toMatch(/SKILL\.md/);
+            // Error message should mention that nothing was found to push
+            expect(stderrLines.join('')).toMatch(/no skills\/ or commands\//);
         } finally {
             restoreExit();
             restoreStderr();
@@ -472,6 +593,37 @@ describe('skillPushWithConfig — error cases', () => {
             const out = stderrLines.join('');
             expect(out).toContain('validation_failed');
             expect(out).toContain('name must be kebab-case.');
+            // Regression guard: a validation error must NOT be wrongly prefixed
+            // with the transport-failure phrase.
+            expect(out).not.toContain('MCP request failed');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('fails with a clear error before any HTTP call when frontmatter contains a reserved key (e.g. identifier)', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: Hijack Skill', 'description: nope', 'identifier: hijack', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e; else throw e;
+            }
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+            expect(stderrLines.join('')).toContain('identifier');
+
+            // No HTTP call was made — the guard fired before any create attempt.
+            expect(allCaptures.length).toBe(0);
         } finally {
             restoreExit();
             restoreStderr();
@@ -491,7 +643,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             makeMcpSuccess({ version_id: 42, body_blob_sha: 'deadbeef' }),
         ];
         const { dir, cleanup } = makeTmpSkillDir(
-            ['---', 'name: Existing Skill', 'description: updated desc', '---', 'new body'].join('\n'),
+            ['---', 'name: Existing Skill', 'description: updated desc', 'catalog_advertised: true', '---', 'new body'].join('\n'),
             { 'ref.ts': 'export const x = 1;' },
         );
         const restoreExit = patchProcessExit();
@@ -505,10 +657,11 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
-            expect(allCaptures[1].body.params.name).toBe('skills');
+            expect(allCaptures[1].body.params.name).toBe('crews_skills');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit');
             expect(allCaptures[1].body.params.arguments.identifier).toBe('Existing Skill');
-            expect(allCaptures[1].body.params.arguments).toHaveProperty('properties_patch');
+            expect(allCaptures[1].body.params.arguments.catalog_advertised).toBe(true);
+            expect(allCaptures[1].body.params.arguments).not.toHaveProperty('properties_patch');
             expect(allCaptures[1].body.params.arguments.references).toHaveProperty('ref.ts');
             expect(logs.join('')).toContain('updated skill');
         } finally { console.log = origLog; restoreExit(); cleanup(); }
@@ -532,7 +685,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
-            expect(allCaptures[1].body.params.name).toBe('roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
             expect(allCaptures[1].body.params.arguments.role).toBe('builder');
             expect(allCaptures[1].body.params.arguments.name).toBe('Role Skill');
@@ -558,6 +711,1006 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(allCaptures.length).toBe(1);
             expect(logs.join('')).toContain('created skill');
             expect(logs.join('')).toContain('1 refs');
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Drift guard: base_version_id (task B3)
+// ---------------------------------------------------------------------------
+
+describe('skillPushWithConfig — drift guard via base_version_id', () => {
+    it('sends the sidecar head_revision_id as base_version_id on the edit request', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 717, head_revision_id: 717, body_blob_sha: 'cafe' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.arguments.base_version_id).toBe(716);
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('on concurrent_edit, exits 1 and prints a drift message naming --force', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpError('concurrent_edit', 'The document was modified by another write since your base_version_id. Re-read the document and retry.'),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(1);
+            const out = stderrLines.join('');
+            expect(out).toContain('--force');
+        } finally { restoreStderr(); restoreExit(); cleanup(); }
+    });
+
+    it('--force skips sending base_version_id and pushes through even when the sidecar is behind', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 900, head_revision_id: 900, body_blob_sha: 'beef' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, { force: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.arguments).not.toHaveProperty('base_version_id');
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('refreshes the sidecar head_revision_id from the edit response after a successful guarded edit', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess({ version_id: 717, head_revision_id: 717, body_blob_sha: 'cafe' }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            expect(sidecar.head_revision_id).toBe(717);
+            expect(sidecar.identifier).toBe('my-skill');
+            expect(sidecar.doc_id).toBe(42);
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('refreshes the sidecar head_revision_id from the create response on a "created" push (remote delete+recreate)', async () => {
+        // No name_collision this time — the remote skill was deleted and this push recreates it under the
+        // same name, so the create call succeeds directly with a fresh revision.
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-99', reference_doc_ids: {}, head_revision_id: 5 })];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            // Refreshed to the new doc's revision — NOT left at the stale 716 from the deleted doc.
+            expect(sidecar.head_revision_id).toBe(5);
+        } finally { restoreExit(); cleanup(); }
+    });
+
+    it('clears a stale sidecar head_revision_id to null on "created" when the new revision cannot be determined', async () => {
+        responseQueue = [
+            // create succeeds but the response carries no head_revision_id/version_id
+            makeMcpSuccess({ skill_doc_id: 'doc-99', reference_doc_ids: {} }),
+            // the best-effort fallback read also fails to produce one
+            makeMcpError('skill_not_found', 'not found'),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'),
+            { [SKILL_SIDECAR]: JSON.stringify({ identifier: 'my-skill', doc_id: 42, head_revision_id: 716, role: null }) },
+        );
+        const restoreExit = patchProcessExit();
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try { await skillPushWithConfig(dir, {}, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
+            expect(caughtExit?.code).toBe(0);
+            const sidecar = JSON.parse(fs.readFileSync(path.join(dir, SKILL_SIDECAR), 'utf8'));
+            // Cleared, not left at the stale 716 — a future edit must not send it as base_version_id.
+            expect(sidecar.head_revision_id).toBeNull();
+        } finally { restoreExit(); cleanup(); }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// pushParsedSkill — core unit (no process.exit, no print, returns result)
+// ---------------------------------------------------------------------------
+
+describe('pushParsedSkill — core payload-based upsert', () => {
+    const basePayload = {
+        name: 'Core Skill',
+        description: 'A payload-based skill',
+        properties: { catalog_advertised: true },
+        body: 'The skill body',
+        references: { 'helper.ts': 'export const x = 1;' },
+    };
+
+    it('sends skills.create and returns {status:"created", name, data} without calling process.exit', async () => {
+        const createData = { skill_doc_id: 'doc-core-1', reference_doc_ids: { 'helper.ts': 99 } };
+        responseQueue = [makeMcpSuccess(createData)];
+
+        const restoreExit = patchProcessExit();
+        try {
+            // pushParsedSkill must NOT throw ProcessExitError — if it calls process.exit this will throw
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+
+            expect(result.status).toBe('created');
+            expect(result.name).toBe('Core Skill');
+            expect(result.data).toMatchObject(createData);
+
+            // Verify HTTP request shape
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(allCaptures[0].body.params.name).toBe('crews_skills');
+            expect(args.action).toBe('create');
+            expect(args.name).toBe('Core Skill');
+            expect(args.description).toBe('A payload-based skill');
+            expect(args.catalog_advertised).toBe(true);
+            expect(args).not.toHaveProperty('properties');
+            expect(args.references).toHaveProperty('helper.ts', 'export const x = 1;');
+            expect(args.body).toBe('The skill body');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('on name_collision switches to skills.edit and returns {status:"updated", name, data}', async () => {
+        const editData = { version_id: 55, body_blob_sha: 'abcdef' };
+        responseQueue = [
+            makeMcpError('name_collision', 'A skill with this name already exists.'),
+            makeMcpSuccess(editData),
+        ];
+
+        const restoreExit = patchProcessExit();
+        try {
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+
+            expect(result.status).toBe('updated');
+            expect(result.name).toBe('Core Skill');
+            expect(result.data).toMatchObject(editData);
+
+            // Two HTTP requests: first create, then edit on collision
+            expect(allCaptures.length).toBe(2);
+
+            // First request: create
+            expect(allCaptures[0].body.params.arguments.action).toBe('create');
+
+            // Second request: edit with correct args
+            const editArgs = allCaptures[1].body.params.arguments;
+            expect(allCaptures[1].body.params.name).toBe('crews_skills');
+            expect(editArgs.action).toBe('edit');
+            expect(editArgs.identifier).toBe('Core Skill');
+            expect(editArgs.description).toBe('A payload-based skill');
+            expect(editArgs.catalog_advertised).toBe(true);
+            expect(editArgs).not.toHaveProperty('properties_patch');
+            expect(editArgs.references).toHaveProperty('helper.ts');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('on name_collision with --role switches to roles.edit_skill and returns {status:"updated"}', async () => {
+        const editData = { version_id: 3, body_blob_sha: 'cafebabe' };
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess(editData),
+        ];
+
+        const restoreExit = patchProcessExit();
+        try {
+            const result = await pushParsedSkill(basePayload, { role: 'senior-dev' }, stubConfig());
+
+            expect(result.status).toBe('updated');
+
+            expect(allCaptures.length).toBe(2);
+            // First: roles.create_skill
+            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(allCaptures[0].body.params.arguments.action).toBe('create_skill');
+            expect(allCaptures[0].body.params.arguments.role).toBe('senior-dev');
+
+            // Second: roles.edit_skill
+            expect(allCaptures[1].body.params.name).toBe('crews_roles');
+            expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
+            expect(allCaptures[1].body.params.arguments.role).toBe('senior-dev');
+            expect(allCaptures[1].body.params.arguments.name).toBe('Core Skill');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('throws on a non-collision MCP error without calling process.exit', async () => {
+        responseQueue = [makeMcpError('validation_failed', 'name must be kebab-case.')];
+
+        const restoreExit = patchProcessExit();
+        try {
+            // Must throw an Error (not ProcessExitError), propagating the MCP error
+            await expect(pushParsedSkill(basePayload, {}, stubConfig())).rejects.toThrow('validation_failed');
+        } finally {
+            restoreExit();
+        }
+    });
+
+    it('does not call process.exit even when it returns a result', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-noexit', reference_doc_ids: {} })];
+
+        // patchProcessExit so that ANY call to process.exit throws ProcessExitError
+        const restoreExit = patchProcessExit();
+        try {
+            // If pushParsedSkill calls process.exit, this will throw ProcessExitError instead of resolving
+            const result = await pushParsedSkill(basePayload, {}, stubConfig());
+            // Reaching here means process.exit was NOT called
+            expect(result.status).toBe('created');
+        } finally {
+            restoreExit();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests: parseCommandFile
+// ---------------------------------------------------------------------------
+
+describe('parseCommandFile', () => {
+    it('derives name from filename (basename without .md extension, kebab-cased)', () => {
+        const content = '---\ndescription: Does things\n---\nbody text';
+        const result = parseCommandFile('my_command.md', content);
+        expect(result.name).toBe('my-command');
+        expect(result.description).toBe('Does things');
+        expect(result.body).toBe('body text');
+        expect(result.properties).toEqual({});
+        expect(result.references).toEqual({});
+    });
+
+    it('converts spaces to hyphens in derived name', () => {
+        const content = '---\ndescription: A command\n---\nbody';
+        const result = parseCommandFile('my command.md', content);
+        expect(result.name).toBe('my-command');
+    });
+
+    it('lowercases the derived name', () => {
+        const content = '---\ndescription: Uppercase cmd\n---\nbody';
+        const result = parseCommandFile('MyCommand.md', content);
+        expect(result.name).toBe('mycommand');
+    });
+
+    it('does NOT carry allowed-tools or argument-hint into properties', () => {
+        const content = [
+            '---',
+            'description: A command with extras',
+            'allowed-tools: bash,grep',
+            'argument-hint: <filename>',
+            '---',
+            'body',
+        ].join('\n');
+        const result = parseCommandFile('cmd.md', content);
+        expect(result.properties).toEqual({});
+        expect(result.description).toBe('A command with extras');
+    });
+
+    it('throws when description is missing from frontmatter', () => {
+        const content = '---\nname: Something\n---\nbody';
+        expect(() => parseCommandFile('cmd.md', content)).toThrow(/"description"/);
+    });
+
+    it('throws when frontmatter opening marker is missing', () => {
+        expect(() => parseCommandFile('cmd.md', 'description: foo\nbody')).toThrow(/must begin with a YAML frontmatter/);
+    });
+
+    it('throws when frontmatter is not closed', () => {
+        expect(() => parseCommandFile('cmd.md', '---\ndescription: foo')).toThrow(/not closed/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Integration tests: recursive plugin push
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a plugin dir layout:
+ *   <dir>/skills/<name>/SKILL.md
+ *   <dir>/commands/<name>.md
+ *
+ * Returns dir path and cleanup fn.
+ */
+function makePluginDir(opts: {
+    skills?: Array<{ name: string; description: string; body?: string }>;
+    commands?: Array<{ filename: string; description: string; body?: string }>;
+    extras?: Record<string, string>; // other top-level entries (e.g. agents/foo, hooks/bar)
+}): { dir: string; cleanup: () => void } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-plugin-test-'));
+
+    if (opts.skills) {
+        const skillsDir = path.join(dir, 'skills');
+        fs.mkdirSync(skillsDir);
+        for (const skill of opts.skills) {
+            const skillDir = path.join(skillsDir, skill.name);
+            fs.mkdirSync(skillDir);
+            const content = [
+                '---',
+                `name: ${skill.name}`,
+                `description: ${skill.description}`,
+                '---',
+                skill.body ?? 'skill body',
+            ].join('\n');
+            fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+        }
+    }
+
+    if (opts.commands) {
+        const commandsDir = path.join(dir, 'commands');
+        fs.mkdirSync(commandsDir);
+        for (const cmd of opts.commands) {
+            const content = [
+                '---',
+                `description: ${cmd.description}`,
+                '---',
+                cmd.body ?? 'command body',
+            ].join('\n');
+            fs.writeFileSync(path.join(commandsDir, cmd.filename), content, 'utf8');
+        }
+    }
+
+    if (opts.extras) {
+        for (const [relPath, content] of Object.entries(opts.extras)) {
+            const abs = path.join(dir, relPath);
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, content, 'utf8');
+        }
+    }
+
+    return {
+        dir,
+        cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    };
+}
+
+describe('recursive plugin push', () => {
+    it('pushes 3 skills when plugin dir has skills/a, skills/b, and commands/c.md', async () => {
+        // Queue 3 success responses (one per skill push)
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 'doc-a', reference_doc_ids: {} }),
+            makeMcpSuccess({ skill_doc_id: 'doc-b', reference_doc_ids: {} }),
+            makeMcpSuccess({ skill_doc_id: 'doc-c', reference_doc_ids: {} }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'a', description: 'Skill A' },
+                { name: 'b', description: 'Skill B' },
+            ],
+            commands: [
+                { filename: 'c.md', description: 'Command C' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+
+            // Exactly 3 create calls were made
+            expect(allCaptures.length).toBe(3);
+
+            // Extract names from the 3 calls
+            const pushedNames = allCaptures.map((c) => c.body.params.arguments.name);
+            expect(pushedNames).toContain('a');
+            expect(pushedNames).toContain('b');
+            expect(pushedNames).toContain('c');
+
+            // All 3 are create actions
+            for (const cap of allCaptures) {
+                expect(cap.body.params.arguments.action).toBe('create');
+            }
+
+            // The command c should have description from its frontmatter
+            const cCapture = allCaptures.find((c) => c.body.params.arguments.name === 'c');
+            expect(cCapture!.body.params.arguments.description).toBe('Command C');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('plugin mode: excludes a sidecar/.sa-state nested inside a per-skill dir (skills/<name>/) from that skill\'s references', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-a', reference_doc_ids: {} })];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [{ name: 'a', description: 'Skill A' }],
+        });
+
+        try {
+            const skillDir = path.join(dir, 'skills', 'a');
+            fs.writeFileSync(path.join(skillDir, 'real-reference.md'), 'a real reference', 'utf8');
+            fs.writeFileSync(path.join(skillDir, SKILL_SIDECAR), JSON.stringify({ identifier: 'a', doc_id: 1, head_revision_id: 1, role: null }), 'utf8');
+            fs.mkdirSync(path.join(skillDir, '.sa-state'));
+            fs.writeFileSync(path.join(skillDir, '.sa-state', 'cache.json'), '{"secret":"local-state"}', 'utf8');
+
+            const restoreExit = patchProcessExit();
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+            restoreExit();
+
+            expect(caughtExit?.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.references).toEqual({ 'real-reference.md': 'a real reference' });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('single-skill back-compat: a dir with a top-level SKILL.md still pushes exactly 1 skill (one create call)', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 'doc-single', reference_doc_ids: {} })];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: solo-skill', 'description: A single skill', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            // Exactly 1 HTTP create call
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.name).toBe('solo-skill');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('aborts with an error (zero push calls) when skills/foo and commands/foo.md both resolve to name "foo"', async () => {
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'foo', description: 'Foo from skills' },
+            ],
+            commands: [
+                { filename: 'foo.md', description: 'Foo from commands' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit non-zero
+            expect(caughtExit).not.toBeNull();
+            expect(caughtExit!.code).not.toBe(0);
+
+            // Zero HTTP calls — aborted before any push
+            expect(allCaptures.length).toBe(0);
+
+            // Error message must mention the conflict
+            const stderr = stderrLines.join('');
+            expect(stderr).toMatch(/conflict/i);
+            expect(stderr).toContain('foo');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('ignores agents/, hooks/, .mcp.json alongside skills/ and commands/ — only pushes the skills/commands', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 'doc-alpha', reference_doc_ids: {} }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'alpha', description: 'Alpha skill' },
+            ],
+            extras: {
+                'agents/my-agent.md': '# Agent',
+                'hooks/pre-push': '#!/bin/sh\necho hi',
+                '.mcp.json': '{"mcpServers":{}}',
+            },
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, {}, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            // Only 1 push call — agents/hooks/.mcp.json are ignored
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.name).toBe('alpha');
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// skill push --dry-run
+// ---------------------------------------------------------------------------
+
+describe('skill push --dry-run', () => {
+    it('single-skill where skill does NOT exist: prints "[dry-run] would create" and makes only a read call', async () => {
+        // Queue a skill_not_found response for the read pre-flight
+        responseQueue = [makeMcpError('skill_not_found', 'No skill with that identifier exists.')];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: my-new-skill', 'description: A brand new skill', '---', 'skill body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            // Output must contain the dry-run would-create message
+            const allOutput = logs.join('');
+            expect(allOutput).toContain("[dry-run] would create 'my-new-skill'");
+
+            // Exactly ONE HTTP call (the read pre-flight), no create or edit
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.action).toBe('read');
+            expect(allCaptures[0].body.params.arguments.identifier).toBe('my-new-skill');
+
+            // Assert there are no create or edit calls anywhere
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('--role + --dry-run pre-flights the roles tool read_skill {role,name} (not skills read {identifier})', async () => {
+        // role-scoped skill that does not exist yet → would create
+        responseQueue = [makeMcpError('skill_not_found', 'No skill with that name exists for this role.')];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: role-scoped-skill', 'description: A role-scoped skill', '---', 'body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { role: 'senior-engineer', dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            expect(caughtExit?.code).toBe(0);
+            expect(logs.join('')).toContain("[dry-run] would create 'role-scoped-skill'");
+
+            // Pre-flight must target the roles tool's read_skill with role+name, NOT skills read {identifier}
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(args.action).toBe('read_skill');
+            expect(args.role).toBe('senior-engineer');
+            expect(args.name).toBe('role-scoped-skill');
+            expect(args).not.toHaveProperty('identifier');
+
+            // No create_skill / edit_skill calls
+            const mutated = allCaptures.some((c) => ['create_skill', 'edit_skill'].includes(c.body.params.arguments.action));
+            expect(mutated).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('single-skill where skill EXISTS: prints "[dry-run] would update" and makes only a read call', async () => {
+        // Queue a success response for the read pre-flight (skill found)
+        responseQueue = [
+            makeMcpSuccess({
+                identifier: 'existing-skill',
+                doc_id: 'doc-abc',
+                properties: {},
+                body: 'old body',
+                reference: {},
+            }),
+        ];
+
+        const { dir, cleanup } = makeTmpSkillDir(
+            ['---', 'name: existing-skill', 'description: An existing skill', '---', 'new body'].join('\n'),
+        );
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            // Output must contain the dry-run would-update message
+            const allOutput = logs.join('');
+            expect(allOutput).toContain("[dry-run] would update 'existing-skill'");
+
+            // Exactly ONE HTTP call (the read pre-flight), no create or edit
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.action).toBe('read');
+
+            // Assert there are no create or edit calls anywhere
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+
+    it('plugin --dry-run with 2 skills: one not-found → would create, one found → would update, zero create/edit calls', async () => {
+        // First skill: not found → would create
+        // Second skill: found → would update
+        responseQueue = [
+            makeMcpError('skill_not_found', 'No skill with that identifier exists.'),
+            makeMcpSuccess({
+                identifier: 'beta-skill',
+                doc_id: 'doc-beta',
+                properties: {},
+                body: 'existing beta body',
+                reference: {},
+            }),
+        ];
+
+        const { dir, cleanup } = makePluginDir({
+            skills: [
+                { name: 'alpha-skill', description: 'Alpha — a new skill' },
+                { name: 'beta-skill', description: 'Beta — already exists' },
+            ],
+        });
+
+        const restoreExit = patchProcessExit();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+
+        try {
+            let caughtExit: ProcessExitError | null = null;
+            try {
+                await skillPushWithConfig(dir, { dryRun: true }, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) caughtExit = e;
+                else throw e;
+            }
+
+            // Must exit 0
+            expect(caughtExit?.code).toBe(0);
+
+            const allOutput = logs.join('');
+            // Both dry-run lines must appear
+            expect(allOutput).toContain("[dry-run] would create 'alpha-skill'");
+            expect(allOutput).toContain("[dry-run] would update 'beta-skill'");
+
+            // Exactly 2 HTTP calls (one read per skill), no create or edit
+            expect(allCaptures.length).toBe(2);
+            for (const cap of allCaptures) {
+                expect(cap.body.params.arguments.action).toBe('read');
+            }
+
+            const hasCreate = allCaptures.some((c) => c.body.params.arguments.action === 'create');
+            const hasEdit = allCaptures.some((c) => c.body.params.arguments.action === 'edit');
+            expect(hasCreate).toBe(false);
+            expect(hasEdit).toBe(false);
+        } finally {
+            console.log = origLog;
+            restoreExit();
+            cleanup();
+        }
+    });
+});
+
+describe('skillPushWithConfig — staged-not-published warning (single-skill)', () => {
+    async function run(dir: string, options: SkillPushOptions) {
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreErr } = captureStderr();
+        const logs: string[] = [];
+        const origLog = console.log;
+        console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            try { await skillPushWithConfig(dir, options, stubConfig()); }
+            catch (e) { if (!(e instanceof ProcessExitError)) throw e; }
+        } finally {
+            console.log = origLog; restoreErr(); restoreExit();
+        }
+        return { err: errLines.join(''), out: logs.join('') };
+    }
+
+    it('warns (edit path) when has_unpublished_revisions is true', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 42, has_unpublished_revisions: true }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).toContain('Staged, not published');
+            expect(err).toContain('solidactions skill publish my-skill');
+        } finally { cleanup(); }
+    });
+
+    it('does NOT warn (edit path) when has_unpublished_revisions is false', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 43, has_unpublished_revisions: false }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).not.toContain('Staged, not published');
+        } finally { cleanup(); }
+    });
+
+    it('warns (create path, draft wording) when snapshot_hint is truthy', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 118, reference_doc_ids: {}, snapshot_hint: 'no snapshot yet' })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).toContain('unversioned draft');
+            expect(err).toContain('solidactions skill publish my-skill');
+        } finally { cleanup(); }
+    });
+
+    it('does NOT warn (create path) when snapshot_hint is null (live-mode skill)', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 119, reference_doc_ids: {}, snapshot_hint: null })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, {});
+            expect(err).not.toContain('published');
+        } finally { cleanup(); }
+    });
+
+    it('warns with MCP-hint wording (not the publish command) on a --role push', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 5, has_unpublished_revisions: true }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        try {
+            const { err } = await run(dir, { role: 'builder' });
+            expect(err).toContain('crews_versions take_snapshot');
+            expect(err).not.toContain('skill publish');
+        } finally { cleanup(); }
+    });
+});
+
+describe('skillPushWithConfig — --publish (single-skill)', () => {
+    it('rejects --publish combined with --role BEFORE any HTTP request', async () => {
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines, restore } = captureStderr();
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { role: 'builder', publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(1);
+            expect(lastCapture).toBeNull();
+            expect(lines.join('')).toContain('--publish is not supported with --role');
+        } finally { restore(); restoreExit(); cleanup(); }
+    });
+
+    it('after a create push, snapshots by skill_doc_id and prints published (no warning)', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 200, reference_doc_ids: {}, snapshot_hint: 'no snapshot yet' }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 950 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines: errLines, restore: restoreErr } = captureStderr();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[1].body.params.name).toBe('crews_versions');
+            expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 200 });
+            expect(logs.join('')).toContain("published 'my-skill'");
+            expect(errLines.join('')).not.toContain('Not yet published');
+        } finally { console.log = origLog; restoreErr(); restoreExit(); cleanup(); }
+    });
+
+    it('after an edit push, resolves by name then snapshots and prints published', async () => {
+        responseQueue = [
+            makeMcpError('name_collision', 'exists'),
+            makeMcpSuccess({ version_id: 51, has_unpublished_revisions: true }),
+            makeMcpSuccess({ doc_id: 201, has_unpublished_revisions: true }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 951 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(4); // create(collision) → edit → read → take_snapshot
+            expect(allCaptures[2].body.params.arguments).toEqual({ action: 'read', identifier: 'my-skill' });
+            expect(allCaptures[3].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 201 });
+            expect(logs.join('')).toContain("published 'my-skill'");
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('under --json, still performs the publish and emits combined JSON', async () => {
+        responseQueue = [
+            makeMcpSuccess({ skill_doc_id: 202, reference_doc_ids: {}, snapshot_hint: 'x' }),
+            makeMcpSuccess({ snapshot_taken: true, snapshot_id: 952 }),
+        ];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true, json: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            const printed = JSON.parse(logs.join(''));
+            expect(printed.publish).toEqual({ status: 'published', snapshotId: 952 });
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('rejects --publish in plugin mode (no top-level SKILL.md) before pushing', async () => {
+        // Plugin dir: skills/<name>/SKILL.md, no top-level SKILL.md.
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-plugin-'));
+        fs.mkdirSync(path.join(root, 'skills', 'alpha'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'skills', 'alpha', 'SKILL.md'), ['---', 'name: alpha', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const { lines, restore } = captureStderr();
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(root, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(1);
+            expect(lastCapture).toBeNull();
+            expect(lines.join('')).toMatch(/--publish is not supported.*plugin|multiple skills/i);
+        } finally { restore(); restoreExit(); fs.rmSync(root, { recursive: true, force: true }); }
+    });
+
+    it('create push --publish of a live-mode skill (null snapshot_hint) makes NO take_snapshot call and reports live-mode', async () => {
+        responseQueue = [makeMcpSuccess({ skill_doc_id: 300, reference_doc_ids: {}, snapshot_hint: null })];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(1); // create only, no take_snapshot
+            expect(logs.join('')).toContain('live-mode skill');
+        } finally { console.log = origLog; restoreExit(); cleanup(); }
+    });
+
+    it('--publish combined with --dry-run performs NO publish call', async () => {
+        // dry-run does a single read pre-flight (skill_not_found → would-create), no create/edit/snapshot.
+        responseQueue = [makeMcpError('skill_not_found', 'absent')];
+        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
+        const restoreExit = patchProcessExit();
+        const logs: string[] = []; const origLog = console.log; console.log = (m?: any) => { logs.push(String(m)); };
+        try {
+            let code: number | undefined;
+            try { await skillPushWithConfig(dir, { publish: true, dryRun: true }, stubConfig()); }
+            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
+            expect(code).toBe(0);
+            expect(allCaptures.length).toBe(1); // dry-run read pre-flight only, no take_snapshot
+            expect(allCaptures.every((c) => c.body.params.arguments.action !== 'take_snapshot')).toBe(true);
         } finally { console.log = origLog; restoreExit(); cleanup(); }
     });
 });

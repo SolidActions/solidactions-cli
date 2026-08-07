@@ -2,8 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-interface OAuthActionsSearchOptions {
-    method?: string;
+interface OAuthActionListOptions {
     json?: boolean;
     limit?: number;
 }
@@ -17,13 +16,11 @@ interface OAuthAction {
     tags?: string[];
 }
 
-export async function oauthActionsSearch(platform: string, query: string | undefined, options: OAuthActionsSearchOptions) {
+export async function oauthActionList(platform: string, options: OAuthActionListOptions) {
     const config = await requireConfigWithWorkspace();
 
     try {
         const params: Record<string, string> = { platform };
-        if (query) params.q = query;
-        if (options.method) params.method = options.method;
         if (options.limit) params.limit = String(options.limit);
 
         const response = await axios.get(`${config.host}/api/v1/oauth-actions`, {
@@ -39,27 +36,21 @@ export async function oauthActionsSearch(platform: string, query: string | undef
         }
 
         if (actions.length === 0) {
-            console.log('No actions found.');
+            console.log(`No actions found for platform "${platform}".`);
             return;
         }
 
         for (const a of actions) {
             const method = (a.method || 'GET').toUpperCase().padEnd(6);
-            const path = a.path || '';
-            const title = a.title || '';
-            console.log(`${chalk.cyan(method)} ${chalk.white(path.padEnd(55))} ${chalk.gray('— ' + title)}`);
-            if (a.tags?.length) {
-                console.log(chalk.gray(`  tags: ${a.tags.join(', ')}`));
-            }
-            console.log(chalk.gray(`  action_id: ${a.action_id}`));
-            console.log('');
+            console.log(`${chalk.cyan(method)} ${chalk.white(a.path.padEnd(50))} ${chalk.gray('— ' + (a.title || ''))}`);
         }
-
-        console.log(chalk.gray(`${actions.length} action(s) found.`));
-        console.log(chalk.gray(`Run 'solidactions oauth-actions show ${platform} <action_id>' for full schema + paste-ready snippet.`));
+        console.log('');
+        console.log(chalk.gray(`${actions.length} action(s) — use "solidactions oauth-action search ${platform} <query>" to narrow, or "oauth-action view ${platform} <action_id>" for detail.`));
     } catch (error: any) {
-        if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+        if (error.response?.status === 404 && error.response.data?.code === 'platform_unknown') {
+            console.error(chalk.red(`Unknown platform "${platform}". Run \`solidactions oauth-action platforms\` to see available platforms.`));
+        } else if (error.response?.status === 401) {
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global".'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
         } else {

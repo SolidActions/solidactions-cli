@@ -2,12 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from './github';
+import { EXAMPLES_REF } from './examples-ref';
 
-const SKILL_NAMES = [
+export const SOLIDACTIONS_SKILL_NAMES = [
     'solidactions-getting-started',
     'solidactions-workflow-coding',
     'solidactions-deploy-and-config',
     'solidactions-oauth-actions',
+    'solidactions-crew-skills',
 ] as const;
 
 const EXAMPLES_OWNER = 'SolidActions';
@@ -42,9 +44,9 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
 
     fsExtra.ensureDirSync(targetDir);
 
-    for (const skillName of SKILL_NAMES) {
+    for (const skillName of SOLIDACTIONS_SKILL_NAMES) {
         const remotePath = `${SKILLS_PATH_PREFIX}/${skillName}.md`;
-        const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath);
+        const content = await fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, remotePath, EXAMPLES_REF);
 
         const filePath = path.join(targetDir, `${skillName}.md`);
         fs.writeFileSync(filePath, content, 'utf8');
@@ -59,5 +61,24 @@ export async function installSkills(targetDir: string): Promise<{ written: strin
  * repo. Single source per target — no legacy fallback.
  */
 export async function fetchAiHelperContent(targetFile: AiHelperTarget): Promise<string> {
-    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile);
+    return fetchRawFile(EXAMPLES_OWNER, EXAMPLES_REPO, targetFile, EXAMPLES_REF);
+}
+
+/**
+ * True when the project dir already has SolidActions skill files installed
+ * (either AI-helper convention). Used by `deploy` for a non-blocking tip —
+ * these files are how AI assistants self-rescue on env-scope/deploy traps.
+ */
+export function hasSolidActionsSkills(projectDir: string): boolean {
+    for (const target of ['CLAUDE.md', 'AGENTS.md'] as AiHelperTarget[]) {
+        const dir = skillTargetDir(target, projectDir);
+        if (!fs.existsSync(dir)) {
+            continue;
+        }
+        const entries = fs.readdirSync(dir);
+        if (entries.some((f) => f.startsWith('solidactions-') && f.endsWith('.md'))) {
+            return true;
+        }
+    }
+    return false;
 }

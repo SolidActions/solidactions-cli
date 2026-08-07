@@ -48,11 +48,26 @@ export async function pull(projectName: string, destPath?: string, options: { ye
 
         fs.mkdirSync(destination, { recursive: true });
 
+        // The server streams back the exact archive `deploy` uploaded: a
+        // root-level Dockerfile plus every project file nested under
+        // tenantcode/ (see deploy.ts:510-527). Unwrap it here so the pulled
+        // project's files land at dest root, matching what the user actually
+        // wrote — dropping the generated Dockerfile and any noCache
+        // cache-buster entries (deploy.ts's cacheBusterEntry).
         const readable = Readable.from(buffer);
         await pipeline(
             readable,
             createGunzip(),
-            extract({ cwd: destination, strip: 0 })
+            extract({
+                cwd: destination,
+                strip: 1,
+                // `filter` receives the pre-strip path (verified against this
+                // version of the `tar` package).
+                filter: (entryPath) => {
+                    const top = entryPath.split('/')[0];
+                    return top === 'tenantcode' && !/\/sa-nocache-[0-9a-f-]+$/.test(entryPath);
+                },
+            })
         );
 
         console.log(chalk.green(`Project "${projectName}" pulled successfully!`));
@@ -61,7 +76,7 @@ export async function pull(projectName: string, destPath?: string, options: { ye
             if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>" to re-configure.'));
+                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`));
             }

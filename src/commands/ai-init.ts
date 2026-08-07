@@ -4,6 +4,7 @@ import prompts from 'prompts';
 import fsExtra from 'fs-extra';
 import path from 'path';
 import { fetchRawFile } from '../utils/github';
+import { sdkDocsRef } from '../utils/sdk-version';
 import { upsertMarkerSection } from '../utils/markers';
 import { AiHelperTarget, skillTargetDir, installSkills, fetchAiHelperContent } from '../utils/skills';
 
@@ -12,46 +13,72 @@ interface AiInitOptions {
     agents?: boolean;
 }
 
-export async function aiInit(options: AiInitOptions = {}) {
+export const NON_TTY_DEFAULT_NOTICE =
+    'No --claude/--agents given and non-interactive — defaulting to CLAUDE.md; pass --agents for Codex/Cursor/Gemini.';
+
+/**
+ * Resolve which AI-helper file (CLAUDE.md vs AGENTS.md) to target, WITHOUT
+ * touching the filesystem or network. Callers that also scaffold template
+ * files (e.g. `init`) must call this BEFORE writing anything, so a shell
+ * that can't answer the interactive prompt never leaves a half-scaffolded
+ * project — see the `init` half-scaffold bug this closes.
+ */
+export async function resolveAiHelperTarget(options: AiInitOptions = {}): Promise<AiHelperTarget> {
+    if (options.claude && options.agents) {
+        console.error(chalk.red('Please specify only one of --claude or --agents'));
+        process.exit(1);
+    }
+
+    if (options.claude) {
+        return 'CLAUDE.md';
+    }
+    if (options.agents) {
+        return 'AGENTS.md';
+    }
+
+    if (process.stdin.isTTY) {
+        const response = await prompts({
+            type: 'select',
+            name: 'file',
+            message: 'Which AI helper file?',
+            choices: [
+                { title: 'CLAUDE.md (Claude Code)', value: 'CLAUDE.md' },
+                { title: 'AGENTS.md (Codex, Cursor, Gemini, etc.)', value: 'AGENTS.md' },
+            ],
+        });
+
+        if (!response.file) {
+            console.log(chalk.yellow('Cancelled.'));
+            process.exit(0);
+        }
+
+        return response.file as AiHelperTarget;
+    }
+
+    // Non-TTY (CI, pipes, an AI agent's non-interactive shell) with no flag:
+    // never block on an unanswerable prompt — default instead.
+    console.log(chalk.yellow(NON_TTY_DEFAULT_NOTICE));
+    return 'CLAUDE.md';
+}
+
+export async function aiInit(options: AiInitOptions = {}, resolvedTarget?: AiHelperTarget) {
     try {
-        // Determine target file.
-        let targetFile: AiHelperTarget;
-
-        if (options.claude && options.agents) {
-            console.error(chalk.red('Please specify only one of --claude or --agents'));
-            process.exit(1);
-        }
-
-        if (options.claude) {
-            targetFile = 'CLAUDE.md';
-        } else if (options.agents) {
-            targetFile = 'AGENTS.md';
-        } else {
-            const response = await prompts({
-                type: 'select',
-                name: 'file',
-                message: 'Which AI helper file?',
-                choices: [
-                    { title: 'CLAUDE.md (Claude Code)', value: 'CLAUDE.md' },
-                    { title: 'AGENTS.md (Codex, Cursor, Gemini, etc.)', value: 'AGENTS.md' },
-                ],
-            });
-
-            if (!response.file) {
-                console.log(chalk.yellow('Cancelled.'));
-                process.exit(0);
-            }
-
-            targetFile = response.file as AiHelperTarget;
-        }
+        const targetFile: AiHelperTarget = resolvedTarget ?? await resolveAiHelperTarget(options);
 
         console.log(chalk.blue('Fetching AI helper content...'));
 
         // Fetch slim helper content for the chosen target.
         const aiContent = await fetchAiHelperContent(targetFile);
 
-        // Fetch SDK reference (always).
-        const sdkContent = await fetchRawFile('SolidActions', 'solidactions-ts-sdk', 'docs/sdk-reference.md');
+        // Fetch SDK reference (always), pinned to the tag matching the
+        // @solidactions/sdk version this CLI declares, so scaffolded projects
+        // never get docs for an SDK newer than the one the CLI targets.
+        const sdkContent = await fetchRawFile(
+            'SolidActions',
+            'solidactions-ts-sdk',
+            'docs/sdk-reference.md',
+            sdkDocsRef(),
+        );
 
         // Save SDK reference to .solidactions/sdk-reference.md.
         fsExtra.ensureDirSync('.solidactions');

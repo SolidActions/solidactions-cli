@@ -2,7 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
-interface OAuthActionsShowOptions {
+interface OAuthActionViewOptions {
     json?: boolean;
     var?: string;
     legacyEnv?: boolean;
@@ -32,7 +32,7 @@ interface OAuthActionDetail {
     io_schema?: IoSchema;
 }
 
-export async function oauthActionsShow(platform: string, actionId: string, options: OAuthActionsShowOptions) {
+export async function oauthActionView(platform: string, actionId: string, options: OAuthActionViewOptions) {
     const config = await requireConfigWithWorkspace();
 
     try {
@@ -52,7 +52,7 @@ export async function oauthActionsShow(platform: string, actionId: string, optio
         if (error.response?.status === 404) {
             console.error(chalk.red(`Action not found: ${platform}/${actionId}`));
         } else if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login <api-key>".'));
+            console.error(chalk.red('Authentication failed. Run "solidactions login --global".'));
         } else if (error.response) {
             console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
         } else {
@@ -62,7 +62,7 @@ export async function oauthActionsShow(platform: string, actionId: string, optio
     }
 }
 
-function renderHumanReadable(action: OAuthActionDetail, options: OAuthActionsShowOptions) {
+function renderHumanReadable(action: OAuthActionDetail, options: OAuthActionViewOptions) {
     const method = (action.method || 'GET').toUpperCase();
     const ioSchema = action.io_schema || {};
     const example = ioSchema.ioExample?.input;

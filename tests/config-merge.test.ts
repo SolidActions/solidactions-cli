@@ -54,4 +54,24 @@ describe('mergeConfigs', () => {
         expect(result!.config.workspaceId).toBeUndefined();
         expect(result!.sources.workspaceId).toBeNull();
     });
+
+    it('local config with its own apiKey does NOT inherit workspace from global (F-C3)', () => {
+        const local = { host: 'https://other.example', apiKey: 'local-key' };
+        const global = { host: 'https://h', apiKey: 'k', workspace: 'global-ws', workspaceId: 'global-uuid' };
+        const result = mergeConfigs({}, local, LOCAL_PATH, global, GLOBAL_PATH);
+        expect(result).not.toBeNull();
+        expect(result!.config.workspaceId).toBeUndefined();
+        expect(result!.sources.workspaceId).toBeNull();
+        expect(result!.config.workspace).toBeUndefined();
+        expect(result!.sources.workspace).toBeNull();
+    });
+
+    it('pure workspace-pin local (no host/apiKey) still inherits global creds (existing behavior)', () => {
+        const local = { workspace: 'mercer', workspaceId: 'local-uuid' };
+        const global = { host: 'https://h', apiKey: 'k' };
+        const result = mergeConfigs({}, local, LOCAL_PATH, global, GLOBAL_PATH);
+        expect(result).not.toBeNull();
+        expect(result!.config.host).toBe('https://h');
+        expect(result!.config.workspaceId).toBe('local-uuid');
+    });
 });

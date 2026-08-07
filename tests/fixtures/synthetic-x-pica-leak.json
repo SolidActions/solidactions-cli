@@ -1,0 +1,28 @@
+{
+  "platform": "gmail",
+  "method": "POST",
+  "path": "/gmail/v1/users/me/messages/send",
+  "title": "Send Message (synthetic header-leak regression)",
+  "action_id": "conn_mod_def::SYNTHETIC::LEAK",
+  "tags": ["synthetic", "regression"],
+  "io_schema": {
+    "inputSchema": {
+      "description": "Hand-built fixture. Simulates the SAA API regressing and serving proxy-internal headers inside ioExample.input.headers. The CLI's defense-in-depth filter must strip every one of these before they reach a generated workflow snippet."
+    },
+    "ioExample": {
+      "input": {
+        "headers": {
+          "x-pica-secret": "sk_live_LEAKED_PICA_SECRET",
+          "X-Pica-Connection-Key": "leaked-pica-connection-key",
+          "x-one-api-key": "leaked-one-api-key",
+          "Authorization": "Bearer LEAKED_UPSTREAM_TOKEN",
+          "X-SA-Connection": "leaked-sa-connection",
+          "X-OAuth-Connection-Key": "leaked-oauth-connection-key",
+          "X-OAuth-Action-Id": "leaked-action-id",
+          "X-Request-Id": "safe-passthrough-header"
+        },
+        "body": { "raw": "x" }
+      }
+    }
+  }
+}
