@@ -19,6 +19,7 @@ import {
     withDatabaseClient,
 } from '../utils/database-data-plane';
 import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
+export { parseDatabaseImportSql } from '../utils/database-sql-import';
 import { renderTable } from '../utils/table';
 
 export interface DatabaseRecord {
