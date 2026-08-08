@@ -425,6 +425,35 @@ describe('database exec direct action', () => {
 });
 
 describe('database direct command error boundary', () => {
+    it('rejects malformed result metadata through the safe boundary before writing output', async () => {
+        const databaseExecWithConfig = await requireExport('databaseExecWithConfig');
+        const test = directHarness(async () => ({
+            columns: [],
+            rows: [],
+            rowsAffected: 0,
+            lastInsertRowid: {
+                raw: `MALFORMED_RESULT_SENTINEL ${ACCESS.url} ${ACCESS.token}`,
+            },
+        }));
+
+        await expect(databaseExecWithConfig(
+            'Analytics',
+            'DELETE FROM events',
+            { yes: true, json: true },
+            CONFIG,
+            test.dependencies,
+        )).rejects.toMatchObject({
+            code: 'upstream_unavailable',
+            message: 'Database operation failed.',
+        });
+
+        expect(test.stdout).toEqual([]);
+        expect(test.stderr).toEqual([]);
+        expect(test.close).toHaveBeenCalledOnce();
+        expect(JSON.stringify({ stdout: test.stdout, stderr: test.stderr })).not.toContain('MALFORMED_RESULT_SENTINEL');
+        expect(JSON.stringify({ stdout: test.stdout, stderr: test.stderr })).not.toContain(ACCESS.token);
+    });
+
     it.each([
         ['databaseSchemaWithConfig', ['Analytics', { json: true }]],
         ['databaseQueryWithConfig', ['Analytics', 'SELECT * FROM events', { json: true }]],
