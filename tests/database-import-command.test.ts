@@ -654,6 +654,7 @@ describe('database import preflight and execution', () => {
         const source = sourceFile(root, statements.join('\n'));
         const controlDirectory = path.join(root, '.solidactions');
         const imports = path.join(controlDirectory, 'imports');
+        const displacedImports = path.join(controlDirectory, 'imports-displaced-by-attacker');
         const victimDirectory = path.join(root, 'victim-directory');
         fs.mkdirSync(controlDirectory);
         fs.mkdirSync(victimDirectory);
@@ -662,7 +663,10 @@ describe('database import preflight and execution', () => {
         const test = importHarness(root, {
             execute: async () => {
                 executions += 1;
-                if (executions === 1) fs.symlinkSync(victimDirectory, imports, 'dir');
+                if (executions === 1) {
+                    if (fs.existsSync(imports)) fs.renameSync(imports, displacedImports);
+                    fs.symlinkSync(victimDirectory, imports, 'dir');
+                }
             },
         });
 
@@ -677,6 +681,10 @@ describe('database import preflight and execution', () => {
         expect(fs.lstatSync(imports).isSymbolicLink()).toBe(true);
         expect(fs.readFileSync(path.join(victimDirectory, 'keep.txt'), 'utf8')).toBe('VICTIM MUST REMAIN');
         expect(fs.readdirSync(victimDirectory)).toEqual(['keep.txt']);
+        if (fs.existsSync(displacedImports)) {
+            expect(fs.lstatSync(displacedImports).isDirectory()).toBe(true);
+            expect(fs.realpathSync(displacedImports)).not.toBe(fs.realpathSync(victimDirectory));
+        }
         expect(report(caught, test)).not.toContain('Resume with:');
         expect(caught).toMatchObject({ code: 'import_failed' });
     });
