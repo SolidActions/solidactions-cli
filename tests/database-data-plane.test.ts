@@ -160,6 +160,7 @@ describe('database access control-plane request', () => {
         proxyError.response = {
             status: 502,
             data: {
+                code: '   ',
                 message: rawMessage,
                 body: rawMessage,
             },
