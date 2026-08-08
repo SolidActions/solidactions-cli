@@ -12,11 +12,19 @@ export interface DatabaseAccess {
     expires_at: string;
 }
 
+export interface DatabaseResultSet {
+    columns: Array<string>;
+    rows: Array<ArrayLike<unknown>>;
+    rowsAffected?: number;
+    lastInsertRowid?: unknown;
+}
+
 interface DatabaseClientModule {
     createClient: (config: Record<string, unknown>) => DatabaseClient;
 }
 
-interface DatabaseClient {
+export interface DatabaseClient {
+    execute: (statement: string | { sql: string; args?: unknown }) => Promise<DatabaseResultSet>;
     close: () => void | Promise<void>;
     [key: string]: unknown;
 }
@@ -29,7 +37,7 @@ export interface DatabaseRequestDependencies {
     ) => Promise<{ data: unknown }>;
 }
 
-interface DatabaseClientDependencies extends DatabaseRequestDependencies {
+export interface DatabaseClientDependencies extends DatabaseRequestDependencies {
     loadClient?: () => Promise<DatabaseClientModule>;
 }
 

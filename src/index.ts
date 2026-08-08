@@ -60,7 +60,10 @@ import { workflowView } from './commands/workflow-view';
 import {
     databaseCreate,
     databaseDelete,
+    databaseExec,
     databaseList,
+    databaseQuery,
+    databaseSchema,
     databaseUndelete,
 } from './commands/database';
 import { setCliWorkspaceOverride } from './utils/config';
@@ -241,14 +244,20 @@ database
     .command('schema')
     .description('Show a database schema')
     .argument('<name>', 'Database name')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseSchema(name, options);
+    });
 
 database
     .command('query')
     .description('Run a read-only SQL query')
     .argument('<name>', 'Database name')
     .argument('<sql>', 'SQL query')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, sql, options) => {
+        await databaseQuery(name, sql, options);
+    });
 
 database
     .command('exec')
@@ -256,7 +265,10 @@ database
     .argument('<name>', 'Database name')
     .argument('<sql>', 'SQL statement')
     .option('-y, --yes', 'Skip confirmation')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, sql, options) => {
+        await databaseExec(name, sql, options);
+    });
 
 database
     .command('dump')
