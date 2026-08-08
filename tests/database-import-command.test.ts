@@ -871,6 +871,51 @@ describe('database import resume validation', () => {
         expect(test.stdout.join('\n')).toMatch(/Imported 2 statements/i);
         expect(test.stdout.join('\n')).toContain(String(fs.statSync(source).size));
     });
+
+    it('reports the exact last completed resume position before guidance when access fails pre-execution', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const completedSourceBytes = Buffer.byteLength(statements.slice(0, 100).join('\n'));
+        const checkpoint = writeCheckpoint(root, checkpointFor(source, 'Analytics', {
+            lastCompletedBatch: 1,
+            nextStatement: 100,
+            completedSourceBytes,
+        }));
+        const before = fs.readFileSync(checkpoint);
+        const test = importHarness(root, {
+            post: async () => {
+                const denied: any = new Error('RAW_TRANSPORT_SECRET');
+                denied.config = { headers: { Authorization: 'Bearer RAW_TRANSPORT_SECRET' } };
+                denied.response = {
+                    status: 403,
+                    data: { code: 'read_only_mode', message: 'Database writes are disabled.' },
+                    config: denied.config,
+                };
+                throw denied;
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig(
+                'Analytics', source, { yes: true, resume: checkpoint }, CONFIG, test.dependencies,
+            );
+        } catch (error) {
+            caught = error;
+        }
+
+        const lines = report(caught, test).split('\n');
+        const position = `Last completed position: batch 1, 100 statements, ${completedSourceBytes} source bytes.`;
+        const guidance = resumeLine('Analytics', source, checkpoint);
+        expect(lines).toContain(position);
+        expect(lines.indexOf(position)).toBeLessThan(lines.indexOf(guidance));
+        expect(test.executions).toEqual([]);
+        expect(test.clients).toEqual([]);
+        expect(fs.readFileSync(checkpoint)).toEqual(before);
+        expectNoSecrets(report(caught, test));
+    });
 });
 
 describe('database create --from real importer', () => {
@@ -911,6 +956,28 @@ describe('database create --from real importer', () => {
         ]);
         expect(test.executions).toEqual([{ client: 1, sql: managedEnvelope([statement]) }]);
         expect(test.confirm).not.toHaveBeenCalled();
+    });
+
+    it('keeps --json create-from stdout as one undecorated create response', async () => {
+        const databaseCreateWithConfig = await requireCreate();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);');
+        const test = importHarness(root);
+        const expected = {
+            database: {
+                name: 'Analytics',
+                status: 'ready',
+                deleted_at: null,
+                purge_at: null,
+                size_bytes: 0,
+            },
+        };
+
+        await databaseCreateWithConfig('requested-name', { from: source, json: true }, CONFIG, test.dependencies);
+
+        expect(test.stdout).toHaveLength(1);
+        expect(JSON.parse(test.stdout[0])).toEqual(expected);
+        expectNoSecrets(test.stdout);
     });
 
     it('leaves a newly created database in place and returns actionable import_failed guidance', async () => {
