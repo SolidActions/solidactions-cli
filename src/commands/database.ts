@@ -625,7 +625,7 @@ async function removeOwnedFiles(
 }
 
 function pullSidecars(temp: string): string[] {
-    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`];
+    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`, `${temp}-client_wal_index`];
 }
 
 async function anyPathExists(filesystem: DatabaseFileSystem, candidates: string[]): Promise<boolean> {
@@ -674,6 +674,31 @@ async function writeDumpStream(
 
 function displayDestination(io: ResolvedCommandDependencies, target: string): string {
     return path.relative(io.cwd, target) || path.basename(target);
+}
+
+function checkpointInteger(value: unknown): bigint {
+    if (typeof value === 'bigint' && value >= 0n) return value;
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+    if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
+    throw new Error('Invalid database checkpoint result.');
+}
+
+function validateCheckpointResult(result: DatabaseResultSet): void {
+    if (!result || !Array.isArray(result.rows) || result.rows.length !== 1) {
+        throw new Error('Invalid database checkpoint result.');
+    }
+
+    const row = result.rows[0];
+    if (!row || !Number.isSafeInteger(row.length) || row.length < 3) {
+        throw new Error('Invalid database checkpoint result.');
+    }
+
+    const busy = checkpointInteger(row[0]);
+    const log = checkpointInteger(row[1]);
+    const checkpointed = checkpointInteger(row[2]);
+    if (busy !== 0n || checkpointed < log) {
+        throw new Error('Database checkpoint did not complete.');
+    }
 }
 
 export async function databaseListWithConfig(
@@ -978,11 +1003,13 @@ export async function databasePullWithConfig(
         ownsSidecars = true;
 
         let synced = false;
+        let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
         for (let attempt = 0; attempt < PULL_ATTEMPTS; attempt += 1) {
             const { createClient, access } = await loadDatabaseClientBeforeMint(
                 () => requestDatabaseAccess(config, name, 'read', requestDependencies(io)),
                 { loadClient: io.loadClient },
             );
+            localCreateClient = createClient as (config: Record<string, unknown>) => DatabaseClient;
 
             if (attempt === 0) {
                 await assertNoSymlinkComponents(io.filesystem, temp);
@@ -1011,6 +1038,8 @@ export async function databasePullWithConfig(
                     intMode: 'string',
                 }) as DatabaseClient;
             } catch {
+                const createdStat = await lstatIfPresent(io.filesystem, temp);
+                if (createdStat?.isFile() && !createdStat.isSymbolicLink()) ownsTemp = true;
                 throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
             }
 
@@ -1044,12 +1073,37 @@ export async function databasePullWithConfig(
             throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
         }
 
-        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
-            throw new DatabaseOperationError(
-                'upstream_unavailable',
-                'Database replica could not be finalized safely.',
-            );
+        let finalizer: DatabaseClient | undefined;
+        let checkpointResult: DatabaseResultSet | undefined;
+        let finalizationFailed = false;
+        try {
+            finalizer = localCreateClient!({
+                url: pathToFileURL(temp).href,
+                intMode: 'string',
+            });
+            checkpointResult = await finalizer.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+        } catch {
+            finalizationFailed = true;
+        } finally {
+            if (finalizer) {
+                try {
+                    await finalizer.close();
+                } catch {
+                    finalizationFailed = true;
+                }
+            }
         }
+
+        if (finalizationFailed || !checkpointResult) {
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+        validateCheckpointResult(checkpointResult);
+
+        await removeOwnedFiles(io.filesystem, pullSidecars(temp));
+        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+        ownsSidecars = false;
 
         await io.filesystem.chmod(temp, 0o444);
         await assertNoSymlinkComponents(io.filesystem, target);
