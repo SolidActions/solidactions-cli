@@ -57,6 +57,12 @@ import {
     workflowEnable,
 } from './commands/state';
 import { workflowView } from './commands/workflow-view';
+import {
+    databaseCreate,
+    databaseDelete,
+    databaseList,
+    databaseUndelete,
+} from './commands/database';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -197,27 +203,39 @@ const database = program.command('database').description('Manage workspace datab
 database
     .command('list')
     .description('List workspace databases')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (options) => {
+        await databaseList(options);
+    });
 
 database
     .command('create')
     .description('Create a workspace database')
     .argument('<name>', 'Database name')
     .option('--from <file.sql>', 'Import a SQL file after creation')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseCreate(name, options);
+    });
 
 database
     .command('delete')
     .description('Delete a workspace database')
     .argument('<name>', 'Database name')
     .option('-y, --yes', 'Skip confirmation')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseDelete(name, options);
+    });
 
 database
     .command('undelete')
     .description('Restore a deleted workspace database')
     .argument('<name>', 'Database name')
-    .option('--json', 'Output as JSON');
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseUndelete(name, options);
+    });
 
 database
     .command('schema')

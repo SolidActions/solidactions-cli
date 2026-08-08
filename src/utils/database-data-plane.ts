@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getApiHeaders } from './api';
+import { augmentTokenMissingAbilityMessage, getApiHeaders } from './api';
 import { Config } from './config';
 import { loadDatabaseClientBeforeMint } from './database-client-support';
 
@@ -21,12 +21,12 @@ interface DatabaseClient {
     [key: string]: unknown;
 }
 
-interface DatabaseRequestDependencies {
+export interface DatabaseRequestDependencies {
     post?: (
         url: string,
         body: Record<string, unknown>,
         options: { headers: Record<string, string> },
-    ) => Promise<{ data: DatabaseAccess }>;
+    ) => Promise<{ data: unknown }>;
 }
 
 interface DatabaseClientDependencies extends DatabaseRequestDependencies {
@@ -52,7 +52,8 @@ export class DatabaseOperationError extends Error {
 }
 
 function safeAppError(error: unknown): DatabaseOperationError {
-    const response = (error as any)?.response;
+    const augmented = augmentTokenMissingAbilityMessage(error);
+    const response = (augmented as any)?.response;
     const status = typeof response?.status === 'number' ? response.status : undefined;
     const code = typeof response?.data?.code === 'string' && response.data.code.length > 0
         ? response.data.code
@@ -62,6 +63,30 @@ function safeAppError(error: unknown): DatabaseOperationError {
         : 'Database request failed.';
 
     return new DatabaseOperationError(code, message, status);
+}
+
+/**
+ * Call the single CLI database control-plane endpoint and discard all Axios
+ * transport state at the error boundary.
+ */
+export async function requestDatabaseOperation<T>(
+    config: Config,
+    body: Record<string, unknown>,
+    dependencies: DatabaseRequestDependencies = {},
+): Promise<T> {
+    const post = dependencies.post ?? axios.post;
+
+    try {
+        const response = await post(
+            `${config.host}/api/v1/databases`,
+            body,
+            { headers: getApiHeaders(config, 'application/json') },
+        );
+
+        return response.data as T;
+    } catch (error) {
+        throw safeAppError(error);
+    }
 }
 
 function safeDirectClientError(): DatabaseOperationError {
@@ -78,19 +103,11 @@ export async function requestDatabaseAccess(
     mode: DatabaseAccessMode,
     dependencies: DatabaseRequestDependencies = {},
 ): Promise<DatabaseAccess> {
-    const post = dependencies.post ?? axios.post;
-
-    try {
-        const response = await post(
-            `${config.host}/api/v1/databases`,
-            { operation: 'access', name, mode },
-            { headers: getApiHeaders(config, 'application/json') },
-        );
-
-        return response.data;
-    } catch (error) {
-        throw safeAppError(error);
-    }
+    return requestDatabaseOperation<DatabaseAccess>(
+        config,
+        { operation: 'access', name, mode },
+        dependencies,
+    );
 }
 
 /**
