@@ -162,6 +162,19 @@ describe('database SQL import parser', () => {
         }]);
     });
 
+    it.each([
+        Buffer.concat([
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from('CREATE TABLE t (id);'),
+        ]),
+        '\uFEFF\uFEFFCREATE TABLE t (id);',
+    ])('rejects more than one leading UTF-8 BOM', async (source) => {
+        const parse = await requireParser();
+
+        expect(() => parse(source)).toThrow(/more than one leading UTF-8 BOM/i);
+    });
+
     it('accepts trailing whitespace and comments after the last complete statement', async () => {
         const parse = await requireParser();
         const sql = 'CREATE TABLE t (id);';

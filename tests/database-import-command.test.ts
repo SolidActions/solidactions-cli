@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DatabaseOperationError } from '../src/utils/database-data-plane';
 
 const CONFIG = {
     host: 'https://app.example.test',
@@ -538,6 +539,95 @@ describe('database import preflight and execution', () => {
         expectNoSecrets(checkpoint);
     });
 
+    it.each([
+        {
+            code: 'read_only_mode',
+            message: 'Database writes are disabled.',
+            status: 403,
+        },
+        {
+            code: 'plan_denied',
+            message: 'Database writes are unavailable on this plan.',
+            status: 403,
+        },
+        {
+            code: 'rate_limited',
+            message: 'Database access is temporarily rate limited.',
+            status: 429,
+        },
+    ])('preserves a $code renewal refusal and suppresses unsafe resume guidance', async ({ code, message, status }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        let clock = Date.parse('2026-08-07T12:00:00.000Z');
+        const test = importHarness(root, {
+            now: () => clock,
+            post: async (attempt) => {
+                if (attempt === 2) {
+                    const denied: any = new Error('RAW_TRANSPORT_SECRET');
+                    denied.response = { status, data: { code, message } };
+                    throw denied;
+                }
+                return {
+                    url: 'libsql://physical-hostname.sentinel.invalid',
+                    token: 'write-token-sentinel-1',
+                    mode: 'write',
+                    expires_at: '2026-08-07T12:10:00.000Z',
+                };
+            },
+            execute: async () => {
+                clock = Date.parse('2026-08-07T12:09:31.000Z');
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code, message, status });
+        expect(checkpointFiles(root)).toHaveLength(1);
+        expect(report(caught, test)).not.toContain('Resume with:');
+        expectNoSecrets(report(caught, test));
+    });
+
+    it('preserves a structured batch refusal without offering a policy-invalid resume', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) {
+                    throw new DatabaseOperationError(
+                        'read_only_mode',
+                        'Database writes were disabled during import.',
+                        403,
+                    );
+                }
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({
+            code: 'read_only_mode',
+            message: 'Database writes were disabled during import.',
+            status: 403,
+        });
+        expect(checkpointFiles(root)).toHaveLength(1);
+        expect(report(caught, test)).not.toContain('Resume with:');
+        expectNoSecrets(report(caught, test));
+    });
+
     it('never replays a failed or unknown batch and emits the exact stable resume command for the checkpoint', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
@@ -584,6 +674,43 @@ describe('database import preflight and execution', () => {
         expectNoSecrets(checkpoint);
         expect(caught).toMatchObject({ code: 'import_failed' });
         expect(test.closed).toEqual([1]);
+    });
+
+    it('resumes strictly after committed batches when a later batch is interrupted mid-execution', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 201 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const interrupted = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('MID_BATCH_INTERRUPTION');
+            },
+        });
+
+        await expect(
+            databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, interrupted.dependencies),
+        ).rejects.toMatchObject({ code: 'import_failed' });
+
+        const [checkpoint] = checkpointFiles(root);
+        expect(JSON.parse(fs.readFileSync(checkpoint, 'utf8'))).toMatchObject({
+            lastCompletedBatch: 1,
+            nextStatement: 100,
+        });
+
+        const resumed = importHarness(root);
+        await databaseImportWithConfig(
+            'Analytics',
+            source,
+            { yes: true, resume: checkpoint },
+            CONFIG,
+            resumed.dependencies,
+        );
+
+        expect(resumed.executions).toHaveLength(2);
+        expect(resumed.executions[0].sql).toContain('VALUES (100)');
+        expect(resumed.executions[0].sql).not.toContain('VALUES (99)');
+        expect(resumed.executions[1].sql).toContain('VALUES (200)');
+        expect(checkpointFiles(root)).toEqual([]);
     });
 
     it('does not claim resumability when atomic checkpoint publication fails after a committed batch', async () => {

@@ -454,6 +454,46 @@ describe('database pull --writable foreground attached session', () => {
         expect(test.closed).toEqual([1]);
     });
 
+    it('shares hardened SQL framing for comments, quoted identifiers, and trigger bodies', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const trigger = [
+            'CREATE TRIGGER "audit;insert" AFTER INSERT ON "source;table" BEGIN',
+            "  INSERT INTO audit_log(message) VALUES ('first; body');",
+            "  UPDATE audit_log SET message = CASE WHEN message = 'first; body' THEN 'updated' ELSE message END;",
+            'END;',
+        ];
+        const test = writableHarness(root, {
+            lines: [
+                '-- comment semicolon; is not a statement boundary',
+                'CREATE TABLE "source;table" (id INTEGER);',
+                ...trigger,
+                '.exit',
+            ],
+        });
+
+        await databasePullWithConfig(
+            'Analytics',
+            path.join(root, 'analytics.db'),
+            { writable: true },
+            CONFIG,
+            test.dependencies,
+        );
+
+        expect(test.executions).toEqual([
+            {
+                client: 1,
+                method: 'execute',
+                sql: '-- comment semicolon; is not a statement boundary\nCREATE TABLE "source;table" (id INTEGER);',
+            },
+            {
+                client: 1,
+                method: 'execute',
+                sql: trigger.join('\n'),
+            },
+        ]);
+    });
+
     it('refuses .exit with incomplete buffered SQL without executing or replacing an old target', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
