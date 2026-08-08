@@ -77,6 +77,52 @@ installed skills and select `solidactions-deploy-and-config` for deployment.
 For an existing project, install or refresh the same tooling with
 `solidactions ai init --claude` or `solidactions ai init --agents`.
 
+## Database CLI
+
+Use the singular `solidactions database` group to manage databases in the
+active workspace. The complete command surface is:
+
+```bash
+solidactions database list --json
+solidactions database create analytics --from backup.sql --json
+solidactions database delete analytics --yes --json
+solidactions database undelete analytics --json
+solidactions database schema analytics --json
+solidactions database query analytics "SELECT * FROM events" --json
+solidactions database exec analytics "DELETE FROM events WHERE expired = 1" --yes --json
+solidactions database dump analytics backup.sql --yes
+solidactions database pull analytics .solidactions/databases/analytics.db --yes
+solidactions database pull analytics --writable
+solidactions database import analytics backup.sql --yes
+solidactions database import analytics backup.sql --resume <checkpoint> --yes
+```
+
+`--json` produces machine-readable output where supported. `delete`, `exec`,
+`dump` overwrites, `pull` overwrites, and `import` prompt before changing data;
+use `--yes` only when that change is already approved. A database `delete` is a
+soft-delete, and its output shows the purge clock during which `undelete` can
+restore it.
+
+`query` is read-only SQL; use `exec` for writes. `schema`, `query`, `exec`,
+`pull --writable`, and imports use ephemeral scoped access held only in memory.
+No durable credential or credential sidecar is written locally.
+
+By default, `pull` atomically publishes a read-only local replica at
+`.solidactions/databases/<safe-stem>.db`, or at an explicit path. Reuse that
+file for local analytics and transformations. `pull --writable` instead opens a
+foreground session: writes go to the live workspace database.
+No offline merge or background write-back continues after exit.
+
+`dump` publishes only a complete SQL file through an owned temporary path and
+refuses unsafe symlink or unapproved overwrite destinations. The CLI rejects
+any import containing `-- DOWNLOAD INCOMPLETE` before making changes. Use
+`create --from <file.sql>` to preflight, create, and load in one flow.
+
+Imports commit bounded batches and atomically record a source-bound checkpoint
+under `.solidactions/imports/`. After a partial failure, copy the exact printed
+`--resume <checkpoint>` command to continue without replaying completed
+batches; do not restart the same checkpointed source with a plain import.
+
 ## Configuration
 
 The CLI stores `host`, `apiKey`, and `workspaceId` in a JSON config file. Two locations are supported:
