@@ -140,6 +140,75 @@ describe('database access control-plane request', () => {
         expect(publicFailure).not.toContain(APP_CONFIG.apiKey);
         expect(publicFailure).not.toContain('CONTROL_REQUEST_SENTINEL');
     });
+
+    it('discards an unstructured 502 proxy body instead of trusting its raw message', async () => {
+        const requestDatabaseAccess = await requireExport('requestDatabaseAccess');
+        const DatabaseOperationError = await requireExport('DatabaseOperationError');
+        const rawMessage = [
+            'RAW_PROXY_BODY_SENTINEL',
+            'Turso provider failure',
+            'physical-db.sentinel.invalid',
+            ACCESS.url,
+            APP_CONFIG.apiKey,
+        ].join(' ');
+        const proxyError: any = new Error(rawMessage);
+        proxyError.config = {
+            url: `${APP_CONFIG.host}/api/v1/databases`,
+            headers: { Authorization: `Bearer ${APP_CONFIG.apiKey}` },
+        };
+        proxyError.request = { raw: rawMessage };
+        proxyError.response = {
+            status: 502,
+            data: {
+                message: rawMessage,
+                body: rawMessage,
+            },
+            config: proxyError.config,
+            request: proxyError.request,
+        };
+        const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        let caught: any;
+        let renderedOutput = '';
+
+        try {
+            await requestDatabaseAccess(APP_CONFIG, 'analytics', 'read', {
+                post: async () => { throw proxyError; },
+            });
+        } catch (error) {
+            caught = error;
+        } finally {
+            renderedOutput = [
+                ...stdout.mock.calls.flat(),
+                ...stderr.mock.calls.flat(),
+            ].map(String).join('\n');
+            stdout.mockRestore();
+            stderr.mockRestore();
+        }
+
+        expect(caught).not.toBe(proxyError);
+        expect(caught).toBeInstanceOf(DatabaseOperationError as any);
+        expect(caught).toMatchObject({
+            code: 'upstream_unavailable',
+            message: 'Database request failed.',
+            status: 502,
+        });
+        expect(caught).not.toHaveProperty('config');
+        expect(caught).not.toHaveProperty('request');
+        expect(caught).not.toHaveProperty('response');
+        expect(caught).not.toHaveProperty('cause');
+
+        const renderedFailure = `${String(caught)}\n${JSON.stringify(caught)}\n${renderedOutput}`;
+        for (const sentinel of [
+            'RAW_PROXY_BODY_SENTINEL',
+            'Turso',
+            'physical-db.sentinel.invalid',
+            ACCESS.url,
+            APP_CONFIG.apiKey,
+        ]) {
+            expect(renderedFailure).not.toContain(sentinel);
+        }
+    });
 });
 
 describe('database direct-client lifecycle', () => {
