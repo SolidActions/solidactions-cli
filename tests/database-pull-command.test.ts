@@ -243,6 +243,31 @@ describe('database pull read-only replica contract', () => {
         expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
     });
 
+    it('refuses a symlinked destination parent before native load, mint, or file creation', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const outside = path.join(root, 'outside');
+        const linkedParent = path.join(root, 'replicas');
+        fs.mkdirSync(outside);
+        fs.writeFileSync(path.join(outside, 'analytics.db'), 'OUTSIDE REPLICA');
+        fs.symlinkSync(outside, linkedParent, 'dir');
+        const test = pullHarness(root);
+
+        await expect(databasePullWithConfig(
+            'Analytics',
+            path.join(linkedParent, 'analytics.db'),
+            { yes: true },
+            CONFIG,
+            test.dependencies,
+        )).rejects.toThrow(/symbolic link/i);
+
+        expect(test.events).toEqual([]);
+        expect(test.posts).toEqual([]);
+        expect(test.confirm).not.toHaveBeenCalled();
+        expect(fs.readFileSync(path.join(outside, 'analytics.db'), 'utf8')).toBe('OUTSIDE REPLICA');
+        expect(fs.readdirSync(outside)).toEqual(['analytics.db']);
+    });
+
     it('reserves its sibling temp exclusively and never removes a colliding pre-existing file', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
@@ -324,6 +349,69 @@ describe('database pull read-only replica contract', () => {
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2']);
         expect(fs.readFileSync(target, 'utf8')).toBe('COMPLETE REPLICA');
         expect(fs.statSync(target).mode & 0o777).toBe(0o444);
+    });
+
+    it('rolls back only its own replica when final rename fails and scrubs filesystem details', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'existing.db');
+        const ownTemp = path.join(root, '.existing.db.solidactions-task7.tmp');
+        const unrelated = path.join(root, '.unrelated.solidactions-other.tmp');
+        fs.writeFileSync(target, 'OLD REPLICA');
+        fs.writeFileSync(unrelated, 'NOT OUR FILE');
+        const test = pullHarness(root);
+        test.dependencies.filesystem = {
+            ...fs.promises,
+            rename: async () => {
+                throw new Error(`rename leaked ${CONFIG.apiKey} RAW_RENAME_PATH_SENTINEL`);
+            },
+        } as any;
+
+        let caught: any;
+        try {
+            await databasePullWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        const publicError = `${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`;
+        expect(publicError).not.toContain(CONFIG.apiKey);
+        expect(publicError).not.toContain('RAW_RENAME_PATH_SENTINEL');
+        expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+        expect(fs.existsSync(ownTemp)).toBe(false);
+        expect(fs.readFileSync(unrelated, 'utf8')).toBe('NOT OUR FILE');
+    });
+
+    it('cleans a reserved temp after native loading fails before minting while preserving other files', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'existing.db');
+        const ownTemp = path.join(root, '.existing.db.solidactions-task7.tmp');
+        const unrelated = path.join(root, '.unrelated.solidactions-other.tmp');
+        fs.writeFileSync(target, 'OLD REPLICA');
+        fs.writeFileSync(unrelated, 'NOT OUR FILE');
+        const test = pullHarness(root);
+        test.dependencies.loadClient = async () => {
+            expect(fs.existsSync(ownTemp), 'temp must be reserved before native loading').toBe(true);
+            throw new Error('NATIVE_LOAD_SECRET_SENTINEL');
+        };
+
+        let caught: any;
+        try {
+            await databasePullWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'database_client_unsupported' });
+        expect(`${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`)
+            .not.toContain('NATIVE_LOAD_SECRET_SENTINEL');
+        expect(test.posts).toEqual([]);
+        expect(test.clientConfigs).toEqual([]);
+        expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+        expect(fs.existsSync(ownTemp)).toBe(false);
+        expect(fs.readFileSync(unrelated, 'utf8')).toBe('NOT OUR FILE');
     });
 
     it('fails --writable closed before filesystem work, native load, or mint', async () => {

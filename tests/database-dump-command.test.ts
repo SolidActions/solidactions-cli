@@ -189,6 +189,46 @@ describe('database dump atomic file contract', () => {
         expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
     });
 
+    it('refuses a symlinked destination parent before requesting or creating files', async () => {
+        const databaseDumpWithConfig = await requireDump();
+        const root = tempRoot();
+        const outside = path.join(root, 'outside');
+        const linkedParent = path.join(root, 'backups');
+        fs.mkdirSync(outside);
+        fs.writeFileSync(path.join(outside, 'analytics.sql'), 'OUTSIDE DUMP');
+        fs.symlinkSync(outside, linkedParent, 'dir');
+        const test = dumpHarness(root);
+
+        await expect(databaseDumpWithConfig(
+            'Analytics',
+            path.join(linkedParent, 'analytics.sql'),
+            { yes: true },
+            CONFIG,
+            test.dependencies,
+        )).rejects.toThrow(/symbolic link/i);
+
+        expect(test.posts).toEqual([]);
+        expect(test.confirm).not.toHaveBeenCalled();
+        expect(fs.readFileSync(path.join(outside, 'analytics.sql'), 'utf8')).toBe('OUTSIDE DUMP');
+        expect(fs.readdirSync(outside)).toEqual(['analytics.sql']);
+    });
+
+    it('reserves its deterministic sibling temp exclusively without posting or removing a collision', async () => {
+        const databaseDumpWithConfig = await requireDump();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.sql');
+        const temp = path.join(root, '.analytics.sql.solidactions-task7.tmp');
+        fs.writeFileSync(temp, 'PRE-EXISTING TEMP OWNED BY SOMEONE ELSE');
+        const test = dumpHarness(root);
+
+        await expect(databaseDumpWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
+            .rejects.toThrow(/temporary|already exists|failed/i);
+
+        expect(test.posts).toEqual([]);
+        expect(fs.existsSync(target)).toBe(false);
+        expect(fs.readFileSync(temp, 'utf8')).toBe('PRE-EXISTING TEMP OWNED BY SOMEONE ELSE');
+    });
+
     it.each([
         {
             label: 'stream failure',
@@ -252,5 +292,37 @@ describe('database dump atomic file contract', () => {
         expect(publicError).not.toContain('RAW_UPSTREAM_BODY_SENTINEL');
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD DUMP');
         expect(fs.readdirSync(root)).toEqual(['existing.sql']);
+    });
+
+    it('rolls back only its own temp when final rename fails and scrubs filesystem details', async () => {
+        const databaseDumpWithConfig = await requireDump();
+        const root = tempRoot();
+        const target = path.join(root, 'existing.sql');
+        const ownTemp = path.join(root, '.existing.sql.solidactions-task7.tmp');
+        const unrelated = path.join(root, '.unrelated.solidactions-other.tmp');
+        fs.writeFileSync(target, 'OLD DUMP');
+        fs.writeFileSync(unrelated, 'NOT OUR FILE');
+        const test = dumpHarness(root, chunks('COMPLETE NEW DUMP'));
+        test.dependencies.filesystem = {
+            ...fs.promises,
+            rename: async () => {
+                throw new Error(`rename leaked ${CONFIG.apiKey} RAW_RENAME_PATH_SENTINEL`);
+            },
+        } as any;
+
+        let caught: any;
+        try {
+            await databaseDumpWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        const publicError = `${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`;
+        expect(publicError).not.toContain(CONFIG.apiKey);
+        expect(publicError).not.toContain('RAW_RENAME_PATH_SENTINEL');
+        expect(fs.readFileSync(target, 'utf8')).toBe('OLD DUMP');
+        expect(fs.existsSync(ownTemp)).toBe(false);
+        expect(fs.readFileSync(unrelated, 'utf8')).toBe('NOT OUR FILE');
     });
 });
