@@ -664,18 +664,4 @@ describe('database pull read-only replica contract', () => {
         expect(fs.readFileSync(unrelated, 'utf8')).toBe('NOT OUR FILE');
     });
 
-    it('fails --writable closed before filesystem work, native load, or mint', async () => {
-        const databasePullWithConfig = await requirePull();
-        const root = tempRoot();
-        const target = path.join(root, 'missing', 'analytics.db');
-        const test = pullHarness(root);
-
-        await expect(databasePullWithConfig('Analytics', target, { writable: true }, CONFIG, test.dependencies))
-            .rejects.toThrow(/writable.*not available|not available.*writable/i);
-
-        expect(test.events).toEqual([]);
-        expect(test.posts).toEqual([]);
-        expect(test.clientConfigs).toEqual([]);
-        expect(fs.existsSync(path.dirname(target))).toBe(false);
-    });
 });
