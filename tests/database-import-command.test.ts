@@ -433,6 +433,21 @@ describe('database import preflight and execution', () => {
         expect(output).toContain(String(fs.statSync(source).size));
     });
 
+    it('distinguishes committed source progress from total source size', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statement = 'INSERT INTO t VALUES (1);';
+        const source = sourceFile(root, `${statement}\n`);
+        const test = importHarness(root);
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.stdout).toEqual([
+            `Imported checkpoint: 1 statements, committed source progress: ${Buffer.byteLength(statement)} source bytes.`,
+            `Imported 1 statements (${fs.statSync(source).size} total source bytes) into database "Analytics".`,
+        ]);
+    });
+
     it('batches at 512 KiB of UTF-8 SQL and runs one larger legal group alone', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
