@@ -25,6 +25,7 @@ interface DatabaseClientModule {
 
 export interface DatabaseClient {
     execute: (statement: string | { sql: string; args?: unknown }) => Promise<DatabaseResultSet>;
+    executeMultiple?: (sql: string) => Promise<void>;
     sync?: () => Promise<unknown>;
     close: () => void | Promise<void>;
     [key: string]: unknown;

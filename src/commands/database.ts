@@ -92,6 +92,9 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     cwd?: string;
     tempPath?: (target: string) => string;
     filesystem?: DatabaseFileSystem;
+    input?: AsyncIterable<string>;
+    now?: () => number;
+    abortSignal?: AbortSignal;
 }
 
 interface ResolvedCommandDependencies {
@@ -105,6 +108,9 @@ interface ResolvedCommandDependencies {
     cwd: string;
     tempPath: (target: string) => string;
     filesystem: DatabaseFileSystem;
+    input?: AsyncIterable<string>;
+    now: () => number;
+    abortSignal?: AbortSignal;
 }
 
 function defaultConfirmation(message: string): Promise<boolean> {
@@ -148,6 +154,9 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
             `.${path.basename(target)}.solidactions-${randomUUID()}.tmp`,
         )),
         filesystem: dependencies.filesystem ?? fs.promises,
+        input: dependencies.input,
+        now: dependencies.now ?? Date.now,
+        abortSignal: dependencies.abortSignal,
     };
 }
 
@@ -701,6 +710,268 @@ function validateCheckpointResult(result: DatabaseResultSet): void {
     }
 }
 
+const WRITABLE_RENEWAL_WINDOW_MS = 30_000;
+const WRITABLE_WARNING = 'Writable live session: writes go to the live workspace database.';
+const WRITABLE_PROMPT = 'solidactions-db> ';
+const WRITABLE_CONTINUATION_PROMPT = '...> ';
+
+interface AccumulatedSql {
+    sql: string;
+    multiple: boolean;
+}
+
+/**
+ * A deliberately small SQLite statement accumulator. Task 8 needs quoted
+ * string awareness and transaction grouping; Task 9 extends this scanner for
+ * comments, quoted identifiers, and trigger bodies before it is reused for
+ * imports.
+ */
+class SqliteStatementAccumulator {
+    private lines: string[] = [];
+
+    get pending(): boolean {
+        return this.lines.some((line) => line.trim() !== '');
+    }
+
+    push(line: string): AccumulatedSql | null {
+        if (!this.pending && line.trim() === '') return null;
+        this.lines.push(line);
+        const sql = this.lines.join('\n');
+        const segments: string[] = [];
+        let inSingleQuote = false;
+        let segmentStart = 0;
+
+        for (let index = 0; index < sql.length; index += 1) {
+            if (sql[index] === "'") {
+                if (inSingleQuote && sql[index + 1] === "'") {
+                    index += 1;
+                    continue;
+                }
+                inSingleQuote = !inSingleQuote;
+                continue;
+            }
+
+            if (!inSingleQuote && sql[index] === ';') {
+                segments.push(sql.slice(segmentStart, index + 1));
+                segmentStart = index + 1;
+            }
+        }
+
+        if (inSingleQuote || sql.slice(segmentStart).trim() !== '' || segments.length === 0) {
+            return null;
+        }
+
+        const keyword = (statement: string): string => statement
+            .trim()
+            .replace(/;$/, '')
+            .trim()
+            .split(/\s+/, 1)[0]
+            ?.toUpperCase() ?? '';
+        const explicitTransaction = keyword(segments[0]) === 'BEGIN';
+        if (explicitTransaction && !['COMMIT', 'END', 'ROLLBACK'].includes(keyword(segments[segments.length - 1]))) {
+            return null;
+        }
+
+        this.lines = [];
+        return {
+            sql,
+            multiple: explicitTransaction || segments.length > 1,
+        };
+    }
+}
+
+interface WritableInputSession {
+    iterator: AsyncIterator<string>;
+    prompt: (pending: boolean) => void;
+    interrupted: () => boolean;
+    close: () => Promise<void>;
+}
+
+function createWritableInput(io: ResolvedCommandDependencies): WritableInputSession {
+    if (io.input) {
+        const iterator = io.input[Symbol.asyncIterator]();
+        return {
+            iterator,
+            prompt: () => undefined,
+            interrupted: () => false,
+            close: async () => {
+                await iterator.return?.();
+            },
+        };
+    }
+
+    const input = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: io.isTTY,
+    });
+    let interrupted = false;
+    const onSigint = () => {
+        interrupted = true;
+        input.close();
+    };
+    input.on('SIGINT', onSigint);
+    const iterator = input[Symbol.asyncIterator]();
+
+    return {
+        iterator,
+        prompt: (pending) => {
+            if (!io.isTTY) return;
+            input.setPrompt(pending ? WRITABLE_CONTINUATION_PROMPT : WRITABLE_PROMPT);
+            input.prompt();
+        },
+        interrupted: () => interrupted,
+        close: async () => {
+            input.off('SIGINT', onSigint);
+            input.close();
+        },
+    };
+}
+
+async function nextWritableInput(
+    iterator: AsyncIterator<string>,
+    signal: AbortSignal | undefined,
+): Promise<IteratorResult<string>> {
+    if (!signal) return iterator.next();
+    if (signal.aborted) return { done: true, value: undefined };
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (result: IteratorResult<string>) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', onAbort);
+            resolve(result);
+        };
+        const onAbort = () => finish({ done: true, value: undefined });
+        signal.addEventListener('abort', onAbort, { once: true });
+        iterator.next().then(finish, (error) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+    });
+}
+
+function validateWritableAccess(access: unknown, now: number): {
+    url: string;
+    token: string;
+    expiresAt: number;
+} {
+    const value = access as Record<string, unknown> | null;
+    const url = typeof value?.url === 'string' ? value.url.trim() : '';
+    const token = typeof value?.token === 'string' ? value.token.trim() : '';
+    const expiresAt = typeof value?.expires_at === 'string' ? Date.parse(value.expires_at) : Number.NaN;
+    if (
+        value?.mode !== 'write'
+        || url === ''
+        || token === ''
+        || !Number.isFinite(now)
+        || !Number.isFinite(expiresAt)
+        || expiresAt <= now + WRITABLE_RENEWAL_WINDOW_MS
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database access response was invalid.');
+    }
+
+    return { url, token, expiresAt };
+}
+
+class WritableRenewalAttemptError extends Error {
+    readonly publicError: DatabaseOperationError;
+    readonly publishLastValid: boolean;
+
+    constructor(error: DatabaseOperationError, publishLastValid: boolean) {
+        super(error.message);
+        this.publicError = error;
+        this.publishLastValid = publishLastValid;
+        delete this.stack;
+    }
+}
+
+function isAuthenticationExpired(error: unknown): boolean {
+    const value = error as { code?: unknown; message?: unknown } | null;
+    const code = typeof value?.code === 'string' ? value.code.toUpperCase() : '';
+    const message = typeof value?.message === 'string' ? value.message : '';
+    if (['AUTH_TOKEN_EXPIRED', 'AUTH_EXPIRED', 'TOKEN_EXPIRED'].includes(code)) return true;
+    return code === 'SQLITE_AUTH' && /expired|expiration|\bjwt\b/i.test(message);
+}
+
+async function handoffReplicaReservation(
+    io: ResolvedCommandDependencies,
+    temp: string,
+    handle: Awaited<ReturnType<DatabaseFileSystem['open']>>,
+): Promise<void> {
+    await assertNoSymlinkComponents(io.filesystem, temp);
+    const reservedStat = await handle.stat();
+    const pathStat = await lstatIfPresent(io.filesystem, temp);
+    if (
+        !pathStat
+        || !pathStat.isFile()
+        || pathStat.dev !== reservedStat.dev
+        || pathStat.ino !== reservedStat.ino
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+    }
+    await handle.close();
+    await io.filesystem.unlink(temp);
+}
+
+async function finalizeReplica(
+    io: ResolvedCommandDependencies,
+    temp: string,
+    target: string,
+    createClient: (config: Record<string, unknown>) => DatabaseClient,
+): Promise<void> {
+    const assertOwnedMainFile = async () => {
+        await assertNoSymlinkComponents(io.filesystem, temp);
+        const stat = await lstatIfPresent(io.filesystem, temp);
+        if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+            throw new DatabaseOperationError(
+                'unsafe_destination',
+                'The database replica temporary path is unsafe.',
+            );
+        }
+    };
+
+    await assertOwnedMainFile();
+    let finalizer: DatabaseClient | undefined;
+    let checkpointResult: DatabaseResultSet | undefined;
+    let finalizationFailed = false;
+    try {
+        finalizer = createClient({
+            url: pathToFileURL(temp).href,
+            intMode: 'string',
+        });
+        checkpointResult = await finalizer.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch {
+        finalizationFailed = true;
+    } finally {
+        if (finalizer) {
+            try {
+                await finalizer.close();
+            } catch {
+                finalizationFailed = true;
+            }
+        }
+    }
+
+    if (finalizationFailed || !checkpointResult) {
+        throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+    }
+    validateCheckpointResult(checkpointResult);
+    await assertOwnedMainFile();
+
+    await removeOwnedFiles(io.filesystem, pullSidecars(temp));
+    if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+        throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+    }
+
+    await io.filesystem.chmod(temp, 0o444);
+    await assertNoSymlinkComponents(io.filesystem, target);
+    await io.filesystem.rename(temp, target);
+}
+
 export async function databaseListWithConfig(
     options: DatabaseListOptions,
     config: Config,
@@ -960,6 +1231,282 @@ export async function databaseDumpWithConfig(
     }
 }
 
+async function databaseWritablePullWithConfig(
+    name: string,
+    destination: string | undefined,
+    options: DatabasePullOptions,
+    config: Config,
+    io: ResolvedCommandDependencies,
+): Promise<void> {
+    const target = resolveDatabaseDestination(
+        io,
+        destination,
+        path.join('.solidactions', 'databases', `${safeDatabaseStem(name)}.db`),
+    );
+    let temp: string | undefined;
+    let reservationHandle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
+    let ownsTemp = false;
+    let ownsSidecars = false;
+    let client: DatabaseClient | undefined;
+    let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
+    let expiresAt = 0;
+    let inputSession: WritableInputSession | undefined;
+
+    const closeAttachedClient = async (): Promise<void> => {
+        if (!client) return;
+        const closing = client;
+        client = undefined;
+        try {
+            await closing.close();
+        } catch {
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+    };
+
+    const openAttachedClient = async (initial: boolean): Promise<void> => {
+        let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
+        try {
+            loaded = await loadDatabaseClientBeforeMint(
+                () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
+                { loadClient: io.loadClient },
+            );
+        } catch (error) {
+            const safeError = freshSafeFileError(error);
+            if (!initial && error instanceof DatabaseOperationError) {
+                throw new WritableRenewalAttemptError(safeError, true);
+            }
+            throw safeError;
+        }
+        const access = validateWritableAccess(loaded.access, io.now());
+        const createClient = loaded.createClient as (config: Record<string, unknown>) => DatabaseClient;
+
+        if (initial) {
+            await handoffReplicaReservation(io, temp!, reservationHandle!);
+            reservationHandle = undefined;
+            ownsTemp = false;
+        }
+
+        await assertNoSymlinkComponents(io.filesystem, temp!);
+        const beforeCreate = await lstatIfPresent(io.filesystem, temp!);
+        if (
+            (initial && beforeCreate !== null)
+            || (!initial && (!beforeCreate || beforeCreate.isSymbolicLink() || !beforeCreate.isFile()))
+        ) {
+            throw new DatabaseOperationError(
+                'unsafe_destination',
+                'The database replica temporary path is unsafe.',
+            );
+        }
+
+        let opened: DatabaseClient;
+        try {
+            opened = createClient({
+                url: pathToFileURL(temp!).href,
+                syncUrl: access.url,
+                authToken: access.token,
+                intMode: 'string',
+                readYourWrites: true,
+                offline: false,
+            });
+        } catch {
+            const createdStat = await lstatIfPresent(io.filesystem, temp!);
+            if (createdStat?.isFile() && !createdStat.isSymbolicLink()) ownsTemp = true;
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+
+        let syncFailed = false;
+        try {
+            if (typeof opened.sync !== 'function') throw new Error('Database sync is unavailable.');
+            await opened.sync();
+        } catch {
+            syncFailed = true;
+        }
+
+        const replicaStat = await lstatIfPresent(io.filesystem, temp!);
+        if (replicaStat?.isFile() && !replicaStat.isSymbolicLink()) ownsTemp = true;
+        if (
+            syncFailed
+            || !replicaStat
+            || replicaStat.isSymbolicLink()
+            || !replicaStat.isFile()
+        ) {
+            try {
+                await opened.close();
+            } catch {
+                // The stable setup error below takes precedence.
+            }
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+
+        client = opened;
+        localCreateClient = createClient;
+        expiresAt = access.expiresAt;
+    };
+
+    try {
+        if (!await confirmFileOverwrite(target, options, io)) return;
+
+        const reservation = await reserveDestinationTemp(io, target);
+        temp = reservation.temp;
+        reservationHandle = reservation.handle;
+        ownsTemp = true;
+        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+            throw new DatabaseOperationError(
+                'upstream_unavailable',
+                'Database replica temporary files already exist.',
+            );
+        }
+        ownsSidecars = true;
+
+        await openAttachedClient(true);
+        io.stdout(WRITABLE_WARNING);
+        inputSession = createWritableInput(io);
+        const accumulator = new SqliteStatementAccumulator();
+        let sessionFailure: unknown;
+        let publishAfterFailure = false;
+
+        try {
+            while (true) {
+                if (io.abortSignal?.aborted || inputSession.interrupted()) break;
+
+                if (io.now() >= expiresAt - WRITABLE_RENEWAL_WINDOW_MS) {
+                    try {
+                        await closeAttachedClient();
+                        await openAttachedClient(false);
+                    } catch (error) {
+                        sessionFailure = error instanceof WritableRenewalAttemptError
+                            ? error.publicError
+                            : error;
+                        publishAfterFailure = error instanceof WritableRenewalAttemptError
+                            && error.publishLastValid;
+                        break;
+                    }
+                }
+
+                inputSession.prompt(accumulator.pending);
+                const next = await nextWritableInput(inputSession.iterator, io.abortSignal);
+                if (io.abortSignal?.aborted || inputSession.interrupted()) break;
+                if (next.done) {
+                    if (accumulator.pending) {
+                        sessionFailure = new DatabaseOperationError(
+                            'incomplete_sql',
+                            'The SQL input is incomplete.',
+                        );
+                    }
+                    break;
+                }
+
+                if (next.value.trim() === '.exit') {
+                    if (accumulator.pending) {
+                        sessionFailure = new DatabaseOperationError(
+                            'incomplete_sql',
+                            'The SQL input is incomplete.',
+                        );
+                    }
+                    break;
+                }
+
+                const statement = accumulator.push(next.value);
+                if (!statement) continue;
+
+                try {
+                    if (statement.multiple) {
+                        if (typeof client?.executeMultiple !== 'function') {
+                            throw new Error('Multiple SQL execution is unavailable.');
+                        }
+                        await client.executeMultiple(statement.sql);
+                        io.stdout('Transaction group executed successfully.');
+                    } else {
+                        const result = stableDirectResult(await client!.execute(statement.sql));
+                        io.stdout(
+                            result.columns.length > 0
+                                ? renderDirectTable(result)
+                                : `Rows affected: ${result.rowsAffected}`,
+                        );
+                    }
+                } catch (error) {
+                    if (!isAuthenticationExpired(error)) {
+                        io.stderr('Database statement failed.');
+                        continue;
+                    }
+
+                    io.stderr('Database statement has an unknown outcome because authorization expired.');
+                    try {
+                        await closeAttachedClient();
+                        await openAttachedClient(false);
+                    } catch (renewalError) {
+                        sessionFailure = renewalError instanceof WritableRenewalAttemptError
+                            ? renewalError.publicError
+                            : renewalError;
+                        publishAfterFailure = renewalError instanceof WritableRenewalAttemptError
+                            && renewalError.publishLastValid;
+                        break;
+                    }
+                }
+            }
+        } catch (error) {
+            sessionFailure = error;
+        } finally {
+            if (inputSession) {
+                try {
+                    await inputSession.close();
+                } catch {
+                    if (!sessionFailure) {
+                        sessionFailure = new DatabaseOperationError(
+                            'upstream_unavailable',
+                            'Database file operation failed.',
+                        );
+                    }
+                }
+                inputSession = undefined;
+            }
+            try {
+                await closeAttachedClient();
+            } catch (error) {
+                if (!sessionFailure) sessionFailure = error;
+                publishAfterFailure = false;
+            }
+        }
+
+        if (sessionFailure && !publishAfterFailure) throw sessionFailure;
+
+        await finalizeReplica(io, temp, target, localCreateClient!);
+        ownsTemp = false;
+        ownsSidecars = false;
+        if (sessionFailure) throw sessionFailure;
+        io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
+    } catch (error) {
+        if (inputSession) {
+            try {
+                await inputSession.close();
+            } catch {
+                // Cleanup remains scoped to this invocation's input session.
+            }
+        }
+        if (client) {
+            try {
+                await client.close();
+            } catch {
+                // Cleanup below remains scoped to this invocation's replica.
+            }
+        }
+        if (reservationHandle) {
+            try {
+                await reservationHandle.close();
+            } catch {
+                // Cleanup below remains scoped to the exclusively reserved path.
+            }
+        }
+        if (temp) {
+            await removeOwnedFiles(io.filesystem, [
+                ...(ownsTemp ? [temp] : []),
+                ...(ownsSidecars ? pullSidecars(temp) : []),
+            ]);
+        }
+        throw freshSafeFileError(error);
+    }
+}
+
 export async function databasePullWithConfig(
     name: string,
     destination: string | undefined,
@@ -969,10 +1516,7 @@ export async function databasePullWithConfig(
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
     if (options.writable) {
-        throw new DatabaseOperationError(
-            'database_client_unsupported',
-            'Writable database pull is not available yet.',
-        );
+        return databaseWritablePullWithConfig(name, destination, options, config, io);
     }
 
     const target = resolveDatabaseDestination(
@@ -1073,41 +1617,7 @@ export async function databasePullWithConfig(
             throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
         }
 
-        let finalizer: DatabaseClient | undefined;
-        let checkpointResult: DatabaseResultSet | undefined;
-        let finalizationFailed = false;
-        try {
-            finalizer = localCreateClient!({
-                url: pathToFileURL(temp).href,
-                intMode: 'string',
-            });
-            checkpointResult = await finalizer.execute('PRAGMA wal_checkpoint(TRUNCATE)');
-        } catch {
-            finalizationFailed = true;
-        } finally {
-            if (finalizer) {
-                try {
-                    await finalizer.close();
-                } catch {
-                    finalizationFailed = true;
-                }
-            }
-        }
-
-        if (finalizationFailed || !checkpointResult) {
-            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
-        }
-        validateCheckpointResult(checkpointResult);
-
-        await removeOwnedFiles(io.filesystem, pullSidecars(temp));
-        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
-            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
-        }
-        ownsSidecars = false;
-
-        await io.filesystem.chmod(temp, 0o444);
-        await assertNoSymlinkComponents(io.filesystem, target);
-        await io.filesystem.rename(temp, target);
+        await finalizeReplica(io, temp, target, localCreateClient!);
         ownsTemp = false;
         ownsSidecars = false;
         io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
