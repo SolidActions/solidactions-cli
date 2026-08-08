@@ -1,7 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { removeNativeProbeDirectory } from './remove-native-probe-directory.mjs';
 
 const probeDirectory = await mkdtemp(path.join(tmpdir(), 'solidactions-database-probe-'));
 const databaseUrl = pathToFileURL(path.join(probeDirectory, 'probe.db')).href;
@@ -27,6 +29,6 @@ try {
     try {
         client?.close();
     } finally {
-        await rm(probeDirectory, { recursive: true, force: true });
+        await removeNativeProbeDirectory(probeDirectory);
     }
 }
