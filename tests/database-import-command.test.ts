@@ -784,6 +784,38 @@ describe('database import resume validation', () => {
         expect(test.executions).toEqual([]);
     });
 
+    it.each([
+        {
+            label: 'batch count exceeds the deterministic boundary count',
+            lastCompletedBatch: 2,
+            nextStatement: 100,
+        },
+        {
+            label: 'statement position is not a deterministic batch boundary',
+            lastCompletedBatch: 1,
+            nextStatement: 50,
+        },
+    ])('rejects a checkpoint whose $label before native load or mint', async ({ lastCompletedBatch, nextStatement }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const checkpoint = writeCheckpoint(root, checkpointFor(source, 'Analytics', {
+            lastCompletedBatch,
+            nextStatement,
+            completedSourceBytes: Buffer.byteLength(statements.slice(0, nextStatement).join('\n')),
+        }));
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig(
+            'Analytics', source, { yes: true, resume: checkpoint }, CONFIG, test.dependencies,
+        )).rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(test.executions).toEqual([]);
+    });
+
     it('rejects corrupt JSON and same-size source mutation before native load or mint', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
@@ -908,5 +940,62 @@ describe('database create --from real importer', () => {
         expect(rendered).toMatch(/remain|left in place/i);
         expect(rendered).toContain('--resume');
         expectNoSecrets(rendered);
+    });
+
+    it('namespaces a partial create-from checkpoint and guidance by the API-returned canonical name', async () => {
+        const databaseCreateWithConfig = await requireCreate();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('CONTROLLED_SECOND_BATCH_FAILURE');
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseCreateWithConfig('requested-name', { from: source }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        const checkpoints = checkpointFiles(root);
+        expect(checkpoints).toHaveLength(1);
+        expect(path.basename(checkpoints[0])).toMatch(/^analytics-/);
+        expect(report(caught, test).split('\n')).toContain(resumeLine('Analytics', source, checkpoints[0]));
+        expect(JSON.parse(fs.readFileSync(checkpoints[0], 'utf8'))).toMatchObject({ database: 'Analytics' });
+    });
+
+    it('makes a create-from checkpoint discoverable by a later plain import of the returned name without replay', async () => {
+        const databaseCreateWithConfig = await requireCreate();
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const interrupted = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('CONTROLLED_SECOND_BATCH_FAILURE');
+            },
+        });
+        await expect(databaseCreateWithConfig(
+            'requested-name', { from: source }, CONFIG, interrupted.dependencies,
+        )).rejects.toMatchObject({ code: 'import_failed' });
+        const [checkpoint] = checkpointFiles(root);
+        const before = fs.readFileSync(checkpoint);
+        const plain = importHarness(root);
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, plain.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(plain.events).not.toContain('native:load');
+        expect(plain.posts).toEqual([]);
+        expect(plain.executions).toEqual([]);
+        expect(fs.readFileSync(checkpoint)).toEqual(before);
+        expect(report(caught, plain).split('\n')).toContain(resumeLine('Analytics', source, checkpoint));
     });
 });
