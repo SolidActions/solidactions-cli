@@ -1264,6 +1264,17 @@ async function databaseWritablePullWithConfig(
     };
 
     const openAttachedClient = async (initial: boolean): Promise<void> => {
+        if (!initial) {
+            await assertNoSymlinkComponents(io.filesystem, temp!);
+            const beforeMint = await lstatIfPresent(io.filesystem, temp!);
+            if (!beforeMint || beforeMint.isSymbolicLink() || !beforeMint.isFile()) {
+                throw new DatabaseOperationError(
+                    'unsafe_destination',
+                    'The database replica temporary path is unsafe.',
+                );
+            }
+        }
+
         let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
         try {
             loaded = await loadDatabaseClientBeforeMint(
