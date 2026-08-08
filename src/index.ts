@@ -60,8 +60,10 @@ import { workflowView } from './commands/workflow-view';
 import {
     databaseCreate,
     databaseDelete,
+    databaseDump,
     databaseExec,
     databaseList,
+    databasePull,
     databaseQuery,
     databaseSchema,
     databaseUndelete,
@@ -275,7 +277,10 @@ database
     .description('Download a database SQL dump')
     .argument('<name>', 'Database name')
     .argument('[file]', 'Destination file')
-    .option('-y, --yes', 'Overwrite without confirmation');
+    .option('-y, --yes', 'Overwrite without confirmation')
+    .action(async (name, file, options) => {
+        await databaseDump(name, file, options);
+    });
 
 database
     .command('pull')
@@ -283,7 +288,10 @@ database
     .argument('<name>', 'Database name')
     .argument('[path]', 'Destination path')
     .option('-y, --yes', 'Overwrite without confirmation')
-    .option('--writable', 'Open a foreground writable session');
+    .option('--writable', 'Open a foreground writable session')
+    .action(async (name, destination, options) => {
+        await databasePull(name, destination, options);
+    });
 
 database
     .command('import')

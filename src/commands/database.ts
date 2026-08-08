@@ -1,4 +1,8 @@
+import fs from 'fs';
+import path from 'path';
 import * as readline from 'readline';
+import { randomUUID } from 'crypto';
+import { pathToFileURL } from 'url';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 import {
@@ -9,9 +13,12 @@ import {
     DatabaseResultSet,
     formatDatabaseTableValue,
     normalizeDatabaseValue,
+    requestDatabaseAccess,
+    requestDatabaseDumpStream,
     requestDatabaseOperation,
     withDatabaseClient,
 } from '../utils/database-data-plane';
+import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
 import { renderTable } from '../utils/table';
 
 export interface DatabaseRecord {
@@ -65,12 +72,26 @@ interface DatabaseExecOptions {
     json?: boolean;
 }
 
+interface DatabaseDumpOptions {
+    yes?: boolean;
+}
+
+interface DatabasePullOptions {
+    yes?: boolean;
+    writable?: boolean;
+}
+
+type DatabaseFileSystem = typeof fs.promises;
+
 export interface DatabaseCommandDependencies extends DatabaseClientDependencies {
     stdout?: (line: string) => void;
     stderr?: (line: string) => void;
     confirm?: (message: string) => Promise<boolean | undefined>;
     isTTY?: boolean;
     importDatabase?: (name: string, file: string) => Promise<void>;
+    cwd?: string;
+    tempPath?: (target: string) => string;
+    filesystem?: DatabaseFileSystem;
 }
 
 interface ResolvedCommandDependencies {
@@ -81,6 +102,9 @@ interface ResolvedCommandDependencies {
     importDatabase: (name: string, file: string) => Promise<void>;
     post: DatabaseCommandDependencies['post'];
     loadClient: DatabaseCommandDependencies['loadClient'];
+    cwd: string;
+    tempPath: (target: string) => string;
+    filesystem: DatabaseFileSystem;
 }
 
 function defaultConfirmation(message: string): Promise<boolean> {
@@ -118,6 +142,12 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         importDatabase: dependencies.importDatabase ?? unavailableImportHandoff,
         post: dependencies.post,
         loadClient: dependencies.loadClient,
+        cwd: dependencies.cwd ?? process.cwd(),
+        tempPath: dependencies.tempPath ?? ((target) => path.join(
+            path.dirname(target),
+            `.${path.basename(target)}.solidactions-${randomUUID()}.tmp`,
+        )),
+        filesystem: dependencies.filesystem ?? fs.promises,
     };
 }
 
@@ -445,6 +475,207 @@ function renderSchema(schema: DatabaseSchemaResponse): string {
     return sections.join('\n\n');
 }
 
+const INCOMPLETE_DUMP_MARKER = '-- DOWNLOAD INCOMPLETE';
+const DUMP_TAIL_BYTES = 4096;
+const PULL_ATTEMPTS = 3;
+
+function safeDatabaseStem(name: string): string {
+    return name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'database';
+}
+
+function errorCode(error: unknown): string | undefined {
+    return error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code
+        : undefined;
+}
+
+function freshSafeFileError(error: unknown): DatabaseOperationError {
+    if (error instanceof DatabaseOperationError) {
+        return new DatabaseOperationError(error.code, error.message, error.status);
+    }
+
+    if (errorCode(error) === 'database_client_unsupported') {
+        return new DatabaseOperationError(
+            'database_client_unsupported',
+            'Database commands are not supported on this platform.',
+        );
+    }
+
+    return new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+}
+
+function isMissingPath(error: unknown): boolean {
+    return errorCode(error) === 'ENOENT';
+}
+
+async function lstatIfPresent(
+    filesystem: DatabaseFileSystem,
+    candidate: string,
+): Promise<Awaited<ReturnType<DatabaseFileSystem['lstat']>> | null> {
+    try {
+        return await filesystem.lstat(candidate);
+    } catch (error) {
+        if (isMissingPath(error)) return null;
+        throw error;
+    }
+}
+
+async function assertNoSymlinkComponents(
+    filesystem: DatabaseFileSystem,
+    destination: string,
+): Promise<void> {
+    const absolute = path.resolve(destination);
+    const root = path.parse(absolute).root;
+    const relative = absolute.slice(root.length);
+    const components = relative.split(path.sep).filter(Boolean);
+    let current = root;
+
+    for (const component of components) {
+        current = path.join(current, component);
+        const stat = await lstatIfPresent(filesystem, current);
+        if (stat?.isSymbolicLink()) {
+            throw new DatabaseOperationError(
+                'unsafe_destination',
+                'Destination paths cannot contain symbolic links.',
+            );
+        }
+    }
+}
+
+async function confirmFileOverwrite(
+    target: string,
+    options: { yes?: boolean },
+    io: ResolvedCommandDependencies,
+): Promise<boolean> {
+    await assertNoSymlinkComponents(io.filesystem, target);
+    const targetStat = await lstatIfPresent(io.filesystem, target);
+    if (!targetStat) return true;
+
+    if (!targetStat.isFile()) {
+        throw new DatabaseOperationError('unsafe_destination', 'Destination must be a regular file.');
+    }
+
+    if (options.yes) return true;
+    if (!io.isTTY) {
+        throw new DatabaseOperationError(
+            'confirmation_required',
+            'Overwriting an existing database file requires --yes in non-interactive mode.',
+        );
+    }
+
+    if (!await io.confirm(`Overwrite "${target}"?`)) {
+        io.stdout('Cancelled.');
+        return false;
+    }
+
+    return true;
+}
+
+function resolveDatabaseDestination(
+    io: ResolvedCommandDependencies,
+    requested: string | undefined,
+    fallback: string,
+): string {
+    return path.resolve(io.cwd, requested ?? fallback);
+}
+
+function validatedTempPath(io: ResolvedCommandDependencies, target: string): string {
+    const temp = path.resolve(io.tempPath(target));
+    if (temp === target || path.dirname(temp) !== path.dirname(target)) {
+        throw new DatabaseOperationError(
+            'unsafe_destination',
+            'The temporary database file must be a sibling of its destination.',
+        );
+    }
+    return temp;
+}
+
+async function reserveDestinationTemp(
+    io: ResolvedCommandDependencies,
+    target: string,
+): Promise<{
+    temp: string;
+    handle: Awaited<ReturnType<DatabaseFileSystem['open']>>;
+}> {
+    const parent = path.dirname(target);
+    await assertNoSymlinkComponents(io.filesystem, target);
+    await io.filesystem.mkdir(parent, { recursive: true });
+    await assertNoSymlinkComponents(io.filesystem, target);
+
+    const temp = validatedTempPath(io, target);
+    await assertNoSymlinkComponents(io.filesystem, temp);
+    const handle = await io.filesystem.open(temp, 'wx', 0o600);
+    return { temp, handle };
+}
+
+async function removeOwnedFiles(
+    filesystem: DatabaseFileSystem,
+    paths: string[],
+): Promise<void> {
+    for (const candidate of paths) {
+        try {
+            await filesystem.unlink(candidate);
+        } catch {
+            // Cleanup is best effort and may target only paths owned by this invocation.
+        }
+    }
+}
+
+function pullSidecars(temp: string): string[] {
+    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`];
+}
+
+async function anyPathExists(filesystem: DatabaseFileSystem, candidates: string[]): Promise<boolean> {
+    for (const candidate of candidates) {
+        if (await lstatIfPresent(filesystem, candidate)) return true;
+    }
+    return false;
+}
+
+function streamChunk(value: unknown): Buffer {
+    if (typeof value === 'string') return Buffer.from(value);
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof ArrayBuffer) return Buffer.from(value);
+    if (ArrayBuffer.isView(value)) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    throw new Error('Invalid database dump stream chunk.');
+}
+
+async function writeDumpStream(
+    stream: unknown,
+    handle: Awaited<ReturnType<DatabaseFileSystem['open']>>,
+): Promise<Buffer> {
+    if (!stream || typeof (stream as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] !== 'function') {
+        throw new Error('Invalid database dump stream.');
+    }
+
+    let tail = Buffer.alloc(0);
+    for await (const value of stream as AsyncIterable<unknown>) {
+        const chunk = streamChunk(value);
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+            const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset, null);
+            if (bytesWritten <= 0) throw new Error('Database dump write failed.');
+            offset += bytesWritten;
+        }
+
+        tail = Buffer.concat([tail, chunk]);
+        if (tail.byteLength > DUMP_TAIL_BYTES) {
+            tail = tail.subarray(tail.byteLength - DUMP_TAIL_BYTES);
+        }
+    }
+
+    return tail;
+}
+
+function displayDestination(io: ResolvedCommandDependencies, target: string): string {
+    return path.relative(io.cwd, target) || path.basename(target);
+}
+
 export async function databaseListWithConfig(
     options: DatabaseListOptions,
     config: Config,
@@ -654,6 +885,161 @@ export async function databaseExecWithConfig(
     io.stdout(output.join('\n'));
 }
 
+export async function databaseDumpWithConfig(
+    name: string,
+    file: string | undefined,
+    options: DatabaseDumpOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const target = resolveDatabaseDestination(io, file, `${safeDatabaseStem(name)}.sql`);
+    let temp: string | undefined;
+    let handle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
+    let ownsTemp = false;
+
+    try {
+        if (!await confirmFileOverwrite(target, options, io)) return;
+
+        const reservation = await reserveDestinationTemp(io, target);
+        temp = reservation.temp;
+        handle = reservation.handle;
+        ownsTemp = true;
+
+        const stream = await requestDatabaseDumpStream(config, name, requestDependencies(io));
+        const tail = await writeDumpStream(stream, handle);
+        await handle.close();
+        handle = undefined;
+
+        if (tail.includes(Buffer.from(INCOMPLETE_DUMP_MARKER))) {
+            throw new DatabaseOperationError(
+                'upstream_unavailable',
+                'The downloaded database dump is incomplete.',
+            );
+        }
+
+        await assertNoSymlinkComponents(io.filesystem, target);
+        await io.filesystem.rename(temp, target);
+        ownsTemp = false;
+        io.stdout(`Database dump saved to ${displayDestination(io, target)}.`);
+    } catch (error) {
+        if (handle) {
+            try {
+                await handle.close();
+            } catch {
+                // The public error remains stable; cleanup below owns the path.
+            }
+        }
+        if (ownsTemp && temp) await removeOwnedFiles(io.filesystem, [temp]);
+        throw freshSafeFileError(error);
+    }
+}
+
+export async function databasePullWithConfig(
+    name: string,
+    destination: string | undefined,
+    options: DatabasePullOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    if (options.writable) {
+        throw new DatabaseOperationError(
+            'database_client_unsupported',
+            'Writable database pull is not available yet.',
+        );
+    }
+
+    const target = resolveDatabaseDestination(
+        io,
+        destination,
+        path.join('.solidactions', 'databases', `${safeDatabaseStem(name)}.db`),
+    );
+    let temp: string | undefined;
+    let ownsTemp = false;
+    let ownsSidecars = false;
+
+    try {
+        if (!await confirmFileOverwrite(target, options, io)) return;
+
+        const reservation = await reserveDestinationTemp(io, target);
+        temp = reservation.temp;
+        ownsTemp = true;
+        await reservation.handle.close();
+
+        const sidecars = pullSidecars(temp);
+        if (await anyPathExists(io.filesystem, sidecars)) {
+            throw new DatabaseOperationError(
+                'upstream_unavailable',
+                'Database replica temporary files already exist.',
+            );
+        }
+        ownsSidecars = true;
+
+        let synced = false;
+        for (let attempt = 0; attempt < PULL_ATTEMPTS; attempt += 1) {
+            const { createClient, access } = await loadDatabaseClientBeforeMint(
+                () => requestDatabaseAccess(config, name, 'read', requestDependencies(io)),
+                { loadClient: io.loadClient },
+            );
+
+            let client: DatabaseClient | undefined;
+            let attemptFailed = false;
+            try {
+                client = createClient({
+                    url: pathToFileURL(temp).href,
+                    syncUrl: access.url,
+                    authToken: access.token,
+                    intMode: 'string',
+                }) as DatabaseClient;
+                if (typeof client.sync !== 'function') throw new Error('Database sync is unavailable.');
+                await client.sync();
+            } catch {
+                attemptFailed = true;
+            } finally {
+                if (client) {
+                    try {
+                        await client.close();
+                    } catch {
+                        attemptFailed = true;
+                    }
+                }
+            }
+
+            if (!attemptFailed) {
+                synced = true;
+                break;
+            }
+        }
+
+        if (!synced) {
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+
+        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+            throw new DatabaseOperationError(
+                'upstream_unavailable',
+                'Database replica could not be finalized safely.',
+            );
+        }
+
+        await io.filesystem.chmod(temp, 0o444);
+        await assertNoSymlinkComponents(io.filesystem, target);
+        await io.filesystem.rename(temp, target);
+        ownsTemp = false;
+        ownsSidecars = false;
+        io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
+    } catch (error) {
+        if (ownsTemp && temp) {
+            await removeOwnedFiles(
+                io.filesystem,
+                [temp, ...(ownsSidecars ? pullSidecars(temp) : [])],
+            );
+        }
+        throw freshSafeFileError(error);
+    }
+}
+
 export async function databaseList(
     options: DatabaseListOptions,
     dependencies: DatabaseCommandDependencies = {},
@@ -709,4 +1095,22 @@ export async function databaseExec(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databaseExecWithConfig(name, sql, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databaseDump(
+    name: string,
+    file: string | undefined,
+    options: DatabaseDumpOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseDumpWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databasePull(
+    name: string,
+    destination: string | undefined,
+    options: DatabasePullOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databasePullWithConfig(name, destination, options, await requireConfigWithWorkspace(), dependencies);
 }

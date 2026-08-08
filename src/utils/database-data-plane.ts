@@ -25,6 +25,7 @@ interface DatabaseClientModule {
 
 export interface DatabaseClient {
     execute: (statement: string | { sql: string; args?: unknown }) => Promise<DatabaseResultSet>;
+    sync?: () => Promise<unknown>;
     close: () => void | Promise<void>;
     [key: string]: unknown;
 }
@@ -33,8 +34,8 @@ export interface DatabaseRequestDependencies {
     post?: (
         url: string,
         body: Record<string, unknown>,
-        options: { headers: Record<string, string> },
-    ) => Promise<{ data: unknown }>;
+        options: { headers: Record<string, string>; responseType?: 'stream' },
+    ) => Promise<{ data: unknown; status?: number }>;
 }
 
 export interface DatabaseClientDependencies extends DatabaseRequestDependencies {
@@ -59,7 +60,7 @@ export class DatabaseOperationError extends Error {
     }
 }
 
-function safeAppError(error: unknown): DatabaseOperationError {
+export function safeDatabaseRequestError(error: unknown): DatabaseOperationError {
     const augmented = augmentTokenMissingAbilityMessage(error);
     const response = (augmented as any)?.response;
     const status = typeof response?.status === 'number' ? response.status : undefined;
@@ -97,7 +98,34 @@ export async function requestDatabaseOperation<T>(
 
         return response.data as T;
     } catch (error) {
-        throw safeAppError(error);
+        throw safeDatabaseRequestError(error);
+    }
+}
+
+/** Request the existing server-side SQL dump as a stream. */
+export async function requestDatabaseDumpStream(
+    config: Config,
+    name: string,
+    dependencies: DatabaseRequestDependencies = {},
+): Promise<unknown> {
+    const post = dependencies.post ?? axios.post;
+
+    try {
+        const response = await post(
+            `${config.host}/api/v1/databases`,
+            { operation: 'dump', name },
+            {
+                headers: {
+                    ...getApiHeaders(config, 'application/json'),
+                    Accept: 'application/sql',
+                },
+                responseType: 'stream',
+            },
+        );
+
+        return response.data;
+    } catch (error) {
+        throw safeDatabaseRequestError(error);
     }
 }
 
