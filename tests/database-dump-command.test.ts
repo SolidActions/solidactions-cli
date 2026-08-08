@@ -134,9 +134,13 @@ describe('database dump atomic file contract', () => {
             events.push('rename');
             return realPromises.rename(from, to);
         });
+        const chmod = vi.fn(async (file: fs.PathLike, mode: fs.Mode) => {
+            events.push(`chmod:${Number(mode).toString(8)}`);
+            return realPromises.chmod(file, mode);
+        });
         test.dependencies = {
             ...test.dependencies,
-            filesystem: { ...realPromises, open, rename },
+            filesystem: { ...realPromises, open, rename, chmod },
         } as any;
 
         await databaseDumpWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
@@ -145,7 +149,10 @@ describe('database dump atomic file contract', () => {
         expect(open.mock.calls[0][1]).toBe('wx');
         expect(rename).toHaveBeenCalledOnce();
         expect(events.indexOf('stream-close')).toBeLessThan(events.indexOf('rename'));
+        expect(chmod).toHaveBeenCalledWith(target, 0o444);
+        expect(events.indexOf('rename')).toBeLessThan(events.indexOf('chmod:444'));
         expect(fs.readFileSync(target, 'utf8')).toContain('INSERT INTO events VALUES (1)');
+        expect(fs.statSync(target).mode & 0o777).toBe(0o444);
         expect(fs.readdirSync(root)).toEqual(['chosen.sql']);
     });
 

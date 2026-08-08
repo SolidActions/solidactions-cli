@@ -427,6 +427,34 @@ describe('database lifecycle error boundary', () => {
         expect(rendered).not.toContain(CONFIG.apiKey);
         expect(rendered).not.toContain('RAW_AXIOS_TOKEN_ABILITY_SENTINEL');
     });
+
+    it('maps the stable unauthenticated code to actionable login guidance', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness();
+        const appError: any = new Error(`RAW_UNAUTHENTICATED_SENTINEL ${CONFIG.apiKey}`);
+        appError.response = {
+            status: 401,
+            data: {
+                code: 'unauthenticated',
+                message: 'Unauthenticated.',
+            },
+        };
+        test.dependencies.post = async () => { throw appError; };
+
+        let caught: any;
+        try {
+            await databaseListWithConfig({}, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'unauthenticated', status: 401 });
+        expect(caught?.message).toContain('solidactions login');
+        expect(caught?.message).not.toContain('upstream_unavailable');
+        const rendered = `${String(caught)}\n${JSON.stringify(caught)}\n${test.stderr.join('\n')}`;
+        expect(rendered).not.toContain(CONFIG.apiKey);
+        expect(rendered).not.toContain('RAW_UNAUTHENTICATED_SENTINEL');
+    });
 });
 
 function runBuiltCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {

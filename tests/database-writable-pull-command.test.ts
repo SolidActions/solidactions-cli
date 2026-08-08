@@ -227,6 +227,8 @@ describe('database pull --writable foreground attached session', () => {
         await databasePullWithConfig('Analytics', target, { writable: true }, CONFIG, test.dependencies);
 
         expect(test.stdout[0]).toBe(WARNING);
+        expect(test.events.indexOf('mint:1')).toBeLessThan(test.events.indexOf(`stdout:${WARNING}`));
+        expect(test.events.indexOf('client:1:sync')).toBeLessThan(test.events.indexOf(`stdout:${WARNING}`));
         expect(test.events.indexOf(`stdout:${WARNING}`)).toBeLessThan(test.events.indexOf('input:1'));
         expectWriteAccess(test.posts);
         expect(test.attachedConfigs).toEqual([{

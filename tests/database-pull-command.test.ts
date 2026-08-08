@@ -330,7 +330,7 @@ describe('database pull read-only replica contract', () => {
         expect(fs.readFileSync(temp, 'utf8')).toBe('PRE-EXISTING TEMP OWNED BY SOMEONE ELSE');
     });
 
-    it('makes exactly three attempts with fresh read access, the same temp path, and a close per failed sync', async () => {
+    it('bounds transient transport retries with backoff, fresh access, one temp path, and a close per attempt', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const target = path.join(root, 'existing.db');
@@ -342,8 +342,15 @@ describe('database pull read-only replica contract', () => {
             fs.writeFileSync(temp, 'PARTIAL REPLICA');
             fs.writeFileSync(`${temp}-wal`, 'WAL');
             fs.writeFileSync(`${temp}-shm`, 'SHM');
-            throw new Error(`sync failure physical-hostname.sentinel.invalid ${String(config.authToken)}`);
+            throw Object.assign(
+                new Error(`transport failure physical-hostname.sentinel.invalid ${String(config.authToken)}`),
+                { code: 'ECONNRESET' },
+            );
         });
+        const delays: number[] = [];
+        test.dependencies.sleep = async (milliseconds: number) => {
+            delays.push(milliseconds);
+        };
 
         let caught: any;
         try {
@@ -362,6 +369,7 @@ describe('database pull read-only replica contract', () => {
             'fresh-read-token-sentinel-3',
         ]);
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2', 'close:3']);
+        expect(delays).toEqual([250, 500]);
         expect(caught).toMatchObject({ code: 'upstream_unavailable' });
         const publicError = `${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`;
         expect(publicError).toMatch(/failed/i);
@@ -376,15 +384,21 @@ describe('database pull read-only replica contract', () => {
         expect(fs.readFileSync(unrelated, 'utf8')).toBe('DO NOT DELETE');
     });
 
-    it('stops renewing after the first successful resumed sync', async () => {
+    it('remints exactly once after credential expiry and stops after the resumed sync succeeds', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const target = path.join(root, 'analytics.db');
         const test = pullHarness(root, async (attempt, config) => {
             const temp = fileURLToPath(String(config.url));
             fs.writeFileSync(temp, attempt === 1 ? 'PARTIAL' : 'COMPLETE REPLICA');
-            if (attempt === 1) throw new Error('expired credential with raw details');
+            if (attempt === 1) {
+                throw Object.assign(new Error('JWT expired with raw credential details'), {
+                    code: 'SQLITE_AUTH',
+                });
+            }
         });
+        const delays: number[] = [];
+        test.dependencies.sleep = async (milliseconds: number) => delays.push(milliseconds);
 
         await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
 
@@ -392,8 +406,39 @@ describe('database pull read-only replica contract', () => {
         expect(test.clientConfigs).toHaveLength(2);
         expect(test.clientConfigs[0].url).toBe(test.clientConfigs[1].url);
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2']);
+        expect(delays).toEqual([]);
         expect(fs.readFileSync(target, 'utf8')).toBe('COMPLETE REPLICA');
         expect(fs.statSync(target).mode & 0o777).toBe(0o444);
+    });
+
+    it.each([
+        { label: 'local SQLite', code: 'SQLITE_CORRUPT' },
+        { label: 'Hrana protocol', code: 'HRANA_PROTO_ERROR' },
+    ])('does not retry a deterministic $label failure', async ({ code }) => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const test = pullHarness(root, async (_attempt, config) => {
+            fs.writeFileSync(fileURLToPath(String(config.url)), 'INVALID PARTIAL REPLICA');
+            throw Object.assign(new Error('DETERMINISTIC_FAILURE_SECRET_SENTINEL'), { code });
+        });
+        const delays: number[] = [];
+        test.dependencies.sleep = async (milliseconds: number) => delays.push(milliseconds);
+
+        let caught: any;
+        try {
+            await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(test.posts).toHaveLength(1);
+        expect(test.clientConfigs).toHaveLength(1);
+        expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1']);
+        expect(delays).toEqual([]);
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(`${String(caught)} ${JSON.stringify(caught)}`).not.toContain('DETERMINISTIC_FAILURE_SECRET_SENTINEL');
+        expect(fs.existsSync(target)).toBe(false);
     });
 
     it('hands the exclusive reservation to native creation once, then preserves the partial replica for retry', async () => {

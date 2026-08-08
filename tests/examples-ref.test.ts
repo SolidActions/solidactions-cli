@@ -24,6 +24,16 @@ const PRE_DATABASE_GUIDANCE_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
 const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
 
 describe('EXAMPLES_REF', () => {
+    it('records the temporary PR-head pin and the mandatory pre-release mainline repin without a fabricated override', () => {
+        const source = fs.readFileSync(path.resolve(__dirname, '../src/utils/examples-ref.ts'), 'utf8');
+
+        expect(source).toContain('temporary build-time necessity');
+        expect(source).toContain('merged mainline SHA');
+        expect(source).toMatch(/before any CLI release/i);
+        expect(source).toMatch(/release ritual/i);
+        expect(source).not.toMatch(/PM[- ]directed|PM delivery override|override explicitly approved/i);
+    });
+
     it('moves past the pre-database-guidance examples pin', () => {
         expect(EXAMPLES_REF).not.toBe(PRE_DATABASE_GUIDANCE_REF);
     });

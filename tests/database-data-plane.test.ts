@@ -85,9 +85,37 @@ describe('database access control-plane request', () => {
                     'Content-Type': 'application/json',
                     'X-Workspace-Id': 'workspace-1146',
                 },
+                signal: expect.any(AbortSignal),
+                timeout: 30_000,
             },
         ]]);
         expect(access).toEqual({ ...ACCESS, mode: 'write' });
+    });
+
+    it('aborts a stalled control-plane request at the configured deadline', async () => {
+        const requestDatabaseAccess = await requireExport('requestDatabaseAccess');
+        let observedSignal: AbortSignal | undefined;
+        let observedTimeout: number | undefined;
+
+        const outcome = requestDatabaseAccess(APP_CONFIG, 'analytics', 'read', {
+            controlPlaneTimeoutMs: 10,
+            post: async (_url: string, _body: Record<string, unknown>, options: any) => {
+                observedSignal = options.signal;
+                observedTimeout = options.timeout;
+                return new Promise((_resolve, reject) => {
+                    options.signal.addEventListener('abort', () => {
+                        reject(new Error(`CONTROL_TIMEOUT_SENTINEL ${APP_CONFIG.apiKey}`));
+                    }, { once: true });
+                });
+            },
+        });
+
+        await expect(outcome).rejects.toMatchObject({
+            code: 'upstream_unavailable',
+            message: 'Database request failed.',
+        });
+        expect(observedTimeout).toBe(10);
+        expect(observedSignal?.aborted).toBe(true);
     });
 
     it('retains stable product codes and messages returned by the app', async () => {
@@ -453,6 +481,31 @@ describe('database direct-client lifecycle', () => {
         )).rejects.toBeDefined();
 
         expect(close).toHaveBeenCalledOnce();
+    });
+
+    it('closes the client to cancel a stalled data operation at the configured deadline', async () => {
+        const withDatabaseClient = await requireExport('withDatabaseClient');
+        const events: string[] = [];
+
+        await expect(withDatabaseClient(
+            APP_CONFIG,
+            'analytics',
+            'read',
+            async () => new Promise(() => undefined),
+            dependencies({
+                dataPlaneTimeoutMs: 10,
+                loadClient: async () => ({
+                    createClient: () => ({
+                        close: async () => events.push('close'),
+                    }),
+                }),
+            } as any),
+        )).rejects.toMatchObject({
+            code: 'upstream_unavailable',
+            message: 'Database operation timed out.',
+        });
+
+        expect(events).toEqual(['close']);
     });
 });
 
