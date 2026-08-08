@@ -548,7 +548,9 @@ export async function runPreparedDatabaseImport(
             completedBatches += 1;
             nextStatement = batch.nextStatement;
             completedSourceBytes = boundary;
-            dependencies.stdout(`Imported checkpoint: ${nextStatement} statements, ${boundary} source bytes.`);
+            dependencies.stdout(
+                `Imported checkpoint: ${nextStatement} statements, committed source progress: ${boundary} source bytes.`,
+            );
         }
     } catch {
         failure = importFailure('Database import failed.');
@@ -579,6 +581,6 @@ export async function runPreparedDatabaseImport(
     }
 
     dependencies.stdout(
-        `Imported ${prepared.groups.length} statements (${prepared.sizeBytes} source bytes) into database "${prepared.database}".`,
+        `Imported ${prepared.groups.length} statements (${prepared.sizeBytes} total source bytes) into database "${prepared.database}".`,
     );
 }
