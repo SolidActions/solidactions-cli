@@ -31,4 +31,4 @@
  * was granted. Before any CLI release, repin EXAMPLES_REF to the
  * merged mainline SHA and verify that exact ref during the release ritual.
  */
-export const EXAMPLES_REF = '8a47ced4a248fe57543efd91471b57fa49b4c26d';
+export const EXAMPLES_REF = '4b5754c0469568bf437aa225aa2d63208c3639bf';
