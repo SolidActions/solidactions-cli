@@ -45,17 +45,18 @@ function decodeSource(source: Buffer | string): { text: string; byteBase: number
         && source[0] === 0xef
         && source[1] === 0xbb
         && source[2] === 0xbf;
+    let text: string;
     try {
         // TextDecoder consumes the first UTF-8 BOM. A second BOM remains in
         // the decoded text and is deliberately not normalized away.
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(source);
-        if (hasBom && text.startsWith('\uFEFF')) {
-            throw importError('The SQL import source has more than one leading UTF-8 BOM.');
-        }
-        return { text, byteBase: hasBom ? 3 : 0 };
+        text = new TextDecoder('utf-8', { fatal: true }).decode(source);
     } catch {
         throw importError('The SQL import source is not valid UTF-8.');
     }
+    if (hasBom && text.startsWith('\uFEFF')) {
+        throw importError('The SQL import source has more than one leading UTF-8 BOM.');
+    }
+    return { text, byteBase: hasBom ? 3 : 0 };
 }
 
 function codePointWidth(text: string, index: number): number {
@@ -276,6 +277,57 @@ function scanDatabaseSqlGroupsWithTokens(text: string, byteBase = 0): ScannedGro
  */
 export function scanDatabaseSqlGroups(text: string, byteBase = 0): DatabaseSqlImportGroup[] {
     return scanDatabaseSqlGroupsWithTokens(text, byteBase).map(({ tokens: _tokens, ...group }) => group);
+}
+
+export interface AccumulatedDatabaseSql {
+    sql: string;
+    multiple: boolean;
+}
+
+/**
+ * Incrementally frame complete SQLite input using the same quote, comment,
+ * identifier, and trigger grammar as SQL imports.
+ */
+export class DatabaseSqlStatementAccumulator {
+    private lines: string[] = [];
+
+    get pending(): boolean {
+        return this.lines.some((line) => line.trim() !== '');
+    }
+
+    push(line: string): AccumulatedDatabaseSql | null {
+        if (!this.pending && line.trim() === '') return null;
+        this.lines.push(line);
+        const sql = this.lines.join('\n');
+        let groups: ScannedGroup[];
+
+        try {
+            groups = scanDatabaseSqlGroupsWithTokens(sql);
+        } catch (error) {
+            if (
+                error instanceof DatabaseOperationError
+                && /^(?:Unterminated|Incomplete) SQL\b/.test(error.message)
+            ) {
+                return null;
+            }
+            throw error;
+        }
+
+        if (groups.length === 0) return null;
+
+        const first = sqlWithoutLeadingComments(groups[0].sql);
+        const last = sqlWithoutLeadingComments(groups[groups.length - 1].sql);
+        const explicitTransaction = /^BEGIN(?:\s+TRANSACTION)?\s*;$/i.test(first);
+        if (explicitTransaction && !/^(?:COMMIT|END|ROLLBACK)\s*;$/i.test(last)) {
+            return null;
+        }
+
+        this.lines = [];
+        return {
+            sql,
+            multiple: explicitTransaction || groups.length > 1,
+        };
+    }
 }
 
 type GroupKind =

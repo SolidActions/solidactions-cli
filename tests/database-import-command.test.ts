@@ -534,7 +534,7 @@ describe('database import preflight and execution', () => {
         expect(checkpoints).toHaveLength(1);
         const checkpoint = JSON.parse(fs.readFileSync(checkpoints[0], 'utf8'));
         expect(checkpoint).toMatchObject({ lastCompletedBatch: 1, nextStatement: 100 });
-        expect(report(caught, test).split('\n')).toContain(resumeLine('Analytics', source, checkpoints[0]));
+        expect(report(caught, test)).not.toContain('Resume with:');
         expectNoSecrets(report(caught, test));
         expectNoSecrets(checkpoint);
     });
@@ -1014,7 +1014,7 @@ describe('database import resume validation', () => {
         expect(test.stdout.join('\n')).toContain(String(fs.statSync(source).size));
     });
 
-    it('reports the exact last completed resume position before guidance when access fails pre-execution', async () => {
+    it('preserves a valid checkpoint without resume guidance when policy denies access pre-execution', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
         const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
@@ -1048,11 +1048,12 @@ describe('database import resume validation', () => {
             caught = error;
         }
 
-        const lines = report(caught, test).split('\n');
-        const position = `Last completed position: batch 1, 100 statements, ${completedSourceBytes} source bytes.`;
-        const guidance = resumeLine('Analytics', source, checkpoint);
-        expect(lines).toContain(position);
-        expect(lines.indexOf(position)).toBeLessThan(lines.indexOf(guidance));
+        expect(caught).toMatchObject({
+            code: 'read_only_mode',
+            message: 'Database writes are disabled.',
+            status: 403,
+        });
+        expect(report(caught, test)).not.toContain('Resume with:');
         expect(test.executions).toEqual([]);
         expect(test.clients).toEqual([]);
         expect(fs.readFileSync(checkpoint)).toEqual(before);

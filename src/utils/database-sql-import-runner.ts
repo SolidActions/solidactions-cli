@@ -453,7 +453,8 @@ async function acquireClient(
             () => requestDatabaseAccess(config, prepared.database, 'write', { post: dependencies.post }),
             { loadClient: dependencies.loadClient },
         );
-    } catch {
+    } catch (error) {
+        if (error instanceof DatabaseOperationError) throw error;
         throw importFailure('Database import access could not be renewed.');
     }
 
@@ -516,7 +517,8 @@ export async function runPreparedDatabaseImport(
             const batch = nextBatch(prepared.groups, nextStatement);
             try {
                 await client.executeMultiple!(batchSql(batch.groups));
-            } catch {
+            } catch (error) {
+                if (error instanceof DatabaseOperationError) throw error;
                 throw importFailure('A database import batch failed.');
             }
 
@@ -552,8 +554,10 @@ export async function runPreparedDatabaseImport(
                 `Imported checkpoint: ${nextStatement} statements, committed source progress: ${boundary} source bytes.`,
             );
         }
-    } catch {
-        failure = importFailure('Database import failed.');
+    } catch (error) {
+        failure = error instanceof DatabaseOperationError
+            ? error
+            : importFailure('Database import failed.');
     }
 
     try {
@@ -574,10 +578,13 @@ export async function runPreparedDatabaseImport(
     }
 
     if (failure) {
-        const guidance = checkpointPublished && !suppressResume
+        const policyRefusal = failure.code === 'read_only_mode'
+            || failure.code === 'plan_denied'
+            || failure.status === 429;
+        const guidance = checkpointPublished && !suppressResume && !policyRefusal
             ? `\nLast completed position: batch ${completedBatches}, ${nextStatement} statements, ${completedSourceBytes} source bytes.\n${resumeLine(prepared.database, prepared.file, prepared.checkpointPath)}`
             : '';
-        throw importFailure(`${failure.message}${guidance}`);
+        throw new DatabaseOperationError(failure.code, `${failure.message}${guidance}`, failure.status);
     }
 
     dependencies.stdout(

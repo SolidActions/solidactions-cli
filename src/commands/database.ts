@@ -19,6 +19,7 @@ import {
     withDatabaseClient,
 } from '../utils/database-data-plane';
 import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
+import { DatabaseSqlStatementAccumulator } from '../utils/database-sql-import';
 export { parseDatabaseImportSql } from '../utils/database-sql-import';
 import {
     bindPreparedDatabaseImport,
@@ -720,71 +721,6 @@ const WRITABLE_WARNING = 'Writable live session: writes go to the live workspace
 const WRITABLE_PROMPT = 'solidactions-db> ';
 const WRITABLE_CONTINUATION_PROMPT = '...> ';
 
-interface AccumulatedSql {
-    sql: string;
-    multiple: boolean;
-}
-
-/**
- * A deliberately small SQLite statement accumulator. Task 8 needs quoted
- * string awareness and transaction grouping; Task 9 extends this scanner for
- * comments, quoted identifiers, and trigger bodies before it is reused for
- * imports.
- */
-class SqliteStatementAccumulator {
-    private lines: string[] = [];
-
-    get pending(): boolean {
-        return this.lines.some((line) => line.trim() !== '');
-    }
-
-    push(line: string): AccumulatedSql | null {
-        if (!this.pending && line.trim() === '') return null;
-        this.lines.push(line);
-        const sql = this.lines.join('\n');
-        const segments: string[] = [];
-        let inSingleQuote = false;
-        let segmentStart = 0;
-
-        for (let index = 0; index < sql.length; index += 1) {
-            if (sql[index] === "'") {
-                if (inSingleQuote && sql[index + 1] === "'") {
-                    index += 1;
-                    continue;
-                }
-                inSingleQuote = !inSingleQuote;
-                continue;
-            }
-
-            if (!inSingleQuote && sql[index] === ';') {
-                segments.push(sql.slice(segmentStart, index + 1));
-                segmentStart = index + 1;
-            }
-        }
-
-        if (inSingleQuote || sql.slice(segmentStart).trim() !== '' || segments.length === 0) {
-            return null;
-        }
-
-        const keyword = (statement: string): string => statement
-            .trim()
-            .replace(/;$/, '')
-            .trim()
-            .split(/\s+/, 1)[0]
-            ?.toUpperCase() ?? '';
-        const explicitTransaction = keyword(segments[0]) === 'BEGIN';
-        if (explicitTransaction && !['COMMIT', 'END', 'ROLLBACK'].includes(keyword(segments[segments.length - 1]))) {
-            return null;
-        }
-
-        this.lines = [];
-        return {
-            sql,
-            multiple: explicitTransaction || segments.length > 1,
-        };
-    }
-}
-
 interface WritableInputSession {
     iterator: AsyncIterator<string>;
     prompt: (pending: boolean) => void;
@@ -1446,7 +1382,7 @@ async function databaseWritablePullWithConfig(
         await openAttachedClient(true);
         io.stdout(WRITABLE_WARNING);
         inputSession = createWritableInput(io);
-        const accumulator = new SqliteStatementAccumulator();
+        const accumulator = new DatabaseSqlStatementAccumulator();
         let sessionFailure: unknown;
         let publishAfterFailure = false;
 
