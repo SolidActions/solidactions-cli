@@ -694,6 +694,56 @@ describe('database pull --writable foreground attached session', () => {
         expectNoSecrets(caught);
     });
 
+    it('refuses a substituted temp symlink before creating a proactive-renewal client', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const temp = path.join(root, '.analytics.db.solidactions-task8.tmp');
+        const victim = path.join(root, 'renewal-victim.db');
+        fs.writeFileSync(target, 'OLD REPLICA');
+        fs.writeFileSync(victim, 'RENEWAL VICTIM CONTENT', { mode: 0o640 });
+        const victimMode = fs.statSync(victim).mode & 0o777;
+        let now = Date.parse('2026-08-07T12:00:00.000Z');
+        const test = writableHarness(root, {
+            lines: ['SELECT 1;', 'DELETE FROM audit_log;'],
+            now: () => now,
+            expiresAt: ['2026-08-07T12:10:00.000Z', '2026-08-07T12:20:00.000Z'],
+            execute: async () => {
+                fs.unlinkSync(temp);
+                fs.symlinkSync(victim, temp);
+                now = Date.parse('2026-08-07T12:09:31.000Z');
+                return { columns: ['value'], rows: [['1']], rowsAffected: 0 };
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databasePullWithConfig(
+                'Analytics',
+                target,
+                { writable: true, yes: true },
+                CONFIG,
+                test.dependencies,
+            );
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toBeDefined();
+        expect(test.posts).toHaveLength(2);
+        expect(test.attachedConfigs).toHaveLength(1);
+        expect(test.closed).toEqual([1]);
+        expect(test.events).not.toContain('input:2');
+        expect(test.finalizerConfigs).toEqual([]);
+        expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+        expect(fs.existsSync(temp)).toBe(false);
+        expect(fs.readFileSync(victim, 'utf8')).toBe('RENEWAL VICTIM CONTENT');
+        expect(fs.statSync(victim).mode & 0o777).toBe(victimMode);
+        expectNoSecrets(caught);
+        expectNoSecrets(test.stdout);
+        expectNoSecrets(test.stderr);
+    });
+
     it.each([
         { label: 'at the window', expiresAt: '2026-08-07T12:00:30.000Z' },
         { label: 'inside the window', expiresAt: '2026-08-07T12:00:29.999Z' },
