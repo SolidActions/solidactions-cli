@@ -730,7 +730,8 @@ describe('database pull --writable foreground attached session', () => {
         }
 
         expect(caught).toBeDefined();
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(1);
+        expect(test.events).not.toContain('mint:2');
         expect(test.attachedConfigs).toHaveLength(1);
         expect(test.closed).toEqual([1]);
         expect(test.events).not.toContain('input:2');
