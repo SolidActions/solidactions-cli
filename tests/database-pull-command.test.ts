@@ -167,6 +167,21 @@ function writeReplicaWithCompanions(temp: string, contents = 'MAIN FILE BEFORE C
 }
 
 describe('database pull read-only replica contract', () => {
+    it('actively closes a stalled sync at the per-verb data deadline instead of hanging', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const test = pullHarness(root, async () => new Promise(() => undefined));
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await expect(databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'upstream_unavailable' });
+
+        expect(test.posts).toHaveLength(1);
+        expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1']);
+        expect(fs.existsSync(target)).toBe(false);
+    }, 1_000);
+
     it.each([
         { name: '../../', expected: path.join('.solidactions', 'databases', 'database.db') },
         { name: '../../Customer Data/2026', expected: path.join('.solidactions', 'databases', 'customer-data-2026.db') },

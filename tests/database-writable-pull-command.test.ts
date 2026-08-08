@@ -213,6 +213,25 @@ function expectNoSecrets(value: unknown): void {
 }
 
 describe('database pull --writable foreground attached session', () => {
+    it('closes a stalled initial sync at its deadline before warning or accepting input', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const test = writableHarness(root, {
+            lines: ['DELETE FROM ledger;', '.exit'],
+            sync: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await expect(databasePullWithConfig('Analytics', target, { writable: true }, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'upstream_unavailable' });
+
+        expect(test.closed).toEqual([1]);
+        expect(test.stdout).not.toContain(WARNING);
+        expect(test.events).not.toContain('input:1');
+        expect(fs.existsSync(target)).toBe(false);
+    }, 1_000);
+
     it.each([
         { ending: '.exit', lines: ["INSERT INTO notes(body) VALUES ('one;two');", '.exit'] },
         { ending: 'EOF', lines: ["INSERT INTO notes(body) VALUES ('one;two');"] },

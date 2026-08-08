@@ -251,6 +251,23 @@ describe('database import command registration', () => {
 });
 
 describe('database import preflight and execution', () => {
+    it('closes a stalled atomic batch at the per-verb deadline and does not publish progress', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE stalled (id);');
+        const test = importHarness(root, {
+            execute: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await expect(databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'upstream_unavailable' });
+
+        expect(test.closed).toEqual([1]);
+        expect(checkpointFiles(root)).toEqual([]);
+        expect(test.stdout).toEqual([]);
+    }, 1_000);
+
     it.each([
         "CREATE TABLE t (id);\n-- DOWNLOAD INCOMPLETE: stream failed\n",
         "\ufeffCREATE TABLE t (id);\r\n-- DOWNLOAD INCOMPLETE: browser stream failed\r\n",
