@@ -142,12 +142,43 @@ export function augmentWorkspaceForbiddenMessage(error: any): any {
     return error;
 }
 
+/**
+ * Existing device tokens predate the coarse `databases` scope. Turn the app's
+ * stable missing-ability response into a re-login instruction while preserving
+ * its original message. Other ability failures retain their existing behavior.
+ */
+export function augmentTokenMissingAbilityMessage(error: any): any {
+    const response = error?.response;
+    const requiredAbility = response?.data?.required_ability;
+    const isDatabaseAbility =
+        requiredAbility === 'databases'
+        || (typeof requiredAbility === 'string' && requiredAbility.startsWith('databases:'));
+
+    if (
+        response?.status === 403
+        && response.data?.code === 'token_missing_ability'
+        && isDatabaseAbility
+    ) {
+        const hint = 'Run `solidactions login --device` to refresh database access.';
+        const message = typeof response.data.message === 'string' && response.data.message.length > 0
+            ? response.data.message
+            : 'This session does not have database access.';
+        if (!message.includes('solidactions login --device')) {
+            response.data.message = `${message}\n\n${hint}`;
+        }
+    }
+
+    return error;
+}
+
 axios.interceptors.response.use(
     (response) => response,
     (error) => Promise.reject(
-        augmentWorkspaceForbiddenMessage(
-            augmentNotFoundMessage(
-                augmentSandboxEgressMessage(error),
+        augmentTokenMissingAbilityMessage(
+            augmentWorkspaceForbiddenMessage(
+                augmentNotFoundMessage(
+                    augmentSandboxEgressMessage(error),
+                ),
             ),
         ),
     ),

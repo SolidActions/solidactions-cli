@@ -20,7 +20,24 @@ import { EXAMPLES_REF } from '../src/utils/examples-ref';
 import { rawContentUrl } from '../src/utils/github';
 import { installSkills, fetchAiHelperContent } from '../src/utils/skills';
 
+const PRE_DATABASE_GUIDANCE_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
+const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
+
 describe('EXAMPLES_REF', () => {
+    it('records the temporary PR-head pin and the mandatory pre-release mainline repin without a fabricated override', () => {
+        const source = fs.readFileSync(path.resolve(__dirname, '../src/utils/examples-ref.ts'), 'utf8');
+
+        expect(source).toContain('temporary build-time necessity');
+        expect(source).toContain('merged mainline SHA');
+        expect(source).toMatch(/before any CLI release/i);
+        expect(source).toMatch(/release ritual/i);
+        expect(source).not.toMatch(/PM[- ]directed|PM delivery override|override explicitly approved/i);
+    });
+
+    it('moves past the pre-database-guidance examples pin', () => {
+        expect(EXAMPLES_REF).not.toBe(PRE_DATABASE_GUIDANCE_REF);
+    });
+
     it('is an immutable ref, not a moving branch', () => {
         expect(EXAMPLES_REF).not.toBe('main');
         expect(EXAMPLES_REF).not.toBe('master');
@@ -109,6 +126,9 @@ describe('solidactions-examples fetches pass the pinned ref at the call site', (
             expect(url).toContain(`/${EXAMPLES_REF}/`);
             expect(url).not.toMatch(/solidactions-examples\/main\//);
         }
+        expect(requested.some((url) => url.endsWith(
+            `/${EXAMPLES_REF}/content/skills/solidactions-deploy-and-config.md`,
+        ))).toBe(true);
     });
 
     it('fetchAiHelperContent requests the helper file at the pinned ref', async () => {
@@ -117,6 +137,13 @@ describe('solidactions-examples fetches pass the pinned ref at the call site', (
 
         expect(requested).toHaveLength(1);
         expect(requested[0]).toContain(`/${EXAMPLES_REF}/`);
+    });
+});
+
+describe('pinned canonical database guidance', () => {
+    it('makes the release smoke inspect the installed deploy skill at the pinned ref', () => {
+        expect(RELEASE_SMOKE).toContain('solidactions-deploy-and-config.md');
+        expect(RELEASE_SMOKE).toContain('## Recipe — Databases');
     });
 });
 

@@ -14,7 +14,7 @@ export const SOLIDACTIONS_SKILL_NAMES = [
 
 const EXAMPLES_OWNER = 'SolidActions';
 const EXAMPLES_REPO = 'solidactions-examples';
-const SKILLS_PATH_PREFIX = 'skills';
+const SKILLS_PATH_PREFIX = 'content/skills';
 
 export type AiHelperTarget = 'CLAUDE.md' | 'AGENTS.md';
 

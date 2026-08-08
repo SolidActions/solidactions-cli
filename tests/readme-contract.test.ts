@@ -9,6 +9,13 @@ const COMMAND_TAXONOMY = fs.readFileSync(
     'utf8',
 );
 
+function markdownSection(markdown: string, heading: string): string {
+    const start = markdown.indexOf(heading);
+    expect(start, `missing ${heading}`).toBeGreaterThanOrEqual(0);
+    const next = markdown.indexOf('\n## ', start + heading.length);
+    return markdown.slice(start, next === -1 ? undefined : next);
+}
+
 describe('public README setup contract', () => {
     it('uses the secret-safe current login, deploy, and run commands', () => {
         expect(README).toContain('solidactions login --global');
@@ -60,5 +67,43 @@ describe('public README setup contract', () => {
 
         expect(README).not.toContain('omitting `--env` treats `<project>` as an exact slug');
         expect(README).not.toContain('project view has no implicit');
+    });
+
+    it('documents the complete vendor-neutral database CLI and its safety model', () => {
+        const guidance = markdownSection(README, '## Database CLI');
+        const commands = [
+            'solidactions database list',
+            'solidactions database create',
+            'solidactions database delete',
+            'solidactions database undelete',
+            'solidactions database schema',
+            'solidactions database query',
+            'solidactions database exec',
+            'solidactions database dump',
+            'solidactions database pull',
+            'solidactions database import',
+        ];
+
+        for (const command of commands) {
+            expect(guidance, `README missing ${command}`).toContain(command);
+        }
+
+        for (const option of ['--json', '--yes', '--from', '--writable', '--resume']) {
+            expect(guidance, `README missing ${option}`).toContain(option);
+        }
+
+        expect(guidance).toMatch(/soft-delete/i);
+        expect(guidance).toMatch(/purge clock/i);
+        expect(guidance).toMatch(/read-only local replica/i);
+        expect(guidance).toContain('.solidactions/databases/<safe-stem>.db');
+        expect(guidance).toMatch(/foreground/i);
+        expect(guidance).toMatch(/writes go to the live workspace database/i);
+        expect(guidance).toMatch(/no offline (?:merge|write-back)/i);
+        expect(guidance).toMatch(/ephemeral/i);
+        expect(guidance).toMatch(/no durable credential/i);
+        expect(guidance).toMatch(/DOWNLOAD INCOMPLETE/);
+        expect(guidance).toMatch(/checkpoint/i);
+        expect(guidance).toMatch(/avoid|without|no replay/i);
+        expect(guidance).not.toMatch(/turso|libsql/i);
     });
 });

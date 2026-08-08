@@ -258,6 +258,12 @@ async function verifyScaffold(projectDir, target) {
   assert.deepEqual(installedSkills, [...skillNames].sort(), `${target} skill manifest drifted`);
   assert((await stat(path.join(projectDir, '.solidactions', 'sdk-reference.md'))).isFile(), 'SDK reference missing');
 
+  const deploySkill = await readFile(path.join(skillDir, 'solidactions-deploy-and-config.md'), 'utf8');
+  assert(
+    deploySkill.includes('## Recipe — Databases'),
+    'pinned solidactions-deploy-and-config.md is missing ## Recipe — Databases',
+  );
+
   const helper = await readFile(path.join(projectDir, targetFile), 'utf8');
   for (const skillName of skillNames) {
     assert(helper.includes(skillName), `${targetFile} does not name ${skillName}`);

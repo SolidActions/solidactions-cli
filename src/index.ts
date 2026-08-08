@@ -57,6 +57,18 @@ import {
     workflowEnable,
 } from './commands/state';
 import { workflowView } from './commands/workflow-view';
+import {
+    databaseCreate,
+    databaseDelete,
+    databaseDump,
+    databaseExec,
+    databaseImport,
+    databaseList,
+    databasePull,
+    databaseQuery,
+    databaseSchema,
+    databaseUndelete,
+} from './commands/database';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -184,6 +196,113 @@ program
         // ctx.vars, invoke locally. Without --env: NO platform fetch, ctx.vars is
         // empty {} (the host process.env is never leaked into the workflow).
         dev(file, options);
+    });
+
+// =============================================================================
+// database <subcommand>
+// =============================================================================
+
+// Register the complete public surface up front so help and the generated
+// command manifest stay authoritative while handlers land in focused slices.
+const database = program.command('database').description('Manage workspace databases');
+
+database
+    .command('list')
+    .description('List workspace databases')
+    .option('--json', 'Output as JSON')
+    .action(async (options) => {
+        await databaseList(options);
+    });
+
+database
+    .command('create')
+    .description('Create a workspace database')
+    .argument('<name>', 'Database name')
+    .option('--from <file.sql>', 'Import a SQL file after creation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseCreate(name, options);
+    });
+
+database
+    .command('delete')
+    .description('Delete a workspace database')
+    .argument('<name>', 'Database name')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseDelete(name, options);
+    });
+
+database
+    .command('undelete')
+    .description('Restore a deleted workspace database')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseUndelete(name, options);
+    });
+
+database
+    .command('schema')
+    .description('Show a database schema')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseSchema(name, options);
+    });
+
+database
+    .command('query')
+    .description('Run a read-only SQL query')
+    .argument('<name>', 'Database name')
+    .argument('<sql>', 'SQL query')
+    .option('--json', 'Output as JSON')
+    .action(async (name, sql, options) => {
+        await databaseQuery(name, sql, options);
+    });
+
+database
+    .command('exec')
+    .description('Execute a SQL statement')
+    .argument('<name>', 'Database name')
+    .argument('<sql>', 'SQL statement')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, sql, options) => {
+        await databaseExec(name, sql, options);
+    });
+
+database
+    .command('dump')
+    .description('Download a database SQL dump')
+    .argument('<name>', 'Database name')
+    .argument('[file]', 'Destination file')
+    .option('-y, --yes', 'Overwrite without confirmation')
+    .action(async (name, file, options) => {
+        await databaseDump(name, file, options);
+    });
+
+database
+    .command('pull')
+    .description('Pull a database into a local file')
+    .argument('<name>', 'Database name')
+    .argument('[path]', 'Destination path')
+    .option('-y, --yes', 'Overwrite without confirmation')
+    .option('--writable', 'Open a foreground writable session')
+    .action(async (name, destination, options) => {
+        await databasePull(name, destination, options);
+    });
+
+database
+    .command('import')
+    .description('Import a SQL file into a database')
+    .argument('<name>', 'Database name')
+    .argument('<file.sql>', 'SQL file')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--resume <checkpoint>', 'Resume from a validated import checkpoint')
+    .action(async (name, file, options) => {
+        await databaseImport(name, file, options);
     });
 
 // =============================================================================

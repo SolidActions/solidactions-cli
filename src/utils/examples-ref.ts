@@ -25,7 +25,10 @@
  * users. If solidactions-examples ever starts publishing tags in step with the
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
- * Currently: solidactions-examples main @ 3ca5fd4 "docs: publish examples and AI
- * skill guidance (#23)".
+ * Currently: solidactions-examples PR #29 head @ 8a47ced4 "docs: add database
+ * CLI guidance". Pinning this immutable PR-head commit is a temporary build-time necessity
+ * while the coordinated wave is pending merge; no delivery override
+ * was granted. Before any CLI release, repin EXAMPLES_REF to the
+ * merged mainline SHA and verify that exact ref during the release ritual.
  */
-export const EXAMPLES_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
+export const EXAMPLES_REF = '8a47ced4a248fe57543efd91471b57fa49b4c26d';
