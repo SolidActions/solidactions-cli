@@ -18,10 +18,10 @@ const COMMANDS = [
     { verb: 'exec', args: [['name', true], ['sql', true]], options: ['--yes', '--json'] },
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
     { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
-    { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes'] },
+    { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first
@@ -69,6 +69,9 @@ describe('database command tree', () => {
 
             const from = command.options.find((option: any) => option.long === '--from');
             if (expectedOptions.includes('--from')) expect(from?.required).toBe(true);
+
+            const resume = command.options.find((option: any) => option.long === '--resume');
+            if (expectedOptions.includes('--resume')) expect(resume?.required).toBe(true);
         }
     });
 });

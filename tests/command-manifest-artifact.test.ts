@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'path';
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import { buildCommandManifest } from '../src/utils/command-manifest';
 
 const DIST = path.resolve(__dirname, '../dist');
@@ -37,5 +38,16 @@ describe('command-manifest.json build artifact', () => {
     it('ships inside dist/, which is the only published directory', () => {
         expect(pkg.files).toContain('dist');
         expect(path.relative(DIST, MANIFEST_PATH)).toBe('command-manifest.json');
+    });
+
+    it('is present in the npm pack file list', () => {
+        const packed = JSON.parse(execFileSync(
+            'npm',
+            ['pack', '--dry-run', '--json', '--ignore-scripts'],
+            { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' },
+        ));
+        const files = packed.flatMap((artifact: any) => artifact.files.map((file: any) => file.path));
+
+        expect(files).toContain('dist/command-manifest.json');
     });
 });
