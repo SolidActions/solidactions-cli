@@ -55,13 +55,14 @@ function safeAppError(error: unknown): DatabaseOperationError {
     const augmented = augmentTokenMissingAbilityMessage(error);
     const response = (augmented as any)?.response;
     const status = typeof response?.status === 'number' ? response.status : undefined;
-    const stableCode = typeof response?.data?.code === 'string' && response.data.code.length > 0
-        ? response.data.code
-        : null;
+    const codeCandidate = typeof response?.data?.code === 'string'
+        ? response.data.code.trim()
+        : '';
+    const stableCode = codeCandidate.length > 0 ? codeCandidate : null;
     const code = stableCode ?? 'upstream_unavailable';
     const message = stableCode !== null
         && typeof response?.data?.message === 'string'
-        && response.data.message.length > 0
+        && response.data.message.trim().length > 0
         ? response.data.message
         : 'Database request failed.';
 
