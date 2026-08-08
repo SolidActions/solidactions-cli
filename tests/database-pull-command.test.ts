@@ -351,6 +351,59 @@ describe('database pull read-only replica contract', () => {
         expect(fs.statSync(target).mode & 0o777).toBe(0o444);
     });
 
+    it('hands the exclusive reservation to native creation once, then preserves the partial replica for retry', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const temp = path.join(root, '.analytics.db.solidactions-task7.tmp');
+        const test = pullHarness(root);
+        let loads = 0;
+        let creates = 0;
+
+        test.dependencies.loadClient = async () => {
+            loads += 1;
+            expect(fs.existsSync(temp), 'exclusive reservation or partial replica must exist while loading native support')
+                .toBe(true);
+            if (loads > 1) {
+                expect(fs.readFileSync(temp, 'utf8')).toBe('PARTIAL REPLICA');
+            }
+
+            return {
+                createClient: (config: Record<string, unknown>) => {
+                    creates += 1;
+                    expect(fileURLToPath(String(config.url))).toBe(temp);
+                    if (creates === 1) {
+                        expect(fs.existsSync(temp), 'native client must create the initial replica itself').toBe(false);
+                        fs.writeFileSync(temp, 'NATIVE REPLICA');
+                    } else {
+                        expect(fs.readFileSync(temp, 'utf8'), 'retry must retain incremental replica state')
+                            .toBe('PARTIAL REPLICA');
+                    }
+
+                    return {
+                        sync: async () => {
+                            if (creates === 1) {
+                                fs.writeFileSync(temp, 'PARTIAL REPLICA');
+                                throw new Error('first sync needs fresh read access');
+                            }
+                            fs.writeFileSync(temp, 'COMPLETE REPLICA');
+                        },
+                        close: async () => undefined,
+                    };
+                },
+            };
+        };
+
+        await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
+
+        expect(loads).toBe(2);
+        expect(creates).toBe(2);
+        expect(test.posts).toHaveLength(2);
+        expectOnlyReadAccess(test.posts);
+        expect(fs.readFileSync(target, 'utf8')).toBe('COMPLETE REPLICA');
+        expect(fs.statSync(target).mode & 0o777).toBe(0o444);
+    });
+
     it('rolls back only its own replica when final rename fails and scrubs filesystem details', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
