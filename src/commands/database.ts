@@ -956,6 +956,7 @@ export async function databasePullWithConfig(
         path.join('.solidactions', 'databases', `${safeDatabaseStem(name)}.db`),
     );
     let temp: string | undefined;
+    let reservationHandle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
     let ownsTemp = false;
     let ownsSidecars = false;
 
@@ -964,8 +965,8 @@ export async function databasePullWithConfig(
 
         const reservation = await reserveDestinationTemp(io, target);
         temp = reservation.temp;
+        reservationHandle = reservation.handle;
         ownsTemp = true;
-        await reservation.handle.close();
 
         const sidecars = pullSidecars(temp);
         if (await anyPathExists(io.filesystem, sidecars)) {
@@ -983,8 +984,25 @@ export async function databasePullWithConfig(
                 { loadClient: io.loadClient },
             );
 
-            let client: DatabaseClient | undefined;
-            let attemptFailed = false;
+            if (attempt === 0) {
+                await assertNoSymlinkComponents(io.filesystem, temp);
+                const reservedStat = await reservationHandle!.stat();
+                const pathStat = await lstatIfPresent(io.filesystem, temp);
+                if (
+                    !pathStat
+                    || !pathStat.isFile()
+                    || pathStat.dev !== reservedStat.dev
+                    || pathStat.ino !== reservedStat.ino
+                ) {
+                    throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+                }
+                await reservationHandle!.close();
+                reservationHandle = undefined;
+                await io.filesystem.unlink(temp);
+                ownsTemp = false;
+            }
+
+            let client: DatabaseClient;
             try {
                 client = createClient({
                     url: pathToFileURL(temp).href,
@@ -992,19 +1010,29 @@ export async function databasePullWithConfig(
                     authToken: access.token,
                     intMode: 'string',
                 }) as DatabaseClient;
+            } catch {
+                throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+            }
+
+            let attemptFailed = false;
+            try {
                 if (typeof client.sync !== 'function') throw new Error('Database sync is unavailable.');
                 await client.sync();
             } catch {
                 attemptFailed = true;
             } finally {
-                if (client) {
-                    try {
-                        await client.close();
-                    } catch {
-                        attemptFailed = true;
-                    }
+                try {
+                    await client.close();
+                } catch {
+                    attemptFailed = true;
                 }
             }
+
+            const replicaStat = await lstatIfPresent(io.filesystem, temp);
+            if (!replicaStat || replicaStat.isSymbolicLink() || !replicaStat.isFile()) {
+                throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+            }
+            ownsTemp = true;
 
             if (!attemptFailed) {
                 synced = true;
@@ -1030,11 +1058,18 @@ export async function databasePullWithConfig(
         ownsSidecars = false;
         io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
     } catch (error) {
-        if (ownsTemp && temp) {
-            await removeOwnedFiles(
-                io.filesystem,
-                [temp, ...(ownsSidecars ? pullSidecars(temp) : [])],
-            );
+        if (reservationHandle) {
+            try {
+                await reservationHandle.close();
+            } catch {
+                // Cleanup below remains scoped to the exclusively reserved path.
+            }
+        }
+        if (temp) {
+            await removeOwnedFiles(io.filesystem, [
+                ...(ownsTemp ? [temp] : []),
+                ...(ownsSidecars ? pullSidecars(temp) : []),
+            ]);
         }
         throw freshSafeFileError(error);
     }
