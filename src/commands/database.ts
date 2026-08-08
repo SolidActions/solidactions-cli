@@ -11,8 +11,10 @@ import {
     DatabaseOperationError,
     DatabaseRequestDependencies,
     DatabaseResultSet,
+    DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
     formatDatabaseTableValue,
     normalizeDatabaseValue,
+    runDatabaseClientOperationWithDeadline,
     requestDatabaseAccess,
     requestDatabaseDumpStream,
     requestDatabaseOperation,
@@ -108,6 +110,7 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     input?: AsyncIterable<string>;
     now?: () => number;
     abortSignal?: AbortSignal;
+    sleep?: (milliseconds: number) => Promise<void>;
 }
 
 interface ResolvedCommandDependencies {
@@ -124,6 +127,9 @@ interface ResolvedCommandDependencies {
     input?: AsyncIterable<string>;
     now: () => number;
     abortSignal?: AbortSignal;
+    controlPlaneTimeoutMs: number | undefined;
+    dataPlaneTimeoutMs: number;
+    sleep: (milliseconds: number) => Promise<void>;
 }
 
 function defaultConfirmation(message: string): Promise<boolean> {
@@ -163,17 +169,27 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         input: dependencies.input,
         now: dependencies.now ?? Date.now,
         abortSignal: dependencies.abortSignal,
+        controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
+        dataPlaneTimeoutMs: dependencies.dataPlaneTimeoutMs ?? DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+        sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => {
+            setTimeout(resolve, milliseconds);
+        })),
     };
 }
 
 function requestDependencies(dependencies: ResolvedCommandDependencies): DatabaseRequestDependencies {
-    return { post: dependencies.post };
+    return {
+        post: dependencies.post,
+        controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
+    };
 }
 
 function clientDependencies(dependencies: ResolvedCommandDependencies): DatabaseClientDependencies {
     return {
         post: dependencies.post,
         loadClient: dependencies.loadClient,
+        controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
+        dataPlaneTimeoutMs: dependencies.dataPlaneTimeoutMs,
     };
 }
 
@@ -493,6 +509,7 @@ function renderSchema(schema: DatabaseSchemaResponse): string {
 const INCOMPLETE_DUMP_MARKER = '-- DOWNLOAD INCOMPLETE';
 const DUMP_TAIL_BYTES = 4096;
 const PULL_ATTEMPTS = 3;
+const PULL_RETRY_BACKOFF_MS = [250, 500] as const;
 
 function safeDatabaseStem(name: string): string {
     return name
@@ -838,6 +855,39 @@ function isAuthenticationExpired(error: unknown): boolean {
     return code === 'SQLITE_AUTH' && /expired|expiration|\bjwt\b/i.test(message);
 }
 
+type PullFailureClass = 'credential_expiry' | 'transient_transport' | 'deterministic';
+
+function classifyPullFailure(error: unknown): PullFailureClass {
+    if (isAuthenticationExpired(error)) return 'credential_expiry';
+
+    const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+    const code = typeof value?.code === 'string' ? value.code.toUpperCase() : '';
+    const name = typeof value?.name === 'string' ? value.name : '';
+    const message = typeof value?.message === 'string' ? value.message : '';
+    const transientCodes = new Set([
+        'ECONNABORTED',
+        'ECONNREFUSED',
+        'ECONNRESET',
+        'EHOSTUNREACH',
+        'ENETDOWN',
+        'ENETUNREACH',
+        'ENOTFOUND',
+        'ETIMEDOUT',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_SOCKET',
+    ]);
+    if (
+        transientCodes.has(code)
+        || name === 'AbortError'
+        || /\b(?:connection reset|network unavailable|temporary transport|transport failure|timed? ?out)\b/i.test(message)
+    ) {
+        return 'transient_transport';
+    }
+
+    return 'deterministic';
+}
+
 async function handoffReplicaReservation(
     io: ResolvedCommandDependencies,
     temp: string,
@@ -877,6 +927,15 @@ async function finalizeReplica(
 
     await assertOwnedMainFile();
     let finalizer: DatabaseClient | undefined;
+    let finalizerClosePromise: Promise<void> | undefined;
+    const closeFinalizer = (): Promise<void> => {
+        finalizerClosePromise ??= runDatabaseClientOperationWithDeadline(
+            async () => { await finalizer?.close(); },
+            undefined,
+            io.dataPlaneTimeoutMs,
+        );
+        return finalizerClosePromise;
+    };
     let checkpointResult: DatabaseResultSet | undefined;
     let finalizationFailed = false;
     try {
@@ -884,13 +943,17 @@ async function finalizeReplica(
             url: pathToFileURL(temp).href,
             intMode: 'string',
         });
-        checkpointResult = await finalizer.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+        checkpointResult = await runDatabaseClientOperationWithDeadline(
+            () => finalizer!.execute('PRAGMA wal_checkpoint(TRUNCATE)'),
+            closeFinalizer,
+            io.dataPlaneTimeoutMs,
+        );
     } catch {
         finalizationFailed = true;
     } finally {
         if (finalizer) {
             try {
-                await finalizer.close();
+                await closeFinalizer();
             } catch {
                 finalizationFailed = true;
             }
@@ -971,6 +1034,8 @@ export async function databaseCreateWithConfig(
                         now: io.now,
                         post: io.post,
                         loadClient: io.loadClient,
+                        controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
+                        dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
                     },
                 );
             }
@@ -1031,6 +1096,8 @@ export async function databaseImportWithConfig(
         now: io.now,
         post: io.post,
         loadClient: io.loadClient,
+        controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
+        dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
     });
 }
 
@@ -1227,6 +1294,7 @@ export async function databaseDumpWithConfig(
         await assertNoSymlinkComponents(io.filesystem, target);
         await io.filesystem.rename(temp, target);
         ownsTemp = false;
+        await io.filesystem.chmod(target, 0o444);
         io.stdout(`Database dump saved to ${displayDestination(io, target)}.`);
     } catch (error) {
         if (handle) {
@@ -1261,13 +1329,21 @@ async function databaseWritablePullWithConfig(
     let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
     let expiresAt = 0;
     let inputSession: WritableInputSession | undefined;
+    let attachedClosePromise: Promise<void> | undefined;
 
     const closeAttachedClient = async (): Promise<void> => {
-        if (!client) return;
-        const closing = client;
-        client = undefined;
+        if (client) {
+            const closing = client;
+            client = undefined;
+            attachedClosePromise ??= runDatabaseClientOperationWithDeadline(
+                async () => { await closing.close(); },
+                undefined,
+                io.dataPlaneTimeoutMs,
+            );
+        }
+        if (!attachedClosePromise) return;
         try {
-            await closing.close();
+            await attachedClosePromise;
         } catch {
             throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
         }
@@ -1335,10 +1411,23 @@ async function databaseWritablePullWithConfig(
             throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
         }
 
+        let openedClosePromise: Promise<void> | undefined;
+        const closeOpened = (): Promise<void> => {
+            openedClosePromise ??= runDatabaseClientOperationWithDeadline(
+                async () => { await opened.close(); },
+                undefined,
+                io.dataPlaneTimeoutMs,
+            );
+            return openedClosePromise;
+        };
         let syncFailed = false;
         try {
             if (typeof opened.sync !== 'function') throw new Error('Database sync is unavailable.');
-            await opened.sync();
+            await runDatabaseClientOperationWithDeadline(
+                () => opened.sync!(),
+                closeOpened,
+                io.dataPlaneTimeoutMs,
+            );
         } catch {
             syncFailed = true;
         }
@@ -1352,13 +1441,14 @@ async function databaseWritablePullWithConfig(
             || !replicaStat.isFile()
         ) {
             try {
-                await opened.close();
+                await closeOpened();
             } catch {
                 // The stable setup error below takes precedence.
             }
             throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
         }
 
+        attachedClosePromise = undefined;
         client = opened;
         localCreateClient = createClient;
         expiresAt = access.expiresAt;
@@ -1435,10 +1525,18 @@ async function databaseWritablePullWithConfig(
                         if (typeof client?.executeMultiple !== 'function') {
                             throw new Error('Multiple SQL execution is unavailable.');
                         }
-                        await client.executeMultiple(statement.sql);
+                        await runDatabaseClientOperationWithDeadline(
+                            () => client!.executeMultiple!(statement.sql),
+                            closeAttachedClient,
+                            io.dataPlaneTimeoutMs,
+                        );
                         io.stdout('Transaction group executed successfully.');
                     } else {
-                        const result = stableDirectResult(await client!.execute(statement.sql));
+                        const result = stableDirectResult(await runDatabaseClientOperationWithDeadline(
+                            () => client!.execute(statement.sql),
+                            closeAttachedClient,
+                            io.dataPlaneTimeoutMs,
+                        ));
                         io.stdout(
                             result.columns.length > 0
                                 ? renderDirectTable(result)
@@ -1446,6 +1544,13 @@ async function databaseWritablePullWithConfig(
                         );
                     }
                 } catch (error) {
+                    if (
+                        error instanceof DatabaseOperationError
+                        && error.message === 'Database operation timed out.'
+                    ) {
+                        sessionFailure = error;
+                        break;
+                    }
                     if (!isAuthenticationExpired(error)) {
                         io.stderr('Database statement failed.');
                         continue;
@@ -1569,6 +1674,7 @@ export async function databasePullWithConfig(
 
         let synced = false;
         let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
+        let credentialRemintUsed = false;
         for (let attempt = 0; attempt < PULL_ATTEMPTS; attempt += 1) {
             const { createClient, access } = await loadDatabaseClientBeforeMint(
                 () => requestDatabaseAccess(config, name, 'read', requestDependencies(io)),
@@ -1608,30 +1714,60 @@ export async function databasePullWithConfig(
                 throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
             }
 
-            let attemptFailed = false;
+            let attemptFailure: unknown;
+            let closePromise: Promise<void> | undefined;
+            const closeClient = (): Promise<void> => {
+                closePromise ??= runDatabaseClientOperationWithDeadline(
+                    async () => { await client.close(); },
+                    undefined,
+                    io.dataPlaneTimeoutMs,
+                );
+                return closePromise;
+            };
             try {
                 if (typeof client.sync !== 'function') throw new Error('Database sync is unavailable.');
-                await client.sync();
-            } catch {
-                attemptFailed = true;
+                await runDatabaseClientOperationWithDeadline(
+                    () => client.sync!(),
+                    closeClient,
+                    io.dataPlaneTimeoutMs,
+                );
+            } catch (error) {
+                attemptFailure = error;
             } finally {
                 try {
-                    await client.close();
-                } catch {
-                    attemptFailed = true;
+                    await closeClient();
+                } catch (error) {
+                    if (!attemptFailure) attemptFailure = error;
                 }
             }
 
-            const replicaStat = await lstatIfPresent(io.filesystem, temp);
-            if (!replicaStat || replicaStat.isSymbolicLink() || !replicaStat.isFile()) {
-                throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
-            }
-            ownsTemp = true;
-
-            if (!attemptFailed) {
+            if (!attemptFailure) {
+                const replicaStat = await lstatIfPresent(io.filesystem, temp);
+                if (!replicaStat || replicaStat.isSymbolicLink() || !replicaStat.isFile()) {
+                    throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+                }
+                ownsTemp = true;
                 synced = true;
                 break;
             }
+
+            const replicaStat = await lstatIfPresent(io.filesystem, temp);
+            if (replicaStat?.isSymbolicLink() || (replicaStat && !replicaStat.isFile())) {
+                throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+            }
+            if (replicaStat?.isFile()) ownsTemp = true;
+
+            const failureClass = classifyPullFailure(attemptFailure);
+            const hasAnotherAttempt = attempt + 1 < PULL_ATTEMPTS;
+            if (failureClass === 'credential_expiry' && !credentialRemintUsed && hasAnotherAttempt) {
+                credentialRemintUsed = true;
+                continue;
+            }
+            if (failureClass === 'transient_transport' && hasAnotherAttempt) {
+                await io.sleep(PULL_RETRY_BACKOFF_MS[attempt] ?? PULL_RETRY_BACKOFF_MS.at(-1)!);
+                continue;
+            }
+            break;
         }
 
         if (!synced) {

@@ -113,6 +113,8 @@ function expectControlPost(call: PostCall, body: Record<string, unknown>): void 
                 'Content-Type': 'application/json',
                 'X-Workspace-Id': 'workspace-1146',
             },
+            signal: expect.any(AbortSignal),
+            timeout: 30_000,
         },
     });
 }

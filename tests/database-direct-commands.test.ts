@@ -135,6 +135,8 @@ function expectSingleAccessPost(test: ReturnType<typeof directHarness>, mode: 'r
                 'Content-Type': 'application/json',
                 'X-Workspace-Id': 'workspace-1146',
             },
+            signal: expect.any(AbortSignal),
+            timeout: 30_000,
         },
     }]);
 }

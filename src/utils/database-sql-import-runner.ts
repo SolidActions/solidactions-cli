@@ -7,7 +7,9 @@ import {
     DatabaseClient,
     DatabaseClientDependencies,
     DatabaseOperationError,
+    DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
     requestDatabaseAccess,
+    runDatabaseClientOperationWithDeadline,
 } from './database-data-plane';
 import {
     DatabaseSqlImportGroup,
@@ -450,7 +452,10 @@ async function acquireClient(
     let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
     try {
         loaded = await loadDatabaseClientBeforeMint(
-            () => requestDatabaseAccess(config, prepared.database, 'write', { post: dependencies.post }),
+            () => requestDatabaseAccess(config, prepared.database, 'write', {
+                post: dependencies.post,
+                controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
+            }),
             { loadClient: dependencies.loadClient },
         );
     } catch (error) {
@@ -472,7 +477,11 @@ async function acquireClient(
 
     if (typeof client.executeMultiple !== 'function') {
         try {
-            await client.close();
+            await runDatabaseClientOperationWithDeadline(
+                async () => { await client.close(); },
+                undefined,
+                dependencies.dataPlaneTimeoutMs ?? DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+            );
         } catch {
             // The unsupported client error below is the only public detail.
         }
@@ -481,10 +490,17 @@ async function acquireClient(
     return { client, expiresAt: access.expiresAt };
 }
 
-async function closeClient(client: DatabaseClient | undefined): Promise<void> {
+async function closeClient(
+    client: DatabaseClient | undefined,
+    timeoutMs = DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+): Promise<void> {
     if (!client) return;
     try {
-        await client.close();
+        await runDatabaseClientOperationWithDeadline(
+            async () => { await client.close(); },
+            undefined,
+            timeoutMs,
+        );
     } catch {
         throw importFailure('Database import client cleanup failed.');
     }
@@ -501,14 +517,20 @@ export async function runPreparedDatabaseImport(
     let checkpointPublished = prepared.checkpoint !== null;
     let suppressResume = false;
     let client: DatabaseClient | undefined;
+    let clientClosePromise: Promise<void> | undefined;
     let expiresAt = 0;
     let failure: DatabaseOperationError | undefined;
+    const closeCurrentClient = (): Promise<void> => {
+        clientClosePromise ??= closeClient(client, dependencies.dataPlaneTimeoutMs);
+        return clientClosePromise;
+    };
 
     try {
         while (nextStatement < prepared.groups.length) {
             if (!client || dependencies.now() >= expiresAt - RENEWAL_WINDOW_MS) {
-                await closeClient(client);
+                await closeCurrentClient();
                 client = undefined;
+                clientClosePromise = undefined;
                 const acquired = await acquireClient(prepared, config, dependencies);
                 client = acquired.client;
                 expiresAt = acquired.expiresAt;
@@ -516,7 +538,11 @@ export async function runPreparedDatabaseImport(
 
             const batch = nextBatch(prepared.groups, nextStatement);
             try {
-                await client.executeMultiple!(batchSql(batch.groups));
+                await runDatabaseClientOperationWithDeadline(
+                    () => client!.executeMultiple!(batchSql(batch.groups)),
+                    closeCurrentClient,
+                    dependencies.dataPlaneTimeoutMs ?? DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+                );
             } catch (error) {
                 if (error instanceof DatabaseOperationError) throw error;
                 throw importFailure('A database import batch failed.');
@@ -561,8 +587,9 @@ export async function runPreparedDatabaseImport(
     }
 
     try {
-        await closeClient(client);
+        await closeCurrentClient();
         client = undefined;
+        clientClosePromise = undefined;
     } catch {
         if (!failure) failure = importFailure('Database import client cleanup failed.');
     }

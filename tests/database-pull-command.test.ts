@@ -148,6 +148,8 @@ function expectOnlyReadAccess(posts: ReturnType<typeof pullHarness>['posts'], na
                     'Content-Type': 'application/json',
                     'X-Workspace-Id': 'workspace-1146',
                 },
+                signal: expect.any(AbortSignal),
+                timeout: 30_000,
             },
         });
     }
@@ -173,12 +175,15 @@ describe('database pull read-only replica contract', () => {
         const target = path.join(root, 'analytics.db');
         const test = pullHarness(root, async () => new Promise(() => undefined));
         test.dependencies.dataPlaneTimeoutMs = 10;
+        const delays: number[] = [];
+        test.dependencies.sleep = async (milliseconds: number) => delays.push(milliseconds);
 
         await expect(databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
             .rejects.toMatchObject({ code: 'upstream_unavailable' });
 
-        expect(test.posts).toHaveLength(1);
-        expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1']);
+        expect(test.posts).toHaveLength(3);
+        expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2', 'close:3']);
+        expect(delays).toEqual([250, 500]);
         expect(fs.existsSync(target)).toBe(false);
     }, 1_000);
 
@@ -499,7 +504,9 @@ describe('database pull read-only replica contract', () => {
                         sync: async () => {
                             if (creates === 1) {
                                 fs.writeFileSync(temp, 'PARTIAL REPLICA');
-                                throw new Error('first sync needs fresh read access');
+                                throw Object.assign(new Error('first sync needs fresh read access'), {
+                                    code: 'ECONNRESET',
+                                });
                             }
                             fs.writeFileSync(temp, 'COMPLETE REPLICA');
                         },

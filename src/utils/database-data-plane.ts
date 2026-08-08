@@ -32,16 +32,26 @@ export interface DatabaseClient {
 }
 
 export interface DatabaseRequestDependencies {
+    controlPlaneTimeoutMs?: number;
     post?: (
         url: string,
         body: Record<string, unknown>,
-        options: { headers: Record<string, string>; responseType?: 'stream' },
+        options: {
+            headers: Record<string, string>;
+            responseType?: 'stream';
+            signal?: AbortSignal;
+            timeout?: number;
+        },
     ) => Promise<{ data: unknown; status?: number }>;
 }
 
 export interface DatabaseClientDependencies extends DatabaseRequestDependencies {
+    dataPlaneTimeoutMs?: number;
     loadClient?: () => Promise<DatabaseClientModule>;
 }
+
+export const DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS = 30_000;
+export const DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS = 120_000;
 
 export class DatabaseOperationError extends Error {
     readonly code: string;
@@ -70,13 +80,76 @@ export function safeDatabaseRequestError(error: unknown): DatabaseOperationError
         : '';
     const stableCode = codeCandidate.length > 0 ? codeCandidate : null;
     const code = stableCode ?? 'upstream_unavailable';
-    const message = stableCode !== null
+    const appMessage = stableCode !== null
         && typeof response?.data?.message === 'string'
         && response.data.message.trim().length > 0
         ? response.data.message
         : 'Database request failed.';
+    const message = code === 'unauthenticated'
+        ? `${appMessage} Run solidactions login to authenticate again.`
+        : appMessage;
 
     return new DatabaseOperationError(code, message, status);
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+        ? value
+        : fallback;
+}
+
+class DatabaseDeadlineElapsed extends DatabaseOperationError {
+    constructor(message: string) {
+        super('upstream_unavailable', message);
+    }
+}
+
+async function requestWithDeadline<T>(
+    operation: (signal: AbortSignal, timeoutMs: number) => Promise<T>,
+    timeoutMs: number,
+): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+            controller.abort();
+            reject(new DatabaseDeadlineElapsed('Database request timed out.'));
+        }, timeoutMs);
+    });
+
+    try {
+        return await Promise.race([operation(controller.signal, timeoutMs), deadline]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * Bound a Hrana operation and actively invoke its cancellation/close hook when
+ * the deadline expires. Callers can inject a shorter timeout per command.
+ */
+export async function runDatabaseClientOperationWithDeadline<T>(
+    operation: () => Promise<T>,
+    onTimeout: (() => void | Promise<void>) | undefined,
+    timeoutMs = DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+): Promise<T> {
+    const boundedTimeout = positiveTimeout(timeoutMs, DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+            try {
+                void Promise.resolve(onTimeout?.()).catch(() => undefined);
+            } finally {
+                reject(new DatabaseDeadlineElapsed('Database operation timed out.'));
+            }
+        }, boundedTimeout);
+    });
+
+    try {
+        return await Promise.race([Promise.resolve().then(operation), deadline]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 /**
@@ -89,12 +162,23 @@ export async function requestDatabaseOperation<T>(
     dependencies: DatabaseRequestDependencies = {},
 ): Promise<T> {
     const post = dependencies.post ?? axios.post;
+    const timeoutMs = positiveTimeout(
+        dependencies.controlPlaneTimeoutMs,
+        DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS,
+    );
 
     try {
-        const response = await post(
-            `${config.host}/api/v1/databases`,
-            body,
-            { headers: getApiHeaders(config, 'application/json') },
+        const response = await requestWithDeadline(
+            (signal, timeout) => post(
+                `${config.host}/api/v1/databases`,
+                body,
+                {
+                    headers: getApiHeaders(config, 'application/json'),
+                    signal,
+                    timeout,
+                },
+            ),
+            timeoutMs,
         );
 
         return response.data as T;
@@ -110,18 +194,27 @@ export async function requestDatabaseDumpStream(
     dependencies: DatabaseRequestDependencies = {},
 ): Promise<unknown> {
     const post = dependencies.post ?? axios.post;
+    const timeoutMs = positiveTimeout(
+        dependencies.controlPlaneTimeoutMs,
+        DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS,
+    );
 
     try {
-        const response = await post(
-            `${config.host}/api/v1/databases`,
-            { operation: 'dump', name },
-            {
-                headers: {
-                    ...getApiHeaders(config, 'application/json'),
-                    Accept: 'application/sql',
+        const response = await requestWithDeadline(
+            (signal, timeout) => post(
+                `${config.host}/api/v1/databases`,
+                { operation: 'dump', name },
+                {
+                    headers: {
+                        ...getApiHeaders(config, 'application/json'),
+                        Accept: 'application/sql',
+                    },
+                    responseType: 'stream',
+                    signal,
+                    timeout,
                 },
-                responseType: 'stream',
-            },
+            ),
+            timeoutMs,
         );
 
         return response.data;
@@ -164,7 +257,10 @@ export async function withDatabaseClient<T>(
     dependencies: DatabaseClientDependencies = {},
 ): Promise<T> {
     const { createClient, access } = await loadDatabaseClientBeforeMint(
-        () => requestDatabaseAccess(config, name, mode, { post: dependencies.post }),
+        () => requestDatabaseAccess(config, name, mode, {
+            post: dependencies.post,
+            controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
+        }),
         { loadClient: dependencies.loadClient },
     );
 
@@ -179,15 +275,34 @@ export async function withDatabaseClient<T>(
         throw safeDirectClientError();
     }
 
+    const dataPlaneTimeoutMs = positiveTimeout(
+        dependencies.dataPlaneTimeoutMs,
+        DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+    );
+    let closePromise: Promise<void> | undefined;
+    const closeClient = (): Promise<void> => {
+        closePromise ??= runDatabaseClientOperationWithDeadline(
+            async () => { await client.close(); },
+            undefined,
+            dataPlaneTimeoutMs,
+        );
+        return closePromise;
+    };
     let primaryFailure: DatabaseOperationError | undefined;
     try {
-        return await operation(client);
-    } catch {
-        primaryFailure = safeDirectClientError();
+        return await runDatabaseClientOperationWithDeadline(
+            () => operation(client),
+            closeClient,
+            dataPlaneTimeoutMs,
+        );
+    } catch (error) {
+        primaryFailure = error instanceof DatabaseDeadlineElapsed
+            ? new DatabaseOperationError(error.code, error.message, error.status)
+            : safeDirectClientError();
         throw primaryFailure;
     } finally {
         try {
-            await client.close();
+            await closeClient();
         } catch {
             if (!primaryFailure) {
                 throw safeDirectClientError();

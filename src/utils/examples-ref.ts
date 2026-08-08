@@ -26,7 +26,9 @@
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
  * Currently: solidactions-examples PR #29 head @ 8a47ced4 "docs: add database
- * CLI guidance". The PR is pending owner merge; #1146's PM-directed delivery
- * override explicitly approved pinning this immutable, green PR-head commit.
+ * CLI guidance". Pinning this immutable PR-head commit is a temporary build-time necessity
+ * while the coordinated wave is pending merge; no delivery override
+ * was granted. Before any CLI release, repin EXAMPLES_REF to the
+ * merged mainline SHA and verify that exact ref during the release ritual.
  */
 export const EXAMPLES_REF = '8a47ced4a248fe57543efd91471b57fa49b4c26d';

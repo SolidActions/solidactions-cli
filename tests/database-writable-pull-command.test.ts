@@ -193,6 +193,8 @@ function expectWriteAccess(posts: ReturnType<typeof writableHarness>['posts']): 
                     'Content-Type': 'application/json',
                     'X-Workspace-Id': 'workspace-1146',
                 },
+                signal: expect.any(AbortSignal),
+                timeout: 30_000,
             },
         });
     }

@@ -176,6 +176,8 @@ function expectWriteAccess(test: ReturnType<typeof importHarness>): void {
                     'Content-Type': 'application/json',
                     'X-Workspace-Id': 'workspace-1146',
                 },
+                signal: expect.any(AbortSignal),
+                timeout: 30_000,
             },
         });
     }
