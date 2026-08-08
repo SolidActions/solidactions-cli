@@ -75,7 +75,7 @@ describe('database SQL import parser', () => {
         expect(parsed.groups).toHaveLength(4);
     });
 
-    it('keeps a trigger body, internal semicolons, and nested CASE END expressions in one group', async () => {
+    it('keeps trigger BEGIN/END, internal semicolons, and nested CASE END expressions in one group', async () => {
         const parse = await requireParser();
         const before = 'CREATE TABLE audit (value TEXT);';
         const trigger = [
@@ -144,6 +144,79 @@ describe('database SQL import parser', () => {
         const parsed = parse(source);
 
         expect(parsed.groups.map((group) => group.sql)).toEqual(['CREATE TABLE t (id);']);
+    });
+
+    it('accepts one leading UTF-8 BOM without polluting SQL while preserving its original byte offset', async () => {
+        const parse = await requireParser();
+        const sql = 'CREATE TABLE t (id);';
+        const source = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(sql)]);
+
+        const parsed = parse(source);
+
+        expect(parsed.groups).toEqual([{
+            sql,
+            startByte: 3,
+            endByte: 3 + Buffer.byteLength(sql),
+            startLine: 1,
+            endLine: 1,
+        }]);
+    });
+
+    it('accepts trailing whitespace and comments after the last complete statement', async () => {
+        const parse = await requireParser();
+        const sql = 'CREATE TABLE t (id);';
+
+        const parsed = parse(`${sql}\n \t-- trailing line; comment\n/* trailing block; comment */\n`);
+
+        expect(parsed.groups.map((group) => group.sql)).toEqual([sql]);
+    });
+
+    it.each([
+        ['', 'empty input'],
+        ['  \n-- only; a line comment\n/* only a block; comment */\n', 'comment-only input'],
+    ])('parses $1 to zero groups for the command layer to reject', async (source) => {
+        const parse = await requireParser();
+
+        expect(parse(source)).toEqual({ foreignKeysOff: false, groups: [] });
+    });
+
+    it('refuses malformed UTF-8 instead of replacement-decoding it', async () => {
+        const parse = await requireParser();
+        const malformed = Buffer.concat([
+            Buffer.from('CREATE TABLE t (value TEXT);\nINSERT INTO t VALUES (\''),
+            Buffer.from([0xc3, 0x28]),
+            Buffer.from("');"),
+        ]);
+
+        let caught: unknown;
+        try {
+            parse(malformed);
+        } catch (error) {
+            caught = error;
+        }
+
+        const report = errorReport(caught);
+        expect(report).toMatch(/import_failed/i);
+        expect(report).toMatch(/UTF-8|encoding/i);
+    });
+
+    it.each([
+        ['OFF', 'PRAGMA foreign_keys=OFF;\nCREATE TABLE t (id);'],
+        ['ON', 'CREATE TABLE t (id);\nPRAGMA foreign_keys=ON;'],
+    ])('refuses standalone foreign_keys=%s outside a complete canonical envelope', async (mode, source) => {
+        const parse = await requireParser();
+
+        let caught: unknown;
+        try {
+            parse(source);
+        } catch (error) {
+            caught = error;
+        }
+
+        const report = errorReport(caught);
+        expect(report).toMatch(/import_failed/i);
+        expect(report).toMatch(/foreign_keys/i);
+        expect(report).toMatch(mode === 'OFF' ? /line 1\b/i : /line 2\b/i);
     });
 
     it.each([

@@ -43,9 +43,9 @@ function tempRoot(): string {
     return root;
 }
 
-function sourceFile(root: string, sql: string, name = 'seed.sql'): string {
+function sourceFile(root: string, sql: string | Buffer, name = 'seed.sql'): string {
     const file = path.join(root, name);
-    fs.writeFileSync(file, sql, { encoding: 'utf8', mode: 0o600 });
+    fs.writeFileSync(file, sql, { mode: 0o600 });
     return file;
 }
 
@@ -220,6 +220,10 @@ function report(error: unknown, test: ReturnType<typeof importHarness>): string 
     return [value?.code, value?.message, ...test.stdout, ...test.stderr].map(String).join('\n');
 }
 
+function resumeLine(database: string, source: string, checkpoint: string): string {
+    return `Resume with: solidactions database import ${JSON.stringify(database)} ${JSON.stringify(source)} --resume ${JSON.stringify(checkpoint)} --yes`;
+}
+
 function expectNoSecrets(value: unknown): void {
     const rendered = typeof value === 'string' ? value : JSON.stringify(value);
     expect(rendered).not.toContain(CONFIG.apiKey);
@@ -251,6 +255,9 @@ describe('database import preflight and execution', () => {
         "\ufeffCREATE TABLE t (id);\r\n-- DOWNLOAD INCOMPLETE: browser stream failed\r\n",
         "CREATE TABLE t (id)\n",
         `INSERT INTO t VALUES ('${'x'.repeat(8 * 1024 * 1024)}');`,
+        '',
+        ' \n-- comments only;\n/* still only a comment */\n',
+        Buffer.from([0x43, 0x52, 0x45, 0x41, 0x54, 0x45, 0x20, 0xc3, 0x28, 0x3b]),
     ])('refuses an unsafe source before confirmation, native load, mint, or execution', async (sql) => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
@@ -295,6 +302,89 @@ describe('database import preflight and execution', () => {
             .rejects.toMatchObject({ code: 'confirmation_required' });
         expect(test.events).toEqual([]);
         expect(test.posts).toEqual([]);
+    });
+
+    it('refuses a matching deterministic checkpoint without --resume before minting or replaying work', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const outer = tempRoot();
+        const root = path.join(outer, 'project with spaces');
+        fs.mkdirSync(root);
+        const database = 'Finance North';
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'), 'seed file.sql');
+        const interrupted = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('INITIAL_FAILURE');
+            },
+        });
+        let initialFailure: unknown;
+        try {
+            await databaseImportWithConfig(database, source, { yes: true }, CONFIG, interrupted.dependencies);
+        } catch (error) {
+            initialFailure = error;
+        }
+        const [checkpoint] = checkpointFiles(root);
+        expect(checkpoint).toBeDefined();
+        expect(report(initialFailure, interrupted).split('\n')).toContain(resumeLine(database, source, checkpoint));
+        const before = fs.readFileSync(checkpoint);
+        const test = importHarness(root);
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig(database, source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(test.executions).toEqual([]);
+        expect(fs.readFileSync(checkpoint)).toEqual(before);
+        const lines = report(caught, test).split('\n').filter((line) => line.startsWith('Resume with:'));
+        expect(lines).toEqual([resumeLine(database, source, checkpoint)]);
+    });
+
+    it.each([
+        {
+            label: 'expires at the 30-second boundary',
+            access: {
+                url: 'libsql://physical-hostname.sentinel.invalid',
+                token: 'write-token-sentinel-near-expiry',
+                mode: 'write',
+                expires_at: '2026-08-07T12:00:30.000Z',
+                transport_debug: 'RAW_TRANSPORT_SECRET',
+            },
+        },
+        {
+            label: 'has the wrong mode',
+            access: {
+                url: 'libsql://physical-hostname.sentinel.invalid',
+                token: 'write-token-sentinel-read',
+                mode: 'read',
+                expires_at: '2026-08-07T12:10:00.000Z',
+                transport_debug: 'RAW_TRANSPORT_SECRET',
+            },
+        },
+    ])('rejects access that $label without creating a client or leaking metadata', async ({ access }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);');
+        const test = importHarness(root, { post: async () => access });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(test.clients).toEqual([]);
+        expect(test.executions).toEqual([]);
+        expect(test.closed).toEqual([]);
+        expect(importFiles(root)).toEqual([]);
+        const rendered = report(caught, test);
+        expectNoSecrets(rendered);
+        expect(rendered).not.toContain('RAW_TRANSPORT_SECRET');
     });
 
     it('imports a command-owned preflight snapshot with write-only ephemeral access and an exact managed envelope', async () => {
@@ -424,9 +514,11 @@ describe('database import preflight and execution', () => {
         }
 
         expect(test.executions).toHaveLength(1);
-        expect(checkpointFiles(root)).toHaveLength(1);
-        const checkpoint = JSON.parse(fs.readFileSync(checkpointFiles(root)[0], 'utf8'));
+        const checkpoints = checkpointFiles(root);
+        expect(checkpoints).toHaveLength(1);
+        const checkpoint = JSON.parse(fs.readFileSync(checkpoints[0], 'utf8'));
         expect(checkpoint).toMatchObject({ lastCompletedBatch: 1, nextStatement: 100 });
+        expect(report(caught, test).split('\n')).toContain(resumeLine('Analytics', source, checkpoints[0]));
         expectNoSecrets(report(caught, test));
         expectNoSecrets(checkpoint);
     });
@@ -471,7 +563,7 @@ describe('database import preflight and execution', () => {
         expect(fs.statSync(checkpoints[0]).mode & 0o777).toBe(0o600);
         expect(importFiles(root).filter((file) => file.endsWith('.tmp'))).toEqual([]);
         expect(report(caught, test)).toContain(
-            `Resume with: solidactions database import Analytics ${source} --resume ${checkpoints[0]} --yes`,
+            resumeLine('Analytics', source, checkpoints[0]),
         );
         expectNoSecrets(report(caught, test));
         expectNoSecrets(checkpoint);
@@ -503,9 +595,153 @@ describe('database import preflight and execution', () => {
         expect(report(caught, test)).not.toContain('Resume with:');
         expect(report(caught, test)).toMatch(/import_failed|checkpoint/i);
     });
+
+    it('never follows a deterministic checkpoint target symlink before minting', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const interrupted = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('INITIAL_FAILURE');
+            },
+        });
+        await expect(databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, interrupted.dependencies))
+            .rejects.toMatchObject({ code: 'import_failed' });
+        const [target] = checkpointFiles(root);
+        expect(target).toBeDefined();
+        const victim = path.join(root, 'victim.json');
+        fs.writeFileSync(victim, 'VICTIM MUST REMAIN');
+        fs.unlinkSync(target);
+        fs.symlinkSync(victim, target);
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(test.executions).toEqual([]);
+        expect(fs.readFileSync(victim, 'utf8')).toBe('VICTIM MUST REMAIN');
+        expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+    });
+
+    it('never follows a pre-existing symlinked imports ancestor when deriving a checkpoint', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);');
+        const victimDirectory = path.join(root, 'victim-imports');
+        const controlDirectory = path.join(root, '.solidactions');
+        fs.mkdirSync(victimDirectory);
+        fs.mkdirSync(controlDirectory);
+        fs.writeFileSync(path.join(victimDirectory, 'keep.txt'), 'VICTIM MUST REMAIN');
+        fs.symlinkSync(victimDirectory, path.join(controlDirectory, 'imports'), 'dir');
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(fs.readdirSync(victimDirectory)).toEqual(['keep.txt']);
+        expect(fs.readFileSync(path.join(victimDirectory, 'keep.txt'), 'utf8')).toBe('VICTIM MUST REMAIN');
+    });
+
+    it('does not retry or claim resumability when an imports-ancestor symlink appears after a committed batch', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const controlDirectory = path.join(root, '.solidactions');
+        const imports = path.join(controlDirectory, 'imports');
+        const victimDirectory = path.join(root, 'victim-directory');
+        fs.mkdirSync(controlDirectory);
+        fs.mkdirSync(victimDirectory);
+        fs.writeFileSync(path.join(victimDirectory, 'keep.txt'), 'VICTIM MUST REMAIN');
+        let executions = 0;
+        const test = importHarness(root, {
+            execute: async () => {
+                executions += 1;
+                if (executions === 1) fs.symlinkSync(victimDirectory, imports, 'dir');
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(test.executions).toHaveLength(1);
+        expect(fs.lstatSync(imports).isSymbolicLink()).toBe(true);
+        expect(fs.readFileSync(path.join(victimDirectory, 'keep.txt'), 'utf8')).toBe('VICTIM MUST REMAIN');
+        expect(fs.readdirSync(victimDirectory)).toEqual(['keep.txt']);
+        expect(report(caught, test)).not.toContain('Resume with:');
+        expect(caught).toMatchObject({ code: 'import_failed' });
+    });
 });
 
 describe('database import resume validation', () => {
+    it('refuses a directory supplied as --resume before native load or mint', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);');
+        const resume = path.join(root, 'resume-directory');
+        fs.mkdirSync(resume);
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig(
+            'Analytics', source, { yes: true, resume }, CONFIG, test.dependencies,
+        )).rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+    });
+
+    it('requires --resume to name a regular non-symlink checkpoint file', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);\nINSERT INTO t VALUES (1);');
+        const victim = writeCheckpoint(root, checkpointFor(source, 'Analytics'), 'victim.json');
+        const resume = path.join(path.dirname(victim), 'resume-link.json');
+        fs.symlinkSync(victim, resume);
+        const before = fs.readFileSync(victim);
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig(
+            'Analytics', source, { yes: true, resume }, CONFIG, test.dependencies,
+        )).rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(fs.readFileSync(victim)).toEqual(before);
+        expect(fs.lstatSync(resume).isSymbolicLink()).toBe(true);
+    });
+
+    it('refuses a --resume path beneath a symlinked ancestor before native load or mint', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);\nINSERT INTO t VALUES (1);');
+        const victimDirectory = path.join(root, 'victim-imports');
+        fs.mkdirSync(victimDirectory);
+        const victim = path.join(victimDirectory, 'resume.json');
+        fs.writeFileSync(victim, `${JSON.stringify(checkpointFor(source, 'Analytics'))}\n`, { mode: 0o600 });
+        const linkedAncestor = path.join(root, 'linked-imports');
+        fs.symlinkSync(victimDirectory, linkedAncestor, 'dir');
+        const resume = path.join(linkedAncestor, 'resume.json');
+        const before = fs.readFileSync(victim);
+        const test = importHarness(root);
+
+        await expect(databaseImportWithConfig(
+            'Analytics', source, { yes: true, resume }, CONFIG, test.dependencies,
+        )).rejects.toMatchObject({ code: 'import_failed' });
+
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(fs.readFileSync(victim)).toEqual(before);
+    });
+
     it.each([
         ['wrong version', { version: 99 }],
         ['wrong database', { database: 'Other' }],
@@ -602,6 +838,9 @@ describe('database create --from real importer', () => {
         'CREATE TABLE t (id);\n-- DOWNLOAD INCOMPLETE: stream failed\n',
         'CREATE TABLE t (id)\n',
         `INSERT INTO t VALUES ('${'x'.repeat(8 * 1024 * 1024)}');`,
+        '',
+        ' \n-- comments only;\n/* still only a comment */\n',
+        Buffer.from([0x43, 0x52, 0x45, 0x41, 0x54, 0x45, 0x20, 0xc3, 0x28, 0x3b]),
     ])('preflights marker, parse, and size failures before provisioning or native loading', async (sql) => {
         const databaseCreateWithConfig = await requireCreate();
         const root = tempRoot();
