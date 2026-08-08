@@ -15,19 +15,19 @@ vi.mock('../src/commands/database', async (importOriginal) => ({
 
 import { program } from '../src/index';
 
-function databaseAction(verb: string): Function {
+function databaseCommand(verb: string): any {
     const database = program.commands.find((command) => command.name() === 'database');
     const command = database?.commands.find((candidate) => candidate.name() === verb);
     expect(command, `database ${verb}`).toBeDefined();
     expect((command as any)?._actionHandler, `database ${verb} action`).toBeTypeOf('function');
-    return (command as any)._actionHandler as Function;
+    return command;
 }
 
 describe('database direct command registration', () => {
     it('dispatches schema arguments and options to its command handler', async () => {
         const options = { json: true };
 
-        await databaseAction('schema')('Analytics', options);
+        await databaseCommand('schema').parseAsync(['Analytics', '--json'], { from: 'user' });
 
         expect(handlers.schema).toHaveBeenCalledOnce();
         expect(handlers.schema).toHaveBeenCalledWith('Analytics', options);
@@ -36,7 +36,7 @@ describe('database direct command registration', () => {
     it('dispatches query arguments and options to its command handler', async () => {
         const options = { json: true };
 
-        await databaseAction('query')('Analytics', 'SELECT 1', options);
+        await databaseCommand('query').parseAsync(['Analytics', 'SELECT 1', '--json'], { from: 'user' });
 
         expect(handlers.query).toHaveBeenCalledOnce();
         expect(handlers.query).toHaveBeenCalledWith('Analytics', 'SELECT 1', options);
@@ -45,7 +45,10 @@ describe('database direct command registration', () => {
     it('dispatches exec arguments and options to its command handler', async () => {
         const options = { yes: true, json: true };
 
-        await databaseAction('exec')('Analytics', 'DELETE FROM events', options);
+        await databaseCommand('exec').parseAsync(
+            ['Analytics', 'DELETE FROM events', '--yes', '--json'],
+            { from: 'user' },
+        );
 
         expect(handlers.exec).toHaveBeenCalledOnce();
         expect(handlers.exec).toHaveBeenCalledWith('Analytics', 'DELETE FROM events', options);
