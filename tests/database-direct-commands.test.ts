@@ -53,9 +53,12 @@ function directHarness(
     const statements: unknown[] = [];
     const stdout: string[] = [];
     const stderr: string[] = [];
-    const confirm = vi.fn(async () => Object.prototype.hasOwnProperty.call(options, 'confirmation')
-        ? options.confirmation
-        : true);
+    const confirm = vi.fn(async () => {
+        events.push('confirm');
+        return Object.prototype.hasOwnProperty.call(options, 'confirmation')
+            ? options.confirmation
+            : true;
+    });
     const close = vi.fn(async () => {
         events.push('close');
     });
@@ -200,6 +203,61 @@ describe('database schema direct action', () => {
         });
         expect(test.stderr).toEqual([]);
     });
+
+    it('renders logical tables, column details, composite PK order, and indexes safely for humans', async () => {
+        const databaseSchemaWithConfig = await requireExport('databaseSchemaWithConfig');
+        const test = directHarness(async (statement) => {
+            const sql = statementSql(statement);
+            if (/type\s*=\s*'table'/i.test(sql)) {
+                return {
+                    columns: ['name', 'sql'],
+                    rows: [['memberships', 'CREATE TABLE memberships (account_id INTEGER, region TEXT DEFAULT \'us\', PRIMARY KEY (account_id, region))']],
+                };
+            }
+            if (/type\s*=\s*'index'/i.test(sql)) {
+                return {
+                    columns: ['name', 'tbl_name', 'sql'],
+                    rows: [['idx_memberships_region', 'memberships', 'CREATE INDEX idx_memberships_region ON memberships(region)']],
+                };
+            }
+            if (sql === 'PRAGMA table_info("memberships")') {
+                return {
+                    columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+                    rows: [
+                        ['0', 'account_id', 'INTEGER', '1', null, '1'],
+                        ['1', 'region', 'TEXT', '0', "'us'", '2'],
+                    ],
+                };
+            }
+            throw new Error(`Unexpected direct SQL: ${sql}`);
+        });
+
+        await databaseSchemaWithConfig('Analytics', {}, CONFIG, test.dependencies);
+
+        const output = test.stdout.join('\n');
+        expect(output).toContain('Analytics');
+        expect(output).toContain('memberships');
+        expect(output).toContain('account_id');
+        expect(output).toContain('INTEGER');
+        expect(output).toContain('region');
+        expect(output).toContain('TEXT');
+        expect(output).toMatch(/not.?null/i);
+        expect(output).toMatch(/default/i);
+        expect(output).toContain("'us'");
+        expect(output).toMatch(/pk|primary.?key/i);
+        expect(output).toMatch(/(?:^|\D)1(?:\D|$)/);
+        expect(output).toMatch(/(?:^|\D)2(?:\D|$)/);
+        expect(output).toContain('idx_memberships_region');
+        expect(() => JSON.parse(output)).toThrow();
+        expect(output).not.toMatch(/\u001b\[/);
+        expect(output).not.toContain(CONFIG.apiKey);
+        expect(output).not.toContain(ACCESS.token);
+        expect(output).not.toContain(ACCESS.url);
+        expect(output).not.toContain('physical-db.sentinel.invalid');
+        expect(test.stderr).toEqual([]);
+        expectSingleAccessPost(test, 'read');
+        expectEphemeralClient(test);
+    });
 });
 
 describe('database query direct action', () => {
@@ -320,7 +378,7 @@ describe('database exec direct action', () => {
 
         expect(test.confirm).toHaveBeenCalledOnce();
         expect(test.confirm.mock.calls[0][0]).toMatch(/Analytics/);
-        expect(test.events.indexOf('mint')).toBeGreaterThan(test.events.indexOf('load'));
+        expect(test.events).toEqual(['confirm', 'load', 'mint', 'create', 'execute', 'close']);
         const output = test.stdout.join('\n');
         expect(output).toMatch(/1\s+row.*affected|rows affected.*1/i);
         expect(output).toContain('id');
@@ -338,7 +396,7 @@ describe('database exec direct action', () => {
         await databaseExecWithConfig('Analytics', 'DROP TABLE events', {}, CONFIG, test.dependencies);
 
         expect(test.confirm).toHaveBeenCalledOnce();
-        expect(test.events).toEqual([]);
+        expect(test.events).toEqual(['confirm']);
         expect(test.posts).toEqual([]);
         expect(test.clientConfigs).toEqual([]);
         expect(test.statements).toEqual([]);
