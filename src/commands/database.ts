@@ -20,6 +20,12 @@ import {
 } from '../utils/database-data-plane';
 import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
 export { parseDatabaseImportSql } from '../utils/database-sql-import';
+import {
+    bindPreparedDatabaseImport,
+    prepareDatabaseImport,
+    prepareDatabaseImportSource,
+    runPreparedDatabaseImport,
+} from '../utils/database-sql-import-runner';
 import { renderTable } from '../utils/table';
 
 export interface DatabaseRecord {
@@ -82,6 +88,11 @@ interface DatabasePullOptions {
     writable?: boolean;
 }
 
+interface DatabaseImportOptions {
+    yes?: boolean;
+    resume?: string;
+}
+
 type DatabaseFileSystem = typeof fs.promises;
 
 export interface DatabaseCommandDependencies extends DatabaseClientDependencies {
@@ -103,7 +114,7 @@ interface ResolvedCommandDependencies {
     stderr: (line: string) => void;
     confirm: (message: string) => Promise<boolean>;
     isTTY: boolean;
-    importDatabase: (name: string, file: string) => Promise<void>;
+    importDatabase?: (name: string, file: string) => Promise<void>;
     post: DatabaseCommandDependencies['post'];
     loadClient: DatabaseCommandDependencies['loadClient'];
     cwd: string;
@@ -133,20 +144,13 @@ function defaultConfirmation(message: string): Promise<boolean> {
     });
 }
 
-async function unavailableImportHandoff(name: string, _file: string): Promise<void> {
-    throw new DatabaseOperationError(
-        'import_failed',
-        `Database "${name}" was created, but SQL import is not available yet. The database remains in place.`,
-    );
-}
-
 function resolveDependencies(dependencies: DatabaseCommandDependencies): ResolvedCommandDependencies {
     return {
         stdout: dependencies.stdout ?? ((line) => console.log(line)),
         stderr: dependencies.stderr ?? ((line) => console.error(line)),
         confirm: async (message) => (await (dependencies.confirm ?? defaultConfirmation)(message)) === true,
         isTTY: dependencies.isTTY ?? process.stdin.isTTY === true,
-        importDatabase: dependencies.importDatabase ?? unavailableImportHandoff,
+        importDatabase: dependencies.importDatabase,
         post: dependencies.post,
         loadClient: dependencies.loadClient,
         cwd: dependencies.cwd ?? process.cwd(),
@@ -1000,6 +1004,9 @@ export async function databaseCreateWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const preparedSource = options.from && !io.importDatabase
+        ? await prepareDatabaseImportSource(options.from, io.cwd, io.filesystem)
+        : undefined;
     const data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
         config,
         { operation: 'create', name },
@@ -1008,11 +1015,38 @@ export async function databaseCreateWithConfig(
 
     if (options.from) {
         try {
-            await io.importDatabase(data.database.name, options.from);
-        } catch {
+            if (io.importDatabase) {
+                await io.importDatabase(data.database.name, options.from);
+            } else if (preparedSource) {
+                const prepared = await bindPreparedDatabaseImport(
+                    preparedSource,
+                    data.database.name,
+                    undefined,
+                    io.cwd,
+                    io.filesystem,
+                );
+                await runPreparedDatabaseImport(
+                    prepared,
+                    config,
+                    {
+                        cwd: io.cwd,
+                        filesystem: io.filesystem,
+                        stdout: options.json ? () => undefined : io.stdout,
+                        now: io.now,
+                        post: io.post,
+                        loadClient: io.loadClient,
+                    },
+                );
+            }
+        } catch (error) {
+            const safeGuidance = error instanceof DatabaseOperationError
+                && error.code === 'import_failed'
+                && error.message.includes('Resume with:')
+                ? `\n${error.message}`
+                : '';
             throw new DatabaseOperationError(
                 'import_failed',
-                `Database "${data.database.name}" was created, but its SQL import failed. The database remains in place.`,
+                `Database "${data.database.name}" was created, but its SQL import failed. The database remains in place.${safeGuidance}`,
             );
         }
     }
@@ -1023,6 +1057,45 @@ export async function databaseCreateWithConfig(
     }
 
     io.stdout(renderMutation('create', data.database));
+}
+
+export async function databaseImportWithConfig(
+    name: string,
+    file: string,
+    options: DatabaseImportOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const prepared = await prepareDatabaseImport(
+        name,
+        file,
+        options.resume,
+        io.cwd,
+        io.filesystem,
+    );
+
+    if (!options.yes) {
+        if (!io.isTTY) {
+            throw new DatabaseOperationError(
+                'confirmation_required',
+                'Database import requires --yes in non-interactive mode.',
+            );
+        }
+        if (!await io.confirm(`Import SQL into database "${name}"?`)) {
+            io.stdout('Cancelled.');
+            return;
+        }
+    }
+
+    await runPreparedDatabaseImport(prepared, config, {
+        cwd: io.cwd,
+        filesystem: io.filesystem,
+        stdout: io.stdout,
+        now: io.now,
+        post: io.post,
+        loadClient: io.loadClient,
+    });
 }
 
 export async function databaseDeleteWithConfig(
@@ -1724,4 +1797,13 @@ export async function databasePull(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databasePullWithConfig(name, destination, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databaseImport(
+    name: string,
+    file: string,
+    options: DatabaseImportOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseImportWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
 }

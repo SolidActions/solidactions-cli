@@ -62,6 +62,7 @@ import {
     databaseDelete,
     databaseDump,
     databaseExec,
+    databaseImport,
     databaseList,
     databasePull,
     databaseQuery,
@@ -298,7 +299,11 @@ database
     .description('Import a SQL file into a database')
     .argument('<name>', 'Database name')
     .argument('<file.sql>', 'SQL file')
-    .option('-y, --yes', 'Skip confirmation');
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--resume <checkpoint>', 'Resume from a validated import checkpoint')
+    .action(async (name, file, options) => {
+        await databaseImport(name, file, options);
+    });
 
 // =============================================================================
 // project <subcommand>
