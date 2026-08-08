@@ -7,6 +7,6 @@ const cleanupOptions = {
     retryDelay: 100,
 };
 
-export async function removeNativeProbeDirectory(probeDirectory, remove = rm) {
-    await remove(probeDirectory, cleanupOptions);
+export async function removeNativeProbeDirectory(probeDirectory) {
+    await rm(probeDirectory, cleanupOptions);
 }

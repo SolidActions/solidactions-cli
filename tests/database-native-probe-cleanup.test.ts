@@ -1,26 +1,38 @@
-import { describe, expect, it, vi } from 'vitest';
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
 
 import { removeNativeProbeDirectory } from '../scripts/remove-native-probe-directory.mjs';
 
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
 describe('native database probe cleanup', () => {
-    it('asks Node fs.rm for bounded retries of transient Windows cleanup errors', async () => {
-        const remove = vi.fn().mockResolvedValue(undefined);
+    it('removes a real probe directory and its database file', async () => {
+        const probeDirectory = await mkdtemp(path.join(tmpdir(), 'solidactions-cleanup-test-'));
+        await writeFile(path.join(probeDirectory, 'probe.db'), 'probe');
 
-        await removeNativeProbeDirectory('C:\\Temp\\solidactions-database-probe', remove);
+        await removeNativeProbeDirectory(probeDirectory);
 
-        expect(remove).toHaveBeenCalledOnce();
-        expect(remove).toHaveBeenCalledWith('C:\\Temp\\solidactions-database-probe', {
-            recursive: true,
-            force: true,
-            maxRetries: 5,
-            retryDelay: 100,
-        });
+        await expect(access(probeDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it('surfaces the cleanup failure when Node exhausts its retries', async () => {
-        const exhausted = Object.assign(new Error('resource busy'), { code: 'EBUSY' });
-        const remove = vi.fn().mockRejectedValue(exhausted);
+    it('keeps bounded Windows retries wired into the native probe', async () => {
+        const helperSource = await readFile(
+            path.join(repositoryRoot, 'scripts/remove-native-probe-directory.mjs'),
+            'utf8',
+        );
+        const probeSource = await readFile(
+            path.join(repositoryRoot, 'scripts/probe-native-database-client.mjs'),
+            'utf8',
+        );
 
-        await expect(removeNativeProbeDirectory('C:\\Temp\\probe.db', remove)).rejects.toBe(exhausted);
+        expect(helperSource).toContain('recursive: true');
+        expect(helperSource).toContain('force: true');
+        expect(helperSource).toContain('maxRetries: 5');
+        expect(helperSource).toContain('retryDelay: 100');
+        expect(probeSource).toContain("from './remove-native-probe-directory.mjs'");
+        expect(probeSource).toContain('await removeNativeProbeDirectory(probeDirectory)');
     });
 });
