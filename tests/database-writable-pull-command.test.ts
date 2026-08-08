@@ -111,7 +111,8 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
                     const execution = { client, method, sql: String(statement) };
                     executions.push(execution);
                     events.push(`client:${client}:${method}`);
-                    return options.execute?.(execution) ?? {
+                    if (options.execute) return options.execute(execution);
+                    return {
                         columns: [],
                         rows: [],
                         rowsAffected: 1,
@@ -196,7 +197,13 @@ function expectWriteAccess(posts: ReturnType<typeof writableHarness>['posts']): 
 }
 
 function expectNoSecrets(value: unknown): void {
-    const rendered = typeof value === 'string' ? value : JSON.stringify(value);
+    const rendered = Buffer.isBuffer(value)
+        ? value.toString('utf8')
+        : value instanceof Uint8Array
+            ? Buffer.from(value).toString('utf8')
+            : typeof value === 'string'
+                ? value
+                : JSON.stringify(value);
     expect(rendered).not.toContain(CONFIG.apiKey);
     expect(rendered).not.toContain('fresh-write-token-sentinel');
     expect(rendered).not.toContain('physical-hostname.sentinel.invalid');
@@ -273,6 +280,42 @@ describe('database pull --writable foreground attached session', () => {
         expect(test.executions[1].sql).toBe("BEGIN;\nINSERT INTO notes(body) VALUES ('inside; transaction');\nCOMMIT;");
     });
 
+    it('renders SELECT rows, exact DML affected count, and transaction-group success in the human shell', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        const test = writableHarness(root, {
+            lines: [
+                'SELECT id, body FROM notes;',
+                'UPDATE notes SET body = upper(body);',
+                'BEGIN;',
+                "INSERT INTO notes(body) VALUES ('grouped');",
+                'COMMIT;',
+                '.exit',
+            ],
+            execute: async ({ method, sql }) => {
+                if (method === 'executeMultiple') return undefined;
+                if (sql.startsWith('SELECT')) {
+                    return {
+                        columns: ['id', 'body'],
+                        rows: [['1', 'alpha'], ['2', 'beta']],
+                        rowsAffected: 0,
+                    };
+                }
+                return { columns: [], rows: [], rowsAffected: 3 };
+            },
+        });
+
+        await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
+
+        expect(test.stdout[0]).toBe(WARNING);
+        expect(test.stdout[1]).toBe('id  body\n-----------\n1   alpha\n2   beta');
+        expect(test.stdout[2]).toBe('Rows affected: 3');
+        const groupOutput = test.stdout[3];
+        expect(groupOutput).toMatch(/success|executed|complete/i);
+        expect(groupOutput).not.toMatch(/rows affected|\bid\b|grouped/i);
+        expect(test.stderr).toEqual([]);
+    });
+
     it('renews 30 seconds before expiry before asking the input source for another line', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
@@ -309,6 +352,8 @@ describe('database pull --writable foreground attached session', () => {
     it('stops before consuming more input when proactive renewal is refused', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const temp = path.join(root, '.analytics.db.solidactions-task8.tmp');
         let now = Date.parse('2026-08-07T12:00:00.000Z');
         const test = writableHarness(root, {
             now: () => now,
@@ -318,7 +363,11 @@ describe('database pull --writable foreground attached session', () => {
                 return { columns: ['value'], rows: [['1']], rowsAffected: 0 };
             },
             mint: async (attempt) => {
-                if (attempt === 2) throw new Error('RAW_TRANSPORT_SECRET fuse denied');
+                if (attempt === 2) {
+                    throw Object.assign(new Error('RAW_TRANSPORT_SECRET fuse denied'), {
+                        code: 'database_write_disabled',
+                    });
+                }
                 return {
                     url: 'libsql://physical-hostname.sentinel.invalid',
                     token: 'fresh-write-token-sentinel-1',
@@ -330,15 +379,25 @@ describe('database pull --writable foreground attached session', () => {
 
         let caught: unknown;
         try {
-            await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
+            await databasePullWithConfig('Analytics', target, { writable: true }, CONFIG, test.dependencies);
         } catch (error) {
             caught = error;
         }
 
+        expect(caught).toBeDefined();
         expect(test.events).toContain('mint:2');
         expect(test.events).not.toContain('input:2');
         expect(test.executions.map(({ sql }) => sql)).toEqual(['SELECT 1;']);
         expect(test.closed).toEqual([1]);
+        expect(test.finalizerConfigs).toEqual([{ url: pathToFileURL(temp).href, intMode: 'string' }]);
+        expect(test.events.indexOf('client:1:close')).toBeLessThan(test.events.indexOf('finalizer:create'));
+        expect(test.events).toContain('finalizer:checkpoint');
+        expect(fs.statSync(target).mode & 0o777).toBe(0o444);
+        expect(fs.existsSync(temp)).toBe(false);
+        for (const suffix of ['-wal', '-shm', '-journal', '-client_wal_index']) {
+            expect(fs.existsSync(`${temp}${suffix}`)).toBe(false);
+        }
+        expectNoSecrets(fs.readFileSync(target));
         expectNoSecrets(caught);
         expectNoSecrets(test.stdout);
         expectNoSecrets(test.stderr);
@@ -351,8 +410,10 @@ describe('database pull --writable foreground attached session', () => {
             lines: ["INSERT INTO ledger(value) VALUES ('once');", 'SELECT count(*) FROM ledger;', '.exit'],
             execute: async ({ client, sql }) => {
                 if (client === 1) {
-                    throw Object.assign(new Error('RAW_TRANSPORT_SECRET fresh-write-token-sentinel-1'), {
-                        code: 'AUTH_TOKEN_EXPIRED',
+                    throw Object.assign(new Error(
+                        'JWT expired: RAW_TRANSPORT_SECRET fresh-write-token-sentinel-1',
+                    ), {
+                        code: 'SQLITE_AUTH',
                     });
                 }
                 return { columns: ['count(*)'], rows: [['1']], rowsAffected: 0 };
@@ -391,12 +452,12 @@ describe('database pull --writable foreground attached session', () => {
         expect(test.closed).toEqual([1]);
     });
 
-    it('refuses incomplete SQL at EOF without executing or replacing an old target', async () => {
+    it('refuses .exit with incomplete buffered SQL without executing or replacing an old target', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const target = path.join(root, 'analytics.db');
         fs.writeFileSync(target, 'OLD REPLICA');
-        const test = writableHarness(root, { lines: ["INSERT INTO notes(body) VALUES ('unfinished;"] });
+        const test = writableHarness(root, { lines: ["INSERT INTO notes(body) VALUES ('unfinished;", '.exit'] });
 
         let caught: unknown;
         try {
@@ -504,8 +565,12 @@ describe('database pull --writable foreground attached session', () => {
 
             expect(caught).toBeDefined();
             expect(test.posts.length).toBeGreaterThan(0);
-            if (failure === 'setup') expect(test.events).toContain('client:1:sync');
-            else expect(test.events).toContain('finalizer:checkpoint');
+            if (failure === 'setup') {
+                expect(test.events).toContain('client:1:sync');
+                expect(test.closed).toEqual(test.attachedConfigs.map((_config, index) => index + 1));
+            } else {
+                expect(test.events).toContain('finalizer:checkpoint');
+            }
             expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
             expect(fs.readFileSync(unrelated, 'utf8')).toBe('DO NOT REMOVE');
             expect(fs.existsSync(temp)).toBe(false);
@@ -521,6 +586,9 @@ describe('database pull --writable foreground attached session', () => {
     it('fails closed on an invalid expires_at without accepting SQL or leaking access metadata', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
+        const target = path.join(root, 'analytics.db');
+        const temp = path.join(root, '.analytics.db.solidactions-task8.tmp');
+        fs.writeFileSync(target, 'OLD REPLICA');
         const test = writableHarness(root, {
             lines: ['DELETE FROM audit_log;'],
             expiresAt: ['not-a-timestamp'],
@@ -528,15 +596,19 @@ describe('database pull --writable foreground attached session', () => {
 
         let caught: unknown;
         try {
-            await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
+            await databasePullWithConfig('Analytics', target, { writable: true, yes: true }, CONFIG, test.dependencies);
         } catch (error) {
             caught = error;
         }
 
         expect(caught).toBeDefined();
         expect(test.posts).toHaveLength(1);
+        expect(test.attachedConfigs).toEqual([]);
+        expect(test.finalizerConfigs).toEqual([]);
         expect(test.events.some((event) => event.startsWith('input:'))).toBe(false);
         expect(test.executions).toEqual([]);
+        expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+        expect(fs.existsSync(temp)).toBe(false);
         expectNoSecrets(caught);
         expectNoSecrets(test.stdout);
         expectNoSecrets(test.stderr);
