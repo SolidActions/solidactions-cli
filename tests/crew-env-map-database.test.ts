@@ -72,12 +72,47 @@ function setupConfig(): () => void {
     return cleanup;
 }
 
-function captureConsole(): { logs: string[]; restore: () => void } {
-    const logs: string[] = [];
-    const original = console.log;
-    console.log = (...args: any[]) => { logs.push(args.map(String).join(' ')); };
+class ProcessExitError extends Error {
+    constructor(public readonly code: number | undefined) {
+        super(`process.exit(${code})`);
+    }
+}
 
-    return { logs, restore: () => { console.log = original; } };
+function patchProcessExit(): () => void {
+    const original = process.exit.bind(process);
+    (process as any).exit = (code?: number) => { throw new ProcessExitError(code); };
+    return () => { (process as any).exit = original; };
+}
+
+async function runExpectingExit(fn: () => Promise<void>): Promise<number | undefined> {
+    const restoreExit = patchProcessExit();
+    try {
+        await fn();
+        return undefined;
+    } catch (error) {
+        if (error instanceof ProcessExitError) return error.code;
+        throw error;
+    } finally {
+        restoreExit();
+    }
+}
+
+function captureConsole(): { logs: string[]; errors: string[]; restore: () => void } {
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = (...args: any[]) => { logs.push(args.map(String).join(' ')); };
+    console.error = (...args: any[]) => { errors.push(args.map(String).join(' ')); };
+
+    return {
+        logs,
+        errors,
+        restore: () => {
+            console.log = originalLog;
+            console.error = originalError;
+        },
+    };
 }
 
 describe('matchWorkspaceDatabase', () => {
@@ -98,6 +133,120 @@ describe('matchWorkspaceDatabase', () => {
 });
 
 describe('crewEnvMapDatabase', () => {
+    it('rejects an invalid variable key before making any API request', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'HAS-DASH', 'analytics'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(0);
+            expect(errors.join('\n')).toContain('Invalid variable name "HAS-DASH"');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
+    it('rejects a reserved variable key before making any API request', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'SOLIDACTIONS_API_TOKEN', 'analytics'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(0);
+            expect(errors.join('\n')).toContain('uses the reserved SOLIDACTIONS_ prefix');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
+    it('fails without a PUT when the requested database is not found', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            queue(200, { databases: [], quota: { used: 0, limit: 5 } });
+
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'ANALYTICS_DB', 'missing'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(1);
+            expect(captures[0].path).toBe('/api/v1/databases');
+            expect(errors.join('\n')).toContain('Ready database "missing" not found in this workspace.');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
+    it('fails without a PUT when the named database is not ready', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            queue(200, {
+                databases: [{ id: 'db-1', name: 'Analytics', status: 'restoring', deleted_at: null }],
+                quota: { used: 1, limit: 5 },
+            });
+
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'ANALYTICS_DB', 'analytics'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(1);
+            expect(errors.join('\n')).toContain('Ready database "analytics" not found in this workspace.');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
+    it('formats a 422 mapping validation response', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            queue(200, {
+                databases: [{ id: 'db-1', name: 'Analytics', status: 'ready', deleted_at: null }],
+                quota: { used: 1, limit: 5 },
+            });
+            queue(422, {
+                message: 'The given data was invalid.',
+                errors: { workspace_database_id: ['The selected workspace database is invalid.'] },
+            });
+
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'ANALYTICS_DB', 'analytics'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(2);
+            expect(captures[1].path).toBe('/api/v1/crews/42/variables/ANALYTICS_DB');
+            expect(errors.join('\n')).toContain('The selected workspace database is invalid.');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
+    it('prints a generic request error when mapping fails outside validation', async () => {
+        const cleanup = setupConfig();
+        const { errors, restore } = captureConsole();
+        try {
+            queue(200, {
+                databases: [{ id: 'db-1', name: 'Analytics', status: 'ready', deleted_at: null }],
+                quota: { used: 1, limit: 5 },
+            });
+            queue(500, { message: 'Database service unavailable.' });
+
+            const code = await runExpectingExit(() => crewEnvMapDatabase('42', 'ANALYTICS_DB', 'analytics'));
+
+            expect(code).toBe(1);
+            expect(captures).toHaveLength(2);
+            expect(errors.join('\n')).toContain('Request failed with status code 500');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
+
     it('resolves crew and database names, then PUTs only mapping metadata and prints the exact scope warning', async () => {
         const cleanup = setupConfig();
         const { logs, restore } = captureConsole();
