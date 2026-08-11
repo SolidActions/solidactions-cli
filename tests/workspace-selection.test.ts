@@ -143,6 +143,22 @@ describe('interactive login workspace selection: org grouping', () => {
         expect(logLines.some((line) => line.includes('Selected: Second Workspace') && !line.includes('organization'))).toBe(true);
     });
 
+    it('disambiguates two workspaces sharing the same name across different orgs via org headers and qualified rows', async () => {
+        const sameNameAcrossOrgs = [
+            { id: 'ws-1', name: 'Production', slug: 'production-acme', org_name: 'Acme Org', role: 'admin' },
+            { id: 'ws-2', name: 'Production', slug: 'production-globex', org_name: 'Globex', role: 'member' },
+        ];
+
+        const selected = await selectWorkspaceInteractively(sameNameAcrossOrgs, {
+            question: async () => '2',
+        });
+
+        expect(selected?.id).toBe('ws-2');
+        expect(logLines.some((line) => line.trim() === 'Acme Org')).toBe(true);
+        expect(logLines.some((line) => line.trim() === 'Globex')).toBe(true);
+        expect(logLines.some((line) => line.includes('Selected: Production') && line.includes('Globex'))).toBe(true);
+    });
+
     it('names the org in the auto-selected single-workspace confirmation when known', async () => {
         const singleWorkspaceWithOrg = [
             { id: 'ws-1', name: 'Only Workspace', slug: 'only-workspace', org_name: 'Acme Org', role: 'owner' },
