@@ -95,7 +95,7 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).workspaceId).toBe('ws-2');
     });
 
-    it('groups the numbered list under an org header and renders each row as "name (role)"', async () => {
+    it('does not print a redundant org header for a single-org account, but still renders each row as "name (role)"', async () => {
         writeGlobal(env.home, {
             host: `http://127.0.0.1:${port}`,
             apiKey: 'existing-token',
@@ -106,7 +106,8 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
             { question: async () => '1' },
         );
 
-        expect(logLines.some((line) => line.includes('Acme Org'))).toBe(true);
+        expect(logLines.some((line) => line.trim() === 'Acme Org')).toBe(false);
+        expect(logLines.some((line) => line.toLowerCase().includes('grouped by organization'))).toBe(false);
         expect(logLines.some((line) => line.includes('First Workspace (admin)'))).toBe(true);
     });
 

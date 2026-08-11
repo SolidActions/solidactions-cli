@@ -84,7 +84,7 @@ describe('interactive login workspace selection: org grouping', () => {
         expect(logLines.some((line) => line.includes('2.') && line.includes('Second Workspace'))).toBe(true);
     });
 
-    it('renders a single header when every workspace shares one org', async () => {
+    it('suppresses the org header and grouping preamble when every workspace shares one org', async () => {
         const singleOrgWorkspaces = [
             { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace', org_name: 'Acme Org', role: 'admin' },
             { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace', org_name: 'Acme Org', role: 'member' },
@@ -95,7 +95,8 @@ describe('interactive login workspace selection: org grouping', () => {
         });
 
         const headerCount = logLines.filter((line) => line.trim() === 'Acme Org').length;
-        expect(headerCount).toBe(1);
+        expect(headerCount).toBe(0);
+        expect(logLines.some((line) => line.toLowerCase().includes('grouped by organization'))).toBe(false);
         expect(logLines.some((line) => line.includes('1.') && line.includes('First Workspace (admin)'))).toBe(true);
         expect(logLines.some((line) => line.includes('2.') && line.includes('Second Workspace (member)'))).toBe(true);
     });

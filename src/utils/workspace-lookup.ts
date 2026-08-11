@@ -90,7 +90,11 @@ export async function selectWorkspaceInteractively(
     }
 
     const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => (ws.role ? `${ws.name} (${ws.role})` : ws.name));
-    const grouped = workspaces.some((ws) => ws.org_name);
+    // Header + grouping preamble are only useful once there's more than one
+    // org to disambiguate; a single-org account would otherwise get a
+    // redundant sole header and a pointless "grouped by organization" line.
+    const orgNames = new Set(workspaces.map((ws) => ws.org_name).filter((name): name is string => !!name));
+    const grouped = orgNames.size > 1;
 
     console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
     if (grouped) {
