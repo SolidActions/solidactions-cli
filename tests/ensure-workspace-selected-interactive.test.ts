@@ -95,7 +95,7 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).workspaceId).toBe('ws-2');
     });
 
-    it('prints the (org_name, role) annotation for each workspace in the numbered list', async () => {
+    it('groups the numbered list under an org header and renders each row as "name (role)"', async () => {
         writeGlobal(env.home, {
             host: `http://127.0.0.1:${port}`,
             apiKey: 'existing-token',
@@ -106,6 +106,7 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
             { question: async () => '1' },
         );
 
-        expect(logLines.some((line) => line.includes('First Workspace') && line.includes('(Acme Org, admin)'))).toBe(true);
+        expect(logLines.some((line) => line.includes('Acme Org'))).toBe(true);
+        expect(logLines.some((line) => line.includes('First Workspace (admin)'))).toBe(true);
     });
 });

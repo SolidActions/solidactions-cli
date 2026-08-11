@@ -49,8 +49,10 @@ export async function fetchWorkspaces(config: Config): Promise<FetchWorkspacesRe
     const grouped = response.data.workspaces || response.data.teams || response.data.data || response.data;
     const out: WorkspaceLookupRecord[] = [];
     if (typeof grouped === 'object' && !Array.isArray(grouped)) {
-        for (const orgWorkspaces of Object.values(grouped)) {
-            out.push(...(orgWorkspaces as WorkspaceLookupRecord[]));
+        for (const [orgName, orgWorkspaces] of Object.entries(grouped)) {
+            for (const ws of orgWorkspaces as Array<WorkspaceLookupRecord & { tenant_name?: string }>) {
+                out.push({ ...ws, org_name: ws.tenant_name || orgName });
+            }
         }
     } else if (Array.isArray(grouped)) {
         out.push(...(grouped as WorkspaceLookupRecord[]));
@@ -82,11 +84,18 @@ export async function selectWorkspaceInteractively(
         return workspaces[0];
     }
 
-    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => ws.name);
+    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => (ws.role ? `${ws.name} (${ws.role})` : ws.name));
+    const grouped = workspaces.some((ws) => ws.org_name);
 
     console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
+    let lastOrg: string | undefined;
     workspaces.forEach((ws, i) => {
-        console.log(`  ${chalk.white(`${i + 1}.`)} ${label(ws)}`);
+        if (grouped && ws.org_name !== lastOrg) {
+            console.log(`  ${chalk.white(ws.org_name ?? '')}`);
+            lastOrg = ws.org_name;
+        }
+        const indent = grouped ? '    ' : '  ';
+        console.log(`${indent}${chalk.white(`${i + 1}.`)} ${label(ws)}`);
     });
     console.log('');
 

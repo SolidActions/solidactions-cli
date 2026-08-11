@@ -350,7 +350,6 @@ export async function ensureWorkspaceSelected(
 
         const chosen = await selectWorkspaceInteractively(workspaces, {
             ...dependencies,
-            label: (ws) => `${ws.name} ${chalk.gray(`(${ws.org_name}, ${ws.role})`)}`,
         });
         if (!chosen) {
             process.exit(1);
