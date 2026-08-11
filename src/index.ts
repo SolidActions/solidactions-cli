@@ -204,7 +204,12 @@ program
 
 // Register the complete public surface up front so help and the generated
 // command manifest stay authoritative while handlers land in focused slices.
-const database = program.command('database').description('Manage workspace databases');
+const database = program
+    .command('database')
+    .description('Manage workspace databases')
+    .addHelpText('after', `
+Connect to a Workspace Database directly (any HTTP client or libSQL-compatible
+driver): https://www.solidactions.com/docs/workspace-databases/`);
 
 database
     .command('list')
