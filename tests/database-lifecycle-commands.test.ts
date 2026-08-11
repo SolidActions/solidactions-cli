@@ -45,6 +45,7 @@ const CONFIG: Config = {
 };
 
 const ACTIVE: DatabaseRecord = {
+    id: 'database-active-id',
     name: 'Analytics',
     status: 'ready',
     deleted_at: null,
@@ -53,6 +54,7 @@ const ACTIVE: DatabaseRecord = {
 };
 
 const DELETED: DatabaseRecord = {
+    id: 'database-deleted-id',
     name: 'Retired',
     status: 'ready',
     deleted_at: '2026-08-07T12:00:00.000000Z',
