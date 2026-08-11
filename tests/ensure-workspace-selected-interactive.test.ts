@@ -109,4 +109,20 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         expect(logLines.some((line) => line.includes('Acme Org'))).toBe(true);
         expect(logLines.some((line) => line.includes('First Workspace (admin)'))).toBe(true);
     });
+
+    it('confirms the resolved workspace exactly once, org-qualified', async () => {
+        writeGlobal(env.home, {
+            host: `http://127.0.0.1:${port}`,
+            apiKey: 'existing-token',
+        });
+
+        await ensureWorkspaceSelected(
+            { host: `http://127.0.0.1:${port}`, apiKey: 'existing-token' },
+            { question: async () => '2' },
+        );
+
+        const confirmations = logLines.filter((line) => /Selected:|Workspace set:|Auto-selected workspace:/.test(line));
+        expect(confirmations).toHaveLength(1);
+        expect(confirmations[0]).toContain('Second Workspace — organization Acme Org');
+    });
 });

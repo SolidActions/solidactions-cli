@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
 import {
+    formatWorkspaceWithOrg,
     resolveWorkspaceInput,
     selectWorkspaceInteractively,
     WorkspaceLookupRecord,
@@ -338,7 +339,7 @@ export async function ensureWorkspaceSelected(
 
     if (workspaces.length === 1) {
         selected = workspaces[0];
-        console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
+        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(selected)}`));
     } else {
         if (!process.stdin.isTTY) {
             console.error(chalk.red(
@@ -364,7 +365,6 @@ export async function ensureWorkspaceSelected(
         const targetPath = resolved?.activePath ?? getGlobalConfigPath();
         writeConfigFile(targetPath, config);
     }
-    console.log(chalk.green(`Workspace set: ${selected.name}`));
 
     return config;
 }
