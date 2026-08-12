@@ -57,6 +57,11 @@ describe('sdkRefFromRange', () => {
 // ---------------------------------------------------------------------------
 
 describe('sdkDocsRef', () => {
+    it('pins bundled SDK documentation to the first database-capable release', () => {
+        expect(declaredSdkRange).toBe('^0.8.0');
+        expect(sdkDocsRef()).toBe('v0.8.0');
+    });
+
     it('derives the ref from the @solidactions/sdk range declared in package.json', () => {
         // Both sides read the same source, so bumping the dependency moves the
         // docs ref automatically — there is no literal here to drift.

@@ -14,7 +14,7 @@
  * with the package it publishes. solidactions-examples does NOT version in
  * lockstep with the SDK — its newest tag (v0.7.0) predates the current template
  * by a wide margin: it declares `@solidactions/sdk` ^0.6.0 (this CLI declares
- * ^0.7.3) and lacks skills/solidactions-crew-skills.md entirely. Pinning to that
+ * ^0.8.0) and lacks skills/solidactions-crew-skills.md entirely. Pinning to that
  * tag would regress every new scaffold, so the same derived-version scheme cannot
  * apply here. A commit SHA is immutable and gives the property that actually
  * matters — the scaffold no longer moves under us.
@@ -25,10 +25,11 @@
  * users. If solidactions-examples ever starts publishing tags in step with the
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
- * Currently: solidactions-examples PR #29 head @ 8a47ced4 "docs: add database
- * CLI guidance". Pinning this immutable PR-head commit is a temporary build-time necessity
- * while the coordinated wave is pending merge; no delivery override
- * was granted. Before any CLI release, repin EXAMPLES_REF to the
- * merged mainline SHA and verify that exact ref during the release ritual.
+ * Currently: the solidactions-examples issue #1201 branch head @ cf3a0df6
+ * "docs(#1201): refresh workspace database guidance". Pinning this immutable
+ * PR-head commit is a temporary build-time necessity while the coordinated wave
+ * is pending merge. Before the examples branch is deleted, repin EXAMPLES_REF
+ * to the merged mainline SHA. Before any CLI release, verify that exact ref
+ * during the release ritual.
  */
-export const EXAMPLES_REF = 'c232c416a86f5873c4b209f83132290322495e15';
+export const EXAMPLES_REF = 'cf3a0df634895e549600fb5d632fef2ba547aa8d';
