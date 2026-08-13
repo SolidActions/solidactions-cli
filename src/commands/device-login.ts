@@ -16,7 +16,22 @@ const CLI_OAUTH_CLIENT_ID = '9f1b6e2a-9c1e-4b6e-8f0a-6c9f2b1e7d4c';
 
 // CLI capability scopes requested at device-code issuance — the server
 // rejects any scope not pre-registered via Passport::tokensCan().
-const CLI_SCOPES = 'env deploy runs docs databases';
+//
+// `env:reveal` is REQUESTED here but not necessarily GRANTED: the consent
+// screen renders it as a default-off checkbox, and the server strips it from
+// the issued token unless the user ticks it. Requesting it is what makes the
+// opt-in reachable at all — a scope absent from this string can never be
+// added at consent time, because the device code's scope set is frozen when
+// the code is created (#1252).
+const CLI_SCOPES_WITH_REVEAL = 'env env:reveal deploy runs docs databases';
+
+// Pre-#1252 scope list, kept as the fallback for servers that haven't
+// registered `env:reveal` yet (older production, a lagging staging, a
+// self-hosted install). Passport rejects the entire device-code request with
+// `invalid_scope` if ANY requested scope is unregistered, so requesting
+// `env:reveal` unconditionally would hard-break device login everywhere
+// until every server picks up the companion change.
+const CLI_SCOPES_LEGACY = 'env deploy runs docs databases';
 
 interface DeviceCodeResponse {
     device_code: string;
@@ -32,12 +47,30 @@ export interface TokenResponse {
     expires_in: number;
 }
 
+/**
+ * Request a device code with the full (env:reveal-including) scope list. If
+ * the server doesn't yet recognize `env:reveal` it rejects the whole request
+ * with 400 `invalid_scope` — retry once with the legacy scope list so login
+ * still succeeds. Any other rejection (e.g. a bad client_id) still fails
+ * loudly; only this specific, detectable condition is swallowed.
+ */
 export async function requestDeviceCode(host: string): Promise<DeviceCodeResponse> {
-    const response = await axios.post(`${host}/oauth/device/code`, {
-        client_id: CLI_OAUTH_CLIENT_ID,
-        scope: CLI_SCOPES,
-    });
-    return response.data;
+    try {
+        const response = await axios.post(`${host}/oauth/device/code`, {
+            client_id: CLI_OAUTH_CLIENT_ID,
+            scope: CLI_SCOPES_WITH_REVEAL,
+        });
+        return response.data;
+    } catch (e: any) {
+        if (e?.response?.status === 400 && e.response.data?.error === 'invalid_scope') {
+            const response = await axios.post(`${host}/oauth/device/code`, {
+                client_id: CLI_OAUTH_CLIENT_ID,
+                scope: CLI_SCOPES_LEGACY,
+            });
+            return response.data;
+        }
+        throw e;
+    }
 }
 
 function sleep(ms: number): Promise<void> {

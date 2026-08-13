@@ -114,10 +114,14 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 return;
             }
 
-            // Check if variable already has a value
+            // Check if variable already has a value. Deliberately do NOT pass
+            // reveal=true: this only reads `existing.has_value` (returned
+            // unconditionally by the mappings projection), never the
+            // plaintext value, so requesting reveal would force every write
+            // to also carry the env:reveal ability it doesn't need (#1252).
             if (!options.yes) {
                 const mappingsResponse = await axios.get(
-                    `${config.host}/api/v1/projects/${projectSlug}/variable-mappings?reveal=true`,
+                    `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,
                     { headers: getApiHeaders(config) }
                 );
                 const mappings = mappingsResponse.data || [];

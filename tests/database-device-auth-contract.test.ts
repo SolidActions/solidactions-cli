@@ -29,8 +29,13 @@ describe('database device-token compatibility', () => {
             axios.defaults.adapter = originalAdapter;
         }
 
+        // `env:reveal` joined this list in #1252. It is requested, not assumed
+        // granted — the consent screen shows it as a default-off checkbox and
+        // the server strips it from the token unless the user opts in. It has
+        // to be requested here regardless, because a device code's scope set is
+        // frozen at creation and consent can never add to it.
         expect(String(requestBody?.scope).split(/\s+/).sort()).toEqual(
-            ['databases', 'deploy', 'docs', 'env', 'runs'],
+            ['databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
         );
     });
 
