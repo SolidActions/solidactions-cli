@@ -136,9 +136,9 @@ function revParse(root, candidate) {
  * checkout does not already have it.
  *
  * CI clones the sibling repos at depth 1 with no tags, so a pinned ref the CLI
- * asks for — the SDK's `v0.7.3` tag, or an EXAMPLES_REF SHA that is not the tip
+ * asks for — the SDK's `v0.8.0` tag, or an EXAMPLES_REF SHA that is not the tip
  * of the cloned branch — simply is not present locally, and the smoke failed
- * with "File not found ... (branch: v0.7.3)". Fetching on demand keeps the CI
+ * with "File not found ... (branch: v0.8.0)". Fetching on demand keeps the CI
  * checkouts cheap while still serving exactly the ref the CLI pins to.
  *
  * Remote-tracking refs are preferred over local ones so a stale local `main`
