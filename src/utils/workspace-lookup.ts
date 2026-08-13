@@ -9,6 +9,9 @@ export interface WorkspaceLookupRecord {
     name: string;
     org_name?: string;
     role?: string;
+    tenant_id?: string;
+    tenant_name?: string;
+    tenant_slug?: string;
 }
 
 /** Device-flow token scope, as returned by GET /api/v1/workspaces. Null for user-scoped Sanctum PATs. */
@@ -33,6 +36,55 @@ export function matchWorkspace(
     workspaces: WorkspaceLookupRecord[],
 ): WorkspaceLookupRecord | undefined {
     return workspaces.find((w) => w.id === input || w.slug === input || w.name === input);
+}
+
+export interface WorkspaceOrgGroup {
+    /**
+     * Org display name, qualified with the tenant slug (or tenant id) when
+     * another org shares the name. Undefined when the payload carries no org
+     * identity at all, in which case the caller should render no header.
+     */
+    header?: string;
+    workspaces: WorkspaceLookupRecord[];
+}
+
+/**
+ * Pure: group workspaces by tenant for display, preserving payload order.
+ *
+ * Two different orgs may share a display name (a consultant's employer and
+ * their client both called "Acme"), so groups are keyed by tenant id and only
+ * the colliding names get a qualifier — the one thing that tells the two apart.
+ */
+export function groupWorkspacesByOrg(workspaces: WorkspaceLookupRecord[]): WorkspaceOrgGroup[] {
+    const groups = new Map<string, { name?: string; qualifier?: string; workspaces: WorkspaceLookupRecord[] }>();
+
+    for (const ws of workspaces) {
+        const name = ws.org_name || ws.tenant_name || undefined;
+        const key = ws.tenant_id || name || '';
+        let group = groups.get(key);
+        if (!group) {
+            group = { name, qualifier: ws.tenant_slug || ws.tenant_id, workspaces: [] };
+            groups.set(key, group);
+        }
+        group.workspaces.push(ws);
+    }
+
+    const nameCounts = new Map<string, number>();
+    for (const group of groups.values()) {
+        if (group.name) {
+            nameCounts.set(group.name, (nameCounts.get(group.name) ?? 0) + 1);
+        }
+    }
+
+    return [...groups.values()].map((group) => {
+        const ambiguous = !!group.name && (nameCounts.get(group.name) ?? 0) > 1;
+        return {
+            header: group.name && ambiguous && group.qualifier
+                ? `${group.name} (${group.qualifier})`
+                : group.name,
+            workspaces: group.workspaces,
+        };
+    });
 }
 
 /**
