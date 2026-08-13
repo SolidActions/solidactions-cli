@@ -68,7 +68,11 @@ export function assembleEnv(opts: {
     const env: Record<string, string> = {};
 
     for (const [key, value] of Object.entries(opts.resolved)) {
-        if (isReservedEnvName(key)) {
+        // The resolve endpoint owns this database credential manifest. Local
+        // execution must pass it through with the mapped JSON values so the
+        // SDK can recognize database variables. All other platform-reserved
+        // names remain ignored and are re-added by the CLI where applicable.
+        if (key !== 'SOLIDACTIONS__DB_KEYS' && isReservedEnvName(key)) {
             warnings.push(`crew variable '${key}' is reserved (set by the platform at runtime) — ignored`);
             continue;
         }

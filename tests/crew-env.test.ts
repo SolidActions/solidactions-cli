@@ -497,6 +497,39 @@ describe('crewEnvList', () => {
             cleanup();
         }
     });
+
+    it('renders a workspace database mapping as database:name without any value or credential', async () => {
+        const { cleanup } = setupConfig();
+        const { logs, restore } = captureConsole();
+        try {
+            queue(200, { data: [{ id: 3, name: 'Ops' }] });
+            queue(200, {
+                data: [{
+                    id: 4,
+                    env_name: 'ANALYTICS_DB',
+                    source_type: 'workspace_database',
+                    workspace_database_id: 'database-id',
+                    workspace_database_name: 'analytics',
+                    is_secret: true,
+                    production_value: 'credential-must-not-render',
+                    staging_value: 'credential-must-not-render',
+                    dev_value: 'credential-must-not-render',
+                    token: 'token-must-not-render',
+                }],
+            });
+
+            await runExpectingExit(() => crewEnvList('Ops', {}));
+
+            const output = logs.join('\n');
+            expect(output).toContain('database:analytics');
+            expect(output).not.toContain('credential-must-not-render');
+            expect(output).not.toContain('token-must-not-render');
+            expect(output).not.toContain('••••••');
+        } finally {
+            restore();
+            cleanup();
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------

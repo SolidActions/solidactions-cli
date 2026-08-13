@@ -32,6 +32,7 @@ import {
 import { renderTable } from '../utils/table';
 
 export interface DatabaseRecord {
+    id?: string;
     name: string;
     status: string;
     deleted_at: string | null;
@@ -196,6 +197,7 @@ function clientDependencies(dependencies: ResolvedCommandDependencies): Database
 function stableDatabaseRecord(database: DatabaseRecord | null | undefined): DatabaseRecord {
     if (
         !database
+        || (database.id !== undefined && typeof database.id !== 'string')
         || typeof database.name !== 'string'
         || typeof database.status !== 'string'
         || typeof database.size_bytes !== 'number'
@@ -206,6 +208,7 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
     }
 
     return {
+        ...(database.id === undefined ? {} : { id: database.id }),
         name: database.name,
         status: database.status,
         deleted_at: database.deleted_at,

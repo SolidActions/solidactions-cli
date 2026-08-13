@@ -34,6 +34,10 @@ describe('command tree export', () => {
 
         const scheduleSet = schedule.commands.find((c: any) => c.name() === 'set');
         expect(scheduleSet.options.map((o: any) => o.long)).toContain('--paused');
+
+        const crew = program.commands.find((c: any) => c.name() === 'crew');
+        const crewEnv = crew.commands.find((c: any) => c.name() === 'env');
+        expect(crewEnv.commands.map((c: any) => c.name())).toContain('map-database');
     });
 
     it('exposes the program-level global option', () => {
