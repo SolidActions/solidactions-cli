@@ -95,7 +95,7 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).workspaceId).toBe('ws-2');
     });
 
-    it('prints the (org_name, role) annotation for each workspace in the numbered list', async () => {
+    it('does not print a redundant org header for a single-org account, but still renders each row as "name (role)"', async () => {
         writeGlobal(env.home, {
             host: `http://127.0.0.1:${port}`,
             apiKey: 'existing-token',
@@ -106,6 +106,24 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
             { question: async () => '1' },
         );
 
-        expect(logLines.some((line) => line.includes('First Workspace') && line.includes('(Acme Org, admin)'))).toBe(true);
+        expect(logLines.some((line) => line.trim() === 'Acme Org')).toBe(false);
+        expect(logLines.some((line) => line.toLowerCase().includes('grouped by organization'))).toBe(false);
+        expect(logLines.some((line) => line.includes('First Workspace (admin)'))).toBe(true);
+    });
+
+    it('confirms the resolved workspace exactly once, org-qualified', async () => {
+        writeGlobal(env.home, {
+            host: `http://127.0.0.1:${port}`,
+            apiKey: 'existing-token',
+        });
+
+        await ensureWorkspaceSelected(
+            { host: `http://127.0.0.1:${port}`, apiKey: 'existing-token' },
+            { question: async () => '2' },
+        );
+
+        const confirmations = logLines.filter((line) => /Selected:|Workspace set:|Auto-selected workspace:/.test(line));
+        expect(confirmations).toHaveLength(1);
+        expect(confirmations[0]).toContain('Second Workspace — organization Acme Org');
     });
 });

@@ -14,6 +14,9 @@ interface CrewVariable {
     production_value: string | null;
     staging_value: string | null;
     dev_value: string | null;
+    source_type?: string;
+    workspace_database_name?: string | null;
+    token?: string;
 }
 
 /**
@@ -43,7 +46,22 @@ export async function crewEnvList(crewArg: string, options: CrewEnvListOptions =
         const variables: CrewVariable[] = response.data?.data ?? [];
 
         if (options.json) {
-            console.log(JSON.stringify(variables, null, 2));
+            const safeVariables = variables.map((variable) => {
+                if (variable.source_type !== 'workspace_database') {
+                    return variable;
+                }
+
+                const {
+                    production_value: _productionValue,
+                    staging_value: _stagingValue,
+                    dev_value: _devValue,
+                    token: _token,
+                    ...metadata
+                } = variable;
+
+                return metadata;
+            });
+            console.log(JSON.stringify(safeVariables, null, 2));
             return;
         }
 
@@ -66,13 +84,16 @@ export async function crewEnvList(crewArg: string, options: CrewEnvListOptions =
 
         for (const variable of variables) {
             const key = variable.env_name || '?';
-            const type = variable.is_secret ? chalk.yellow('secret') : chalk.gray('plain');
+            const isDatabase = variable.source_type === 'workspace_database';
+            const type = isDatabase
+                ? chalk.blue(`database:${variable.workspace_database_name ?? 'not-configured'}`)
+                : variable.is_secret ? chalk.yellow('secret') : chalk.gray('plain');
 
             console.log(
                 key.substring(0, 22).padEnd(24) +
-                formatValue(variable.production_value, variable.is_secret).padEnd(20) +
-                formatValue(variable.staging_value, variable.is_secret).padEnd(20) +
-                formatValue(variable.dev_value, variable.is_secret).padEnd(20) +
+                (isDatabase ? chalk.gray('-') : formatValue(variable.production_value, variable.is_secret)).padEnd(20) +
+                (isDatabase ? chalk.gray('-') : formatValue(variable.staging_value, variable.is_secret)).padEnd(20) +
+                (isDatabase ? chalk.gray('-') : formatValue(variable.dev_value, variable.is_secret)).padEnd(20) +
                 type
             );
         }

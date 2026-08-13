@@ -67,7 +67,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
 
                 // Value display (resolved_value includes global/oauth resolution)
                 const rawValue = mapping.resolved_value ?? mapping.value;
-                const value = mapping.is_secret ? '••••••' : rawValue ? rawValue.toString() : '-';
+                let value = mapping.is_secret ? '••••••' : rawValue ? rawValue.toString() : '-';
 
                 // Type & source (mirrors UI getMappingType)
                 let type: string;
@@ -75,12 +75,31 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
                 if (mapping.source_type === 'oauth_connection' && mapping.oauth_connection_id) {
                     type = 'oauth';
                     source = mapping.oauth_connection_name || 'OAuth';
+                } else if (mapping.source_type === 'workspace_database') {
+                    value = '-';
+                    type = 'database';
+                    if (mapping.workspace_database_broken) {
+                        const databaseName = mapping.yaml_default_workspace_database_name || 'Database';
+                        source = `${databaseName} (missing)`;
+                    } else {
+                        source = mapping.workspace_database_name
+                            || mapping.yaml_default_workspace_database_name
+                            || 'Database';
+                    }
                 } else if (mapping.global_variable_key) {
                     type = 'global';
                     source = mapping.global_variable_key;
                 } else if (mapping.has_value) {
                     type = 'project var';
                     source = 'local';
+                } else if (
+                    typeof mapping.yaml_default_workspace_database_name === 'string'
+                    && mapping.yaml_default_workspace_database_name.length > 0
+                    && mapping.yaml_default_not_found === true
+                ) {
+                    value = '-';
+                    type = 'database';
+                    source = `${mapping.yaml_default_workspace_database_name} (not configured)`;
                 } else {
                     type = '-';
                     source = '-';

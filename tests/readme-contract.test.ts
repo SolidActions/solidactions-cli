@@ -106,4 +106,15 @@ describe('public README setup contract', () => {
         expect(guidance).toMatch(/avoid|without|no replay/i);
         expect(guidance).not.toMatch(/turso|libsql/i);
     });
+
+    it('documents database binding setup and the SDK 0.8 transport boundary', () => {
+        const guidance = markdownSection(README, '### Env declarations (`solidactions.yaml`)');
+
+        expect(guidance).toContain('solidactions database create');
+        expect(guidance).toMatch(/web UI/i);
+        expect(guidance).toMatch(/@solidactions\/sdk.*>=\s*0\.8\.0/i);
+        expect(guidance).toContain('read_only');
+        expect(guidance).toContain('DatabaseVar.readOnly');
+        expect(guidance).toMatch(/typed.*DatabaseVar/i);
+    });
 });

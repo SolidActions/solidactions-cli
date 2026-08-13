@@ -50,6 +50,7 @@ import { crewEnvSet } from './commands/crew-env-set';
 import { crewEnvList } from './commands/crew-env-list';
 import { crewEnvDelete } from './commands/crew-env-delete';
 import { crewEnvPush } from './commands/crew-env-push';
+import { crewEnvMapDatabase } from './commands/crew-env-map-database';
 import {
     projectDisable,
     projectEnable,
@@ -613,6 +614,16 @@ crewEnv
     .option('--json', 'Output as JSON')
     .action((crewArg, options) => {
         crewEnvList(crewArg, options);
+    });
+
+crewEnv
+    .command('map-database')
+    .description('Map a workspace database into crew sandboxes')
+    .argument('<crew>', 'Crew name or id')
+    .argument('<key>', 'Variable key')
+    .argument('<database>', 'Workspace database name or id')
+    .action((crewArg, key, databaseArg) => {
+        crewEnvMapDatabase(crewArg, key, databaseArg);
     });
 
 crewEnv

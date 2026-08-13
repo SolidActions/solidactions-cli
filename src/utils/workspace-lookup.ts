@@ -113,6 +113,11 @@ export async function fetchWorkspaces(config: Config): Promise<FetchWorkspacesRe
     return { workspaces: out, scope };
 }
 
+/** Workspace name, qualified with its org name when known (e.g. `"Foo — organization Bar"`). */
+export function formatWorkspaceWithOrg(ws: WorkspaceLookupRecord): string {
+    return ws.org_name ? `${ws.name} — organization ${ws.org_name}` : ws.name;
+}
+
 /**
  * Prompt the user to pick a workspace from an already-fetched list. Auto-
  * selects when there's exactly one. Invalid answers re-prompt; EOF or a
@@ -132,15 +137,29 @@ export async function selectWorkspaceInteractively(
         return undefined;
     }
     if (workspaces.length === 1) {
-        console.log(chalk.gray(`Auto-selected workspace: ${workspaces[0].name}`));
+        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(workspaces[0])}`));
         return workspaces[0];
     }
 
-    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => ws.name);
+    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => (ws.role ? `${ws.name} (${ws.role})` : ws.name));
+    // Header + grouping preamble are only useful once there's more than one
+    // org to disambiguate; a single-org account would otherwise get a
+    // redundant sole header and a pointless "grouped by organization" line.
+    const orgNames = new Set(workspaces.map((ws) => ws.org_name).filter((name): name is string => !!name));
+    const grouped = orgNames.size > 1;
 
     console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
+    if (grouped) {
+        console.log(chalk.gray('Workspaces are grouped by organization.\n'));
+    }
+    let lastOrg: string | undefined;
     workspaces.forEach((ws, i) => {
-        console.log(`  ${chalk.white(`${i + 1}.`)} ${label(ws)}`);
+        if (grouped && ws.org_name !== lastOrg) {
+            console.log(`  ${chalk.bold(ws.org_name ?? '')}`);
+            lastOrg = ws.org_name;
+        }
+        const indent = grouped ? '    ' : '  ';
+        console.log(`${indent}${chalk.white(`${i + 1}.`)} ${label(ws)}`);
     });
     console.log('');
 
@@ -175,7 +194,9 @@ export async function selectWorkspaceInteractively(
             }
             const index = parseInt(answer, 10) - 1;
             if (!isNaN(index) && index >= 0 && index < workspaces.length) {
-                return workspaces[index];
+                const selected = workspaces[index];
+                console.log(chalk.green(`Selected: ${formatWorkspaceWithOrg(selected)}`));
+                return selected;
             }
             console.error(chalk.red('Invalid selection. Enter one of the numbers shown.'));
         }

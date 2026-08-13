@@ -24,12 +24,18 @@ const PRE_DATABASE_GUIDANCE_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
 const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
 
 describe('EXAMPLES_REF', () => {
+    it('pins the approved #1201 examples content commit', () => {
+        expect(EXAMPLES_REF).toBe('cf3a0df634895e549600fb5d632fef2ba547aa8d');
+    });
+
     it('records the temporary PR-head pin and the mandatory pre-release mainline repin without a fabricated override', () => {
         const source = fs.readFileSync(path.resolve(__dirname, '../src/utils/examples-ref.ts'), 'utf8');
 
         expect(source).toContain('temporary build-time necessity');
         expect(source).toContain('merged mainline SHA');
         expect(source).toMatch(/before any CLI release/i);
+        expect(source).toMatch(/before the examples\s+branch is\s+deleted/i);
+        expect(source).toContain('#1201');
         expect(source).toMatch(/release ritual/i);
         expect(source).not.toMatch(/PM[- ]directed|PM delivery override|override explicitly approved/i);
     });

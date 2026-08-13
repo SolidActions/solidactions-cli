@@ -54,7 +54,7 @@
     "tar": "^7.5.22"
   },
   "devDependencies": {
-    "@solidactions/sdk": "^0.7.3",
+    "@solidactions/sdk": "^0.8.0",
     "@types/archiver": "^8.0.0",
     "@types/fs-extra": "^11.0.0",
     "@types/js-yaml": "^4.0.9",

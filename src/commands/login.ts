@@ -21,6 +21,7 @@ import {
 } from '../utils/config-write-target';
 import {
     fetchWorkspaces,
+    formatWorkspaceWithOrg,
     matchWorkspace,
     selectWorkspaceInteractively,
     WorkspaceLookupRecord,
@@ -330,7 +331,7 @@ export async function completeLogin(
         config.workspaceId = match.id;
     } else if (workspaces.length === 1) {
         const selected = workspaces[0];
-        console.log(chalk.gray(`Auto-selected workspace: ${selected.name}`));
+        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(selected)}`));
         config.workspace = selected.slug ?? selected.name;
         config.workspaceId = selected.id;
     } else if (workspaces.length === 0) {

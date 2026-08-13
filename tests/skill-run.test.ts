@@ -89,6 +89,29 @@ describe('assembleEnv', () => {
         expect(warnings.join('\n')).toContain('PATH');
     });
 
+    it('passes resolved workspace-database values and their database-key manifest to local skills', () => {
+        const databaseValue = JSON.stringify({
+            url: 'libsql://analytics-db.turso.io',
+            token: 'fresh-database-token',
+            name: 'analytics',
+            read_only: false,
+        });
+        const { env, warnings } = assembleEnv({
+            resolved: {
+                ANALYTICS_DB: databaseValue,
+                SOLIDACTIONS__DB_KEYS: 'ANALYTICS_DB',
+            },
+            fileVars: {},
+            storageScope: null,
+            dir: '/tmp/skill',
+            config,
+        });
+
+        expect(env.ANALYTICS_DB).toBe(databaseValue);
+        expect(env.SOLIDACTIONS__DB_KEYS).toBe('ANALYTICS_DB');
+        expect(warnings).toEqual([]);
+    });
+
     it('injects STATE_DIR only for storage.scope=crew and SHARED_DIR only for workspace', () => {
         const crew = assembleEnv({ resolved: {}, fileVars: {}, storageScope: 'crew', dir: '/tmp/skill', config });
         expect(crew.env.SOLIDACTIONS_STATE_DIR).toBe(path.join('/tmp/skill', '.sa-state'));
@@ -127,8 +150,21 @@ describe('solidactions skill run — integration', () => {
                 return;
             }
             if (req.url?.startsWith('/api/v1/crews/7/variables/resolve')) {
+                const databaseValue = JSON.stringify({
+                    url: 'libsql://analytics-db.turso.io',
+                    token: 'fresh-database-token',
+                    name: 'analytics',
+                    read_only: false,
+                });
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ variables: { PROBE: 'resolved' }, skipped_secrets: ['HIDDEN'] }));
+                res.end(JSON.stringify({
+                    variables: {
+                        PROBE: 'resolved',
+                        ANALYTICS_DB: databaseValue,
+                        SOLIDACTIONS__DB_KEYS: 'ANALYTICS_DB',
+                    },
+                    skipped_secrets: ['HIDDEN'],
+                }));
                 return;
             }
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -162,7 +198,11 @@ describe('solidactions skill run — integration', () => {
                         '--crew', 'my-crew',
                         '--environment', 'dev',
                         '--',
-                        'node', '-e', 'console.log("PROBE="+process.env.PROBE)',
+                        'node', '-e', [
+                            'console.log("PROBE="+process.env.PROBE)',
+                            'console.log("DB_KEYS="+process.env.SOLIDACTIONS__DB_KEYS)',
+                            'console.log("DATABASE="+process.env.ANALYTICS_DB)',
+                        ].join(';'),
                     ],
                     {
                         env: {
@@ -193,6 +233,8 @@ describe('solidactions skill run — integration', () => {
 
             expect(result.status).toBe(0);
             expect(result.stdout).toContain('PROBE=resolved');
+            expect(result.stdout).toContain('DB_KEYS=ANALYTICS_DB');
+            expect(result.stdout).toContain('DATABASE={"url":"libsql://analytics-db.turso.io","token":"fresh-database-token","name":"analytics","read_only":false}');
             expect(result.stderr).toContain('HIDDEN');
             expect(result.stderr).toContain('env:reveal');
         } finally {
