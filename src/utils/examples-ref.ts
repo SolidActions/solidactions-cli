@@ -25,11 +25,10 @@
  * users. If solidactions-examples ever starts publishing tags in step with the
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
- * Currently: the solidactions-examples issue #1201 branch head @ cf3a0df6
- * "docs(#1201): refresh workspace database guidance". Pinning this immutable
- * PR-head commit is a temporary build-time necessity while the coordinated wave
- * is pending merge. Before the examples branch is deleted, repin EXAMPLES_REF
- * to the merged mainline SHA. Before any CLI release, verify that exact ref
- * during the release ritual.
+ * Currently: the merged solidactions-examples mainline as of CLI v3.8.0
+ * (includes ex#31 "refresh workspace database guidance"). Repinned at release
+ * per the standing #1146 contract: on every CLI release, repin EXAMPLES_REF to
+ * the examples repo's merged mainline SHA and verify the exact ref during the
+ * release ritual.
  */
-export const EXAMPLES_REF = 'cf3a0df634895e549600fb5d632fef2ba547aa8d';
+export const EXAMPLES_REF = '5eaaaab417ef510401618b814a1eedf238752057';
