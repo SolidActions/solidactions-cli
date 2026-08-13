@@ -49,14 +49,21 @@ export async function fetchWorkspaces(config: Config): Promise<FetchWorkspacesRe
     const grouped = response.data.workspaces || response.data.teams || response.data.data || response.data;
     const out: WorkspaceLookupRecord[] = [];
     if (typeof grouped === 'object' && !Array.isArray(grouped)) {
-        for (const orgWorkspaces of Object.values(grouped)) {
-            out.push(...(orgWorkspaces as WorkspaceLookupRecord[]));
+        for (const [orgName, orgWorkspaces] of Object.entries(grouped)) {
+            for (const ws of orgWorkspaces as Array<WorkspaceLookupRecord & { tenant_name?: string }>) {
+                out.push({ ...ws, org_name: ws.tenant_name || orgName });
+            }
         }
     } else if (Array.isArray(grouped)) {
         out.push(...(grouped as WorkspaceLookupRecord[]));
     }
     const scope = (response.data.scope as WorkspaceScope | null) ?? null;
     return { workspaces: out, scope };
+}
+
+/** Workspace name, qualified with its org name when known (e.g. `"Foo — organization Bar"`). */
+export function formatWorkspaceWithOrg(ws: WorkspaceLookupRecord): string {
+    return ws.org_name ? `${ws.name} — organization ${ws.org_name}` : ws.name;
 }
 
 /**
@@ -78,15 +85,29 @@ export async function selectWorkspaceInteractively(
         return undefined;
     }
     if (workspaces.length === 1) {
-        console.log(chalk.gray(`Auto-selected workspace: ${workspaces[0].name}`));
+        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(workspaces[0])}`));
         return workspaces[0];
     }
 
-    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => ws.name);
+    const label = dependencies.label ?? ((ws: WorkspaceLookupRecord) => (ws.role ? `${ws.name} (${ws.role})` : ws.name));
+    // Header + grouping preamble are only useful once there's more than one
+    // org to disambiguate; a single-org account would otherwise get a
+    // redundant sole header and a pointless "grouped by organization" line.
+    const orgNames = new Set(workspaces.map((ws) => ws.org_name).filter((name): name is string => !!name));
+    const grouped = orgNames.size > 1;
 
     console.log(chalk.blue('\nSelect your default workspace (change anytime with `solidactions workspace set`):\n'));
+    if (grouped) {
+        console.log(chalk.gray('Workspaces are grouped by organization.\n'));
+    }
+    let lastOrg: string | undefined;
     workspaces.forEach((ws, i) => {
-        console.log(`  ${chalk.white(`${i + 1}.`)} ${label(ws)}`);
+        if (grouped && ws.org_name !== lastOrg) {
+            console.log(`  ${chalk.bold(ws.org_name ?? '')}`);
+            lastOrg = ws.org_name;
+        }
+        const indent = grouped ? '    ' : '  ';
+        console.log(`${indent}${chalk.white(`${i + 1}.`)} ${label(ws)}`);
     });
     console.log('');
 
@@ -121,7 +142,9 @@ export async function selectWorkspaceInteractively(
             }
             const index = parseInt(answer, 10) - 1;
             if (!isNaN(index) && index >= 0 && index < workspaces.length) {
-                return workspaces[index];
+                const selected = workspaces[index];
+                console.log(chalk.green(`Selected: ${formatWorkspaceWithOrg(selected)}`));
+                return selected;
             }
             console.error(chalk.red('Invalid selection. Enter one of the numbers shown.'));
         }

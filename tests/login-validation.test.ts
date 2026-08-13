@@ -198,6 +198,34 @@ describe('login — validates before writing (F-C2)', () => {
         expect(out).toContain('Logged in successfully!');
     });
 
+    it('non-interactive, no --workspace: auto-selects the sole workspace with an org-qualified confirmation (real grouped-object payload)', async () => {
+        nextStatus = 200;
+        nextBody = {
+            workspaces: {
+                'Acme Org': [
+                    { id: 'ws-1', name: 'Only Workspace', slug: 'only-workspace', role: 'owner', tenant_id: 't-1', tenant_name: 'Acme Org', tenant_slug: 'acme' },
+                ],
+            },
+        };
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await login('good-key', { global: true, host: HOST() });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught).toBeNull();
+        expect(writeCount).toBe(1);
+        const globalPath = path.join(env.home, '.solidactions', 'config.json');
+        const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(config.workspaceId).toBe('ws-1');
+        expect(config.workspace).toBe('only-workspace');
+        const out = logLines.join(' ');
+        expect(out).toContain('Auto-selected workspace: Only Workspace — organization Acme Org');
+    });
+
     it('non-interactive, no --workspace: leaves multiple workspaces unset with recovery guidance', async () => {
         nextStatus = 200;
         nextBody = {

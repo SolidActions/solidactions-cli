@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { requireConfig, requireResolvedConfig } from '../utils/api';
 import { writeWorkspaceToFile } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
-import { resolveWorkspaceInput } from '../utils/workspace-lookup';
+import { formatWorkspaceWithOrg, resolveWorkspaceInput } from '../utils/workspace-lookup';
 
 export async function workspacesList() {
     const config = requireConfig();
@@ -101,6 +101,6 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
         await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
     }
 
-    console.log(chalk.green(`Workspace set to: ${workspace.name} (${workspace.id})`));
+    console.log(chalk.green(`Workspace set to: ${formatWorkspaceWithOrg(workspace)} (${workspace.id})`));
     console.log(chalk.gray(`Saved to ${targetPath}`));
 }
