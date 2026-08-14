@@ -169,6 +169,25 @@ export function augmentTokenMissingAbilityMessage(error: any): any {
         }
     }
 
+    const isEnvRevealAbility = requiredAbility === 'env:reveal';
+
+    if (
+        response?.status === 403
+        && response.data?.code === 'token_missing_ability'
+        && isEnvRevealAbility
+    ) {
+        const hint = "The 'env:reveal' ability grants plaintext disclosure of secret values. "
+            + 'Re-run `solidactions login --device` and tick "Reveal secret values" on the consent screen, '
+            + 'or create an API key with the \'env:reveal\' ability checked at Settings → API keys '
+            + 'and `solidactions login` with that key.';
+        const message = typeof response.data.message === 'string' && response.data.message.length > 0
+            ? response.data.message
+            : "This session does not have the 'env:reveal' ability.";
+        if (!message.includes('Settings → API keys')) {
+            response.data.message = `${message}\n\n${hint}`;
+        }
+    }
+
     return error;
 }
 

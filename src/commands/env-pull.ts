@@ -256,6 +256,16 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                 if (environment !== 'production') {
                     console.log(chalk.gray(`Try deploying with: solidactions project deploy ${projectName} -e ${environment} --create`));
                 }
+            } else if (error.response.status === 403) {
+                // Only the reveal step is named as the culprit — a 403 here can
+                // also be a workspace-scope or project-policy denial, and
+                // blaming env:reveal for those sends the user to the wrong fix.
+                const detail = typeof error.response.data?.message === 'string' ? error.response.data.message : undefined;
+                const needsReveal = error.response.data?.required_ability === 'env:reveal';
+                const lead = needsReveal
+                    ? "Reading variable values requires the 'env:reveal' ability."
+                    : 'Permission denied.';
+                console.error(chalk.red(detail ? `${lead}\n\n${detail}` : lead));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }
