@@ -24,6 +24,7 @@ describe('project view --help — environment targeting contract', () => {
         expect(result.stdout).toMatch(/Usage:.*<project>/);
         expect(result.stdout).toMatch(/Arguments:\s+project\s+Project family slug or name/);
         expect(result.stdout).toContain('Defaults to dev');
+        expect(result.stdout).toContain('--json');
         expect(result.stdout).toContain('Use --env production');
         expect(result.stdout).not.toContain('Exact project slug');
         expect(result.stdout).not.toContain('used as an exact slug');

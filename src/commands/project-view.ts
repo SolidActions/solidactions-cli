@@ -4,7 +4,8 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
-    formatRevisionSummary,
+    formatDetailedRevision,
+    revisionSha,
     sanitizeDisplayText,
     sanitizeRemoteUrl,
     type MetadataSource,
@@ -23,6 +24,9 @@ export interface DeploymentDetail {
     commit_author_date: string | null;
     remote_url: string | null;
     dirty: boolean | null;
+    default_branch: string | null;
+    default_branch_sha: string | null;
+    commits_behind: number | null;
     completed_at: string | null;
 }
 
@@ -38,6 +42,51 @@ export interface ProjectDeploymentDetail {
 
 export interface ProjectViewOptions {
     env?: string;
+    json?: boolean;
+}
+
+/**
+ * Projects exactly the fields `DeploymentDetail` declares.
+ *
+ * The server's DeploymentResource serializes more than this — `failure_reason`
+ * today, more tomorrow — and that field is always null for a *successful*
+ * deployment, which is the only kind this endpoint returns here. Listing the
+ * fields explicitly keeps `--json` a documented contract instead of a mirror of
+ * whatever the API happens to add next.
+ */
+function deploymentJsonProjection(deployment: DeploymentDetail): Record<string, unknown> {
+    return {
+        id: deployment.id,
+        status: deployment.status,
+        source_hash: deployment.source_hash,
+        metadata_source: deployment.metadata_source ?? null,
+        commit_sha: deployment.commit_sha ?? null,
+        short_sha: deployment.short_sha ?? null,
+        branch: deployment.branch ?? null,
+        tag: deployment.tag ?? null,
+        commit_subject: deployment.commit_subject ?? null,
+        commit_author_date: deployment.commit_author_date ?? null,
+        remote_url: deployment.remote_url ?? null,
+        dirty: deployment.dirty ?? null,
+        default_branch: deployment.default_branch ?? null,
+        default_branch_sha: deployment.default_branch_sha ?? null,
+        commits_behind: deployment.commits_behind ?? null,
+        completed_at: deployment.completed_at ?? null,
+    };
+}
+
+export function projectViewJsonProjection(project: ProjectDeploymentDetail): Record<string, unknown> {
+    const deployment = project.latest_successful_deployment ?? null;
+
+    return {
+        slug: project.slug ?? null,
+        name: project.name ?? null,
+        status: project.status ?? null,
+        enabled: project.enabled ?? null,
+        deployed_hash: project.deployed_hash ?? null,
+        deployment_matches_deployed_hash: project.deployment_matches_deployed_hash ?? false,
+        latest_successful_deployment: deployment === null ? null : deploymentJsonProjection(deployment),
+    };
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
@@ -71,9 +120,7 @@ function metadataSourceLabel(source: unknown): string | null {
 }
 
 export function formatDeploymentRevision(deployment: DeploymentDetail): string[] {
-    const sha = sanitizeDisplayText(deployment.short_sha, 16)
-        ?? sanitizeDisplayText(deployment.commit_sha, 64);
-    if (!sha) {
+    if (revisionSha(deployment) === null) {
         const archiveHash = sanitizeDisplayText(deployment.source_hash, 64);
         return [
             'No source revision was reported.',
@@ -82,7 +129,7 @@ export function formatDeploymentRevision(deployment: DeploymentDetail): string[]
     }
 
     const lines = [
-        `Revision (Client-reported): ${formatRevisionSummary(deployment)}`,
+        `Revision (Client-reported): ${formatDetailedRevision(deployment)}`,
     ];
     const source = metadataSourceLabel(deployment.metadata_source);
     if (source) {
@@ -161,8 +208,12 @@ export async function projectViewWithConfig(
             `${config.host}/api/v1/projects/${encodeURIComponent(slug)}?include=deployment`,
             { headers: getApiHeaders(config) },
         );
-        for (const line of formatProjectView(response.data)) {
-            writeLine(line);
+        if (options.json) {
+            writeLine(JSON.stringify(projectViewJsonProjection(response.data), null, 2));
+        } else {
+            for (const line of formatProjectView(response.data)) {
+                writeLine(line);
+            }
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
