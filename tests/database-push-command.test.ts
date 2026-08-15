@@ -262,7 +262,11 @@ describe('database push workflow', () => {
                 bodies.push(body);
                 if (body.operation === 'bulk_load_prepare') {
                     prepares++;
-                    return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: `fresh-secret-${prepares}` } } };
+                    // Only the FIRST prepare carries a credential; a renewal
+                    // replay extends the lease and returns none (#1287 R9b).
+                    return prepares === 1
+                        ? { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'fresh-secret-1' } } }
+                        : { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' } } };
                 }
                 if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } } };
                 return { data: { operation: { id: body.operation_id, phase: 'promoted' } } };

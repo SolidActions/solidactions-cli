@@ -256,9 +256,11 @@ export async function databasePushWithConfig(name: string, file: string, options
                 const replay = await requestDatabaseOperation<any>(config, prepareBody, { post: dependencies.post, controlPlaneTimeoutMs: controlRemaining() });
                 const replayOperation = stableOperation(replay);
                 if (replayOperation.id !== operation.id) throw new DatabaseOperationError('bulk_load_conflict', 'The bulk-load replay returned a different operation.');
-                // A replay deliberately rotates the candidate credential. The
-                // upload already in progress keeps its original credential;
-                // the fresh token is neither retained nor printed.
+                // A replay is a LEASE renewal only (#1287 R9b): the server
+                // returns no credential, because an in-progress direct upload
+                // cannot swap tokens mid-flight. The original single-use
+                // credential stays valid until the hard deadline. Should any
+                // server ever include one, it is neither retained nor printed.
             }).catch((error) => { renewalFailure = error; });
         }, 5 * 60_000);
         try {
