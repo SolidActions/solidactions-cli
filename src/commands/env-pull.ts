@@ -270,6 +270,9 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
             }
+        } else if (!axios.isAxiosError(error) && error.code) {
+            // A filesystem failure writing the .env — not a connection problem.
+            console.error(chalk.red(`Failed to write ${outputFile}: ${error.message}`));
         } else {
             console.error(chalk.red('Connection failed:'), error.message);
         }

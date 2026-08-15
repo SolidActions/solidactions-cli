@@ -111,6 +111,7 @@ describe('envPull file permissions', () => {
         expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
         expect(fs.readFileSync(target, 'utf8')).toContain('API_TOKEN=super-secret');
         expect(mode(target)).toBe(0o600);
+        expect(fs.statSync(target).mode & 0o077).toBe(0);
     });
 
     posixOnly('creates an OAuth-only .env owner-only (--update-oauth, no existing file)', async () => {
