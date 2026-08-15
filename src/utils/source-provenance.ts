@@ -21,6 +21,9 @@ export interface SourceMetadata {
     commit_author_date: string | null;
     remote_url: string | null;
     dirty: boolean | null;
+    default_branch: string | null;
+    default_branch_sha: string | null;
+    commits_behind: number | null;
 }
 
 export interface DeployAcceptance {
@@ -149,7 +152,72 @@ function git(sourceDir: string, args: string[]): string | null {
     return result.stdout.trim();
 }
 
-function localGitMetadata(sourceDir: string): SourceMetadata | null {
+interface DefaultBranchEvidence {
+    default_branch: string | null;
+    default_branch_sha: string | null;
+    commits_behind: number | null;
+}
+
+const NULL_DEFAULT_BRANCH_EVIDENCE: DefaultBranchEvidence = {
+    default_branch: null,
+    default_branch_sha: null,
+    commits_behind: null,
+};
+
+function defaultBranchEvidence(
+    sourceDir: string,
+    hasOrigin: boolean,
+    hint?: (message: string) => void,
+): DefaultBranchEvidence {
+    if (!hasOrigin || git(sourceDir, ['rev-parse', '--is-shallow-repository']) !== 'false') {
+        return NULL_DEFAULT_BRANCH_EVIDENCE;
+    }
+
+    let trackingRef = git(sourceDir, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+    if (trackingRef === null) {
+        // Only a genuinely absent origin/HEAD permits the conventional-name fallback.
+        // An unexpected direct ref is existing-but-invalid evidence, just like a stale
+        // symbolic target, and must not be silently replaced with a guess.
+        if (git(sourceDir, ['rev-parse', '--verify', 'refs/remotes/origin/HEAD']) !== null) {
+            return NULL_DEFAULT_BRANCH_EVIDENCE;
+        }
+        const candidates = ['main', 'master'].filter((branch) =>
+            git(sourceDir, ['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`]) !== null,
+        );
+        if (candidates.length !== 1) {
+            hint?.('Unable to determine origin default branch; run `git remote set-head origin -a`.');
+            return NULL_DEFAULT_BRANCH_EVIDENCE;
+        }
+        trackingRef = `refs/remotes/origin/${candidates[0]}`;
+    }
+
+    const prefix = 'refs/remotes/origin/';
+    if (!trackingRef.startsWith(prefix)) {
+        return NULL_DEFAULT_BRANCH_EVIDENCE;
+    }
+    const branch = displayValue(trackingRef.slice(prefix.length), 255);
+    const sha = shaValue(git(sourceDir, ['rev-parse', '--verify', `${trackingRef}^{commit}`]) ?? undefined);
+    if (!branch || !sha) {
+        return NULL_DEFAULT_BRANCH_EVIDENCE;
+    }
+
+    const counts = git(sourceDir, ['rev-list', '--left-right', '--count', `HEAD...${trackingRef}`]);
+    const match = counts?.match(/^(\d+)\s+(\d+)$/);
+    if (!match) {
+        return NULL_DEFAULT_BRANCH_EVIDENCE;
+    }
+    const behind = Number(match[2]);
+    if (!Number.isSafeInteger(behind) || behind < 0 || behind > 2_147_483_647) {
+        return NULL_DEFAULT_BRANCH_EVIDENCE;
+    }
+
+    return { default_branch: branch, default_branch_sha: sha, commits_behind: behind };
+}
+
+function localGitMetadata(
+    sourceDir: string,
+    hint?: (message: string) => void,
+): SourceMetadata | null {
     if (git(sourceDir, ['rev-parse', '--is-inside-work-tree']) !== 'true') {
         return null;
     }
@@ -161,6 +229,7 @@ function localGitMetadata(sourceDir: string): SourceMetadata | null {
 
     const status = git(sourceDir, ['status', '--porcelain=v1', '--untracked-files=all', '--', '.']);
     const shortSha = shaValue(git(sourceDir, ['rev-parse', '--short=12', 'HEAD']) ?? undefined);
+    const remoteUrl = sanitizeRemoteUrl(git(sourceDir, ['config', '--get', 'remote.origin.url']) ?? undefined);
 
     return {
         metadata_source: 'git',
@@ -170,8 +239,9 @@ function localGitMetadata(sourceDir: string): SourceMetadata | null {
         tag: displayValue(git(sourceDir, ['describe', '--tags', '--exact-match', 'HEAD']) ?? undefined, 255),
         commit_subject: displayValue(git(sourceDir, ['show', '-s', '--format=%s', 'HEAD']) ?? undefined, 500),
         commit_author_date: authorDateValue(git(sourceDir, ['show', '-s', '--format=%aI', 'HEAD']) ?? undefined),
-        remote_url: sanitizeRemoteUrl(git(sourceDir, ['config', '--get', 'remote.origin.url']) ?? undefined),
+        remote_url: remoteUrl,
         dirty: status === null ? null : status !== '',
+        ...defaultBranchEvidence(sourceDir, remoteUrl !== null, hint),
     };
 }
 
@@ -186,6 +256,9 @@ function baseCiMetadata(source: MetadataSource, sha: string): SourceMetadata {
         commit_author_date: null,
         remote_url: null,
         dirty: null,
+        default_branch: null,
+        default_branch_sha: null,
+        commits_behind: null,
     };
 }
 
@@ -260,8 +333,9 @@ function bitbucketMetadata(environment: Environment): SourceMetadata | null {
 export function collectSourceMetadata(
     sourceDir: string,
     environment: Environment = process.env,
+    hint?: (message: string) => void,
 ): SourceMetadata | null {
-    return localGitMetadata(path.resolve(sourceDir))
+    return localGitMetadata(path.resolve(sourceDir), hint)
         ?? githubMetadata(environment)
         ?? gitlabMetadata(environment)
         ?? circleMetadata(environment)
