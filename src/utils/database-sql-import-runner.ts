@@ -6,10 +6,15 @@ import { loadDatabaseClientBeforeMint } from './database-client-support';
 import {
     DatabaseClient,
     DatabaseClientDependencies,
+    DatabaseAccess,
+    DatabaseCredentialDeadline,
     DatabaseOperationError,
     DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
     requestDatabaseAccess,
     runDatabaseClientOperationWithDeadline,
+    databaseCredentialDeadline,
+    databaseCredentialFailureCode,
+    isDatabaseCredentialAuthFailure,
 } from './database-data-plane';
 import {
     DatabaseSqlImportGroup,
@@ -54,6 +59,7 @@ export interface DatabaseImportRunnerDependencies extends DatabaseClientDependen
     filesystem: ImportFileSystem;
     stdout: (line: string) => void;
     now: () => number;
+    monotonicNow: () => number;
 }
 
 function importFailure(message = 'Database import failed.'): DatabaseOperationError {
@@ -426,29 +432,36 @@ function batchSql(groups: DatabaseSqlImportGroup[]): string {
     ].join('\n');
 }
 
-function validateAccess(access: unknown, now: number): { url: string; token: string; expiresAt: number } {
+function validateAccess(access: unknown, now: number, monotonicNow: number): {
+    url: string;
+    token: string;
+    deadline: DatabaseCredentialDeadline;
+} {
     const value = access as Record<string, unknown> | null;
     const url = typeof value?.url === 'string' ? value.url.trim() : '';
     const token = typeof value?.token === 'string' ? value.token.trim() : '';
-    const expiresAt = typeof value?.expires_at === 'string' ? Date.parse(value.expires_at) : Number.NaN;
+    const deadline = databaseCredentialDeadline(
+        value as unknown as DatabaseAccess,
+        now,
+        monotonicNow,
+        RENEWAL_WINDOW_MS,
+    );
     if (
         value?.mode !== 'write'
         || url === ''
         || token === ''
-        || !Number.isFinite(now)
-        || !Number.isFinite(expiresAt)
-        || expiresAt <= now + RENEWAL_WINDOW_MS
+        || !deadline
     ) {
         throw importFailure('Database import access was invalid.');
     }
-    return { url, token, expiresAt };
+    return { url, token, deadline };
 }
 
 async function acquireClient(
     prepared: PreparedDatabaseImport,
     config: Config,
     dependencies: DatabaseImportRunnerDependencies,
-): Promise<{ client: DatabaseClient; expiresAt: number }> {
+): Promise<{ client: DatabaseClient; deadline: DatabaseCredentialDeadline }> {
     let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
     try {
         loaded = await loadDatabaseClientBeforeMint(
@@ -463,7 +476,7 @@ async function acquireClient(
         throw importFailure('Database import access could not be renewed.');
     }
 
-    const access = validateAccess(loaded.access, dependencies.now());
+    const access = validateAccess(loaded.access, dependencies.now(), dependencies.monotonicNow());
     let client: DatabaseClient;
     try {
         client = loaded.createClient({
@@ -487,7 +500,7 @@ async function acquireClient(
         }
         throw importFailure('Database import requires atomic multi-statement execution support.');
     }
-    return { client, expiresAt: access.expiresAt };
+    return { client, deadline: access.deadline };
 }
 
 async function closeClient(
@@ -518,7 +531,7 @@ export async function runPreparedDatabaseImport(
     let suppressResume = false;
     let client: DatabaseClient | undefined;
     let clientClosePromise: Promise<void> | undefined;
-    let expiresAt = 0;
+    let deadline: DatabaseCredentialDeadline | undefined;
     let failure: DatabaseOperationError | undefined;
     const closeCurrentClient = (): Promise<void> => {
         clientClosePromise ??= closeClient(client, dependencies.dataPlaneTimeoutMs);
@@ -527,13 +540,14 @@ export async function runPreparedDatabaseImport(
 
     try {
         while (nextStatement < prepared.groups.length) {
-            if (!client || dependencies.now() >= expiresAt - RENEWAL_WINDOW_MS) {
+            const deadlineNow = deadline?.clock === 'monotonic' ? dependencies.monotonicNow() : dependencies.now();
+            if (!client || !deadline || deadlineNow >= deadline.renewalAt) {
                 await closeCurrentClient();
                 client = undefined;
                 clientClosePromise = undefined;
                 const acquired = await acquireClient(prepared, config, dependencies);
                 client = acquired.client;
-                expiresAt = acquired.expiresAt;
+                deadline = acquired.deadline;
             }
 
             const batch = nextBatch(prepared.groups, nextStatement);
@@ -545,6 +559,14 @@ export async function runPreparedDatabaseImport(
                 );
             } catch (error) {
                 if (error instanceof DatabaseOperationError) throw error;
+                if (deadline && isDatabaseCredentialAuthFailure(error)) {
+                    const code = databaseCredentialFailureCode(deadline, dependencies.now(), dependencies.monotonicNow());
+                    const label = code === 'database_credential_expired' ? 'expired' : 'was revoked';
+                    throw new DatabaseOperationError(
+                        code,
+                        `Database credential ${label} during an import batch; the batch outcome is unknown.`,
+                    );
+                }
                 throw importFailure('A database import batch failed.');
             }
 
@@ -607,6 +629,7 @@ export async function runPreparedDatabaseImport(
     if (failure) {
         const policyRefusal = failure.code === 'read_only_mode'
             || failure.code === 'plan_denied'
+            || ['reads_exhausted', 'writes_exhausted', 'storage_exhausted'].includes(failure.code)
             || failure.status === 429;
         const guidance = checkpointPublished && !suppressResume && !policyRefusal
             ? `\nLast completed position: batch ${completedBatches}, ${nextStatement} statements, ${completedSourceBytes} source bytes.\n${resumeLine(prepared.database, prepared.file, prepared.checkpointPath)}`

@@ -54,6 +54,8 @@ interface HarnessOptions {
     input?: AsyncIterable<string>;
     onRead?: (line: string, index: number) => void;
     now?: () => number;
+    monotonicNow?: () => number;
+    expiresInSeconds?: number;
     expiresAt?: string[];
     mint?: (attempt: number) => Promise<Record<string, unknown>>;
     execute?: (execution: Execution) => Promise<unknown>;
@@ -79,6 +81,7 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
         cwd: root,
         tempPath: (target: string) => path.join(path.dirname(target), `.${path.basename(target)}.solidactions-task8.tmp`),
         now: options.now ?? (() => Date.parse('2026-08-07T12:00:00.000Z')),
+        monotonicNow: options.monotonicNow,
         input: options.input ?? lineSource(options.lines ?? ['.exit'], (line, index) => {
             events.push(`input:${index + 1}`);
             options.onRead?.(line, index);
@@ -152,6 +155,7 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
                     token: `fresh-write-token-sentinel-${attempt}`,
                     mode: 'write',
                     expires_at: expiresAt[Math.min(attempt - 1, expiresAt.length - 1)],
+                    ...(options.expiresInSeconds === undefined ? {} : { expires_in_seconds: options.expiresInSeconds }),
                 },
             };
         },
@@ -372,6 +376,56 @@ describe('database pull --writable foreground attached session', () => {
             { client: 2, sql: 'SELECT 2;' },
         ]);
         expect(test.closed).toEqual([1, 2]);
+    });
+
+    it('renews from the monotonic response-receipt lifetime when wall time moves backwards', async () => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        let monotonic = 20_000;
+        const test = writableHarness(root, {
+            now: () => Date.parse('1999-01-01T00:00:00.000Z'),
+            monotonicNow: () => monotonic,
+            expiresAt: ['2099-01-01T00:00:00.000Z'],
+            expiresInSeconds: 600,
+            lines: ['SELECT 1;', 'SELECT 2;', '.exit'],
+            execute: async ({ sql }) => {
+                if (sql === 'SELECT 1;') monotonic = 590_001;
+                return { columns: ['value'], rows: [['1']], rowsAffected: 0 };
+            },
+        });
+
+        await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
+
+        expect(test.posts).toHaveLength(2);
+        expect(test.executions.map(({ client }) => client)).toEqual([1, 2]);
+    });
+
+    it.each([
+        { error: { code: 'AUTH_TOKEN_EXPIRED' }, elapsed: 599_999, label: 'database_credential_revoked' },
+        { error: { code: 'AUTH_EXPIRED' }, elapsed: 600_000, label: 'database_credential_expired' },
+        { error: { code: 'TOKEN_EXPIRED' }, elapsed: 600_000, label: 'database_credential_expired' },
+        { error: { code: 'SQLITE_AUTH', message: 'jwt rejected' }, elapsed: 599_999, label: 'database_credential_revoked' },
+    ])('preserves $error.code detection and labels it $label', async ({ error, elapsed, label }) => {
+        const databasePullWithConfig = await requirePull();
+        const root = tempRoot();
+        let monotonic = 30_000;
+        const test = writableHarness(root, {
+            monotonicNow: () => monotonic,
+            expiresInSeconds: 600,
+            lines: ['INSERT INTO ledger VALUES (1);', '.exit'],
+            execute: async ({ client }) => {
+                if (client === 1) {
+                    monotonic = 30_000 + elapsed;
+                    throw Object.assign(new Error(error.message ?? 'auth failed'), error);
+                }
+                return { columns: [], rows: [], rowsAffected: 1 };
+            },
+        });
+
+        await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
+
+        expect(test.stderr.join('\n')).toContain(label);
+        expect(test.posts).toHaveLength(2);
     });
 
     it('stops before consuming more input when proactive renewal is refused', async () => {

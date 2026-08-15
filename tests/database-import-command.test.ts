@@ -59,6 +59,8 @@ interface HarnessOptions {
     confirm?: boolean;
     isTTY?: boolean;
     now?: () => number;
+    monotonicNow?: () => number;
+    expiresInSeconds?: number;
     expiresAt?: string[];
     post?: (attempt: number, body: Record<string, unknown>) => Promise<unknown>;
     execute?: (execution: Execution) => Promise<void>;
@@ -86,6 +88,7 @@ function importHarness(root: string, options: HarnessOptions = {}) {
         cwd: root,
         filesystem: options.filesystem,
         now: options.now ?? (() => Date.parse('2026-08-07T12:00:00.000Z')),
+        monotonicNow: options.monotonicNow,
         isTTY: options.isTTY ?? true,
         confirm,
         stdout: (line: string) => stdout.push(line),
@@ -142,6 +145,7 @@ function importHarness(root: string, options: HarnessOptions = {}) {
                     token: `write-token-sentinel-${attempt}`,
                     mode: 'write',
                     expires_at: expiresAt[Math.min(attempt - 1, expiresAt.length - 1)],
+                    ...(options.expiresInSeconds === undefined ? {} : { expires_in_seconds: options.expiresInSeconds }),
                 },
             };
         },
@@ -515,6 +519,52 @@ describe('database import preflight and execution', () => {
         expect(test.events.lastIndexOf('post:access')).toBeLessThan(test.events.indexOf('client:2:execute:2'));
     });
 
+    it('uses the response-receipt monotonic lifetime for renewal despite a slow wall clock', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`).join('\n'));
+        let monotonic = 10_000;
+        const test = importHarness(root, {
+            now: () => Date.parse('1999-01-01T00:00:00.000Z'),
+            monotonicNow: () => monotonic,
+            expiresAt: ['2099-01-01T00:00:00.000Z'],
+            expiresInSeconds: 600,
+            execute: async () => { monotonic = 580_001; },
+        });
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(accessPosts(test)).toHaveLength(2);
+        expect(test.closed).toEqual([1, 2]);
+    });
+
+    it.each([
+        { elapsed: 599_999, code: 'database_credential_revoked' },
+        { elapsed: 600_000, code: 'database_credential_expired' },
+    ])('labels a remote driver 401 at $elapsed ms as $code without retaining its cause', async ({ elapsed, code }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT INTO t VALUES (1);');
+        let monotonic = 5_000;
+        const test = importHarness(root, {
+            monotonicNow: () => monotonic,
+            expiresInSeconds: 600,
+            execute: async () => {
+                monotonic = 5_000 + elapsed;
+                const cause = Object.assign(new Error('RAW_TRANSPORT_SECRET'), { status: 401 });
+                throw Object.assign(new Error('SERVER_ERROR: RAW_TRANSPORT_SECRET'), {
+                    name: 'LibsqlError', code: 'SERVER_ERROR', cause,
+                });
+            },
+        });
+
+        let caught: unknown;
+        try { await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies); } catch (error) { caught = error; }
+
+        expect(caught).toMatchObject({ code });
+        expectNoSecrets(caught);
+    });
+
     it('stops before the next batch when renewal is refused and retains only the last valid checkpoint', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
@@ -556,6 +606,60 @@ describe('database import preflight and execution', () => {
         expect(report(caught, test)).not.toContain('Resume with:');
         expectNoSecrets(report(caught, test));
         expectNoSecrets(checkpoint);
+    });
+
+    it('attempts a reads-exhausted renewal exactly once without retrying or offering terminal resume guidance', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        let monotonic = 10_000;
+        let refusalAttempts = 0;
+        const test = importHarness(root, {
+            monotonicNow: () => monotonic,
+            expiresInSeconds: 600,
+            post: async (attempt) => {
+                if (attempt >= 2) {
+                    refusalAttempts += 1;
+                    const denied: any = new Error('RAW_TRANSPORT_SECRET reads fuse response');
+                    denied.response = {
+                        status: 403,
+                        data: {
+                            code: 'reads_exhausted',
+                            message: 'Database reads are exhausted.',
+                        },
+                    };
+                    throw denied;
+                }
+                return {
+                    url: 'libsql://physical-hostname.sentinel.invalid',
+                    token: 'write-token-sentinel-1',
+                    mode: 'write',
+                    expires_at: '2099-01-01T00:00:00.000Z',
+                    expires_in_seconds: 600,
+                };
+            },
+            execute: async () => { monotonic = 580_001; },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({
+            code: 'reads_exhausted',
+            message: 'Database reads are exhausted.',
+            status: 403,
+        });
+        expect(accessPosts(test)).toHaveLength(2);
+        expect(refusalAttempts).toBe(1);
+        expect(test.executions).toHaveLength(1);
+        expect(checkpointFiles(root)).toHaveLength(1);
+        expect(report(caught, test)).not.toContain('Resume with:');
+        expectNoSecrets(report(caught, test));
     });
 
     it.each([
