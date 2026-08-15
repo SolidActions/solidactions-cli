@@ -71,12 +71,14 @@ describe('writeSecretFileSync', () => {
         fs.writeFileSync(target, 'OLD=0\n');
         fs.chmodSync(target, 0o644);
         fs.symlinkSync(target, link);
+        expect(mode(target)).toBe(0o644); // precondition
 
         writeSecretFileSync(link, 'SECRET=1\n');
 
         expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
         expect(fs.readFileSync(target, 'utf8')).toBe('SECRET=1\n');
         expect(mode(target)).toBe(0o600);
+        expect(fs.statSync(target).mode & 0o077).toBe(0);
         expect(fs.readdirSync(targetDir)).toEqual(['real.env']);
         fs.rmSync(targetDir, { recursive: true, force: true });
     });
@@ -91,6 +93,7 @@ describe('writeSecretFileSync', () => {
         expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
         expect(fs.readFileSync(target, 'utf8')).toBe('SECRET=1\n');
         expect(mode(target)).toBe(0o600);
+        expect(fs.statSync(target).mode & 0o077).toBe(0);
     });
 
     posixOnly('writes a character device directly and leaves no temp file', () => {
