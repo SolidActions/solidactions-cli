@@ -155,6 +155,29 @@ describe('database push workflow', () => {
         expect(output.join('\n').toLowerCase()).toContain('reacquire');
     });
 
+    it('accepts canonical UUIDv7 operation and explicit idempotency identifiers', async () => {
+        const source = await fixture();
+        const operationId = '0198f36e-7b2a-7cc2-8f1a-123456789abc';
+        const idempotencyKey = '0198f36e-7b2b-7dd3-9a2b-abcdef012345';
+        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: operationId, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } };
+            if (body.operation === 'bulk_load_promote') return { data: { operation: { id: operationId, phase: 'validating' } } };
+            return { data: { operation: { id: operationId, phase: 'promoted' } } };
+        });
+        await expect(databasePushWithConfig('analytics', source, { yes: true, idempotencyKey }, { host: 'https://app.test', apiKey: 'secret' }, { post, upload: async () => ({ status: 200 }) })).resolves.toBeUndefined();
+        expect(post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ operation: 'bulk_load_prepare', idempotency_key: idempotencyKey }), expect.any(Object));
+    });
+
+    it('rejects malformed operation identifiers without reflecting them', async () => {
+        const source = await fixture();
+        const leaked = 'secret-operation-id-candidate-token';
+        const output: string[] = [];
+        const post = vi.fn(async () => ({ data: { operation: { id: leaked, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } }));
+        await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post, stdout: (line) => output.push(line) }))
+            .rejects.toMatchObject({ code: 'upstream_unavailable', message: expect.not.stringContaining(leaked) });
+        expect(output.join('\n')).not.toContain(leaked).not.toContain('candidate-secret');
+    });
+
     it('rejects zero countable rows unless --allow-empty is explicit', async () => {
         const source = await fixture(true);
         const post = vi.fn();

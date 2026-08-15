@@ -13,7 +13,10 @@ const PAGE_SIZE = 4096;
 const POLL_MS = 2_000;
 const TERMINAL = new Set(['promoted', 'failed', 'aborted']);
 const PHASES = new Set(['preparing', 'uploading', 'validating', 'finalizing', 'promoted_pending_ready', 'promoted', 'aborting', 'aborted', 'failed']);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Laravel's unversioned `uuid` validation accepts the canonical hexadecimal
+// 8-4-4-4-12 representation regardless of UUID version (including UUIDv7).
+const IDEMPOTENCY_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPERATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EXCLUDED_PREFIXES = ['sqlite_', '_litestream', 'libsql_', '_turso_'];
 
 export interface DatabasePushOptions {
@@ -205,14 +208,14 @@ function hardDeadlineMs(bytes: number): number {
 
 function stableOperation(data: unknown): Record<string, unknown> {
     const operation = (data as any)?.operation;
-    if (!operation || typeof operation.id !== 'string' || !UUID.test(operation.id) || typeof operation.phase !== 'string' || !PHASES.has(operation.phase)) throw new DatabaseOperationError('upstream_unavailable', 'The database bulk-load response was invalid.');
+    if (!operation || typeof operation.id !== 'string' || !OPERATION_UUID.test(operation.id) || typeof operation.phase !== 'string' || !PHASES.has(operation.phase)) throw new DatabaseOperationError('upstream_unavailable', 'The database bulk-load response was invalid.');
     return operation;
 }
 
 export async function databasePushWithConfig(name: string, file: string, options: DatabasePushOptions, config: Config, dependencies: PushDependencies = {}): Promise<void> {
     if (!options.yes) throw new DatabaseOperationError('confirmation_required', 'Database push is destructive and requires --yes.');
     const key = options.idempotencyKey ?? randomUUID();
-    if (!UUID.test(key)) throw new DatabaseOperationError('invalid_bulk_database', '--idempotency-key must be a UUID.');
+    if (!IDEMPOTENCY_UUID.test(key)) throw new DatabaseOperationError('invalid_bulk_database', '--idempotency-key must be a UUID.');
     const stdout = dependencies.stdout ?? console.log;
     const sleep = dependencies.sleep ?? ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     const normalized = await normalizeDatabaseForPush(file, dependencies);
