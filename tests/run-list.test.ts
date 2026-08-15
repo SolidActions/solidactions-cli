@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     detailedOutcomeTag,
@@ -5,8 +6,22 @@ import {
     displaySummaryTable,
     formatDetailedRevision,
     formatRevisionCell,
+    runs,
     summaryStatusLabel,
 } from '../src/commands/run-list';
+
+vi.mock('axios', () => ({
+    default: { get: vi.fn() },
+}));
+
+vi.mock('../src/utils/api', () => ({
+    getApiHeaders: vi.fn(() => ({})),
+    requireConfigWithWorkspace: vi.fn(async () => ({
+        host: 'https://api.example.test',
+        apiKey: 'test-key',
+        workspaceId: 'test-workspace',
+    })),
+}));
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -20,6 +35,49 @@ const revision = {
 };
 
 describe('run revision formatting', () => {
+    it('passes through all seven deployed revision fields and values in JSON output', async () => {
+        const deployedRevision = {
+            commit_sha: 'abcdef1234567890abcdef1234567890abcdef12',
+            short_sha: 'abcdef123456',
+            dirty: true,
+            remote_url: 'https://example.test/acme/project.git',
+            default_branch: 'main',
+            default_branch_sha: '1234567890abcdef1234567890abcdef12345678',
+            commits_behind: 3,
+        };
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            data: { data: [{ id: 41, deployed_revision: deployedRevision }] },
+        });
+        const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        await runs(undefined, { json: true });
+
+        const output = JSON.parse(String(log.mock.calls[0][0]));
+        expect(Object.keys(output[0].deployed_revision)).toEqual([
+            'commit_sha',
+            'short_sha',
+            'dirty',
+            'remote_url',
+            'default_branch',
+            'default_branch_sha',
+            'commits_behind',
+        ]);
+        expect(output[0].deployed_revision).toEqual(deployedRevision);
+    });
+
+    it('passes through a null deployed revision in JSON output', async () => {
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            data: { data: [{ id: 42, deployed_revision: null }] },
+        });
+        const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        await runs(undefined, { json: true });
+
+        expect(JSON.parse(String(log.mock.calls[0][0]))).toEqual([
+            { id: 42, deployed_revision: null },
+        ]);
+    });
+
     it('formats clean, dirty, unknown-dirty, behind, and unknown summary cells', () => {
         expect(formatRevisionCell(revision)).toBe('abcdef123456');
         expect(formatRevisionCell({ ...revision, dirty: true })).toBe('abcdef123456*');
