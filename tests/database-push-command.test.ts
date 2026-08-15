@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { createClient } from '@libsql/client';
+import axios from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { assertCountableTableLimit, normalizeDatabaseForPush, databasePushWithConfig } from '../src/commands/database-push';
@@ -153,6 +154,26 @@ describe('database push workflow', () => {
         expect(posts[1]).toMatchObject({ upload_http_status: 200 });
         expect(output.join('\n')).not.toContain('candidate-secret').not.toContain('must-not-log');
         expect(output.join('\n').toLowerCase()).toContain('reacquire');
+    });
+
+    it('uses POST for the default Turso /v1/upload transport', async () => {
+        const source = await fixture();
+        const uploadPost = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+        const uploadPut = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
+        const operationId = '0198f36e-7b2a-7cc2-8f1a-123456789abc';
+        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: operationId, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } };
+            if (body.operation === 'bulk_load_promote') return { data: { operation: { id: operationId, phase: 'validating' } } };
+            return { data: { operation: { id: operationId, phase: 'promoted' } } };
+        });
+        try {
+            await databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post });
+            expect(uploadPost).toHaveBeenCalledWith('https://candidate.test/v1/upload', expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer candidate-secret' }) }));
+            expect(uploadPut).not.toHaveBeenCalled();
+        } finally {
+            uploadPost.mockRestore();
+            uploadPut.mockRestore();
+        }
     });
 
     it('accepts canonical UUIDv7 operation and explicit idempotency identifiers', async () => {

@@ -244,7 +244,7 @@ export async function databasePushWithConfig(name: string, file: string, options
         operationId = String(operation.id);
         const upload = prepare?.upload;
         if (typeof upload?.url !== 'string' || typeof upload?.token !== 'string') throw new DatabaseOperationError('upstream_unavailable', 'The database upload credential response was invalid.');
-        const uploader = dependencies.upload ?? axios.put;
+        const uploader = dependencies.upload ?? axios.post;
         let uploaded;
         let renewalFailure: unknown;
         let renewing: Promise<void> = Promise.resolve();
