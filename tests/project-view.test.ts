@@ -225,4 +225,99 @@ describe('project view request and rendering', () => {
             'No deployment provenance recorded (deployed before tracking)',
         );
     });
+
+    it('renders the drift clause inside the revision parenthetical when commits_behind is positive, byte-identical to run list', () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment.dirty = true;
+        body.latest_successful_deployment.default_branch = 'main';
+        body.latest_successful_deployment.commits_behind = 1;
+
+        const output = formatProjectView(body).join('\n');
+        expect(output).toContain('Revision (Client-reported): abcdef123456 (DIRTY, 1 behind origin/main at deploy)');
+    });
+
+    it.each([
+        ['commits_behind is zero', { commits_behind: 0, default_branch: 'main' }],
+        ['commits_behind is null', { commits_behind: null, default_branch: 'main' }],
+        ['default_branch is null', { commits_behind: 3, default_branch: null }],
+    ])('omits the drift clause when %s — byte-identical to today', (_label, overrides) => {
+        const body = structuredClone(responseBody) as any;
+        Object.assign(body.latest_successful_deployment, overrides);
+
+        const output = formatProjectView(body).join('\n');
+        expect(output).toContain('Revision (Client-reported): abcdef123456 (clean)');
+        expect(output).not.toContain('behind');
+    });
+});
+
+describe('project view --json', () => {
+    it('emits the full projection with all seven revision fields intact under latest_successful_deployment', async () => {
+        const body = structuredClone(responseBody) as any;
+        body.latest_successful_deployment.default_branch = 'main';
+        body.latest_successful_deployment.default_branch_sha = 'fedcba987654';
+        body.latest_successful_deployment.commits_behind = 4;
+        responseBody = body;
+
+        const lines: string[] = [];
+        await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
+
+        expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
+        const output = JSON.parse(lines.join('\n'));
+        expect(output).toEqual({
+            project: 'billing-dev',
+            name: null,
+            status: 'deployed',
+            enabled: null,
+            deployed_hash: 'archive-md5',
+            deployment_matches_deployed_hash: true,
+            latest_successful_deployment: {
+                id: 'deployment-1',
+                status: 'succeeded',
+                source_hash: 'archive-md5',
+                metadata_source: 'git',
+                commit_sha: 'abcdef1234567890',
+                short_sha: 'abcdef123456',
+                branch: 'feature/payments',
+                tag: 'v2.0.0',
+                commit_subject: 'Ship payments',
+                commit_author_date: '2026-07-27T10:00:00-05:00',
+                remote_url: 'git@example.test:team/repo.git',
+                dirty: false,
+                default_branch: 'main',
+                default_branch_sha: 'fedcba987654',
+                commits_behind: 4,
+                completed_at: '2026-07-27T15:00:00Z',
+            },
+        });
+    });
+
+    it('still emits deployment_matches_deployed_hash: false and the deployment object when the recorded deployment is not the running build', async () => {
+        const body = structuredClone(responseBody) as any;
+        body.deployment_matches_deployed_hash = false;
+        responseBody = body;
+
+        const lines: string[] = [];
+        await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
+
+        const output = JSON.parse(lines.join('\n'));
+        expect(output.deployment_matches_deployed_hash).toBe(false);
+        expect(output.latest_successful_deployment).not.toBeNull();
+        expect(output.latest_successful_deployment.commit_sha).toBe('abcdef1234567890');
+    });
+
+    it('emits latest_successful_deployment: null when there is no deployment', async () => {
+        responseBody = {
+            slug: 'legacy',
+            status: 'deployed',
+            deployed_hash: null,
+            deployment_matches_deployed_hash: false,
+            latest_successful_deployment: null,
+        };
+
+        const lines: string[] = [];
+        await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
+
+        const output = JSON.parse(lines.join('\n'));
+        expect(output.latest_successful_deployment).toBeNull();
+    });
 });

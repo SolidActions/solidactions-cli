@@ -4,7 +4,8 @@ import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
-    formatRevisionSummary,
+    formatDetailedRevision,
+    revisionSha,
     sanitizeDisplayText,
     sanitizeRemoteUrl,
     type MetadataSource,
@@ -23,6 +24,9 @@ export interface DeploymentDetail {
     commit_author_date: string | null;
     remote_url: string | null;
     dirty: boolean | null;
+    default_branch: string | null;
+    default_branch_sha: string | null;
+    commits_behind: number | null;
     completed_at: string | null;
 }
 
@@ -38,6 +42,19 @@ export interface ProjectDeploymentDetail {
 
 export interface ProjectViewOptions {
     env?: string;
+    json?: boolean;
+}
+
+export function projectViewJsonProjection(project: ProjectDeploymentDetail): Record<string, unknown> {
+    return {
+        project: project.slug ?? null,
+        name: project.name ?? null,
+        status: project.status ?? null,
+        enabled: project.enabled ?? null,
+        deployed_hash: project.deployed_hash ?? null,
+        deployment_matches_deployed_hash: project.deployment_matches_deployed_hash ?? false,
+        latest_successful_deployment: project.latest_successful_deployment ?? null,
+    };
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
@@ -71,9 +88,7 @@ function metadataSourceLabel(source: unknown): string | null {
 }
 
 export function formatDeploymentRevision(deployment: DeploymentDetail): string[] {
-    const sha = sanitizeDisplayText(deployment.short_sha, 16)
-        ?? sanitizeDisplayText(deployment.commit_sha, 64);
-    if (!sha) {
+    if (revisionSha(deployment) === null) {
         const archiveHash = sanitizeDisplayText(deployment.source_hash, 64);
         return [
             'No source revision was reported.',
@@ -82,7 +97,7 @@ export function formatDeploymentRevision(deployment: DeploymentDetail): string[]
     }
 
     const lines = [
-        `Revision (Client-reported): ${formatRevisionSummary(deployment)}`,
+        `Revision (Client-reported): ${formatDetailedRevision(deployment)}`,
     ];
     const source = metadataSourceLabel(deployment.metadata_source);
     if (source) {
@@ -161,8 +176,12 @@ export async function projectViewWithConfig(
             `${config.host}/api/v1/projects/${encodeURIComponent(slug)}?include=deployment`,
             { headers: getApiHeaders(config) },
         );
-        for (const line of formatProjectView(response.data)) {
-            writeLine(line);
+        if (options.json) {
+            writeLine(JSON.stringify(projectViewJsonProjection(response.data), null, 2));
+        } else {
+            for (const line of formatProjectView(response.data)) {
+                writeLine(line);
+            }
         }
     } catch (error: any) {
         if (error.response?.status === 401) {

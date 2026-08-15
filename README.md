@@ -237,7 +237,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 | `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused |
 | `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
 | `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
-| `project view <project>` | `-e` (default `dev`) | View status, `Enabled: on|off`, and client-reported deployed revision |
+| `project view <project>` | `-e` (default `dev`), `--json` | View status, `Enabled: on|off`, and client-reported deployed revision, incl. an `N behind origin/<branch> at deploy` drift clause when the deployment is behind the default branch |
 | `project pull <name> [path]` | `-y` | Pull source (warns before overwriting) |
 | `project logs <name>` | | View build logs |
 | `project list` | `--json` | List project families; environments render as `environment:on/off` |
@@ -277,7 +277,7 @@ its project or schedule.
 |---------|-----------|-------------|
 | `run start <project> <workflow>` | `-e`, `-i`, `--wait` | Trigger a workflow run |
 | `run list [project]` | `--json`, `--detailed`, `--status`, `--since`, `--workflow`, `--limit`, `--offset` | List and filter runs |
-| `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run |
+| `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run, incl. the deployed revision (`Revision (latest session): ...`, or `deployed_revision` under `--json`) |
 
 ### env
 

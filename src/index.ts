@@ -317,6 +317,7 @@ project
     .description('View project status and the client-reported deployed revision')
     .argument('<project>', 'Project family slug or name')
     .option('-e, --env <environment>', 'Target environment (production/staging/dev). Defaults to dev.', 'dev')
+    .option('--json', 'Output as JSON')
     .addHelpText('after', `
 Defaults to dev: <project> is normalized as a project family and "-dev" is
 appended. Use --env staging for the "-staging" target. Use --env production to
