@@ -209,6 +209,20 @@ function hardDeadlineMs(bytes: number): number {
     return Math.min(4 * 60 * 60_000, 30 * 60_000 + Math.ceil(bytes / 2_000_000) * 1000);
 }
 
+// A push may keep polling past the client's own hard deadline, but only as far
+// as the deadline the SERVER reports for the phase it is in (#1287 R18), and
+// never unboundedly: `hard_expires_at` is the UPLOAD deadline, while validation
+// runs on a lease of its own that legitimately outlives it. Giving up on the
+// upload deadline abandoned pushes whose validation was perfectly healthy.
+const MAX_POLL_EXTENSION_MS = 60 * 60_000;
+
+function extendedPollDeadline(current: number, uploadDeadlineAt: number, serverDeadline: unknown): number {
+    if (typeof serverDeadline !== 'string') return current;
+    const parsed = Date.parse(serverDeadline);
+    if (!Number.isFinite(parsed)) return current;
+    return Math.max(current, Math.min(parsed + POLL_MS, uploadDeadlineAt + MAX_POLL_EXTENSION_MS));
+}
+
 function stableOperation(data: unknown): Record<string, unknown> {
     const operation = (data as any)?.operation;
     if (!operation || typeof operation.id !== 'string' || !OPERATION_UUID.test(operation.id) || typeof operation.phase !== 'string' || !PHASES.has(operation.phase)) throw new DatabaseOperationError('upstream_unavailable', 'The database bulk-load response was invalid.');
@@ -282,9 +296,16 @@ export async function databasePushWithConfig(name: string, file: string, options
         }
         await requestDatabaseOperation(config, { operation: 'bulk_load_promote', operation_id: operation.id, idempotency_key: key, upload_http_status: uploaded.status }, { post: dependencies.post, controlPlaneTimeoutMs: controlRemaining() });
         promoteAccepted = true;
-        while (clock() <= deadlineAt) {
-            const response = await requestDatabaseOperation<any>(config, { operation: 'bulk_load_status', operation_id: operation.id }, { post: dependencies.post, controlPlaneTimeoutMs: controlRemaining() });
+        let pollDeadlineAt = deadlineAt;
+        const pollControlRemaining = (): number => {
+            const value = pollDeadlineAt - clock();
+            if (value <= 0) throw new DatabaseOperationError('upstream_unavailable', 'Database replacement did not finish before the displayed hard deadline. Retry with the same idempotency key.');
+            return Math.min(DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, value);
+        };
+        while (clock() <= pollDeadlineAt) {
+            const response = await requestDatabaseOperation<any>(config, { operation: 'bulk_load_status', operation_id: operation.id }, { post: dependencies.post, controlPlaneTimeoutMs: pollControlRemaining() });
             const status = stableOperation(response);
+            pollDeadlineAt = extendedPollDeadline(pollDeadlineAt, deadlineAt, status.deadline_at);
             if (!TERMINAL.has(String(status.phase))) { await sleep(POLL_MS); continue; }
             terminalObserved = true;
             if (status.phase !== 'promoted') throw new DatabaseOperationError(typeof status.failure_code === 'string' ? status.failure_code : 'upstream_unavailable', `Database replacement ended in ${status.phase}.`);

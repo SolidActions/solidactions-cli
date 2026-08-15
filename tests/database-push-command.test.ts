@@ -288,6 +288,43 @@ describe('database push workflow', () => {
         }
     });
 
+    it('keeps polling past its own upload deadline while the server reports a live validation deadline', async () => {
+        const source = await fixture();
+        let clock = 1_000_000;
+        const statuses: string[] = [];
+        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } }, status: 202 };
+            if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
+            statuses.push('poll');
+            // Every poll pushes the client past its own upload deadline; the
+            // server keeps reporting a live validation deadline (#1287 R18).
+            clock += 20 * 60_000;
+            return statuses.length < 3
+                ? { data: { operation: { id: body.operation_id, phase: 'validating', deadline_at: new Date(clock + 10 * 60_000).toISOString() } }, status: 200 }
+                : { data: { operation: { id: body.operation_id, phase: 'promoted', rows_loaded: 1 } }, status: 200 };
+        });
+
+        await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, {
+            post, upload: async () => ({ status: 200 }), sleep: async () => undefined, now: () => clock,
+        })).resolves.toBeUndefined();
+        expect(statuses).toHaveLength(3);
+    });
+
+    it('gives up on its own upload deadline when the server publishes no later deadline', async () => {
+        const source = await fixture();
+        let clock = 1_000_000;
+        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } }, status: 202 };
+            if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
+            clock += 20 * 60_000;
+            return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 200 };
+        });
+
+        await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, {
+            post, upload: async () => ({ status: 200 }), sleep: async () => undefined, now: () => clock,
+        })).rejects.toMatchObject({ code: 'upstream_unavailable' });
+    });
+
     it('maps upload 413 to bulk_load_too_large without exposing its body', async () => {
         const source = await fixture();
         const post = vi.fn(async (_url, body: Record<string, unknown>) => body.operation === 'bulk_load_prepare'
