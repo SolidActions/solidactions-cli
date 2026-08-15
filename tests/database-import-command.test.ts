@@ -608,6 +608,60 @@ describe('database import preflight and execution', () => {
         expectNoSecrets(checkpoint);
     });
 
+    it('attempts a reads-exhausted renewal exactly once without retrying or offering terminal resume guidance', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        let monotonic = 10_000;
+        let refusalAttempts = 0;
+        const test = importHarness(root, {
+            monotonicNow: () => monotonic,
+            expiresInSeconds: 600,
+            post: async (attempt) => {
+                if (attempt >= 2) {
+                    refusalAttempts += 1;
+                    const denied: any = new Error('RAW_TRANSPORT_SECRET reads fuse response');
+                    denied.response = {
+                        status: 403,
+                        data: {
+                            code: 'reads_exhausted',
+                            message: 'Database reads are exhausted.',
+                        },
+                    };
+                    throw denied;
+                }
+                return {
+                    url: 'libsql://physical-hostname.sentinel.invalid',
+                    token: 'write-token-sentinel-1',
+                    mode: 'write',
+                    expires_at: '2099-01-01T00:00:00.000Z',
+                    expires_in_seconds: 600,
+                };
+            },
+            execute: async () => { monotonic = 580_001; },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({
+            code: 'reads_exhausted',
+            message: 'Database reads are exhausted.',
+            status: 403,
+        });
+        expect(accessPosts(test)).toHaveLength(2);
+        expect(refusalAttempts).toBe(1);
+        expect(test.executions).toHaveLength(1);
+        expect(checkpointFiles(root)).toHaveLength(1);
+        expect(report(caught, test)).not.toContain('Resume with:');
+        expectNoSecrets(report(caught, test));
+    });
+
     it.each([
         {
             code: 'read_only_mode',
