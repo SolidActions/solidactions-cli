@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import FormData from 'form-data';
+import { sanitizeCell } from './table';
 
 export type MetadataSource =
     | 'git'
@@ -76,6 +77,34 @@ export function formatRevisionSummary(metadata: {
     return `${sha} (${dirtyLabel(
         typeof metadata.dirty === 'boolean' ? metadata.dirty : null,
     )})`;
+}
+
+export interface DeployedRevision {
+    commit_sha?: unknown;
+    short_sha?: unknown;
+    dirty?: unknown;
+    default_branch?: unknown;
+    commits_behind?: unknown;
+}
+
+export function revisionSha(revision: DeployedRevision | null): string | null {
+    if (!revision) return null;
+    return sanitizeDisplayText(revision.short_sha, 16)
+        ?? sanitizeDisplayText(revision.commit_sha, 64);
+}
+
+export function formatDetailedRevision(revision: DeployedRevision | null): string {
+    const sha = revisionSha(revision);
+    if (!sha) return 'unknown';
+    const states = [revision?.dirty === true
+        ? 'DIRTY'
+        : revision?.dirty === false ? 'clean' : 'dirty state unknown'];
+    const branch = sanitizeDisplayText(revision?.default_branch, 255);
+    if (branch && typeof revision?.commits_behind === 'number'
+        && Number.isSafeInteger(revision.commits_behind) && revision.commits_behind > 0) {
+        states.push(`${revision.commits_behind} behind origin/${branch} at deploy`);
+    }
+    return sanitizeCell(`${sha} (${states.join(', ')})`);
 }
 
 function shaValue(value: string | undefined): string | null {

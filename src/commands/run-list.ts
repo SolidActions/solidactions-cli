@@ -2,7 +2,11 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
-import { sanitizeDisplayText } from '../utils/source-provenance';
+import { formatDetailedRevision, revisionSha } from '../utils/source-provenance';
+import type { DeployedRevision } from '../utils/source-provenance';
+
+export { formatDetailedRevision } from '../utils/source-provenance';
+export type { DeployedRevision } from '../utils/source-provenance';
 
 interface RunListOptions {
     limit?: number;
@@ -125,20 +129,6 @@ export function detailedOutcomeTag(run: any): string {
     return '';
 }
 
-interface DeployedRevision {
-    commit_sha?: unknown;
-    short_sha?: unknown;
-    dirty?: unknown;
-    default_branch?: unknown;
-    commits_behind?: unknown;
-}
-
-function revisionSha(revision: DeployedRevision | null): string | null {
-    if (!revision) return null;
-    return sanitizeDisplayText(revision.short_sha, 16)
-        ?? sanitizeDisplayText(revision.commit_sha, 64);
-}
-
 export function formatRevisionCell(revision: DeployedRevision | null): string {
     const sha = revisionSha(revision);
     if (!sha) return '-';
@@ -149,20 +139,6 @@ export function formatRevisionCell(revision: DeployedRevision | null): string {
         ? ` ↓${revision.commits_behind}`
         : '';
     return sanitizeCell(`${sha}${dirty}${behind}`);
-}
-
-export function formatDetailedRevision(revision: DeployedRevision | null): string {
-    const sha = revisionSha(revision);
-    if (!sha) return 'unknown';
-    const states = [revision?.dirty === true
-        ? 'DIRTY'
-        : revision?.dirty === false ? 'clean' : 'dirty state unknown'];
-    const branch = sanitizeDisplayText(revision?.default_branch, 255);
-    if (branch && typeof revision?.commits_behind === 'number'
-        && Number.isSafeInteger(revision.commits_behind) && revision.commits_behind > 0) {
-        states.push(`${revision.commits_behind} behind origin/${branch} at deploy`);
-    }
-    return sanitizeCell(`${sha} (${states.join(', ')})`);
 }
 
 export function displaySummaryTable(runsList: any[], projectName?: string) {
