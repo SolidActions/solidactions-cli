@@ -15,7 +15,7 @@ const MAX_SYMLINK_HOPS = 40;
 function resolveCreationPath(filePath: string): string {
     let current = filePath;
 
-    for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+    for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
         let stats: fs.Stats;
         try {
             stats = fs.lstatSync(current);
@@ -30,6 +30,7 @@ function resolveCreationPath(filePath: string): string {
         current = path.resolve(path.dirname(current), fs.readlinkSync(current));
     }
 
+    // Defensive guard, unreachable in practice: statSync raises ELOOP first.
     const error = new Error(`Too many symbolic links resolving ${filePath}`) as NodeJS.ErrnoException;
     error.code = 'ELOOP';
     throw error;

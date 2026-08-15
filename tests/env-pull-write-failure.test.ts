@@ -67,7 +67,9 @@ describe('envPull error reporting', () => {
         await envPull('my-project', { env: 'dev', output: dest, yes: true });
 
         expect(printed()).toContain('Failed to write');
+        expect(printed()).toContain(dest);
         expect(printed()).not.toContain('Connection failed');
+        expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
     it('still reports a genuine connection failure as such', async () => {
