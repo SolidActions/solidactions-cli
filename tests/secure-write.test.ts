@@ -10,7 +10,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { writeSecretFileSync } from '../src/utils/secure-write';
+import { writeSecretFileSync, writeViaTempFileSync } from '../src/utils/secure-write';
 
 const posixOnly = process.platform === 'win32' ? it.skip : it;
 
@@ -122,5 +122,31 @@ describe('writeSecretFileSync', () => {
 
         expect(() => writeSecretFileSync(path.join(file, '.env'), 'SECRET=1\n'))
             .toThrow(expect.objectContaining({ code: 'ENOTDIR' }));
+    });
+});
+
+describe('writeViaTempFileSync', () => {
+    // The temp path is randomized inside writeSecretFileSync, so a planted
+    // collision can only be staged against this seam.
+    posixOnly('leaves a file it did not create at the temp path in place', () => {
+        const dest = path.join(root, '.env');
+        const tempPath = path.join(root, '.env.planted.tmp');
+        fs.writeFileSync(tempPath, 'NOT-OURS\n');
+
+        expect(() => writeViaTempFileSync(dest, tempPath, 'SECRET=1\n'))
+            .toThrow(expect.objectContaining({ code: 'EEXIST' }));
+
+        expect(fs.readFileSync(tempPath, 'utf8')).toBe('NOT-OURS\n');
+        expect(fs.existsSync(dest)).toBe(false);
+    });
+
+    posixOnly('removes the temp file it did create when the rename fails', () => {
+        const dest = path.join(root, 'subdir');
+        fs.mkdirSync(dest);
+        const tempPath = path.join(root, '.subdir.ours.tmp');
+
+        expect(() => writeViaTempFileSync(dest, tempPath, 'SECRET=1\n')).toThrow();
+
+        expect(fs.readdirSync(root)).toEqual(['subdir']);
     });
 });

@@ -76,15 +76,32 @@ export function writeSecretFileSync(filePath: string, contents: string): void {
         `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`,
     );
 
+    writeViaTempFileSync(target, tempPath, contents);
+}
+
+/**
+ * Write `contents` to `tempPath` at 0600 and rename it over `target`.
+ *
+ * Exported so tests can stage a collision at a known temp path; production
+ * callers go through writeSecretFileSync, which randomizes that path.
+ */
+export function writeViaTempFileSync(target: string, tempPath: string, contents: string): void {
+    let created = false;
+
     try {
         // 'wx' refuses to follow or clobber an existing (or planted) temp path.
         fs.writeFileSync(tempPath, contents, { flag: 'wx', mode: 0o600 });
+        created = true;
         fs.renameSync(tempPath, target);
     } catch (error) {
-        try {
-            fs.unlinkSync(tempPath);
-        } catch {
-            // Nothing to clean up.
+        // Only our own temp file may be removed: a failed 'wx' means the path
+        // holds someone else's file, which is not ours to delete.
+        if (created) {
+            try {
+                fs.unlinkSync(tempPath);
+            } catch {
+                // Nothing to clean up.
+            }
         }
         throw error;
     }
