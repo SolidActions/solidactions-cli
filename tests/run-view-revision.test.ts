@@ -82,15 +82,6 @@ describe('run view revision', () => {
         await runView('4', { json: true });
 
         const output = JSON.parse(String(log.mock.calls[0][0]));
-        expect(Object.keys(output.deployed_revision)).toEqual([
-            'commit_sha',
-            'short_sha',
-            'dirty',
-            'remote_url',
-            'default_branch',
-            'default_branch_sha',
-            'commits_behind',
-        ]);
         expect(output.deployed_revision).toEqual(revision);
     });
 

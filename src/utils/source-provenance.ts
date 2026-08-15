@@ -87,13 +87,13 @@ export interface DeployedRevision {
     commits_behind?: unknown;
 }
 
-export function revisionSha(revision: DeployedRevision | null): string | null {
+export function revisionSha(revision: DeployedRevision | null | undefined): string | null {
     if (!revision) return null;
     return sanitizeDisplayText(revision.short_sha, 16)
         ?? sanitizeDisplayText(revision.commit_sha, 64);
 }
 
-export function formatDetailedRevision(revision: DeployedRevision | null): string {
+export function formatDetailedRevision(revision: DeployedRevision | null | undefined): string {
     const sha = revisionSha(revision);
     if (!sha) return 'unknown';
     const states = [revision?.dirty === true

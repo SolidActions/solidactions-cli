@@ -47,7 +47,7 @@ export interface ProjectViewOptions {
 
 export function projectViewJsonProjection(project: ProjectDeploymentDetail): Record<string, unknown> {
     return {
-        project: project.slug ?? null,
+        slug: project.slug ?? null,
         name: project.name ?? null,
         status: project.status ?? null,
         enabled: project.enabled ?? null,

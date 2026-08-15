@@ -264,7 +264,7 @@ describe('project view --json', () => {
         expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
         const output = JSON.parse(lines.join('\n'));
         expect(output).toEqual({
-            project: 'billing-dev',
+            slug: 'billing-dev',
             name: null,
             status: 'deployed',
             enabled: null,
