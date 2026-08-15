@@ -15,7 +15,7 @@ const MAX_SYMLINK_HOPS = 40;
 function resolveCreationPath(filePath: string): string {
     let current = filePath;
 
-    for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+    for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
         let stats: fs.Stats;
         try {
             stats = fs.lstatSync(current);
