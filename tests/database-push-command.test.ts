@@ -70,6 +70,11 @@ describe('database push normalization', () => {
             .rejects.toMatchObject({ code: 'invalid_bulk_database', message: expect.stringContaining('disk space') });
     });
 
+    it('reports a missing source path as file not found', async () => {
+        await expect(normalizeDatabaseForPush(path.join(os.tmpdir(), `missing-${Date.now()}.db`)))
+            .rejects.toMatchObject({ code: 'invalid_bulk_database', message: expect.stringMatching(/file.*not found/i) });
+    });
+
     it('captures committed WAL rows without changing the main database or WAL', async () => {
         const source = await fixture();
         const writer = createClient({ url: pathToFileURL(source).href });
@@ -154,6 +159,8 @@ describe('database push workflow', () => {
         expect(posts[1]).toMatchObject({ upload_http_status: 200 });
         expect(output.join('\n')).not.toContain('candidate-secret').not.toContain('must-not-log');
         expect(output.join('\n').toLowerCase()).toContain('reacquire');
+        expect(output.join('\n')).toContain('countable rows');
+        expect(output.join('\n')).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
     });
 
     it('uses POST for the default Turso /v1/upload transport', async () => {

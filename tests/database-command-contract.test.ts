@@ -75,6 +75,16 @@ describe('database command tree', () => {
             if (expectedOptions.includes('--resume')) expect(resume?.required).toBe(true);
         }
     });
+
+    it('explains push normalization and countable-row exclusions in help', () => {
+        const program = loadProgram();
+        const push = program.commands.find((command: any) => command.name() === 'database')
+            ?.commands.find((command: any) => command.name() === 'push');
+        const help = push.helpInformation();
+        expect(help).toMatch(/WAL.*4096.*auto-vacuum NONE/is);
+        expect(help).toMatch(/source file is\s+unchanged/i);
+        expect(help).toMatch(/countable rows.*internal.*virtual.*shadow/is);
+    });
 });
 
 describe('database command manifest', () => {

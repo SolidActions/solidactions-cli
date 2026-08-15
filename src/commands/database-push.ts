@@ -76,6 +76,9 @@ function isExcluded(name: string): boolean {
 
 function safeNormalizationError(error: unknown): DatabaseOperationError {
     if (error instanceof DatabaseOperationError) return error;
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return new DatabaseOperationError('invalid_bulk_database', 'The source database file was not found; no source file was changed.');
+    }
     const text = error instanceof Error ? error.message.toLowerCase() : '';
     if (text.includes('database is locked') || text.includes('busy')) {
         return new DatabaseOperationError('invalid_bulk_database', 'The SQLite snapshot is busy. Quiesce local writers and retry; the source database was not changed.');
@@ -233,7 +236,7 @@ export async function databasePushWithConfig(name: string, file: string, options
             return value;
         };
         const controlRemaining = (): number => Math.min(DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, remaining());
-        stdout(`WARNING: This destructively replaces database "${name}". Quiesce all writers; old URLs and credentials will become invalid.`);
+        stdout(`WARNING: This destructively replaces database "${name}". Quiesce all writers; old URLs and credentials will become invalid. A private snapshot is normalized to WAL, 4096-byte pages, and auto-vacuum NONE; the source file is unchanged.`);
         stdout(`Hard deadline: ${Math.ceil(deadlineMs / 60_000)} minutes for ${normalized.inputBytes} bytes. Idempotency key: ${key}`);
         const prepareBody = {
             operation: 'bulk_load_prepare', name, bulk_mode: 'replace', input_bytes: normalized.inputBytes,
@@ -283,7 +286,7 @@ export async function databasePushWithConfig(name: string, file: string, options
             if (!TERMINAL.has(String(status.phase))) { await sleep(POLL_MS); continue; }
             terminalObserved = true;
             if (status.phase !== 'promoted') throw new DatabaseOperationError(typeof status.failure_code === 'string' ? status.failure_code : 'upstream_unavailable', `Database replacement ended in ${status.phase}.`);
-            stdout(`Database "${name}" replaced successfully (${String(status.rows_loaded ?? normalized.totalRows)} rows). Reacquire database credentials before reconnecting.`);
+            stdout(`Database "${name}" replaced successfully (${String(status.rows_loaded ?? normalized.totalRows)} countable rows). Reacquire database credentials before reconnecting.`);
             return;
         }
         throw new DatabaseOperationError('upstream_unavailable', 'Database replacement did not finish before the displayed hard deadline. Retry status with the same idempotency key.');
