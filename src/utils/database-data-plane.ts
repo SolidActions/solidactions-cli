@@ -10,6 +10,59 @@ export interface DatabaseAccess {
     token: string;
     mode: DatabaseAccessMode;
     expires_at: string;
+    expires_in_seconds?: number;
+}
+
+export type DatabaseCredentialFailureCode = 'database_credential_revoked' | 'database_credential_expired';
+export interface DatabaseCredentialDeadline {
+    renewalAt: number;
+    expiresAt: number;
+    clock: 'monotonic' | 'wall';
+}
+
+export function databaseCredentialDeadline(
+    access: DatabaseAccess,
+    wallNow: number,
+    monotonicNow: number,
+    renewalWindowMs: number,
+): DatabaseCredentialDeadline | null {
+    if (access.expires_in_seconds !== undefined) {
+        const lifetime = access.expires_in_seconds;
+        if (
+            !Number.isSafeInteger(lifetime)
+            || lifetime <= 0
+            || !Number.isFinite(monotonicNow)
+        ) return null;
+        const lifetimeMs = lifetime * 1_000;
+        if (lifetimeMs <= renewalWindowMs) return null;
+        return {
+            renewalAt: monotonicNow + lifetimeMs - renewalWindowMs,
+            expiresAt: monotonicNow + lifetimeMs,
+            clock: 'monotonic',
+        };
+    }
+    const expiresAt = Date.parse(access.expires_at);
+    if (!Number.isFinite(wallNow) || !Number.isFinite(expiresAt) || expiresAt <= wallNow + renewalWindowMs) return null;
+    return { renewalAt: expiresAt - renewalWindowMs, expiresAt, clock: 'wall' };
+}
+
+export function isDatabaseCredentialAuthFailure(error: unknown): boolean {
+    const value = error as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown } | null;
+    const code = typeof value?.code === 'string' ? value.code.toUpperCase() : '';
+    const message = typeof value?.message === 'string' ? value.message : '';
+    if (['AUTH_TOKEN_EXPIRED', 'AUTH_EXPIRED', 'TOKEN_EXPIRED'].includes(code)) return true;
+    if (code === 'SQLITE_AUTH' && /expired|expiration|\bjwt\b/i.test(message)) return true;
+    const cause = value?.cause as { status?: unknown } | null;
+    return value?.name === 'LibsqlError' && code === 'SERVER_ERROR' && cause?.status === 401;
+}
+
+export function databaseCredentialFailureCode(
+    deadline: DatabaseCredentialDeadline,
+    wallNow: number,
+    monotonicNow: number,
+): DatabaseCredentialFailureCode {
+    const now = deadline.clock === 'monotonic' ? monotonicNow : wallNow;
+    return now >= deadline.expiresAt ? 'database_credential_expired' : 'database_credential_revoked';
 }
 
 export interface DatabaseResultSet {

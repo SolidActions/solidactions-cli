@@ -8,12 +8,17 @@ import { Config } from '../utils/config';
 import {
     DatabaseClient,
     DatabaseClientDependencies,
+    DatabaseAccess,
+    DatabaseCredentialDeadline,
     DatabaseOperationError,
     DatabaseRequestDependencies,
     DatabaseResultSet,
     DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+    databaseCredentialDeadline,
+    databaseCredentialFailureCode,
     formatDatabaseTableValue,
     normalizeDatabaseValue,
+    isDatabaseCredentialAuthFailure,
     runDatabaseClientOperationWithDeadline,
     requestDatabaseAccess,
     requestDatabaseDumpStream,
@@ -110,6 +115,7 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     filesystem?: DatabaseFileSystem;
     input?: AsyncIterable<string>;
     now?: () => number;
+    monotonicNow?: () => number;
     abortSignal?: AbortSignal;
     sleep?: (milliseconds: number) => Promise<void>;
 }
@@ -127,6 +133,7 @@ interface ResolvedCommandDependencies {
     filesystem: DatabaseFileSystem;
     input?: AsyncIterable<string>;
     now: () => number;
+    monotonicNow: () => number;
     abortSignal?: AbortSignal;
     controlPlaneTimeoutMs: number | undefined;
     dataPlaneTimeoutMs: number;
@@ -169,6 +176,7 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         filesystem: dependencies.filesystem ?? fs.promises,
         input: dependencies.input,
         now: dependencies.now ?? Date.now,
+        monotonicNow: dependencies.monotonicNow ?? (() => performance.now()),
         abortSignal: dependencies.abortSignal,
         controlPlaneTimeoutMs: dependencies.controlPlaneTimeoutMs,
         dataPlaneTimeoutMs: dependencies.dataPlaneTimeoutMs ?? DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
@@ -815,27 +823,30 @@ async function nextWritableInput(
     });
 }
 
-function validateWritableAccess(access: unknown, now: number): {
+function validateWritableAccess(access: unknown, now: number, monotonicNow: number): {
     url: string;
     token: string;
-    expiresAt: number;
+    deadline: DatabaseCredentialDeadline;
 } {
     const value = access as Record<string, unknown> | null;
     const url = typeof value?.url === 'string' ? value.url.trim() : '';
     const token = typeof value?.token === 'string' ? value.token.trim() : '';
-    const expiresAt = typeof value?.expires_at === 'string' ? Date.parse(value.expires_at) : Number.NaN;
+    const deadline = databaseCredentialDeadline(
+        value as unknown as DatabaseAccess,
+        now,
+        monotonicNow,
+        WRITABLE_RENEWAL_WINDOW_MS,
+    );
     if (
         value?.mode !== 'write'
         || url === ''
         || token === ''
-        || !Number.isFinite(now)
-        || !Number.isFinite(expiresAt)
-        || expiresAt <= now + WRITABLE_RENEWAL_WINDOW_MS
+        || !deadline
     ) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database access response was invalid.');
     }
 
-    return { url, token, expiresAt };
+    return { url, token, deadline };
 }
 
 class WritableRenewalAttemptError extends Error {
@@ -850,18 +861,10 @@ class WritableRenewalAttemptError extends Error {
     }
 }
 
-function isAuthenticationExpired(error: unknown): boolean {
-    const value = error as { code?: unknown; message?: unknown } | null;
-    const code = typeof value?.code === 'string' ? value.code.toUpperCase() : '';
-    const message = typeof value?.message === 'string' ? value.message : '';
-    if (['AUTH_TOKEN_EXPIRED', 'AUTH_EXPIRED', 'TOKEN_EXPIRED'].includes(code)) return true;
-    return code === 'SQLITE_AUTH' && /expired|expiration|\bjwt\b/i.test(message);
-}
-
 type PullFailureClass = 'credential_expiry' | 'transient_transport' | 'deterministic';
 
 function classifyPullFailure(error: unknown): PullFailureClass {
-    if (isAuthenticationExpired(error)) return 'credential_expiry';
+    if (isDatabaseCredentialAuthFailure(error)) return 'credential_expiry';
 
     const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
     const code = typeof value?.code === 'string' ? value.code.toUpperCase() : '';
@@ -1035,6 +1038,7 @@ export async function databaseCreateWithConfig(
                         filesystem: io.filesystem,
                         stdout: options.json ? () => undefined : io.stdout,
                         now: io.now,
+                        monotonicNow: io.monotonicNow,
                         post: io.post,
                         loadClient: io.loadClient,
                         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
@@ -1097,6 +1101,7 @@ export async function databaseImportWithConfig(
         filesystem: io.filesystem,
         stdout: io.stdout,
         now: io.now,
+        monotonicNow: io.monotonicNow,
         post: io.post,
         loadClient: io.loadClient,
         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
@@ -1330,7 +1335,7 @@ async function databaseWritablePullWithConfig(
     let ownsSidecars = false;
     let client: DatabaseClient | undefined;
     let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
-    let expiresAt = 0;
+    let credentialDeadline: DatabaseCredentialDeadline | undefined;
     let inputSession: WritableInputSession | undefined;
     let attachedClosePromise: Promise<void> | undefined;
 
@@ -1377,7 +1382,7 @@ async function databaseWritablePullWithConfig(
             }
             throw safeError;
         }
-        const access = validateWritableAccess(loaded.access, io.now());
+        const access = validateWritableAccess(loaded.access, io.now(), io.monotonicNow());
         const createClient = loaded.createClient as (config: Record<string, unknown>) => DatabaseClient;
 
         if (initial) {
@@ -1454,7 +1459,7 @@ async function databaseWritablePullWithConfig(
         attachedClosePromise = undefined;
         client = opened;
         localCreateClient = createClient;
-        expiresAt = access.expiresAt;
+        credentialDeadline = access.deadline;
     };
 
     try {
@@ -1483,7 +1488,10 @@ async function databaseWritablePullWithConfig(
             while (true) {
                 if (io.abortSignal?.aborted || inputSession.interrupted()) break;
 
-                if (io.now() >= expiresAt - WRITABLE_RENEWAL_WINDOW_MS) {
+                const deadlineNow = credentialDeadline?.clock === 'monotonic'
+                    ? io.monotonicNow()
+                    : io.now();
+                if (!credentialDeadline || deadlineNow >= credentialDeadline.renewalAt) {
                     try {
                         await closeAttachedClient();
                         await openAttachedClient(false);
@@ -1554,12 +1562,17 @@ async function databaseWritablePullWithConfig(
                         sessionFailure = error;
                         break;
                     }
-                    if (!isAuthenticationExpired(error)) {
+                    if (!isDatabaseCredentialAuthFailure(error)) {
                         io.stderr('Database statement failed.');
                         continue;
                     }
 
-                    io.stderr('Database statement has an unknown outcome because authorization expired.');
+                    const credentialCode = databaseCredentialFailureCode(
+                        credentialDeadline!,
+                        io.now(),
+                        io.monotonicNow(),
+                    );
+                    io.stderr(`Database statement has an unknown outcome because of ${credentialCode}.`);
                     try {
                         await closeAttachedClient();
                         await openAttachedClient(false);

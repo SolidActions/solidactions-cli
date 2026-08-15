@@ -7,6 +7,7 @@ interface DatabaseAccess {
     token: string;
     mode: 'read' | 'write';
     expires_at: string;
+    expires_in_seconds?: number;
 }
 
 interface DatabaseConfig {
@@ -35,6 +36,7 @@ const ACCESS: DatabaseAccess = {
     token: 'ephemeral-database-token-sentinel',
     mode: 'read',
     expires_at: '2026-08-07T12:10:00Z',
+    expires_in_seconds: 600,
 };
 
 async function loadDataPlane(): Promise<Record<string, unknown>> {

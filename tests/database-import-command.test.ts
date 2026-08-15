@@ -59,6 +59,8 @@ interface HarnessOptions {
     confirm?: boolean;
     isTTY?: boolean;
     now?: () => number;
+    monotonicNow?: () => number;
+    expiresInSeconds?: number;
     expiresAt?: string[];
     post?: (attempt: number, body: Record<string, unknown>) => Promise<unknown>;
     execute?: (execution: Execution) => Promise<void>;
@@ -86,6 +88,7 @@ function importHarness(root: string, options: HarnessOptions = {}) {
         cwd: root,
         filesystem: options.filesystem,
         now: options.now ?? (() => Date.parse('2026-08-07T12:00:00.000Z')),
+        monotonicNow: options.monotonicNow,
         isTTY: options.isTTY ?? true,
         confirm,
         stdout: (line: string) => stdout.push(line),
@@ -142,6 +145,7 @@ function importHarness(root: string, options: HarnessOptions = {}) {
                     token: `write-token-sentinel-${attempt}`,
                     mode: 'write',
                     expires_at: expiresAt[Math.min(attempt - 1, expiresAt.length - 1)],
+                    ...(options.expiresInSeconds === undefined ? {} : { expires_in_seconds: options.expiresInSeconds }),
                 },
             };
         },
@@ -513,6 +517,52 @@ describe('database import preflight and execution', () => {
         expect(test.events.indexOf('client:1:execute:1')).toBeLessThan(test.events.indexOf('client:1:close'));
         expect(test.events.indexOf('client:1:close')).toBeLessThan(test.events.lastIndexOf('post:access'));
         expect(test.events.lastIndexOf('post:access')).toBeLessThan(test.events.indexOf('client:2:execute:2'));
+    });
+
+    it('uses the response-receipt monotonic lifetime for renewal despite a slow wall clock', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`).join('\n'));
+        let monotonic = 10_000;
+        const test = importHarness(root, {
+            now: () => Date.parse('1999-01-01T00:00:00.000Z'),
+            monotonicNow: () => monotonic,
+            expiresAt: ['2099-01-01T00:00:00.000Z'],
+            expiresInSeconds: 600,
+            execute: async () => { monotonic = 580_001; },
+        });
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(accessPosts(test)).toHaveLength(2);
+        expect(test.closed).toEqual([1, 2]);
+    });
+
+    it.each([
+        { elapsed: 599_999, code: 'database_credential_revoked' },
+        { elapsed: 600_000, code: 'database_credential_expired' },
+    ])('labels a remote driver 401 at $elapsed ms as $code without retaining its cause', async ({ elapsed, code }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT INTO t VALUES (1);');
+        let monotonic = 5_000;
+        const test = importHarness(root, {
+            monotonicNow: () => monotonic,
+            expiresInSeconds: 600,
+            execute: async () => {
+                monotonic = 5_000 + elapsed;
+                const cause = Object.assign(new Error('RAW_TRANSPORT_SECRET'), { status: 401 });
+                throw Object.assign(new Error('SERVER_ERROR: RAW_TRANSPORT_SECRET'), {
+                    name: 'LibsqlError', code: 'SERVER_ERROR', cause,
+                });
+            },
+        });
+
+        let caught: unknown;
+        try { await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies); } catch (error) { caught = error; }
+
+        expect(caught).toMatchObject({ code });
+        expectNoSecrets(caught);
     });
 
     it('stops before the next batch when renewal is refused and retains only the last valid checkpoint', async () => {
