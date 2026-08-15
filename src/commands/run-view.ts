@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { formatDetailedRevision } from '../utils/source-provenance';
 
 interface RunViewOptions {
     timeline?: boolean;
@@ -101,6 +102,9 @@ export async function runView(runId: string, options: RunViewOptions) {
                 steps: flatSteps,
                 logs: logsResponse.data.logs || '',
             };
+            if (Object.prototype.hasOwnProperty.call(runData, 'deployed_revision')) {
+                output.deployed_revision = runData.deployed_revision;
+            }
             if (runData.output) output.output = runData.output;
             if (runData.error) output.error = runData.error;
             console.log(JSON.stringify(output, null, 2));
@@ -139,6 +143,9 @@ function displayFullView(runData: any, timeline: any, steps: any[], logsData: an
     const exitStr = exitCode !== null && exitCode !== undefined ? ` (exit ${exitCode})` : '';
     console.log(`  Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
     console.log(`  Trigger:   ${chalk.gray(runData.triggered_by || '-')}`);
+    if (Object.prototype.hasOwnProperty.call(runData, 'deployed_revision')) {
+        console.log(`  Revision (latest session): ${chalk.gray(formatDetailedRevision(runData.deployed_revision))}`);
+    }
 
     // Timeline
     displayTimeline(runData, timeline, steps);
