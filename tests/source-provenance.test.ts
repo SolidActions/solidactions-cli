@@ -50,6 +50,11 @@ function repository(): string {
     return root;
 }
 
+function setOriginHead(root: string, branch = 'main'): void {
+    git(root, 'update-ref', `refs/remotes/origin/${branch}`, 'HEAD');
+    git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${branch}`);
+}
+
 afterEach(() => {
     for (const root of roots.splice(0)) {
         fs.rmSync(root, { recursive: true, force: true });
@@ -121,6 +126,128 @@ describe('sanitizeRemoteUrl', () => {
 });
 
 describe('collectSourceMetadata — local Git', () => {
+    it('reports the verified origin default branch and a clean checkout with zero commits behind', () => {
+        const root = repository();
+        setOriginHead(root);
+
+        expect(collectSourceMetadata(root, {})).toMatchObject({
+            default_branch: 'main',
+            default_branch_sha: git(root, 'rev-parse', 'refs/remotes/origin/main'),
+            commits_behind: 0,
+        });
+    });
+
+    it('counts fetched default-only commits for stale and diverged checkouts', () => {
+        const root = repository();
+        setOriginHead(root);
+        const checkout = git(root, 'rev-parse', 'HEAD');
+
+        fs.writeFileSync(path.join(root, 'upstream.txt'), 'upstream\n');
+        git(root, 'add', '.');
+        git(root, 'commit', '-m', 'Fetched upstream commit');
+        git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+        git(root, 'checkout', '--detach', checkout);
+        expect(collectSourceMetadata(root, {})?.commits_behind).toBe(1);
+
+        fs.writeFileSync(path.join(root, 'local.txt'), 'local\n');
+        git(root, 'add', '.');
+        git(root, 'commit', '-m', 'Diverged local commit');
+        expect(collectSourceMetadata(root, {})).toMatchObject({
+            default_branch: 'main',
+            commits_behind: 1,
+        });
+    });
+
+    it('falls back for a git-init repository only when exactly one conventional tracking ref exists', () => {
+        const source = repository();
+        const remote = tempDir('sa-provenance-bare-');
+        fs.rmSync(remote, { recursive: true, force: true });
+        execFileSync('git', ['clone', '--bare', source, remote]);
+        const root = tempDir('sa-provenance-init-fetch-');
+        git(root, 'init', '-b', 'main');
+        git(root, 'remote', 'add', 'origin', remote);
+        git(root, 'fetch', 'origin', 'refs/heads/main:refs/remotes/origin/main');
+        git(root, 'reset', '--hard', 'refs/remotes/origin/main');
+
+        expect(() => git(root, 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD')).toThrow();
+
+        expect(collectSourceMetadata(root, {})).toMatchObject({
+            default_branch: 'main',
+            commits_behind: 0,
+        });
+    });
+
+    it('hints once when origin/HEAD is missing and fallback is absent or ambiguous', () => {
+        for (const mode of ['absent', 'ambiguous']) {
+            const root = repository();
+            if (mode === 'ambiguous') {
+                git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+                git(root, 'update-ref', 'refs/remotes/origin/master', 'HEAD');
+            }
+            const hints: string[] = [];
+            expect(collectSourceMetadata(root, {}, (hint) => hints.push(hint))).toMatchObject({
+                default_branch: null,
+                default_branch_sha: null,
+                commits_behind: null,
+            });
+            expect(hints).toEqual(['Unable to determine origin default branch; run `git remote set-head origin -a`.']);
+        }
+    });
+
+    it('does not fall back when origin/HEAD exists but points to a stale deleted target', () => {
+        const root = repository();
+        git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/deleted');
+        git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+        const hints: string[] = [];
+
+        expect(collectSourceMetadata(root, {}, (hint) => hints.push(hint))).toMatchObject({
+            default_branch: null,
+            default_branch_sha: null,
+            commits_behind: null,
+        });
+        expect(hints).toEqual([]);
+    });
+
+    it('does not fall back when origin/HEAD is an invalid direct ref', () => {
+        const root = repository();
+        git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+        git(root, 'update-ref', 'refs/remotes/origin/HEAD', 'HEAD');
+        const hints: string[] = [];
+
+        expect(collectSourceMetadata(root, {}, (hint) => hints.push(hint))).toMatchObject({
+            default_branch: null,
+            default_branch_sha: null,
+            commits_behind: null,
+        });
+        expect(hints).toEqual([]);
+    });
+
+    it('rejects plausible comparison counts from a shallow repository', () => {
+        const source = repository();
+        setOriginHead(source);
+        const shallow = tempDir('sa-provenance-shallow-');
+        fs.rmSync(shallow, { recursive: true, force: true });
+        execFileSync('git', ['clone', '--depth=1', `file://${source}`, shallow]);
+
+        expect(collectSourceMetadata(shallow, {})).toMatchObject({
+            default_branch: null,
+            default_branch_sha: null,
+            commits_behind: null,
+        });
+    });
+
+    it('does not mutate refs or configuration while collecting comparison evidence', () => {
+        const root = repository();
+        setOriginHead(root);
+        const refsBefore = git(root, 'show-ref');
+        const configBefore = fs.readFileSync(path.join(root, '.git', 'config'), 'utf8');
+
+        collectSourceMetadata(root, {});
+
+        expect(git(root, 'show-ref')).toBe(refsBefore);
+        expect(fs.readFileSync(path.join(root, '.git', 'config'), 'utf8')).toBe(configBefore);
+    });
+
     it('collects a clean branch, SHA, subject, author date, and credential-free remote', () => {
         const root = repository();
         const metadata = collectSourceMetadata(root, {});
@@ -258,6 +385,9 @@ describe('collectSourceMetadata — CI fallback', () => {
             branch: 'feature/provenance',
             dirty: null,
             remote_url: 'https://github.example.test/acme/private',
+            default_branch: null,
+            default_branch_sha: null,
+            commits_behind: null,
         });
 
         const tag = collectSourceMetadata(tempDir('sa-ci-gh-tag-'), {

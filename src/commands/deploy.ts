@@ -598,7 +598,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     // Provenance is optional, best effort, and collected before archiving so
     // the deploy artifact itself can never make the source look dirty.
-    const sourceMetadata = safeCollectSourceMetadata(sourceDir, options);
+    const sourceMetadata = safeCollectSourceMetadata(
+        sourceDir,
+        options,
+        (directory) => collectSourceMetadata(directory, process.env, (hint) => {
+            console.log(chalk.yellow(`Git provenance hint: ${hint}`));
+        }),
+    );
     if (sourceMetadata) {
         console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
     }

@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
+import { sanitizeDisplayText } from '../utils/source-provenance';
 
 interface RunListOptions {
     limit?: number;
@@ -124,12 +125,52 @@ export function detailedOutcomeTag(run: any): string {
     return '';
 }
 
-function displaySummaryTable(runsList: any[], projectName?: string) {
+interface DeployedRevision {
+    commit_sha?: unknown;
+    short_sha?: unknown;
+    dirty?: unknown;
+    default_branch?: unknown;
+    commits_behind?: unknown;
+}
+
+function revisionSha(revision: DeployedRevision | null): string | null {
+    if (!revision) return null;
+    return sanitizeDisplayText(revision.short_sha, 16)
+        ?? sanitizeDisplayText(revision.commit_sha, 64);
+}
+
+export function formatRevisionCell(revision: DeployedRevision | null): string {
+    const sha = revisionSha(revision);
+    if (!sha) return '-';
+    const dirty = revision?.dirty === true ? '*' : revision?.dirty === false ? '' : '?';
+    const behind = typeof revision?.commits_behind === 'number'
+        && Number.isSafeInteger(revision.commits_behind)
+        && revision.commits_behind > 0
+        ? ` ↓${revision.commits_behind}`
+        : '';
+    return sanitizeCell(`${sha}${dirty}${behind}`);
+}
+
+export function formatDetailedRevision(revision: DeployedRevision | null): string {
+    const sha = revisionSha(revision);
+    if (!sha) return 'unknown';
+    const states = [revision?.dirty === true
+        ? 'DIRTY'
+        : revision?.dirty === false ? 'clean' : 'dirty state unknown'];
+    const branch = sanitizeDisplayText(revision?.default_branch, 255);
+    if (branch && typeof revision?.commits_behind === 'number'
+        && Number.isSafeInteger(revision.commits_behind) && revision.commits_behind > 0) {
+        states.push(`${revision.commits_behind} behind origin/${branch} at deploy`);
+    }
+    return sanitizeCell(`${sha} (${states.join(', ')})`);
+}
+
+export function displaySummaryTable(runsList: any[], projectName?: string) {
     const header = projectName ? `Recent runs for "${projectName}":` : 'Recent runs:';
     console.log(chalk.blue(header));
     console.log('');
 
-    const headers = ['ID', 'WORKFLOW', 'STATUS', 'TRIGGERED', 'TRIGGERED BY'];
+    const headers = ['ID', 'WORKFLOW', 'STATUS', 'REVISION', 'TRIGGERED', 'TRIGGERED BY'];
     const rows = runsList.map((run) => {
         const { label: status } = summaryStatusLabel(run);
         const triggeredAt = run.triggered_at ? new Date(run.triggered_at).toLocaleString() : '-';
@@ -137,18 +178,19 @@ function displaySummaryTable(runsList: any[], projectName?: string) {
             String(run.id || '?'),
             sanitizeCell(truncateCell(run.workflow_name || '?', 24)),
             status,
+            formatRevisionCell(run.deployed_revision ?? null),
             triggeredAt,
             sanitizeCell(run.triggered_by || '-'),
         ];
     });
-    const widths = computeColumnWidths(headers, rows, { minWidths: [8, 25, 12, 22, 0] });
+    const widths = computeColumnWidths(headers, rows, { minWidths: [8, 25, 12, 14, 22, 0] });
 
     console.log(chalk.gray(headers.map((h, i) => h.padEnd(widths[i])).join('')));
     console.log(chalk.gray('-'.repeat(widths.reduce((a, b) => a + b, 0))));
 
     for (let i = 0; i < runsList.length; i++) {
         const run = runsList[i];
-        const [id, workflow, status, triggeredAt, triggeredBy] = rows[i];
+        const [id, workflow, status, revision, triggeredAt, triggeredBy] = rows[i];
         const { attention } = summaryStatusLabel(run);
         const statusColor = attention ? chalk.yellow : getStatusColor(status);
 
@@ -156,16 +198,18 @@ function displaySummaryTable(runsList: any[], projectName?: string) {
             chalk.gray(id.padEnd(widths[0])) +
             workflow.padEnd(widths[1]) +
             statusColor(status.padEnd(widths[2])) +
-            chalk.gray(triggeredAt.padEnd(widths[3])) +
+            chalk.gray(revision.padEnd(widths[3])) +
+            chalk.gray(triggeredAt.padEnd(widths[4])) +
             chalk.gray(triggeredBy)
         );
     }
 
     console.log('');
+    console.log(chalk.gray('REVISION shows latest session: * dirty, ? dirty state unknown, ↓N behind default branch at deploy.'));
     console.log(chalk.gray(`Showing ${runsList.length} run(s)`));
 }
 
-function displayDetailedList(runsList: any[], projectName?: string) {
+export function displayDetailedList(runsList: any[], projectName?: string) {
     const header = projectName ? `Runs for "${projectName}" (detailed):` : 'Runs (detailed):';
     console.log(chalk.blue(header));
 
@@ -180,6 +224,9 @@ function displayDetailedList(runsList: any[], projectName?: string) {
         console.log(chalk.bold(`  Run #${run.id}`) + chalk.gray(` — ${run.workflow_name || '?'} (${run.project_name || '?'})`) + silentTag);
         console.log(`    Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
         console.log(`    Trigger:   ${chalk.gray(run.triggered_by || '-')}`);
+        if (Object.prototype.hasOwnProperty.call(run, 'deployed_revision')) {
+            console.log(`    Revision (latest session): ${chalk.gray(formatDetailedRevision(run.deployed_revision))}`);
+        }
 
         // Timeline
         if (run.timeline) {
