@@ -305,6 +305,41 @@ describe('project view --json', () => {
         expect(output.latest_successful_deployment.commit_sha).toBe('abcdef1234567890');
     });
 
+    it('drops server-side deployment fields the CLI does not declare, including the real failure_reason', async () => {
+        const body = structuredClone(responseBody) as any;
+        // failure_reason is real — DeploymentResource serializes it — and is always
+        // null for a successful deployment; unknown_future_field stands in for
+        // whatever the API adds next. Neither belongs in the documented --json shape.
+        body.latest_successful_deployment.failure_reason = 'build exploded';
+        body.latest_successful_deployment.unknown_future_field = 'leaked';
+        responseBody = body;
+
+        const lines: string[] = [];
+        await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
+
+        const output = JSON.parse(lines.join('\n'));
+        expect(Object.keys(output.latest_successful_deployment)).toEqual([
+            'id',
+            'status',
+            'source_hash',
+            'metadata_source',
+            'commit_sha',
+            'short_sha',
+            'branch',
+            'tag',
+            'commit_subject',
+            'commit_author_date',
+            'remote_url',
+            'dirty',
+            'default_branch',
+            'default_branch_sha',
+            'commits_behind',
+            'completed_at',
+        ]);
+        expect(lines.join('\n')).not.toContain('failure_reason');
+        expect(lines.join('\n')).not.toContain('leaked');
+    });
+
     it('emits latest_successful_deployment: null when there is no deployment', async () => {
         responseBody = {
             slug: 'legacy',
