@@ -205,6 +205,7 @@ export function displaySummaryTable(runsList: any[], projectName?: string) {
     }
 
     console.log('');
+    console.log(chalk.gray('REVISION shows latest session: * dirty, ? dirty state unknown, ↓N behind default branch at deploy.'));
     console.log(chalk.gray(`Showing ${runsList.length} run(s)`));
 }
 

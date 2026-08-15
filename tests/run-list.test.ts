@@ -48,6 +48,18 @@ describe('run revision formatting', () => {
         expect(output).not.toContain('\u202e');
     });
 
+    it('explains latest-session attribution and every revision marker after the summary table', () => {
+        const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        displaySummaryTable([{ id: 1, workflow_name: 'safe', execution_status: 'SUCCESS' }]);
+        const lines = log.mock.calls.map((call) => String(call[0]));
+
+        expect(lines).toContain(
+            'REVISION shows latest session: * dirty, ? dirty state unknown, ↓N behind default branch at deploy.',
+        );
+        expect(lines.indexOf('REVISION shows latest session: * dirty, ? dirty state unknown, ↓N behind default branch at deploy.'))
+            .toBeGreaterThan(lines.findIndex((line) => line.includes('safe')));
+    });
+
     it('renders old-server summary as unknown and omits its detailed line', () => {
         const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
         const oldRun = { id: 1, workflow_name: 'legacy', execution_status: 'SUCCESS' };
