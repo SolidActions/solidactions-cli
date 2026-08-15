@@ -19,6 +19,7 @@ const COMMANDS = [
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
     { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
     { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
+    { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
 ] as const;
 
 const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume'];
@@ -29,7 +30,7 @@ function loadProgram(): any {
 }
 
 describe('database command tree', () => {
-    it('exports the singular noun with exactly the ten public v1 verbs', () => {
+    it('exports the singular noun with the complete public verbs', () => {
         const program = loadProgram();
         const nouns = program.commands.map((command: any) => command.name());
         const database = program.commands.find((command: any) => command.name() === 'database');

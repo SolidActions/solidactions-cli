@@ -70,6 +70,7 @@ import {
     databaseSchema,
     databaseUndelete,
 } from './commands/database';
+import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -304,6 +305,18 @@ database
     .option('--resume <checkpoint>', 'Resume from a validated import checkpoint')
     .action(async (name, file, options) => {
         await databaseImport(name, file, options);
+    });
+
+database
+    .command('push')
+    .description('Replace a database from a complete SQLite file')
+    .argument('<database>', 'Database name')
+    .argument('<file.db>', 'Complete SQLite database file')
+    .requiredOption('-y, --yes', 'Acknowledge destructive replacement')
+    .option('--allow-empty', 'Allow a database with zero countable rows')
+    .option('--idempotency-key <uuid>', 'Reuse a bulk-load operation UUID')
+    .action(async (name, file, options) => {
+        await databasePush(name, file, options);
     });
 
 // =============================================================================
