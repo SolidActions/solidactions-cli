@@ -4,6 +4,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { writeSecretFileSync } from '../utils/secure-write';
 
 interface EnvPullOptions {
     env?: string;
@@ -119,7 +120,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                 // No .env file — create with just OAuth vars
                 console.log(chalk.yellow('No .env file found — creating with OAuth vars only. Run a full env:pull for all variables.'));
                 const content = oauthLines.join('\n') + '\n';
-                fs.writeFileSync(outputPath, content);
+                writeSecretFileSync(outputPath, content);
             } else {
                 // Merge into existing .env file
                 const existingContent = fs.readFileSync(outputPath, 'utf-8');
@@ -163,7 +164,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                 preservedLines.push(...oauthLines);
                 preservedLines.push('');
 
-                fs.writeFileSync(outputPath, preservedLines.join('\n'));
+                writeSecretFileSync(outputPath, preservedLines.join('\n'));
             }
 
             console.log(chalk.green(`\n✓ Updated ${oauthVars.length} OAuth token(s) in ${outputFile}`));
@@ -233,7 +234,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
         lines.push('');
 
         // Write to file
-        fs.writeFileSync(outputPath, lines.join('\n'));
+        writeSecretFileSync(outputPath, lines.join('\n'));
 
         console.log(chalk.green(`\n✓ Wrote ${count} variables to ${outputFile}`));
         if (secretCount > 0) {
