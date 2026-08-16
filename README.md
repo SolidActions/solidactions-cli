@@ -95,6 +95,7 @@ solidactions database pull analytics .solidactions/databases/analytics.db --yes
 solidactions database pull analytics --writable
 solidactions database import analytics backup.sql --yes
 solidactions database import analytics backup.sql --resume <checkpoint> --yes
+solidactions database push analytics complete.db --yes
 ```
 
 `--json` produces machine-readable output where supported. `delete`, `exec`,
@@ -111,6 +112,16 @@ By default, `pull` atomically publishes a read-only local replica at
 `.solidactions/databases/<safe-stem>.db`, or at an explicit path. Reuse that
 file for local analytics and transformations. `pull --writable` instead opens a
 foreground session: writes go to the live workspace database.
+
+`database push` replaces the complete remote database from a local SQLite file.
+It requires `--yes`, never changes the source file, and normalizes a private
+snapshot to UTF-8 SQLite with 4096-byte pages, no auto-vacuum, and WAL mode.
+The normalized snapshot can have a different byte size from the source.
+Quiesce writers before starting: replacement invalidates the old database URL
+and credentials. Empty databases additionally require `--allow-empty`; use
+`--idempotency-key <uuid>` to safely replay an interrupted operation.
+Reported countable rows include ordinary user tables; internal, virtual, and
+shadow tables are excluded.
 No offline merge or background write-back continues after exit.
 
 `dump` publishes only a complete SQL file through an owned temporary path and

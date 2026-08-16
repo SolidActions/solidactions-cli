@@ -19,6 +19,7 @@ const COMMANDS = [
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
     { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
     { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
+    { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
 ] as const;
 
 const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume'];
@@ -29,7 +30,7 @@ function loadProgram(): any {
 }
 
 describe('database command tree', () => {
-    it('exports the singular noun with exactly the ten public v1 verbs', () => {
+    it('exports the singular noun with the complete public verbs', () => {
         const program = loadProgram();
         const nouns = program.commands.map((command: any) => command.name());
         const database = program.commands.find((command: any) => command.name() === 'database');
@@ -73,6 +74,16 @@ describe('database command tree', () => {
             const resume = command.options.find((option: any) => option.long === '--resume');
             if (expectedOptions.includes('--resume')) expect(resume?.required).toBe(true);
         }
+    });
+
+    it('explains push normalization and countable-row exclusions in help', () => {
+        const program = loadProgram();
+        const push = program.commands.find((command: any) => command.name() === 'database')
+            ?.commands.find((command: any) => command.name() === 'push');
+        const help = push.helpInformation();
+        expect(help).toMatch(/WAL.*4096.*auto-vacuum NONE/is);
+        expect(help).toMatch(/source file is\s+unchanged/i);
+        expect(help).toMatch(/countable rows.*internal.*virtual.*shadow/is);
     });
 });
 
