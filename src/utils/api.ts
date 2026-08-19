@@ -441,7 +441,10 @@ export async function applyWorkspaceGuard(
 ): Promise<Config> {
     const isTty = io.isTty ?? (() => !!process.stdin.isTTY);
     const warn = io.warn ?? ((message: string) => { process.stderr.write(`${message}\n`); });
-    const announce = io.announce ?? ((message: string) => { console.log(message); });
+    // stdout is reserved for a command's own machine-parseable output (e.g. `database
+    // create --json`) — the banner and the decline message are human-facing status, so
+    // they default to stderr, same as warn.
+    const announce = io.announce ?? ((message: string) => { process.stderr.write(`${message}\n`); });
     const now = io.now ?? (() => new Date());
 
     const cwdInferred = isCwdInferredWorkspace(sources, getGlobalConfigPath());

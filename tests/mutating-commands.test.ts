@@ -33,7 +33,10 @@ function classifiableLeafPaths(): string[] {
 
     return commands
         .filter((c) => !isStrictPrefixOfSome(c))
-        .filter((c) => !c.hidden)
+        // Hidden leaves (e.g. the deprecated `skill run` alias) must still be classified —
+        // only excluding them let `skill run` fall through the fail-safe to MUTATING
+        // unnoticed (#1437). `help` is commander's own auto-generated leaf and is never
+        // routed through requireConfigWithWorkspace, so it stays excluded.
         .filter((c) => c.path[c.path.length - 1] !== 'help')
         .map((c) => c.path.join(' '));
 }

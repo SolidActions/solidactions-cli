@@ -179,13 +179,16 @@ export function mergeConfigs(
     // Pure workspace-pin local files (no host/apiKey of their own) keep
     // inheriting global credentials and so may still inherit the workspace.
     const localDefinesCreds = !!(local && (local.host !== undefined || local.apiKey !== undefined));
+    // org must travel with the SAME layer that supplied workspaceId — never picked
+    // independently — so a local file pinning workspace A never inherits the global
+    // file's org name for a workspace it didn't name (the confusion #1194 fixed).
     const pickWorkspaceField = <K extends 'workspace' | 'workspaceId'>(
         key: K,
-    ): { value: Config[K] | undefined; source: ConfigSource } => {
-        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env' };
-        if (local && local[key] !== undefined) return { value: local[key], source: localPath! };
-        if (!localDefinesCreds && global && global[key] !== undefined) return { value: global[key], source: globalPath };
-        return { value: undefined, source: null };
+    ): { value: Config[K] | undefined; source: ConfigSource; org: string | undefined } => {
+        if (env[key] !== undefined) return { value: env[key] as Config[K], source: 'env', org: undefined };
+        if (local && local[key] !== undefined) return { value: local[key], source: localPath!, org: local.workspaceOrg };
+        if (!localDefinesCreds && global && global[key] !== undefined) return { value: global[key], source: globalPath, org: global.workspaceOrg };
+        return { value: undefined, source: null, org: undefined };
     };
 
     const workspace = pickWorkspaceField('workspace');
@@ -205,6 +208,7 @@ export function mergeConfigs(
             apiKey: (apiKey.value ?? '') as string,
             workspace: workspace.value as string | undefined,
             workspaceId: workspaceId.value as string | undefined,
+            workspaceOrg: workspaceId.org,
             scopeMode: scopeMode.value as Config['scopeMode'],
             scopedWorkspaceIds: scopedWorkspaceIds.value as string[] | undefined,
         },
@@ -235,6 +239,10 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
     if (cliWorkspaceOverride !== undefined) {
         merged.config.workspace = cliWorkspaceOverride;
         merged.config.workspaceId = undefined;
+        // Org is unknown until resolveWorkspaceInput() re-resolves it for the override
+        // (requireConfigWithWorkspace's -w branch sets it there) — a stale file-layer
+        // org must not linger and get attributed to whatever workspace -w turns out to be.
+        merged.config.workspaceOrg = undefined;
         merged.sources.workspace = 'cli';
         merged.sources.workspaceId = 'cli';
     }
