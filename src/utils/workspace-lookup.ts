@@ -25,17 +25,117 @@ export interface FetchWorkspacesResult {
     scope: WorkspaceScope | null;
 }
 
+export type WorkspaceMatchResult =
+    | { kind: 'match'; workspace: WorkspaceLookupRecord }
+    | { kind: 'ambiguous'; input: string; candidates: WorkspaceLookupRecord[] }
+    | { kind: 'org-only'; input: string; orgWorkspaces: WorkspaceLookupRecord[] }
+    | { kind: 'not-found'; input: string };
+
 /**
- * Pure: given a list of workspaces and an input string, return the matching
- * workspace. Match order: id, slug, name (first match wins). Cross-tenant
- * collisions resolve to the first match in the list (pre-existing behavior;
- * see sol-r0b-test-todo.md for follow-up).
+ * Pure: given a list of workspaces and an input string, classify the match.
+ * Match order: id, slug, name — but unlike a bare first-match, NAME matches
+ * are checked for collisions before being trusted, because org names and
+ * workspace names share a namespace (#1196):
+ *   - the input can be an org name that also happens to be one of that org's
+ *     workspace names, silently landing the user in the org-wide workspace
+ *     instead of the one they meant;
+ *   - the input can be an org name that owns no workspace of that name at
+ *     all, which a bare miss reports as "not found" even though it's right
+ *     there on `workspace list`;
+ *   - the same workspace name can exist in two different orgs.
+ * `id` and `slug` matches are exact handles (unique in practice) and stay
+ * ambiguity-free so scripted `workspace set <slug|uuid>` keeps working
+ * unprompted; only name matches get the extra checks.
  */
-export function matchWorkspace(
+export function classifyWorkspaceInput(
     input: string,
     workspaces: WorkspaceLookupRecord[],
-): WorkspaceLookupRecord | undefined {
-    return workspaces.find((w) => w.id === input || w.slug === input || w.name === input);
+): WorkspaceMatchResult {
+    const idMatch = workspaces.find((w) => w.id === input);
+    if (idMatch) {
+        return { kind: 'match', workspace: idMatch };
+    }
+
+    const slugMatches = workspaces.filter((w) => w.slug === input);
+    if (slugMatches.length === 1) {
+        return { kind: 'match', workspace: slugMatches[0] };
+    }
+    if (slugMatches.length > 1) {
+        return { kind: 'ambiguous', input, candidates: slugMatches };
+    }
+
+    const nameMatches = workspaces.filter((w) => w.name === input);
+    const orgWorkspaces = workspaces.filter((w) => (w.org_name || w.tenant_name) === input);
+
+    if (nameMatches.length === 0) {
+        if (orgWorkspaces.length > 0) {
+            return { kind: 'org-only', input, orgWorkspaces };
+        }
+        return { kind: 'not-found', input };
+    }
+
+    if (nameMatches.length > 1) {
+        return { kind: 'ambiguous', input, candidates: nameMatches };
+    }
+
+    const soleMatch = nameMatches[0];
+    const otherOrgWorkspaces = orgWorkspaces.filter((w) => w.id !== soleMatch.id);
+    if (orgWorkspaces.length > 0 && otherOrgWorkspaces.length > 0) {
+        const candidates = [soleMatch, ...otherOrgWorkspaces];
+        return { kind: 'ambiguous', input, candidates };
+    }
+
+    return { kind: 'match', workspace: soleMatch };
+}
+
+/** One candidate's identifying details, for ambiguity/org-only listings. */
+function describeCandidate(ws: WorkspaceLookupRecord): string {
+    const orgName = ws.org_name || ws.tenant_name;
+    const parts = [ws.name];
+    if (orgName) {
+        parts.push(`organization: ${orgName}`);
+    }
+    if (ws.role) {
+        parts.push(`role: ${ws.role}`);
+    }
+    if (ws.slug) {
+        parts.push(`slug: ${ws.slug}`);
+    }
+    parts.push(`id: ${ws.id}`);
+    return `  - ${parts.join(', ')}`;
+}
+
+/**
+ * Pure: build the plain (uncoloured) failure message body for a
+ * non-`match` classification. Callers wrap this in `chalk.red` at the call
+ * site. `not-found` returns the pre-existing message text so error copy
+ * doesn't regress for the common miss case.
+ */
+export function describeWorkspaceMatchFailure(result: WorkspaceMatchResult): string {
+    switch (result.kind) {
+        case 'ambiguous': {
+            const isAlsoOrgName = result.candidates.some((w) => (w.org_name || w.tenant_name) === result.input);
+            const lines = [
+                `"${result.input}" is ambiguous — it matches more than one workspace` + (isAlsoOrgName ? ' (it is also an organization name)' : '') + ':',
+                ...result.candidates.map(describeCandidate),
+                'Re-run with the workspace\'s slug or ID instead.',
+            ];
+            return lines.join('\n');
+        }
+        case 'org-only': {
+            const lines = [
+                `"${result.input}" is an organization, not a workspace.`,
+                'Its workspaces:',
+                ...result.orgWorkspaces.map(describeCandidate),
+                'Pick one by name, slug or ID.',
+            ];
+            return lines.join('\n');
+        }
+        case 'not-found':
+            return `Workspace "${result.input}" not found. Run \`solidactions workspace list\` to list available workspaces.`;
+        case 'match':
+            return '';
+    }
 }
 
 export interface WorkspaceOrgGroup {
@@ -221,22 +321,26 @@ export async function resolveWorkspaceInput(
         console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
         process.exit(1);
     }
-    const match = matchWorkspace(input, workspaces);
-    if (!match) {
-        // A scoped (single/subset) session only ever lists the workspaces its
-        // OAuth grant covers, so a miss can mean either "doesn't exist" OR
-        // "exists but out of this session's scope" — disambiguate so the user
-        // knows re-auth with broader scope may be the fix, not a typo.
-        if (scope && (scope.mode === 'single' || scope.mode === 'subset')) {
-            console.error(chalk.red(
-                `Workspace "${input}" not found in this session's authorized workspaces `
-                + `(scope: ${scope.mode}${scope.workspace_ids.length ? `, covering ${scope.workspace_ids.join(', ')}` : ''}). `
-                + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login --device`.',
-            ));
-        } else {
-            console.error(chalk.red(`Workspace "${input}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
-        }
+    const result = classifyWorkspaceInput(input, workspaces);
+    if (result.kind === 'match') {
+        return result.workspace;
+    }
+    if (result.kind === 'ambiguous' || result.kind === 'org-only') {
+        console.error(chalk.red(describeWorkspaceMatchFailure(result)));
         process.exit(1);
     }
-    return match;
+    // A scoped (single/subset) session only ever lists the workspaces its
+    // OAuth grant covers, so a miss can mean either "doesn't exist" OR
+    // "exists but out of this session's scope" — disambiguate so the user
+    // knows re-auth with broader scope may be the fix, not a typo.
+    if (scope && (scope.mode === 'single' || scope.mode === 'subset')) {
+        console.error(chalk.red(
+            `Workspace "${input}" not found in this session's authorized workspaces `
+            + `(scope: ${scope.mode}${scope.workspace_ids.length ? `, covering ${scope.workspace_ids.join(', ')}` : ''}). `
+            + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login --device`.',
+        ));
+    } else {
+        console.error(chalk.red(describeWorkspaceMatchFailure(result)));
+    }
+    process.exit(1);
 }
