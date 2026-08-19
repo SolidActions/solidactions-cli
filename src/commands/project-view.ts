@@ -221,12 +221,10 @@ export async function projectViewWithConfig(
             console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response?.status === 404) {
             const envs = await listProjectEnvironments(config, project);
-            if (envs) {
-                let suggested = envs.includes('production') ? 'production' : envs[0];
-                if (suggested === environment) {
-                    suggested = envs.find((env) => env !== environment) ?? suggested;
-                }
-                console.error(chalk.red(`Project "${project}" has no ${environment} environment (exists in: ${envs.join(', ')}).`));
+            const otherEnvs = envs?.filter((env) => env !== environment) ?? [];
+            if (otherEnvs.length > 0) {
+                const suggested = otherEnvs.includes('production') ? 'production' : otherEnvs[0];
+                console.error(chalk.red(`Project "${project}" has no ${environment} environment (exists in: ${otherEnvs.join(', ')}).`));
                 console.error(`  solidactions project view ${project} -e ${suggested}`);
             } else {
                 const message = sanitizeDisplayText(error.response.data?.message, 500)

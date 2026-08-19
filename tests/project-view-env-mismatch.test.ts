@@ -113,6 +113,32 @@ describe('project view — env-miss remedy (app#1335)', () => {
         expect(text).not.toContain('smoke1329-dev');
     });
 
+    it('excludes the requested environment from the displayed list and the suggestion when the projects list and the detail 404 disagree', async () => {
+        // GET /api/v1/projects can report `dev` as existing (environment rows can exist
+        // standalone, or a row can exist before its deployment lands) even though the
+        // detail endpoint 404s for that exact slug. The message must not claim "no dev
+        // environment" while also listing dev as one of the environments it exists in.
+        projectsListBody = { data: [{ name: 'smoke1329', slug: 'smoke1329', environments: ['production', 'dev'] }] };
+
+        const { code, text } = await runProjectView('smoke1329');
+
+        expect(code).toBe(1);
+        expect(text).toContain('Project "smoke1329" has no dev environment (exists in: production).');
+        expect(text).not.toContain('exists in: production, dev');
+        expect(text).toContain('  solidactions project view smoke1329 -e production');
+    });
+
+    it('falls back to the server message and workspace hint when the only reported environment is the one that just 404d', async () => {
+        projectsListBody = { data: [{ name: 'smoke1329', slug: 'smoke1329', environments: ['dev'] }] };
+
+        const { code, text } = await runProjectView('smoke1329');
+
+        expect(code).toBe(1);
+        expect(text).toContain("Project 'smoke1329-dev' not found in your active workspace 'test-workspace'.");
+        expect(text).toContain('Did you mean to switch workspaces?');
+        expect(text).not.toMatch(/has no .* environment/);
+    });
+
     it('falls back to the server message and workspace hint when the family exists in no environment', async () => {
         projectsListBody = { data: [] };
 
