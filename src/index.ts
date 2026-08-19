@@ -110,7 +110,7 @@ program
 // a parent option of the same name, so `login --workspace <x>` was being
 // swallowed by this global flag instead of reaching login()'s own option.
 // The short form `-w` is unaffected and remains the primary way to use this.
-program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w)');
+program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w; also skips the CWD-inference prompt)');
 
 program.hook('preAction', (thisCommand, actionCommand) => {
     // Record the full commander path (e.g. ['project', 'deploy']) and the active

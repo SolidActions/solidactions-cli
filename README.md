@@ -151,6 +151,42 @@ For each field (`host`, `apiKey`, `workspaceId`), the CLI resolves independently
 
 You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while letting `host` and `apiKey` come from a file.
 
+### Workspace safety
+
+Resolution order layers 2 and 3 mean the active workspace can come from *where you are
+standing*: a `./.solidactions/config.json` in the current folder or any ancestor. That's
+convenient in a single project, but running a command from the wrong directory can silently
+target a different workspace than the one you last used.
+
+The CLI remembers the last workspace it used in `~/.solidactions/state.json` (a
+cosmetic/advisory file — deleting it just means the next command has nothing to compare
+against). When a CWD-inferred workspace differs from that last-used one, the CLI warns:
+
+```
+warn: workspace changed to <name> — organization <org> (<workspaceId>) — inferred from <path>; last used was <last-used-name-or-id>. Pin it with -w <workspaceId>.
+```
+
+For commands that **write** to the server, it also asks for confirmation before proceeding:
+
+```
+This command WRITES to <name> — organization <org> (<workspaceId>). Proceed?
+```
+
+`-w <id-or-slug-or-name>` (stating the workspace explicitly) and `--yes` both skip the prompt.
+A non-interactive shell with neither is refused rather than guessed:
+
+```
+re-run with -w <workspaceId> to confirm the target workspace, or --yes to accept the inferred one
+```
+
+Read-only commands are never prompted — at most they print the `warn:` line above. Every
+mutating command prints its resolved workspace, organization-qualified, as its first output
+line:
+
+```
+Workspace: <name> — organization <org> (<workspaceId>)
+```
+
 ### `solidactions login` flags
 
 - With no positional argument, `login` securely prompts for the API key using
