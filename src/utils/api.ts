@@ -1,5 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
 import {
     formatWorkspaceWithOrg,
@@ -8,6 +9,13 @@ import {
     WorkspaceLookupRecord,
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
+import { activeCommandIsMutating, getAssumeYes } from './mutating-commands';
+import {
+    decideWorkspaceGuard,
+    isCwdInferredWorkspace,
+    readLastUsedWorkspace,
+    writeLastUsedWorkspace,
+} from './workspace-guard';
 
 // Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
 // We require the literal single-quotes around the slug so plausible future error messages
@@ -379,6 +387,7 @@ export async function ensureWorkspaceSelected(
 
     config.workspace = selected.slug ?? selected.name;
     config.workspaceId = selected.id;
+    config.workspaceOrg = selected.org_name;
 
     if (workspaceSource !== 'env') {
         const targetPath = resolved?.activePath ?? getGlobalConfigPath();
@@ -388,18 +397,134 @@ export async function ensureWorkspaceSelected(
     return config;
 }
 
+/**
+ * Thrown by applyWorkspaceGuard when a CWD-inferred write is refused (non-TTY, no --yes)
+ * or declined (user answered no to the confirm prompt). Kept as a typed error rather than
+ * calling process.exit directly so the guard's decision logic stays unit-testable; the thin
+ * wrapper below (requireConfigWithWorkspace) is the only place that converts it into an exit.
+ */
+export class WorkspaceGuardAbort extends Error {
+    constructor(public readonly exitCode: number, message: string) {
+        super(message);
+        this.name = 'WorkspaceGuardAbort';
+    }
+}
+
+export interface WorkspaceGuardIo {
+    isTty?: () => boolean;
+    confirm?: (message: string) => Promise<boolean>;
+    warn?: (message: string) => void;
+    announce?: (message: string) => void;
+    homeDir?: string;
+    now?: () => Date;
+}
+
+/** Cosmetic "<name> — organization <org>" label for a resolved Config, offline (no lookup record needed). */
+function workspaceLabel(config: Config): string {
+    return formatWorkspaceWithOrg({
+        id: config.workspaceId ?? '',
+        name: config.workspace ?? config.workspaceId ?? 'workspace',
+        org_name: config.workspaceOrg,
+    });
+}
+
+/**
+ * Applies the CWD-inference guard to an already-resolved config, then records it as last-used.
+ * Returns the config, or throws WorkspaceGuardAbort when the user declines / cannot be asked
+ * (the caller is responsible for turning that into process.exit).
+ */
+export async function applyWorkspaceGuard(
+    config: Config,
+    sources: ResolvedConfig['sources'],
+    options: { mutating: boolean; explicitOverride: boolean; assumeYes: boolean },
+    io: WorkspaceGuardIo = {},
+): Promise<Config> {
+    const isTty = io.isTty ?? (() => !!process.stdin.isTTY);
+    const warn = io.warn ?? ((message: string) => { process.stderr.write(`${message}\n`); });
+    const announce = io.announce ?? ((message: string) => { console.log(message); });
+    const now = io.now ?? (() => new Date());
+
+    const cwdInferred = isCwdInferredWorkspace(sources, getGlobalConfigPath());
+    if (options.explicitOverride && cwdInferred) {
+        // Invariant: -w always sets sources.workspaceId = 'cli', which isCwdInferredWorkspace
+        // already treats as not-inferred. If this fires, resolution wiring is broken.
+        throw new Error('workspace guard: explicitOverride but isCwdInferredWorkspace returned true');
+    }
+
+    const lastUsed = readLastUsedWorkspace(io.homeDir);
+    const action = decideWorkspaceGuard({
+        resolvedWorkspaceId: config.workspaceId,
+        lastUsedWorkspaceId: lastUsed?.workspaceId,
+        cwdInferred,
+        mutating: options.mutating,
+    });
+
+    if (action === 'warn' || action === 'confirm') {
+        const inferredFrom = sources.workspaceId as string;
+        const lastLabel = lastUsed?.label ?? lastUsed?.workspaceId ?? 'unknown';
+        warn(
+            chalk.yellow('warn:') + ` workspace changed to ${workspaceLabel(config)} (${config.workspaceId}) `
+            + `— inferred from ${inferredFrom}; last used was ${lastLabel}. `
+            + `Pin it with -w ${config.workspaceId}.`,
+        );
+    }
+
+    if (action === 'confirm' && !options.assumeYes) {
+        if (!isTty()) {
+            warn(`re-run with -w ${config.workspaceId} to confirm the target workspace, or --yes to accept the inferred one`);
+            throw new WorkspaceGuardAbort(1, 'workspace guard: refused (non-interactive, no --yes)');
+        }
+
+        const confirmFn = io.confirm ?? (async (message: string) => {
+            const response = await prompts({ type: 'confirm', name: 'confirm', message, initial: false });
+            return !!response.confirm;
+        });
+        const proceed = await confirmFn(`This command WRITES to ${workspaceLabel(config)} (${config.workspaceId}). Proceed?`);
+        if (!proceed) {
+            announce(chalk.gray('Cancelled.'));
+            throw new WorkspaceGuardAbort(0, 'workspace guard: user declined');
+        }
+    }
+
+    if (options.mutating && config.workspaceId) {
+        announce(chalk.gray(`Workspace: ${workspaceLabel(config)} (${config.workspaceId})`));
+    }
+
+    if (config.workspaceId) {
+        writeLastUsedWorkspace(
+            { workspaceId: config.workspaceId, label: config.workspace, at: now().toISOString() },
+            io.homeDir,
+        );
+    }
+
+    return config;
+}
+
 export async function requireConfigWithWorkspace(): Promise<Config> {
     const resolved = requireResolvedConfig();
     let config = resolved.config;
+    const explicitOverride = resolved.sources.workspace === 'cli';
 
     // -w override path: source label 'cli' on the workspace field means
     // setCliWorkspaceOverride was called. workspaceId was cleared by resolveConfig
     // because we don't yet know if the input was a slug or UUID. Resolve now.
-    if (resolved.sources.workspace === 'cli' && !config.workspaceId) {
+    if (explicitOverride && !config.workspaceId) {
         const ws = await resolveWorkspaceInput(config, config.workspace!);
-        config = { ...config, workspace: ws.slug ?? ws.name, workspaceId: ws.id };
-        return config;
+        config = { ...config, workspace: ws.slug ?? ws.name, workspaceId: ws.id, workspaceOrg: ws.org_name };
+    } else {
+        config = await ensureWorkspaceSelected(config);
     }
 
-    return ensureWorkspaceSelected(config);
+    try {
+        return await applyWorkspaceGuard(config, resolved.sources, {
+            mutating: activeCommandIsMutating(),
+            explicitOverride,
+            assumeYes: getAssumeYes(),
+        });
+    } catch (error) {
+        if (error instanceof WorkspaceGuardAbort) {
+            process.exit(error.exitCode);
+        }
+        throw error;
+    }
 }

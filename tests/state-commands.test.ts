@@ -311,7 +311,10 @@ describe('state command failures', () => {
 
         expect(result.status).toBe(1);
         expect(result.stderr).toMatch(expected);
-        expect(result.stdout).toBe('');
+        // workflow disable is a mutating command — requireConfigWithWorkspace() always
+        // announces the resolved workspace before the command runs, even on a subsequent
+        // failure (#1437).
+        expect(result.stdout).toBe('Workspace: workspace-state-1 (workspace-state-1)\n');
     });
 
     it('rejects an unsupported environment without sending a request', async () => {

@@ -122,6 +122,11 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     // Fetches crew variables (read) and runs the working copy locally, like
     // `dev` — never writes server state.
     'skill dev',
+    // Hidden deprecated alias of `skill dev` (same skillDev() function, removed
+    // in v2.0.0) — omitted from this list originally; without it the fail-safe
+    // default classified it MUTATING, which broke the alias's identical-output
+    // contract by making it print the mutating-command workspace banner (#1437).
+    'skill run',
     'doc pull',
 ]);
 
@@ -166,4 +171,19 @@ export function activeCommandIsMutating(): boolean {
         return false;
     }
     return isMutatingCommand(activeCommandPath);
+}
+
+let assumeYes = false;
+
+/**
+ * Set from the preAction hook, reflecting the active command's own --yes/-y flag.
+ * Module-level state — set once at CLI startup before the command runs.
+ */
+export function setAssumeYes(value: boolean): void {
+    assumeYes = value;
+}
+
+/** The value recorded by setAssumeYes. */
+export function getAssumeYes(): boolean {
+    return assumeYes;
 }

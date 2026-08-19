@@ -72,6 +72,7 @@ import {
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
+import { setActiveCommandPath, setAssumeYes } from './utils/mutating-commands';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -112,6 +113,17 @@ program
 program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w)');
 
 program.hook('preAction', (thisCommand, actionCommand) => {
+    // Record the full commander path (e.g. ['project', 'deploy']) and the active
+    // command's own --yes/-y flag, unconditionally — these feed the workspace guard
+    // in requireConfigWithWorkspace() and must never be skipped by an early return
+    // below (e.g. the `workspace set` -w warning).
+    const commandPath: string[] = [];
+    for (let cmd: Command | null = actionCommand; cmd && cmd !== program; cmd = cmd.parent) {
+        commandPath.unshift(cmd.name());
+    }
+    setActiveCommandPath(commandPath);
+    setAssumeYes(!!actionCommand.opts().yes);
+
     const opts = thisCommand.opts();
     const wsOverride: string | undefined = opts.workspaceOverride;
     if (wsOverride) {

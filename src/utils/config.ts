@@ -8,6 +8,7 @@ export interface Config {
     apiKey: string;
     workspace?: string;     // human-readable slug; cosmetic
     workspaceId?: string;   // canonical UUID used in API calls
+    workspaceOrg?: string;  // organization name for workspaceId; cosmetic, enables org-qualified display offline
     scopeMode?: 'all' | 'subset' | 'single'; // set for device-flow tokens; absent for user-scoped Sanctum PATs
     scopedWorkspaceIds?: string[];           // present when scopeMode is 'subset' or 'single'
 }
@@ -121,9 +122,9 @@ export function writeConfigFile(filePath: string, config: Config): void {
  * any existing keys (preserves host/apiKey if already present). Re-uses
  * writeConfigFile's atomic-write + 0o600 mode contract.
  */
-export function writeWorkspaceToFile(filePath: string, workspace: string, workspaceId: string): void {
+export function writeWorkspaceToFile(filePath: string, workspace: string, workspaceId: string, org?: string): void {
     const existing: Partial<Config> = readConfigFile(filePath) ?? {};
-    writeConfigFile(filePath, { ...existing, workspace, workspaceId } as Config);
+    writeConfigFile(filePath, { ...existing, workspace, workspaceId, workspaceOrg: org } as Config);
 }
 
 export function removeConfigFile(filePath: string): boolean {
