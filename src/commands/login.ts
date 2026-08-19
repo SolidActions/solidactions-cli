@@ -301,13 +301,53 @@ export async function completeLogin(
     options: { workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
     scope: WorkspaceScope | null = null,
     preflight: LoginWritePreflight | null = null,
-    dependencies: { selectWorkspace?: typeof selectWorkspaceInteractively } = {},
+    dependencies: {
+        selectWorkspace?: typeof selectWorkspaceInteractively;
+        overwriteQuestion?: WritePromptDependencies['question'];
+    } = {},
 ): Promise<void> {
     // Device-flow tokens carry a scope (mode + workspace_ids) that later
     // gates `workspace set`; absent for user-scoped Sanctum PATs.
     if (scope) {
         config.scopeMode = scope.mode;
         config.scopedWorkspaceIds = scope.workspace_ids;
+    }
+
+    // Decide the destination and confirm any destructive overwrite BEFORE
+    // workspace resolution (including the interactive picker), so the y/N
+    // lands before the user has done the picker work, not after (app#1197).
+    // Device login has already persisted its base credential via a preflight.
+    let target: WriteTarget | undefined;
+    let targetPath: string | undefined;
+    if (!preflight) {
+        target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
+        targetPath = pathForTarget(target);
+
+        // The final config (which gains workspace/workspaceId) isn't known
+        // until the workspace is chosen below, so we can't byte-compare
+        // against it here. Compare credentials instead — the guard exists to
+        // protect a *different* account's config from being clobbered.
+        const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
+        let isDestructive = false;
+        if (existingRaw !== null) {
+            try {
+                const existing = JSON.parse(existingRaw);
+                isDestructive = existing.host !== config.host || existing.apiKey !== config.apiKey;
+            } catch {
+                isDestructive = true;
+            }
+        }
+
+        if (isDestructive) {
+            const backupPath = backupPathFor(targetPath);
+            const proceed = await confirmOverwrite(targetPath, backupPath, { question: dependencies.overwriteQuestion });
+            if (!proceed) {
+                console.log(chalk.yellow('Aborted. No changes were made.'));
+                process.exit(0);
+            }
+            fs.copyFileSync(targetPath, backupPath);
+            console.log(chalk.gray(`Backup saved to ${backupPath}`));
+        }
     }
 
     // Resolve the workspace. Device login has already persisted its base
@@ -362,25 +402,8 @@ export async function completeLogin(
         savedTargetPath = preflight.targetPath;
         writeConfigFile(preflight.targetPath, config);
     } else {
-        const target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
-        const targetPath = pathForTarget(target);
-        savedTargetPath = targetPath;
-
-        const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
-        const wouldChange = existingRaw !== null && existingRaw.trim() !== JSON.stringify(config, null, 2).trim();
-
-        if (wouldChange) {
-            const backupPath = backupPathFor(targetPath);
-            const proceed = await confirmOverwrite(targetPath, backupPath);
-            if (!proceed) {
-                console.log(chalk.yellow('Aborted. No changes were made.'));
-                process.exit(0);
-            }
-            fs.copyFileSync(targetPath, backupPath);
-            console.log(chalk.gray(`Backup saved to ${backupPath}`));
-        }
-
-        writeConfigFile(targetPath, config);
+        savedTargetPath = targetPath!;
+        writeConfigFile(targetPath!, config);
 
         if (target === 'local') {
             await ensureGitignoreCovers(process.cwd(), !!options.gitignore);

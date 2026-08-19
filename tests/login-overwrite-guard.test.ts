@@ -19,7 +19,8 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { login } from '../src/commands/login';
+import { completeLogin, Config, login } from '../src/commands/login';
+import { WorkspaceLookupRecord } from '../src/utils/workspace-lookup';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 class ProcessExitError extends Error {
@@ -144,5 +145,77 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         expect(out).toContain('backup');
         expect(out).toContain('--local');
         expect(out).toContain('./.solidactions/config.json');
+    });
+
+    // app#1197 (second item): the overwrite confirm/backup must run BEFORE
+    // workspace resolution (including the interactive picker), not after —
+    // otherwise the user does the picker work and only then finds out the
+    // config would have been clobbered.
+    it('ordering (app#1197): with a DIFFERENT-credential existing config and multiple workspaces, confirm/backup runs before the workspace picker is reached', async () => {
+        const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
+        const oldRaw = fs.readFileSync(globalPath, 'utf-8');
+
+        Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+
+        const config: Config = { host: HOST(), apiKey: 'new-api-key' };
+        const multipleWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+            { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+        ];
+
+        await completeLogin(
+            config,
+            multipleWorkspaces,
+            { global: true },
+            null,
+            null,
+            {
+                // Auto-answer "yes" to the overwrite confirm so the test never
+                // waits on real stdin, then record that the (real) interactive
+                // workspace-picker branch was reached — a genuine observation
+                // of completeLogin's own control flow, not a spy on it.
+                overwriteQuestion: async () => 'y',
+                selectWorkspace: async (ws) => {
+                    console.log('picker reached');
+                    return ws[0];
+                },
+            },
+        );
+
+        const backupIndex = logLines.findIndex((l) => l.includes('Backup saved to'));
+        const pickerIndex = logLines.findIndex((l) => l.includes('picker reached'));
+
+        expect(backupIndex).toBeGreaterThanOrEqual(0);
+        expect(pickerIndex).toBeGreaterThanOrEqual(0);
+        expect(backupIndex).toBeLessThan(pickerIndex);
+
+        const dir = path.dirname(globalPath);
+        const backups = fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'));
+        expect(backups).toHaveLength(1);
+        expect(fs.readFileSync(path.join(dir, backups[0]), 'utf-8')).toBe(oldRaw);
+    });
+
+    // app#1197: the byte-level "would the serialized config change" compare
+    // used to trigger a backup here too, because the FINAL config gains a
+    // workspaceId only after workspace resolution runs. Comparing credentials
+    // (host + apiKey) instead means a same-account re-login backs up nothing.
+    it('same-credential re-login: no backup file is created and no prompt is shown, even though the final config gains a workspaceId', async () => {
+        const globalPath = writeGlobal(env.home, { host: HOST(), apiKey: 'same-key' });
+
+        const config: Config = { host: HOST(), apiKey: 'same-key' };
+        const oneWorkspace: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'Only Workspace', slug: 'only-workspace' },
+        ];
+
+        await completeLogin(config, oneWorkspace, { global: true });
+
+        const dir = path.dirname(globalPath);
+        const backups = fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'));
+        expect(backups).toHaveLength(0);
+        expect(logLines.some((l) => l.includes('Backup saved to'))).toBe(false);
+
+        const newConfig = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(newConfig.apiKey).toBe('same-key');
+        expect(newConfig.workspaceId).toBe('ws-1');
     });
 });
