@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { getApiHeaders, listProjectEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
@@ -194,9 +194,10 @@ export async function projectViewWithConfig(
     config: Config,
     writeLine: (line: string) => void = console.log,
 ): Promise<void> {
+    const environment = options.env ?? 'dev';
     let slug: string;
     try {
-        slug = projectSlugForView(project, options.env ?? 'dev');
+        slug = projectSlugForView(project, environment);
     } catch (error: any) {
         console.error(chalk.red(error.message));
         process.exit(1);
@@ -219,9 +220,19 @@ export async function projectViewWithConfig(
         if (error.response?.status === 401) {
             console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response?.status === 404) {
-            const message = sanitizeDisplayText(error.response.data?.message, 500)
-                ?? `Project "${slug}" not found.`;
-            console.error(chalk.red(message));
+            const envs = await listProjectEnvironments(config, project);
+            if (envs) {
+                let suggested = envs.includes('production') ? 'production' : envs[0];
+                if (suggested === environment) {
+                    suggested = envs.find((env) => env !== environment) ?? suggested;
+                }
+                console.error(chalk.red(`Project "${project}" has no ${environment} environment (exists in: ${envs.join(', ')}).`));
+                console.error(`  solidactions project view ${project} -e ${suggested}`);
+            } else {
+                const message = sanitizeDisplayText(error.response.data?.message, 500)
+                    ?? `Project "${slug}" not found.`;
+                console.error(chalk.red(message));
+            }
         } else if (error.response) {
             console.error(chalk.red(`Failed to view project: ${error.response.status}`));
         } else {

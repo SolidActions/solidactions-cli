@@ -216,19 +216,28 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
 
 /**
  * Best-effort lookup of the environments a project family actually has
- * (e.g. "production, dev"), for a friendlier 404 message. Returns null on
- * any failure — callers should treat that as "no extra detail available."
+ * (e.g. ["production", "dev"]), for a friendlier 404 message. Returns null
+ * on any failure — callers should treat that as "no extra detail available."
  */
-export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+export async function listProjectEnvironments(config: Config, projectName: string): Promise<string[] | null> {
     try {
         const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
         const rows = res.data?.data ?? res.data ?? [];
         const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
         const envs: string[] | undefined = hit?.environments;
-        return envs?.length ? envs.join(', ') : null;
+        return envs?.length ? envs : null;
     } catch {
         return null;
     }
+}
+
+/**
+ * Same lookup as `listProjectEnvironments`, joined for display (e.g.
+ * "production, dev"). Returns null on any failure.
+ */
+export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+    const envs = await listProjectEnvironments(config, projectName);
+    return envs ? envs.join(', ') : null;
 }
 
 /**
