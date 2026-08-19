@@ -301,6 +301,7 @@ export async function completeLogin(
     options: { workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
     scope: WorkspaceScope | null = null,
     preflight: LoginWritePreflight | null = null,
+    dependencies: { selectWorkspace?: typeof selectWorkspaceInteractively } = {},
 ): Promise<void> {
     // Device-flow tokens carry a scope (mode + workspace_ids) that later
     // gates `workspace set`; absent for user-scoped Sanctum PATs.
@@ -343,7 +344,8 @@ export async function completeLogin(
             + 'run `solidactions workspace set <name>`.',
         ));
     } else if (process.stdin.isTTY) {
-        const selected = await selectWorkspaceInteractively(workspaces);
+        const selectWorkspace = dependencies.selectWorkspace ?? selectWorkspaceInteractively;
+        const selected = await selectWorkspace(workspaces);
         if (selected) {
             config.workspace = selected.slug ?? selected.name;
             config.workspaceId = selected.id;
@@ -385,17 +387,26 @@ export async function completeLogin(
         }
     }
 
-    console.log(chalk.green('Logged in successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${savedTargetPath}`));
-    console.log('');
-    console.log(chalk.blue('Next step — scaffold a new project (includes AI tooling):'));
-    console.log(chalk.gray('  solidactions init <project-name>      Creates ./<project-name>/ with scaffold + AI skills'));
-    console.log(chalk.gray('  solidactions init                     Scaffolds in the current (empty) directory'));
-    console.log('');
-    console.log(chalk.blue('Quick start:'));
-    console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
-    console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
-    console.log(chalk.gray('  solidactions run list                 List recent runs'));
+    if (config.workspaceId) {
+        console.log(chalk.green('Logged in successfully!'));
+        console.log(chalk.gray(`Configuration saved to ${savedTargetPath}`));
+        console.log('');
+        console.log(chalk.blue('Next step — scaffold a new project (includes AI tooling):'));
+        console.log(chalk.gray('  solidactions init <project-name>      Creates ./<project-name>/ with scaffold + AI skills'));
+        console.log(chalk.gray('  solidactions init                     Scaffolds in the current (empty) directory'));
+        console.log('');
+        console.log(chalk.blue('Quick start:'));
+        console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
+        console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
+        console.log(chalk.gray('  solidactions run list                 List recent runs'));
+    } else {
+        console.log(chalk.yellow(`Authentication saved to ${savedTargetPath}.`));
+        if (workspaces.length > 0) {
+            console.log(chalk.yellow(
+                'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
+            ));
+        }
+    }
 }
 
 export async function login(
