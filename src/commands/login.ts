@@ -313,6 +313,17 @@ export async function completeLogin(
         config.scopedWorkspaceIds = scope.workspace_ids;
     }
 
+    // A failed --workspace match on an API-key login never reaches
+    // writeConfigFile below, so it must exit before the destination/confirm/
+    // backup block runs — otherwise the block backs up and claims to
+    // overwrite a config that was never touched (app#1197 finding 1). Device
+    // login (preflight set) keeps its own --workspace-miss handling below.
+    if (!preflight && options.workspace && !matchWorkspace(options.workspace, workspaces)) {
+        console.error(chalk.red(`Workspace "${options.workspace}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+        process.exit(1);
+        return;
+    }
+
     // Decide the destination and confirm any destructive overwrite BEFORE
     // workspace resolution (including the interactive picker), so the y/N
     // lands before the user has done the picker work, not after (app#1197).

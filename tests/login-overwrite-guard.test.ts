@@ -195,6 +195,84 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         expect(fs.readFileSync(path.join(dir, backups[0]), 'utf-8')).toBe(oldRaw);
     });
 
+    // app#1197 finding 1: a mismatched --workspace on an API-key login exits
+    // before writeConfigFile is ever reached, so the destination/confirm/
+    // backup block must not run — otherwise it falsely claims the (untouched)
+    // config "will be overwritten" and leaves a stray backup file behind.
+    it('mismatched --workspace with a DIFFERENT-credential existing config: exits 1 without backing up, overwriting, or claiming either', async () => {
+        const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
+        const oldRaw = fs.readFileSync(globalPath, 'utf-8');
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await login('new-api-key', { global: true, host: HOST(), workspace: 'Nonexistent Team' });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(fs.readFileSync(globalPath, 'utf-8')).toBe(oldRaw);
+
+        const dir = path.dirname(globalPath);
+        const backups = fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'));
+        expect(backups).toHaveLength(0);
+
+        const allOutput = [...logLines, ...errorLines].join('\n');
+        expect(allOutput).not.toContain('will be overwritten');
+        expect(allOutput).not.toContain('Backup saved to');
+    });
+
+    // app#1197 finding 3: the decline path through the hoisted confirm/backup
+    // block must abort BEFORE the workspace picker is ever reached, not just
+    // before the answer 'y' is exercised.
+    it('declining the overwrite confirm ("n"): aborts before the workspace picker is reached, leaves the config and disk untouched', async () => {
+        const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
+        const oldRaw = fs.readFileSync(globalPath, 'utf-8');
+
+        Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+
+        const config: Config = { host: HOST(), apiKey: 'new-api-key' };
+        const multipleWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+            { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+        ];
+        const pickerCalls: WorkspaceLookupRecord[][] = [];
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await completeLogin(
+                config,
+                multipleWorkspaces,
+                { global: true },
+                null,
+                null,
+                {
+                    overwriteQuestion: async () => 'n',
+                    // Records its own invocation in a plain array — a real
+                    // observation of whether completeLogin reached the
+                    // interactive-picker branch, not a mock/spy library.
+                    selectWorkspace: async (ws) => {
+                        pickerCalls.push(ws);
+                        return ws[0];
+                    },
+                },
+            );
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(0);
+        expect(logLines.some((l) => l.includes('Aborted. No changes were made.'))).toBe(true);
+        expect(pickerCalls).toHaveLength(0);
+
+        expect(fs.readFileSync(globalPath, 'utf-8')).toBe(oldRaw);
+        const dir = path.dirname(globalPath);
+        const backups = fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'));
+        expect(backups).toHaveLength(0);
+    });
+
     // app#1197: the byte-level "would the serialized config change" compare
     // used to trigger a backup here too, because the FINAL config gains a
     // workspaceId only after workspace resolution runs. Comparing credentials
