@@ -171,6 +171,95 @@ describe('describeWorkspaceMatchFailure', () => {
             'Workspace "nope" not found. Run `solidactions workspace list` to list available workspaces.',
         );
     });
+
+    it('golden: the org/workspace name-collision refusal renders exactly this, line for line', () => {
+        const result = classifyWorkspaceInput('10TC', [
+            { id: 'ws-1', slug: '10tc', name: '10TC', org_name: '10TC', role: 'admin', tenant_id: 't-10tc' },
+            { id: 'ws-2', slug: '10tc-sales', name: '10TC Sales', org_name: '10TC', role: 'member', tenant_id: 't-10tc' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toEqual([
+            '"10TC" is both an organization name and a workspace name — it could mean any of the following workspaces:',
+            '  - 10TC, organization: 10TC, role: admin, slug: 10tc, id: ws-1',
+            '  - 10TC Sales, organization: 10TC, role: member, slug: 10tc-sales, id: ws-2',
+            "Re-run with the workspace's slug or ID instead.",
+        ].join('\n'));
+    });
+
+    it('golden: the cross-org same-name refusal renders exactly this, line for line', () => {
+        const result = classifyWorkspaceInput('Shared Name', [
+            { id: 'ws-1', slug: 'acme-shared', name: 'Shared Name', org_name: 'Acme Org', role: 'admin', tenant_id: 't-acme' },
+            { id: 'ws-2', slug: 'globex-shared', name: 'Shared Name', org_name: 'Globex Org', role: 'member', tenant_id: 't-globex' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toEqual([
+            '"Shared Name" is ambiguous — it matches more than one workspace:',
+            '  - Shared Name, organization: Acme Org, role: admin, slug: acme-shared, id: ws-1',
+            '  - Shared Name, organization: Globex Org, role: member, slug: globex-shared, id: ws-2',
+            "Re-run with the workspace's slug or ID instead.",
+        ].join('\n'));
+    });
+
+    it('golden: the org-only refusal renders exactly this, line for line', () => {
+        const result = classifyWorkspaceInput('Test Org', [
+            { id: 'ws-1', slug: 'ops', name: 'Operations', org_name: 'Test Org', role: 'admin', tenant_id: 't-test' },
+            { id: 'ws-2', slug: 'eng', name: 'Engineering', org_name: 'Test Org', role: 'member', tenant_id: 't-test' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toEqual([
+            '"Test Org" is an organization, not a workspace.',
+            'Its workspaces:',
+            '  - Operations, organization: Test Org, role: admin, slug: ops, id: ws-1',
+            '  - Engineering, organization: Test Org, role: member, slug: eng, id: ws-2',
+            'Pick one by name, slug or ID.',
+        ].join('\n'));
+    });
+
+    it('golden: a duplicated-slug ambiguity asks for the ID only — the slug is the thing that just failed', () => {
+        const result = classifyWorkspaceInput('dup', [
+            { id: 'ws-1', slug: 'dup', name: 'Acme Ops', org_name: 'Acme Org', role: 'admin', tenant_id: 't-acme' },
+            { id: 'ws-2', slug: 'dup', name: 'Globex Ops', org_name: 'Globex Org', role: 'member', tenant_id: 't-globex' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toEqual([
+            '"dup" is ambiguous — it matches more than one workspace:',
+            '  - Acme Ops, organization: Acme Org, role: admin, slug: dup, id: ws-1',
+            '  - Globex Ops, organization: Globex Org, role: member, slug: dup, id: ws-2',
+            "Re-run with the workspace's ID instead.",
+        ].join('\n'));
+    });
+
+    it('a name ambiguity whose candidates share a slug across orgs also asks for the ID only', () => {
+        const result = classifyWorkspaceInput('Shared Name', [
+            { id: 'ws-1', slug: 'shared', name: 'Shared Name', org_name: 'Acme Org', role: 'admin', tenant_id: 't-acme' },
+            { id: 'ws-2', slug: 'shared', name: 'Shared Name', org_name: 'Globex Org', role: 'member', tenant_id: 't-globex' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toContain("Re-run with the workspace's ID instead.");
+        expect(message).not.toContain("slug or ID instead");
+    });
+
+    it('a candidate with no slug at all cannot be reached by slug, so the remedy is the ID only', () => {
+        const result = classifyWorkspaceInput('Shared Name', [
+            { id: 'ws-1', slug: 'acme-shared', name: 'Shared Name', org_name: 'Acme Org', role: 'admin', tenant_id: 't-acme' },
+            { id: 'ws-2', name: 'Shared Name', org_name: 'Globex Org', role: 'member', tenant_id: 't-globex' },
+        ]);
+
+        const message = describeWorkspaceMatchFailure(result);
+
+        expect(message).toContain("Re-run with the workspace's ID instead.");
+        expect(message).not.toContain("slug or ID instead");
+    });
 });
 
 describe('fetchWorkspaces', () => {

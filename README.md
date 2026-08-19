@@ -392,7 +392,7 @@ You do **not** need `--overwrite` to keep an edited file whose doc was deleted o
 | `workspace list` | List all workspaces |
 | `workspace set <id>` | Set active workspace (by ID, slug, or name) |
 
-**A name that's ambiguous is refused, not guessed.** If the name is shared across two organizations, or is also the name of an organization that owns other workspaces, `workspace set` refuses (exit 1) and lists the candidates — re-run with the workspace's slug or ID instead.
+**A name that's ambiguous is refused, not guessed.** If the name is shared across two organizations, or is also the name of an organization that owns other workspaces, `workspace set` refuses (exit 1) and lists the candidates — re-run with the workspace's slug or ID instead. Slugs are unique only within an organization, so when the candidates don't have distinct slugs of their own — including when the ambiguous input *was* a slug shared by two organizations — the refusal asks for the ID specifically, which is the only handle that can separate them.
 
 ### ai
 

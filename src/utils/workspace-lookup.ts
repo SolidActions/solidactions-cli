@@ -124,10 +124,18 @@ export function describeWorkspaceMatchFailure(result: WorkspaceMatchResult): str
             const headline = isAlsoOrgName
                 ? `"${result.input}" is both an organization name and a workspace name — it could mean any of the following workspaces:`
                 : `"${result.input}" is ambiguous — it matches more than one workspace:`;
+            // Slugs are unique per tenant, not globally, so they can't always
+            // separate the candidates — telling the user to retry with the slug
+            // when the ambiguity IS slug-level (or when two candidates share a
+            // slug, or one has none) sends them back to what just failed.
+            const slugs = result.candidates.map((w) => w.slug);
+            const slugsDisambiguate = slugs.every((slug) => !!slug) && new Set(slugs).size === slugs.length;
             const lines = [
                 headline,
                 ...result.candidates.map(describeCandidate),
-                'Re-run with the workspace\'s slug or ID instead.',
+                slugsDisambiguate
+                    ? 'Re-run with the workspace\'s slug or ID instead.'
+                    : 'Re-run with the workspace\'s ID instead.',
             ];
             return lines.join('\n');
         }
