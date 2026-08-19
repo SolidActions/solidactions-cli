@@ -39,11 +39,9 @@ Only `project deploy` was updated in this PR to surface the augmented backend me
 
 Audit pass on those controllers (in `solidactions-app`) would have them fall through to the same error helper as the route binding, so the augmented hint shows up for every command. Tracked as a separate ticket — backend change, not CLI.
 
-### Cross-tenant slug ambiguity in workspace lookup
+### ~~Cross-tenant slug ambiguity in workspace lookup~~ — RESOLVED by #1196
 
-`matchWorkspace(input, workspaces)` does a flat search across every workspace the API key returns. A user with access to two tenants where each tenant has a workspace slugged `acme` would silently get the first match in the list. Pre-existing behavior — applies to the old `workspaceSet` and the new `-w` resolution and `workspaceSetSlug` lookup alike.
-
-Mitigation considered out of scope: the API would need a `?tenant=<tenant-slug>` filter on `/api/v1/workspaces`, and the CLI would need a way to disambiguate. Revisit when (if) a real user reports the collision.
+`matchWorkspace(input, workspaces)` did a flat search across every workspace the API key returns and silently took the first match — a user with access to two tenants each having a workspace slugged `acme` would silently land in the wrong one. Resolved with a CLI-only fix rather than the `?tenant=<tenant-slug>` API-filter approach floated here originally: `matchWorkspace` is retired and replaced with `classifyWorkspaceInput`, which refuses (rather than guesses) on a duplicate-slug match, a duplicate-name match, and the org/workspace name collision that #1196 was filed for, returning an `ambiguous`/`org-only` result the caller reports instead of picking a winner.
 
 ### `e2e-init-cli` script in `solidactions-app` is broken
 

@@ -74,23 +74,19 @@ export function classifyWorkspaceInput(
         return { kind: 'not-found', input };
     }
 
-    if (nameMatches.length > 1) {
-        return { kind: 'ambiguous', input, candidates: nameMatches };
-    }
-
-    const soleMatch = nameMatches[0];
-    const otherOrgWorkspaces = orgWorkspaces.filter((w) => w.id !== soleMatch.id);
-    if (orgWorkspaces.length > 0 && otherOrgWorkspaces.length > 0) {
-        // Payload order, not "match first": filter the original array by the
-        // candidate id set rather than concatenating soleMatch ahead of the
-        // rest, so the ambiguity list reads in the order `workspace list`
-        // would show it.
-        const candidateIds = new Set([soleMatch.id, ...otherOrgWorkspaces.map((w) => w.id)]);
+    // Union name matches with same-named-org workspaces (not just when
+    // there's exactly one name match): two workspaces can share the input's
+    // name AND that name can also be an org that owns a third workspace, and
+    // all three belong in the ambiguity list. Filtering the original array by
+    // the merged id set (rather than concatenating) both dedupes by id and
+    // preserves payload order.
+    const candidateIds = new Set([...nameMatches.map((w) => w.id), ...orgWorkspaces.map((w) => w.id)]);
+    if (candidateIds.size > 1) {
         const candidates = workspaces.filter((w) => candidateIds.has(w.id));
         return { kind: 'ambiguous', input, candidates };
     }
 
-    return { kind: 'match', workspace: soleMatch };
+    return { kind: 'match', workspace: nameMatches[0] };
 }
 
 /** One candidate's identifying details, for ambiguity/org-only listings. */

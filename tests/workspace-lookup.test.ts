@@ -66,7 +66,7 @@ describe('classifyWorkspaceInput', () => {
         const message = describeWorkspaceMatchFailure(result);
         expect(message).toContain('is both an organization name and a workspace name');
         expect(message).toContain('10TC Sales');
-        expect(message).toMatch(/slug or ID|slug|ID/i);
+        expect(message).toContain("Re-run with the workspace's slug or ID instead.");
         // The org-collision headline must not claim "matches more than one
         // workspace" — only ws-1 is actually NAMED 10TC.
         expect(message).not.toContain('matches more than one workspace');
@@ -132,6 +132,25 @@ describe('classifyWorkspaceInput', () => {
         // Neither org's name equals the shared workspace name, so this must
         // NOT get the org-collision wording.
         expect(message).not.toContain('is both an organization name and a workspace name');
+    });
+
+    it('review fix #1: compound collision — two workspaces share the input name AND that name is also an org that owns a third workspace — merges all three candidates', () => {
+        const compoundWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-acme-1', slug: 'acme-1', name: 'Acme', org_name: 'Acme', role: 'admin', tenant_id: 't-acme' },
+            { id: 'ws-acme-sales', slug: 'acme-sales', name: 'Acme Sales', org_name: 'Acme', role: 'member', tenant_id: 't-acme' },
+            { id: 'ws-acme-2', slug: 'acme-2', name: 'Acme', org_name: 'Globex', role: 'member', tenant_id: 't-globex' },
+        ];
+
+        const result = classifyWorkspaceInput('Acme', compoundWorkspaces);
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+            expect(result.candidates).toEqual(compoundWorkspaces);
+        }
+
+        const message = describeWorkspaceMatchFailure(result);
+        expect(message).toContain('Acme Sales');
+        expect(message).toContain('Globex');
     });
 
     it('falls back to tenant_name for org matching when org_name is absent', () => {

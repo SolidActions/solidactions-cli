@@ -316,8 +316,9 @@ export async function completeLogin(
         if (result.kind !== 'match') {
             if (preflight?.credentialPersisted) {
                 writeConfigFile(preflight.targetPath, config);
+                console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
                 console.error(chalk.yellow(
-                    `Workspace "${options.workspace}" was not found. Authentication was saved to ${preflight.targetPath}.`,
+                    `Authentication was saved to ${preflight.targetPath}.`,
                 ));
                 console.error(chalk.yellow(
                     'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',

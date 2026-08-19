@@ -175,6 +175,59 @@ describe('login — validates before writing (F-C2)', () => {
         expect(out).toContain('Nonexistent Team');
     });
 
+    it('review fix #2: --workspace matching an org name that is also one of its own workspace names errors ambiguous before writing', async () => {
+        const globalPath = path.join(env.home, '.solidactions', 'config.json');
+        nextStatus = 200;
+        nextBody = {
+            data: [
+                { id: 'ws-1', name: '10TC', slug: '10tc', org_name: '10TC', role: 'admin' },
+                { id: 'ws-2', name: '10TC Sales', slug: '10tc-sales', org_name: '10TC', role: 'member' },
+            ],
+        };
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await login('good-key', { global: true, host: HOST(), workspace: '10TC' });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(writeCount).toBe(0);
+        expect(fs.existsSync(globalPath)).toBe(false);
+        const out = errorLines.join(' ');
+        expect(out).toContain('is both an organization name and a workspace name');
+        expect(out).toContain('10TC Sales');
+    });
+
+    it('review fix #2: --workspace matching only an org name (no same-named workspace) errors org-only before writing', async () => {
+        const globalPath = path.join(env.home, '.solidactions', 'config.json');
+        nextStatus = 200;
+        nextBody = {
+            data: [
+                { id: 'ws-1', name: 'Operations', slug: 'ops', org_name: 'Test Org', role: 'admin' },
+                { id: 'ws-2', name: 'Engineering', slug: 'eng', org_name: 'Test Org', role: 'member' },
+            ],
+        };
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await login('good-key', { global: true, host: HOST(), workspace: 'Test Org' });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(writeCount).toBe(0);
+        expect(fs.existsSync(globalPath)).toBe(false);
+        const out = errorLines.join(' ');
+        expect(out).toContain('is an organization, not a workspace.');
+        expect(out).toContain('Operations');
+        expect(out).toContain('Engineering');
+    });
+
     it('non-interactive, no --workspace: auto-selects and persists the sole workspace', async () => {
         nextStatus = 200;
         nextBody = { data: [{ id: 'ws-1', name: 'Some Workspace', slug: 'some-workspace' }] };
