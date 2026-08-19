@@ -63,9 +63,9 @@ describe('run view — id resolution (app#1306)', () => {
         expect(requestedUrls).toContain(`https://api.example.test/api/v1/runs/${uuid}`);
     });
 
-    it('accepts an uppercase-hex UUID', async () => {
+    it('accepts an uppercase-hex UUID and lowercases it before forwarding', async () => {
         const uuid = '3FA85F64-5717-4562-B3FC-2C963F66AFA6';
-        mockRunViewEndpoints({ id: uuid, workflow_name: 'wf', project_name: 'proj' });
+        mockRunViewEndpoints({ id: uuid.toLowerCase(), workflow_name: 'wf', project_name: 'proj' });
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
         const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
@@ -73,7 +73,12 @@ describe('run view — id resolution (app#1306)', () => {
 
         expect(exit).not.toHaveBeenCalled();
         const requestedUrls = vi.mocked(axios.get).mock.calls.map((call) => call[0]);
-        expect(requestedUrls).toContain(`https://api.example.test/api/v1/runs/${uuid}`);
+        // The server stores `run_uuid` lowercase and compares it verbatim, so an
+        // uppercase UUID must be normalized here or it 404s.
+        expect(requestedUrls).toContain(`https://api.example.test/api/v1/runs/${uuid.toLowerCase()}`);
+        expect(requestedUrls).toContain(`https://api.example.test/api/v1/runs/${uuid.toLowerCase()}/logs`);
+        expect(requestedUrls).toContain(`https://api.example.test/api/v1/runs/${uuid.toLowerCase()}/steps`);
+        expect(requestedUrls.some((url) => String(url).includes(uuid))).toBe(false);
     });
 
     it('rejects a garbage identifier with the invalid-id error and exit code 1', async () => {
