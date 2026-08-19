@@ -10,9 +10,11 @@ interface RunViewOptions {
     json?: boolean;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function runView(runId: string, options: RunViewOptions) {
-    if (!/^\d+$/.test(runId)) {
-        console.error(chalk.red(`Invalid run id: "${runId}" (run ids are numeric — see \`solidactions run list\`).`));
+    if (!/^\d+$/.test(runId) && !UUID_PATTERN.test(runId)) {
+        console.error(chalk.red(`Invalid run id: "${runId}" (expected a numeric run id or a run UUID — see \`solidactions run list\`).`));
         process.exit(1);
         return;
     }
