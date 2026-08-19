@@ -349,14 +349,25 @@ export async function pushYamlDeclarations(
 
     // Non-fatal: a warning means a declared resource doesn't exist in the
     // workspace yet, not that the sync failed (app#1150).
-    const warnings = formatSyncYamlWarnings(response?.data?.warnings);
+    const body = response?.data;
+    const rawWarnings = (body !== null && typeof body === 'object') ? body.warnings : undefined;
+    const warnings = formatSyncYamlWarnings(rawWarnings);
     const unresolvedSuffix = warnings.length > 0 ? ` (${warnings.length} unresolved)` : '';
     console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations${unresolvedSuffix}`));
+
+    // A `warnings` key that isn't an array means the response shape changed
+    // under us. Say so rather than silently reporting plain success, which is
+    // the exact bug app#1150 fixed. An ABSENT key is not a surprise — an older
+    // server simply doesn't send one — so it stays quiet.
+    if (rawWarnings !== undefined && !Array.isArray(rawWarnings)) {
+        console.log(chalk.gray('  Server returned warnings in an unrecognized shape; unresolved declarations may not be listed.'));
+    }
+
     for (const warning of warnings) {
         console.log(chalk.yellow(`  ⚠ ${warning}`));
     }
     if (warnings.length > 0) {
-        console.log(chalk.yellow('  These variables will have no value at runtime until the named resource exists.'));
+        console.log(chalk.yellow("  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies)."));
     }
 }
 

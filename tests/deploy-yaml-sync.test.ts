@@ -44,6 +44,15 @@ beforeAll(async () => {
                 res.end(JSON.stringify({ message: 'Sync target unreachable.' }));
                 return;
             }
+            if (req.url?.includes('/projects/shape-project/')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    message: 'YAML declarations synced.',
+                    count: 1,
+                    warnings: { unexpected: 'object instead of array' },
+                }));
+                return;
+            }
             if (req.url?.includes('/projects/warn-project/')) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
@@ -223,10 +232,14 @@ describe('pushYamlDeclarations: prints sync-yaml warnings from the response body
             capture.restore();
         }
 
-        expect(capture.lines).toHaveLength(3);
-        expect(capture.lines[0]).toContain('Synced 1 YAML env declarations (1 unresolved)');
-        expect(capture.lines[1]).toContain('ANALYTICS_DB → no workspace database named "does-not-exist"');
-        expect(capture.lines[2]).toContain('will have no value at runtime until the named resource exists');
+        // Exact equality, not toContain: the PR claims a precise rendering, and
+        // chalk is level 0 under vitest so these are the literal bytes a user
+        // sees (shop rule "commit the golden check", app#547/#1150 R1).
+        expect(capture.lines).toEqual([
+            'Synced 1 YAML env declarations (1 unresolved)',
+            '  ⚠ ANALYTICS_DB → no workspace database named "does-not-exist"',
+            "  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies).",
+        ]);
     });
 
     it('prints the unchanged single summary line when the response has no warnings', async () => {
@@ -239,9 +252,8 @@ describe('pushYamlDeclarations: prints sync-yaml warnings from the response body
             capture.restore();
         }
 
-        expect(capture.lines).toHaveLength(1);
-        expect(capture.lines[0]).toContain('Synced 0 YAML env declarations');
-        expect(capture.lines[0]).not.toContain('unresolved');
+        // The "byte-identical when there are no warnings" claim, as an exact test.
+        expect(capture.lines).toEqual(['Synced 0 YAML env declarations']);
     });
 
     it('does not crash when the response body is missing `warnings` entirely', async () => {
@@ -257,8 +269,25 @@ describe('pushYamlDeclarations: prints sync-yaml warnings from the response body
             capture.restore();
         }
 
-        expect(capture.lines).toHaveLength(1);
-        expect(capture.lines[0]).toContain('Synced 1 YAML env declarations');
-        expect(capture.lines[0]).not.toContain('unresolved');
+        expect(capture.lines).toEqual(['Synced 1 YAML env declarations']);
+    });
+
+    it('says so when the response carries `warnings` in a shape that is not an array', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: [{ MYDB: { database: 'analytics' } }],
+        };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'shape-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        expect(capture.lines).toEqual([
+            'Synced 1 YAML env declarations',
+            '  Server returned warnings in an unrecognized shape; unresolved declarations may not be listed.',
+        ]);
     });
 });
