@@ -13,6 +13,12 @@ import type { ResolvedConfig } from '../src/utils/config';
 
 const GLOBAL_PATH = '/home/u/.solidactions/config.json';
 
+// A mode-0o500 (no-write) directory does not stop root from writing into it, so the
+// permission-failure tests below would pass vacuously (never actually hitting the
+// error path) if run as root. Skip them in that case rather than let them silently
+// assert nothing.
+const isRoot = process.getuid !== undefined && process.getuid() === 0;
+
 function sources(workspaceId: ResolvedConfig['sources']['workspaceId']): ResolvedConfig['sources'] {
     return {
         host: null,
@@ -112,6 +118,54 @@ describe('state file: read/write round trip', () => {
         }
     });
 
+    it('returns null when the state file is empty (zero bytes)', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.home, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'state.json'), '');
+            expect(readLastUsedWorkspace(env.home)).toBeNull();
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    it('returns null when the state file contains a JSON string at the root', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.home, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify('hello'));
+            expect(readLastUsedWorkspace(env.home)).toBeNull();
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    it('returns null when the state file contains a JSON number at the root', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.home, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(42));
+            expect(readLastUsedWorkspace(env.home)).toBeNull();
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    it('returns null when workspaceId is present but not a string', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.home, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ workspaceId: 12345 }));
+            expect(readLastUsedWorkspace(env.home)).toBeNull();
+        } finally {
+            env.cleanup();
+        }
+    });
+
     it('creates the .solidactions dir when writing into a HOME that does not exist yet', () => {
         const env = makeTmpEnv();
         try {
@@ -124,7 +178,12 @@ describe('state file: read/write round trip', () => {
         }
     });
 
-    it('does not throw when the write fails (read-only .solidactions dir)', () => {
+    // These next two tests cover two distinct failure paths inside writeLastUsedWorkspace's
+    // single try/catch: writing into an existing-but-read-only dir (fs.writeFileSync fails),
+    // and creating the dir itself failing (fs.mkdirSync fails, because the parent is
+    // unwritable). A future refactor that splits the mkdir and write steps should keep both
+    // covered.
+    it.skipIf(isRoot)('does not throw when the write fails (read-only .solidactions dir)', () => {
         const env = makeTmpEnv();
         try {
             const dir = path.join(env.home, '.solidactions');
@@ -132,6 +191,19 @@ describe('state file: read/write round trip', () => {
             expect(() => writeLastUsedWorkspace({ workspaceId: 'ws-789' }, env.home)).not.toThrow();
         } finally {
             fs.chmodSync(path.join(env.home, '.solidactions'), 0o700);
+            env.cleanup();
+        }
+    });
+
+    it.skipIf(isRoot)('does not throw when mkdirSync itself fails (.solidactions absent, unwritable parent)', () => {
+        const env = makeTmpEnv();
+        try {
+            const unwritableHome = path.join(env.home, 'locked-home');
+            fs.mkdirSync(unwritableHome, { mode: 0o500 });
+            expect(fs.existsSync(path.join(unwritableHome, '.solidactions'))).toBe(false);
+            expect(() => writeLastUsedWorkspace({ workspaceId: 'ws-999' }, unwritableHome)).not.toThrow();
+        } finally {
+            fs.chmodSync(path.join(env.home, 'locked-home'), 0o700);
             env.cleanup();
         }
     });
