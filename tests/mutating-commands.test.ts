@@ -73,6 +73,10 @@ describe('mutating-commands classification', () => {
             expect(isMutatingCommand(['project', 'deploy'])).toBe(true);
         });
 
+        it('returns true for `database pull` because --writable opens a live write REPL, even though the plain form is read-only', () => {
+            expect(isMutatingCommand(['database', 'pull'])).toBe(true);
+        });
+
         it('returns false for a known read-only path', () => {
             expect(isMutatingCommand(['project', 'view'])).toBe(false);
         });

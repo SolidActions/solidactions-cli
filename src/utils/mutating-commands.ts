@@ -7,13 +7,23 @@
  *
  * Classified by reading each command's implementation under src/commands/
  * and checking which HTTP verb it sends. Most commands call axios directly
- * (GET = read, POST/PUT/PATCH/DELETE = write). The crews/roles MCP commands
- * (skill push/publish/pull/list/view/delete, role push) are transported as a
- * single JSON-RPC `tools/call` POST regardless of semantics (see
- * `postMcpTool` in src/utils/mcp.ts) — for those, the classification follows
- * the MCP tool's `action` argument instead of the outer HTTP verb
- * ('list'/'read' = read, 'create'/'edit'/'delete'/'take_snapshot'/
- * 'sandbox_exec' = write).
+ * (GET = read, POST/PUT/PATCH/DELETE = write). The MCP-backed commands
+ * (crews/roles tools: skill push/publish/pull/list/view/delete, role push;
+ * docs_vault tool: doc push/pull) are transported as a single JSON-RPC
+ * `tools/call` POST regardless of semantics (see `postMcpTool` in
+ * src/utils/mcp.ts) — for those, the classification follows the MCP tool's
+ * `action` argument instead of the outer HTTP verb ('list'/'read' = read,
+ * 'create'/'edit'/'delete'/'take_snapshot'/'sandbox_exec' = write).
+ *
+ * Classification is per command PATH only — it does not see flags. A
+ * command that can write under some flag combination but not others (e.g.
+ * `database pull --writable`) must still be classified MUTATING wholesale;
+ * there is no flag-aware variant of this lookup. Over-inclusion is the
+ * intended bias: the workspace-mismatch guard this file feeds only prompts
+ * when the resolved workspace ALSO changed and was CWD-inferred, so
+ * classifying a mostly-read command as MUTATING costs at most one extra
+ * confirmation, whereas the reverse can silently write to the wrong
+ * workspace.
  */
 
 /** Space-joined command paths that mutate SERVER state, e.g. 'project deploy'. */
@@ -24,6 +34,16 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'database exec',
     'database import',
     'database push',
+    // Plain `database pull` is read-only (GET, writes a local file only —
+    // same family as project/env/doc/skill pull). But `--writable`
+    // (databaseWritablePullWithConfig, src/commands/database.ts:1320) mints
+    // a WRITE-mode credential and opens a live interactive SQL REPL that
+    // executes real statements (client.execute/executeMultiple, ~lines
+    // 1540-1560) against the server-backed replica. Classification can't see
+    // flags, so the whole leaf must be MUTATING to keep the workspace guard
+    // from silently letting --writable writes through against the wrong
+    // CWD-inferred workspace.
+    'database pull',
     'project create',
     'project deploy',
     'project enable',
@@ -72,9 +92,6 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     // family below — the data-plane request happens to be a POST, but no
     // server state changes.
     'database dump',
-    // project/env/database/doc/skill pull all write LOCAL files from a GET —
-    // they cannot corrupt the wrong workspace's server state.
-    'database pull',
     'project view',
     'project pull',
     'project logs',
