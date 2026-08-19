@@ -81,7 +81,12 @@ export function classifyWorkspaceInput(
     const soleMatch = nameMatches[0];
     const otherOrgWorkspaces = orgWorkspaces.filter((w) => w.id !== soleMatch.id);
     if (orgWorkspaces.length > 0 && otherOrgWorkspaces.length > 0) {
-        const candidates = [soleMatch, ...otherOrgWorkspaces];
+        // Payload order, not "match first": filter the original array by the
+        // candidate id set rather than concatenating soleMatch ahead of the
+        // rest, so the ambiguity list reads in the order `workspace list`
+        // would show it.
+        const candidateIds = new Set([soleMatch.id, ...otherOrgWorkspaces.map((w) => w.id)]);
+        const candidates = workspaces.filter((w) => candidateIds.has(w.id));
         return { kind: 'ambiguous', input, candidates };
     }
 
@@ -114,9 +119,17 @@ function describeCandidate(ws: WorkspaceLookupRecord): string {
 export function describeWorkspaceMatchFailure(result: WorkspaceMatchResult): string {
     switch (result.kind) {
         case 'ambiguous': {
+            // The org-collision case (input is a name AND an org, e.g. #1196's
+            // 10TC/10TC Sales) only has ONE workspace actually named the
+            // input — "matches more than one workspace" would be false there.
+            // The plain cross-name case (two+ workspaces genuinely sharing a
+            // name) keeps that wording because it's true.
             const isAlsoOrgName = result.candidates.some((w) => (w.org_name || w.tenant_name) === result.input);
+            const headline = isAlsoOrgName
+                ? `"${result.input}" is both an organization name and a workspace name — it could mean any of the following workspaces:`
+                : `"${result.input}" is ambiguous — it matches more than one workspace:`;
             const lines = [
-                `"${result.input}" is ambiguous — it matches more than one workspace` + (isAlsoOrgName ? ' (it is also an organization name)' : '') + ':',
+                headline,
                 ...result.candidates.map(describeCandidate),
                 'Re-run with the workspace\'s slug or ID instead.',
             ];

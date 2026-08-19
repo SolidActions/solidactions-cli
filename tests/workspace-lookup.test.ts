@@ -50,7 +50,7 @@ describe('classifyWorkspaceInput', () => {
         }
     });
 
-    it('#1196(1): an org name equal to one of its workspace names, which also owns a second workspace, is ambiguous with both candidates', () => {
+    it('#1196(1): an org name equal to one of its workspace names, which also owns a second workspace, is ambiguous with both candidates in payload order', () => {
         const orgWorkspaces: WorkspaceLookupRecord[] = [
             { id: 'ws-1', slug: '10tc', name: '10TC', org_name: '10TC', role: 'admin', tenant_id: 't-10tc' },
             { id: 'ws-2', slug: '10tc-sales', name: '10TC Sales', org_name: '10TC', role: 'member', tenant_id: 't-10tc' },
@@ -60,14 +60,30 @@ describe('classifyWorkspaceInput', () => {
 
         expect(result.kind).toBe('ambiguous');
         if (result.kind === 'ambiguous') {
-            expect(result.candidates.map((w) => w.id).sort()).toEqual(['ws-1', 'ws-2']);
+            expect(result.candidates).toEqual(orgWorkspaces);
         }
 
         const message = describeWorkspaceMatchFailure(result);
-        expect(message).toContain('10TC');
-        expect(message).toContain('organization');
+        expect(message).toContain('is both an organization name and a workspace name');
         expect(message).toContain('10TC Sales');
         expect(message).toMatch(/slug or ID|slug|ID/i);
+        // The org-collision headline must not claim "matches more than one
+        // workspace" — only ws-1 is actually NAMED 10TC.
+        expect(message).not.toContain('matches more than one workspace');
+    });
+
+    it('#1196(1) regression: org-collision candidates preserve payload order even when the name match is NOT listed first', () => {
+        const outOfOrderWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-b', slug: 'widgets', name: 'Widgets', org_name: 'Acme', role: 'member', tenant_id: 't-acme' },
+            { id: 'ws-a', slug: 'acme-ws', name: 'Acme', org_name: 'Acme', role: 'admin', tenant_id: 't-acme' },
+        ];
+
+        const result = classifyWorkspaceInput('Acme', outOfOrderWorkspaces);
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+            expect(result.candidates.map((w) => w.id)).toEqual(['ws-b', 'ws-a']);
+        }
     });
 
     it('a same-named org that owns ONLY the matched workspace still resolves to match', () => {
@@ -110,8 +126,12 @@ describe('classifyWorkspaceInput', () => {
         }
 
         const message = describeWorkspaceMatchFailure(result);
+        expect(message).toContain('is ambiguous — it matches more than one workspace');
         expect(message).toContain('Acme Org');
         expect(message).toContain('Globex Org');
+        // Neither org's name equals the shared workspace name, so this must
+        // NOT get the org-collision wording.
+        expect(message).not.toContain('is both an organization name and a workspace name');
     });
 
     it('falls back to tenant_name for org matching when org_name is absent', () => {
