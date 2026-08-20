@@ -76,7 +76,7 @@ describe('applyWorkspaceGuard', () => {
             const result = await applyWorkspaceGuard(
                 config,
                 sources(LOCAL_PATH),
-                { mutating: false, explicitOverride: false, assumeYes: false },
+                { mutating: false, explicitOverride: false },
                 io,
             );
 
@@ -107,7 +107,7 @@ describe('applyWorkspaceGuard', () => {
             await applyWorkspaceGuard(
                 makeConfig(),
                 sources(LOCAL_PATH),
-                { mutating: false, explicitOverride: false, assumeYes: false },
+                { mutating: false, explicitOverride: false },
                 read.io,
             );
 
@@ -119,7 +119,7 @@ describe('applyWorkspaceGuard', () => {
                 applyWorkspaceGuard(
                     makeConfig(),
                     sources(LOCAL_PATH),
-                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    { mutating: true, explicitOverride: false },
                     write.io,
                 ),
             ).rejects.toMatchObject({ exitCode: 1 });
@@ -140,7 +140,7 @@ describe('applyWorkspaceGuard', () => {
             await applyWorkspaceGuard(
                 config,
                 sources(LOCAL_PATH),
-                { mutating: true, explicitOverride: false, assumeYes: false },
+                { mutating: true, explicitOverride: false },
                 io,
             );
 
@@ -165,7 +165,7 @@ describe('applyWorkspaceGuard', () => {
                 applyWorkspaceGuard(
                     config,
                     sources(LOCAL_PATH),
-                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    { mutating: true, explicitOverride: false },
                     io,
                 ),
             ).rejects.toMatchObject({ exitCode: 0 });
@@ -177,7 +177,7 @@ describe('applyWorkspaceGuard', () => {
         }
     });
 
-    it('write command + non-TTY + no --yes: refuses, does not record last-used', async () => {
+    it('write command + non-TTY: refuses, hint names -w only (never --yes), does not record last-used', async () => {
         const env = makeTmpEnv();
         try {
             writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
@@ -188,82 +188,35 @@ describe('applyWorkspaceGuard', () => {
                 applyWorkspaceGuard(
                     config,
                     sources(LOCAL_PATH),
-                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    { mutating: true, explicitOverride: false },
                     io,
                 ),
             ).rejects.toMatchObject({ exitCode: 1 });
 
             expect(confirmCalls).toHaveLength(0);
-            expect(warns.some((line) => line.includes('-w ws-new') && line.includes('--yes'))).toBe(true);
+            expect(warns.some((line) => line === 're-run with -w ws-new to confirm the target workspace')).toBe(true);
+            expect(warns.some((line) => line.includes('--yes'))).toBe(false);
             expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-old');
         } finally {
             env.cleanup();
         }
     });
 
-    it('write command + non-TTY + no --yes support: refuses, hint omits --yes but keeps -w', async () => {
+    it("a command's own --yes does not grant workspace consent: TTY still prompts", async () => {
         const env = makeTmpEnv();
         try {
             writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
-            const { io, warns, confirmCalls } = makeIo(env.home, { isTty: false });
-
-            const config = makeConfig();
-            await expect(
-                applyWorkspaceGuard(
-                    config,
-                    sources(LOCAL_PATH),
-                    { mutating: true, explicitOverride: false, assumeYes: false, supportsAssumeYes: false },
-                    io,
-                ),
-            ).rejects.toMatchObject({ exitCode: 1 });
-
-            expect(confirmCalls).toHaveLength(0);
-            expect(warns.some((line) => line.startsWith('re-run with -w ws-new') && !line.includes('--yes'))).toBe(true);
-            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-old');
-        } finally {
-            env.cleanup();
-        }
-    });
-
-    it('write command + non-TTY + --yes support: refuses, hint keeps both -w and --yes', async () => {
-        const env = makeTmpEnv();
-        try {
-            writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
-            const { io, warns, confirmCalls } = makeIo(env.home, { isTty: false });
-
-            const config = makeConfig();
-            await expect(
-                applyWorkspaceGuard(
-                    config,
-                    sources(LOCAL_PATH),
-                    { mutating: true, explicitOverride: false, assumeYes: false, supportsAssumeYes: true },
-                    io,
-                ),
-            ).rejects.toMatchObject({ exitCode: 1 });
-
-            expect(confirmCalls).toHaveLength(0);
-            expect(warns.some((line) => line.startsWith('re-run with -w ws-new') && line.includes('--yes'))).toBe(true);
-            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-old');
-        } finally {
-            env.cleanup();
-        }
-    });
-
-    it('write command + non-TTY + assumeYes: proceeds without prompting', async () => {
-        const env = makeTmpEnv();
-        try {
-            writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
-            const { io, confirmCalls } = makeIo(env.home, { isTty: false });
+            const { io, confirmCalls } = makeIo(env.home, { isTty: true, confirmResult: true });
 
             const config = makeConfig();
             await applyWorkspaceGuard(
                 config,
                 sources(LOCAL_PATH),
-                { mutating: true, explicitOverride: false, assumeYes: true },
+                { mutating: true, explicitOverride: false },
                 io,
             );
 
-            expect(confirmCalls).toHaveLength(0);
+            expect(confirmCalls).toHaveLength(1);
             expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-new');
         } finally {
             env.cleanup();
@@ -280,7 +233,7 @@ describe('applyWorkspaceGuard', () => {
             await applyWorkspaceGuard(
                 config,
                 sources(getGlobalConfigPath()),
-                { mutating: true, explicitOverride: false, assumeYes: false },
+                { mutating: true, explicitOverride: false },
                 io,
             );
 
@@ -302,7 +255,7 @@ describe('applyWorkspaceGuard', () => {
             await applyWorkspaceGuard(
                 config,
                 sources('cli'),
-                { mutating: true, explicitOverride: true, assumeYes: false },
+                { mutating: true, explicitOverride: true },
                 io,
             );
 
@@ -324,7 +277,7 @@ describe('applyWorkspaceGuard', () => {
             await applyWorkspaceGuard(
                 config,
                 sources(LOCAL_PATH),
-                { mutating: true, explicitOverride: false, assumeYes: false },
+                { mutating: true, explicitOverride: false },
                 io,
             );
 
@@ -344,7 +297,7 @@ describe('applyWorkspaceGuard', () => {
                 await applyWorkspaceGuard(
                     config,
                     sources(getGlobalConfigPath()),
-                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    { mutating: true, explicitOverride: false },
                     io,
                 );
                 expect(announces).toHaveLength(1);
@@ -364,12 +317,35 @@ describe('applyWorkspaceGuard', () => {
                 await applyWorkspaceGuard(
                     config,
                     sources(getGlobalConfigPath()),
-                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    { mutating: true, explicitOverride: false },
                     io,
                 );
                 expect(announces).toHaveLength(1);
                 expect(announces[0]).toContain('Workspace: new-ws (ws-new)');
                 expect(announces[0]).not.toContain('organization');
+            } finally {
+                env.cleanup();
+            }
+        });
+
+        it('shows the id alone when workspaceId came from the environment and the name did not: no stale slug', async () => {
+            const env = makeTmpEnv();
+            try {
+                const { io, announces } = makeIo(env.home);
+
+                // SOLIDACTIONS_WORKSPACE_ID alone: the id is env-sourced, the leftover name and
+                // org describe whatever workspace the config file happens to name (#1437 R4).
+                await applyWorkspaceGuard(
+                    makeConfig({ workspace: 'stale-slug', workspaceOrg: 'Stale Org' }),
+                    { host: null, apiKey: null, workspace: LOCAL_PATH, workspaceId: 'env' },
+                    { mutating: true, explicitOverride: false },
+                    io,
+                );
+
+                expect(announces).toHaveLength(1);
+                expect(announces[0]).toContain('ws-new');
+                expect(announces[0]).not.toContain('stale-slug');
+                expect(announces[0]).not.toContain('Stale Org');
             } finally {
                 env.cleanup();
             }
@@ -383,7 +359,7 @@ describe('applyWorkspaceGuard', () => {
                 await applyWorkspaceGuard(
                     config,
                     sources(getGlobalConfigPath()),
-                    { mutating: false, explicitOverride: false, assumeYes: false },
+                    { mutating: false, explicitOverride: false },
                     io,
                 );
                 expect(announces).toHaveLength(0);

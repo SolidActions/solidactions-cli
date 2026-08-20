@@ -9,7 +9,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
-import { activeCommandIsMutating, getAssumeYes, getSupportsAssumeYes } from './mutating-commands';
+import { activeCommandIsMutating } from './mutating-commands';
 import {
     decideWorkspaceGuard,
     isCwdInferredWorkspace,
@@ -421,13 +421,23 @@ export interface WorkspaceGuardIo {
     now?: () => Date;
 }
 
-/** Cosmetic "<name> — organization <org>" label for a resolved Config, offline (no lookup record needed). */
-function workspaceLabel(config: Config): string {
-    return formatWorkspaceWithOrg({
-        id: config.workspaceId ?? '',
-        name: config.workspace ?? config.workspaceId ?? 'workspace',
-        org_name: config.workspaceOrg,
-    });
+/**
+ * Renders the resolved workspace for humans: `<name> — organization <org> (<id>)`.
+ *
+ * `workspace` (the display name/slug) and `workspaceId` are INDEPENDENT config layers.
+ * Setting only SOLIDACTIONS_WORKSPACE_ID resolves the id from the environment while the
+ * name is left behind by a config file that describes a DIFFERENT workspace — pairing them
+ * would print a confident lie about where a write is going. When the name did not come from
+ * the same layer as the id, show the id alone (#1437).
+ */
+function describeWorkspace(config: Config, sources: ResolvedConfig['sources']): string {
+    const id = config.workspaceId ?? '';
+    // A name that is merely ABSENT cannot mislead — only one carried over from another layer can.
+    if (config.workspace && sources.workspace !== sources.workspaceId) {
+        return id || 'workspace';
+    }
+    const name = config.workspace ?? (id || 'workspace');
+    return `${formatWorkspaceWithOrg({ id, name, org_name: config.workspaceOrg })} (${id})`;
 }
 
 /**
@@ -448,7 +458,7 @@ export function buildWorkspaceConfirmPrompt(message: string): prompts.PromptObje
 export async function applyWorkspaceGuard(
     config: Config,
     sources: ResolvedConfig['sources'],
-    options: { mutating: boolean; explicitOverride: boolean; assumeYes: boolean; supportsAssumeYes?: boolean },
+    options: { mutating: boolean; explicitOverride: boolean },
     io: WorkspaceGuardIo = {},
 ): Promise<Config> {
     const isTty = io.isTty ?? (() => !!process.stdin.isTTY);
@@ -478,29 +488,30 @@ export async function applyWorkspaceGuard(
         const inferredFrom = sources.workspaceId as string;
         const lastLabel = lastUsed?.label ?? lastUsed?.workspaceId ?? 'unknown';
         warn(
-            chalk.yellow('warn:') + ` workspace changed to ${workspaceLabel(config)} (${config.workspaceId}) `
+            chalk.yellow('warn:') + ` workspace changed to ${describeWorkspace(config, sources)} `
             + `— inferred from ${inferredFrom}; last used was ${lastLabel}. `
             + `Pin it with -w ${config.workspaceId}.`,
         );
     }
 
-    if (action === 'confirm' && !options.assumeYes) {
+    if (action === 'confirm') {
+        // Consent to a workspace is exactly two things: stating it explicitly (-w /
+        // SOLIDACTIONS_WORKSPACE_ID, both of which make this branch unreachable), or
+        // answering the interactive prompt below. A command's OWN --yes is never
+        // workspace consent — it acknowledges that command's own destructive act
+        // (`database push` requires -y, `database pull --yes` means "overwrite the local
+        // file"), and conflating the two made the confirmation structurally unreachable
+        // on the highest-blast-radius command in the CLI (#1437).
         if (!isTty()) {
-            // Only mention --yes when the active command actually declares it — the
-            // majority of mutating commands don't (see MUTATING_COMMANDS' doc comment),
-            // and telling a non-interactive caller to pass a flag that doesn't exist on
-            // that command is a dead end.
-            const supportsAssumeYes = options.supportsAssumeYes ?? true;
-            const yesClause = supportsAssumeYes ? ', or --yes to accept the inferred one' : '';
-            warn(`re-run with -w ${config.workspaceId} to confirm the target workspace${yesClause}`);
-            throw new WorkspaceGuardAbort(1, 'workspace guard: refused (non-interactive, no --yes)');
+            warn(`re-run with -w ${config.workspaceId} to confirm the target workspace`);
+            throw new WorkspaceGuardAbort(1, 'workspace guard: refused (non-interactive)');
         }
 
         const confirmFn = io.confirm ?? (async (message: string) => {
             const response = await prompts(buildWorkspaceConfirmPrompt(message));
             return !!response.confirm;
         });
-        const proceed = await confirmFn(`This command WRITES to ${workspaceLabel(config)} (${config.workspaceId}). Proceed?`);
+        const proceed = await confirmFn(`This command WRITES to ${describeWorkspace(config, sources)}. Proceed?`);
         if (!proceed) {
             announce(chalk.gray('Cancelled.'));
             throw new WorkspaceGuardAbort(0, 'workspace guard: user declined');
@@ -508,7 +519,7 @@ export async function applyWorkspaceGuard(
     }
 
     if (options.mutating && config.workspaceId) {
-        announce(chalk.gray(`Workspace: ${workspaceLabel(config)} (${config.workspaceId})`));
+        announce(chalk.gray(`Workspace: ${describeWorkspace(config, sources)}`));
     }
 
     // state.json means "the workspace you last WROTE to" — that is precisely what the write
@@ -543,8 +554,6 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
         return await applyWorkspaceGuard(config, resolved.sources, {
             mutating: activeCommandIsMutating(),
             explicitOverride,
-            assumeYes: getAssumeYes(),
-            supportsAssumeYes: getSupportsAssumeYes(),
         });
     } catch (error) {
         if (error instanceof WorkspaceGuardAbort) {

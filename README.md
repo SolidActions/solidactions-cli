@@ -174,16 +174,27 @@ For commands that **write** to the server, it also asks for confirmation before 
 This command WRITES to <name> — organization <org> (<workspaceId>). Proceed?
 ```
 
-`-w <id-or-slug-or-name>` (stating the workspace explicitly) always skips the prompt; `--yes`
-does too, but only on the commands that declare it — most mutating commands don't. A
-non-interactive shell with neither is refused rather than guessed:
+Consent to a workspace is exactly two things: stating it explicitly with
+`-w <id-or-slug-or-name>` or `SOLIDACTIONS_WORKSPACE_ID` (either of which skips the prompt
+entirely), or answering the prompt. A command's **own** `--yes` is not workspace consent — it
+acknowledges that command's own destructive act (`database push` requires `-y`, `database
+pull --yes` means "overwrite the local file") and says nothing about which workspace you meant. A
+non-interactive shell is refused rather than guessed:
 
 ```
 re-run with -w <workspaceId> to confirm the target workspace
 ```
 
-(commands that do declare `--yes` append `, or --yes to accept the inferred one` to that
-message).
+**Breaking change for existing non-interactive automation.** A script, cron job, or CI step
+that writes from a directory whose `.solidactions/config.json` supplies the workspace, without
+passing `-w` or setting `SOLIDACTIONS_WORKSPACE_ID`, now **exits 1** as soon as
+`~/.solidactions/state.json` records a different workspace as the last one written to. On a
+persistent runner that is not only the first run: any run after the box has written to some
+other workspace — a second project's job, a manual command in another folder — will refuse,
+because the guard compares against whatever was written last, not against a per-directory
+memory. Passing `-w <id>` (or exporting `SOLIDACTIONS_WORKSPACE_ID`) restores the previous
+behaviour and is the recommended fix for every non-interactive caller; it is also what the
+refusal message tells you to do. Deleting `state.json` silences one run, not the next.
 
 Read-only commands are never prompted — at most they print the `warn:` line above. Every
 mutating command prints its resolved workspace, organization-qualified, as its first output

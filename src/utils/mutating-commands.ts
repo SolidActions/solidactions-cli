@@ -106,8 +106,10 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'webhook list',
     'webhook secret',
     'workspace list',
-    // Excluded from the workspace-mismatch guard entirely elsewhere; still
-    // classified explicitly here because it writes local config only.
+    // Never reaches the guard at all: `workspace set` resolves through
+    // requireConfig()/requireResolvedConfig(), not requireConfigWithWorkspace(), so
+    // applyWorkspaceGuard never runs for it. Listed anyway to keep the classification
+    // complete — it writes local config, never server state.
     'workspace set',
     'oauth-action search',
     'oauth-action list',
@@ -171,35 +173,4 @@ export function activeCommandIsMutating(): boolean {
         return false;
     }
     return isMutatingCommand(activeCommandPath);
-}
-
-let assumeYes = false;
-
-/**
- * Set from the preAction hook, reflecting the active command's own --yes/-y flag.
- * Module-level state — set once at CLI startup before the command runs.
- */
-export function setAssumeYes(value: boolean): void {
-    assumeYes = value;
-}
-
-/** The value recorded by setAssumeYes. */
-export function getAssumeYes(): boolean {
-    return assumeYes;
-}
-
-let supportsAssumeYes = true;
-
-/**
- * Set from the preAction hook, reflecting whether the active command itself declares a
- * --yes/-y option (most mutating commands don't — see MUTATING_COMMANDS' doc comment).
- * Module-level state — set once at CLI startup before the command runs.
- */
-export function setSupportsAssumeYes(value: boolean): void {
-    supportsAssumeYes = value;
-}
-
-/** The value recorded by setSupportsAssumeYes. */
-export function getSupportsAssumeYes(): boolean {
-    return supportsAssumeYes;
 }
