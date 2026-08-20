@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
+import { formatRevisionCell } from '../utils/source-provenance';
 
 interface ProjectListOptions {
     json?: boolean;
@@ -64,11 +65,12 @@ export async function projectList(options: ProjectListOptions = {}) {
             project.name || '?',
             project.status || '?',
             project.snapshot_name || '-',
+            formatRevisionCell(project.deployed_revision ?? null),
             environmentCells[index],
         ]);
 
-        const lines = renderTable(['NAME', 'STATUS', 'SNAPSHOT', 'ENVIRONMENTS'], rows, {
-            minWidths: [25, 15, 30],
+        const lines = renderTable(['NAME', 'STATUS', 'SNAPSHOT', 'REVISION', 'ENVIRONMENTS'], rows, {
+            minWidths: [25, 15, 30, 14],
         });
         console.log(chalk.gray(lines[0]));
         console.log(chalk.gray(lines[1]));
@@ -80,6 +82,9 @@ export async function projectList(options: ProjectListOptions = {}) {
         }
 
         console.log('');
+        console.log(chalk.gray(
+            'REVISION shows the latest successful deployment: * dirty, ? dirty state unknown, ↓N behind default branch at deploy.',
+        ));
         console.log(chalk.gray(`${projects.length} project(s)`));
     } catch (error: any) {
         if (error.response) {

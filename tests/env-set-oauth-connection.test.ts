@@ -97,7 +97,9 @@ describe('env set --oauth-connection', () => {
         ], home, cwd);
 
         expect(result.status).toBe(0);
-        expect(result.stderr).toBe('');
+        // env set is a mutating command — requireConfigWithWorkspace() always announces
+        // the resolved workspace on stderr, first, even on success (#1437).
+        expect(result.stderr).toBe('Workspace: workspace-1 (workspace-1)\n');
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({
             method: 'POST',

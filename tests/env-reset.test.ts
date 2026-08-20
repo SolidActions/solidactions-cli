@@ -113,7 +113,9 @@ describe('env reset', () => {
         const result = await runCli(['env', 'reset', 'mail-worker', 'GMAIL_TOKEN'], home, cwd);
 
         expect(result.status).toBe(0);
-        expect(result.stderr).toBe('');
+        // env reset is a mutating command — requireConfigWithWorkspace() always announces
+        // the resolved workspace on stderr, first, even on success (#1437).
+        expect(result.stderr).toBe('Workspace: workspace-1 (workspace-1)\n');
         expect(requests).toEqual([
             expect.objectContaining({
                 method: 'GET',
