@@ -2,10 +2,9 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
-import { formatDetailedRevision, revisionSha } from '../utils/source-provenance';
-import type { DeployedRevision } from '../utils/source-provenance';
+import { formatDetailedRevision, formatRevisionCell } from '../utils/source-provenance';
 
-export { formatDetailedRevision } from '../utils/source-provenance';
+export { formatDetailedRevision, formatRevisionCell } from '../utils/source-provenance';
 export type { DeployedRevision } from '../utils/source-provenance';
 
 interface RunListOptions {
@@ -127,18 +126,6 @@ export function detailedOutcomeTag(run: any): string {
     if (run.outcome === 'degraded') return ' [DEGRADED]';
     if (hasRunErrors(run) && isSuccessStatus(run.execution_status || run.status || '')) return ' [DEGRADED]';
     return '';
-}
-
-export function formatRevisionCell(revision: DeployedRevision | null): string {
-    const sha = revisionSha(revision);
-    if (!sha) return '-';
-    const dirty = revision?.dirty === true ? '*' : revision?.dirty === false ? '' : '?';
-    const behind = typeof revision?.commits_behind === 'number'
-        && Number.isSafeInteger(revision.commits_behind)
-        && revision.commits_behind > 0
-        ? ` ↓${revision.commits_behind}`
-        : '';
-    return sanitizeCell(`${sha}${dirty}${behind}`);
 }
 
 export function displaySummaryTable(runsList: any[], projectName?: string) {

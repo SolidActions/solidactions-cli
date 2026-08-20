@@ -93,6 +93,18 @@ export function revisionSha(revision: DeployedRevision | null | undefined): stri
         ?? sanitizeDisplayText(revision.commit_sha, 64);
 }
 
+export function formatRevisionCell(revision: DeployedRevision | null): string {
+    const sha = revisionSha(revision);
+    if (!sha) return '-';
+    const dirty = revision?.dirty === true ? '*' : revision?.dirty === false ? '' : '?';
+    const behind = typeof revision?.commits_behind === 'number'
+        && Number.isSafeInteger(revision.commits_behind)
+        && revision.commits_behind > 0
+        ? ` ↓${revision.commits_behind}`
+        : '';
+    return sanitizeCell(`${sha}${dirty}${behind}`);
+}
+
 export function formatDetailedRevision(revision: DeployedRevision | null | undefined): string {
     const sha = revisionSha(revision);
     if (!sha) return 'unknown';
