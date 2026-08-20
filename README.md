@@ -35,7 +35,8 @@ solidactions run start my-project hello -e production -i '{"name":"Ada"}' --wait
 
 The generated `hello` workflow requires no third-party credentials. A successful
 run completes with a greeting of `Hello, Ada!`; use the run ID printed by the
-command with `solidactions run view <run-id>` or open the run in the app.
+command with `solidactions run view <run-id>` (accepts the numeric run id or
+the run UUID) or open the run in the app.
 
 For non-interactive automation, explicitly read the key from stdin instead of
 placing it in argv:
@@ -288,7 +289,7 @@ its project or schedule.
 |---------|-----------|-------------|
 | `run start <project> <workflow>` | `-e`, `-i`, `--wait` | Trigger a workflow run |
 | `run list [project]` | `--json`, `--detailed`, `--status`, `--since`, `--workflow`, `--limit`, `--offset` | List and filter runs |
-| `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run, incl. the deployed revision (`Revision (latest session): ...`, or `deployed_revision` under `--json`) |
+| `run view <run-id>` | `--json`, `--timeline`, `--steps`, `--logs` | Inspect a run (accepts the numeric run id or the run UUID), incl. the deployed revision (`Revision (latest session): ...`, or `deployed_revision` under `--json`) |
 
 ### env
 

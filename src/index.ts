@@ -509,7 +509,7 @@ runCmd
 runCmd
     .command('view')
     .description('View details, timeline, steps, or logs for a workflow run')
-    .argument('<run-id>', 'Run ID')
+    .argument('<run-id>', 'Run ID (numeric id or run UUID)')
     .option('--timeline', 'Show only timeline data')
     .option('--steps', 'Show only step data')
     .option('--logs', 'Show raw logs')

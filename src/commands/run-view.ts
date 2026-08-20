@@ -10,18 +10,24 @@ interface RunViewOptions {
     json?: boolean;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function runView(runId: string, options: RunViewOptions) {
-    if (!/^\d+$/.test(runId)) {
-        console.error(chalk.red(`Invalid run id: "${runId}" (run ids are numeric — see \`solidactions run list\`).`));
+    if (!/^\d+$/.test(runId) && !UUID_PATTERN.test(runId)) {
+        console.error(chalk.red(`Invalid run id: "${runId}" (expected a numeric run id or a run UUID — see \`solidactions run list\`).`));
         process.exit(1);
         return;
     }
+
+    // The server stores `run_uuid` lowercase and compares it verbatim, so an
+    // uppercase UUID must be normalized here or it would silently 404.
+    const resolvedRunId = UUID_PATTERN.test(runId) ? runId.toLowerCase() : runId;
 
     const config = await requireConfigWithWorkspace();
 
     try {
         // Fetch run data (includes session timing)
-        const runResponse = await axios.get(`${config.host}/api/v1/runs/${runId}`, {
+        const runResponse = await axios.get(`${config.host}/api/v1/runs/${resolvedRunId}`, {
             headers: getApiHeaders(config),
         });
         const runData = runResponse.data;
@@ -44,7 +50,7 @@ export async function runView(runId: string, options: RunViewOptions) {
 
         // --logs: fetch and display raw logs
         if (options.logs) {
-            const logsResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/logs`, {
+            const logsResponse = await axios.get(`${config.host}/api/v1/runs/${resolvedRunId}/logs`, {
                 headers: getApiHeaders(config),
             });
             const logData = logsResponse.data.logs || '';
@@ -58,7 +64,7 @@ export async function runView(runId: string, options: RunViewOptions) {
         }
 
         // Fetch steps data
-        const stepsResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/steps`, {
+        const stepsResponse = await axios.get(`${config.host}/api/v1/runs/${resolvedRunId}/steps`, {
             headers: getApiHeaders(config),
         });
         const stepsData = stepsResponse.data;
@@ -86,7 +92,7 @@ export async function runView(runId: string, options: RunViewOptions) {
 
         // Full view
         // Fetch logs for the full view
-        const logsResponse = await axios.get(`${config.host}/api/v1/runs/${runId}/logs`, {
+        const logsResponse = await axios.get(`${config.host}/api/v1/runs/${resolvedRunId}/logs`, {
             headers: getApiHeaders(config),
         });
 
