@@ -20,9 +20,10 @@ import {
     WritePromptDependencies,
 } from '../utils/config-write-target';
 import {
+    classifyWorkspaceInput,
+    describeWorkspaceMatchFailure,
     fetchWorkspaces,
     formatWorkspaceWithOrg,
-    matchWorkspace,
     selectWorkspaceInteractively,
     WorkspaceLookupRecord,
     WorkspaceScope,
@@ -311,22 +312,24 @@ export async function completeLogin(
     // Resolve the workspace. Device login has already persisted its base
     // credential; API-key login still resolves before its first write.
     if (options.workspace) {
-        const match = matchWorkspace(options.workspace, workspaces);
-        if (!match) {
+        const result = classifyWorkspaceInput(options.workspace, workspaces);
+        if (result.kind !== 'match') {
             if (preflight?.credentialPersisted) {
                 writeConfigFile(preflight.targetPath, config);
+                console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
                 console.error(chalk.yellow(
-                    `Workspace "${options.workspace}" was not found. Authentication was saved to ${preflight.targetPath}.`,
+                    `Authentication was saved to ${preflight.targetPath}.`,
                 ));
                 console.error(chalk.yellow(
                     'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
                 ));
             } else {
-                console.error(chalk.red(`Workspace "${options.workspace}" not found. Run \`solidactions workspace list\` to list available workspaces.`));
+                console.error(chalk.red(describeWorkspaceMatchFailure(result)));
             }
             process.exit(1);
             return;
         }
+        const match = result.workspace;
         config.workspace = match.slug ?? match.name;
         config.workspaceId = match.id;
     } else if (workspaces.length === 1) {

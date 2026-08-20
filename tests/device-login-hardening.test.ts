@@ -272,4 +272,63 @@ describe('device login destination and credential hardening', () => {
         expect(output).toContain('solidactions workspace list');
         expect(output).toContain('solidactions workspace set <name>');
     });
+
+    it('review fix #2: keeps the approved credential and describes the real ambiguity when an explicit workspace name is also its org\'s name', async () => {
+        workspaceBody = {
+            data: [
+                { id: 'ws-1', name: '10TC', slug: '10tc', org_name: '10TC', role: 'admin' },
+                { id: 'ws-2', name: '10TC Sales', slug: '10tc-sales', org_name: '10TC', role: 'member' },
+            ],
+            scope: { mode: 'all', workspace_ids: [] },
+        };
+
+        await expectExit(() => deviceLogin({
+            host: host(),
+            global: true,
+            workspace: '10TC',
+        }));
+
+        expect(JSON.parse(fs.readFileSync(globalPath(), 'utf-8'))).toMatchObject({
+            host: host(),
+            apiKey: 'approved-token',
+            scopeMode: 'all',
+        });
+        const output = [...logLines, ...errorLines].join('\n');
+        // The credentialPersisted branch must describe the REAL failure
+        // (ambiguous), not the old blanket "was not found" copy.
+        expect(output).toContain('is both an organization name and a workspace name');
+        expect(output).toContain('10TC Sales');
+        expect(output).toContain('Authentication was saved');
+        expect(output).toContain('solidactions workspace list');
+        expect(output).toContain('solidactions workspace set <name>');
+    });
+
+    it('review fix #2: keeps the approved credential and describes the real org-only failure when an explicit workspace name is actually an organization', async () => {
+        workspaceBody = {
+            data: [
+                { id: 'ws-1', name: 'Operations', slug: 'ops', org_name: 'Test Org', role: 'admin' },
+                { id: 'ws-2', name: 'Engineering', slug: 'eng', org_name: 'Test Org', role: 'member' },
+            ],
+            scope: { mode: 'all', workspace_ids: [] },
+        };
+
+        await expectExit(() => deviceLogin({
+            host: host(),
+            global: true,
+            workspace: 'Test Org',
+        }));
+
+        expect(JSON.parse(fs.readFileSync(globalPath(), 'utf-8'))).toMatchObject({
+            host: host(),
+            apiKey: 'approved-token',
+            scopeMode: 'all',
+        });
+        const output = [...logLines, ...errorLines].join('\n');
+        expect(output).toContain('is an organization, not a workspace.');
+        expect(output).toContain('Operations');
+        expect(output).toContain('Engineering');
+        expect(output).toContain('Authentication was saved');
+        expect(output).toContain('solidactions workspace list');
+        expect(output).toContain('solidactions workspace set <name>');
+    });
 });
