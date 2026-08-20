@@ -18,7 +18,9 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
     let originalExit: typeof process.exit;
     let originalIsTTY: boolean | undefined;
     let originalLog: typeof console.log;
+    let originalError: typeof console.error;
     let logLines: string[];
+    let errorLines: string[];
 
     beforeAll(async () => {
         server = http.createServer((_req, res) => {
@@ -46,6 +48,9 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         originalLog = console.log;
         logLines = [];
         console.log = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+        originalError = console.error;
+        errorLines = [];
+        console.error = (...args: unknown[]) => { errorLines.push(args.map(String).join(' ')); };
         workspaceBody = {
             workspaces: {
                 'Acme Org': [
@@ -60,6 +65,7 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
         (process as any).exit = originalExit;
         Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
         console.log = originalLog;
+        console.error = originalError;
         env.cleanup();
     });
 
@@ -122,7 +128,9 @@ describe('ensureWorkspaceSelected interactive multi-workspace selection', () => 
             { question: async () => '2' },
         );
 
-        const confirmations = logLines.filter((line) => /Selected:|Workspace set:|Auto-selected workspace:/.test(line));
+        // "Selected:" is status text on stderr (same reasoning as the workspace banner: stdout
+        // is reserved for a command's own machine-parseable output).
+        const confirmations = errorLines.filter((line) => /Selected:|Workspace set:|Auto-selected workspace:/.test(line));
         expect(confirmations).toHaveLength(1);
         expect(confirmations[0]).toContain('Second Workspace — organization Acme Org');
     });

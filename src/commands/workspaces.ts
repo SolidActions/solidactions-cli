@@ -82,7 +82,7 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
     const target = await decideWriteTarget({ local: options.local, global: options.global });
     const targetPath = pathForTarget(target);
 
-    writeWorkspaceToFile(targetPath, workspace.slug ?? workspace.name, workspace.id);
+    writeWorkspaceToFile(targetPath, workspace.slug ?? workspace.name, workspace.id, workspace.org_name);
 
     if (target === 'local') {
         await ensureGitignoreCovers(process.cwd(), !!options.gitignore);

@@ -72,6 +72,7 @@ import {
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
+import { setActiveCommandPath } from './utils/mutating-commands';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -109,9 +110,18 @@ program
 // a parent option of the same name, so `login --workspace <x>` was being
 // swallowed by this global flag instead of reaching login()'s own option.
 // The short form `-w` is unaffected and remains the primary way to use this.
-program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w)');
+program.option('-w, --workspace-override <id-or-slug-or-name>', 'Override active workspace for this command (short form: -w; also skips the CWD-inference prompt)');
 
 program.hook('preAction', (thisCommand, actionCommand) => {
+    // Record the full commander path (e.g. ['project', 'deploy']) unconditionally —
+    // it feeds the workspace guard in requireConfigWithWorkspace() and must never be
+    // skipped by an early return below (e.g. the `workspace set` -w warning).
+    const commandPath: string[] = [];
+    for (let cmd: Command | null = actionCommand; cmd && cmd !== program; cmd = cmd.parent) {
+        commandPath.unshift(cmd.name());
+    }
+    setActiveCommandPath(commandPath);
+
     const opts = thisCommand.opts();
     const wsOverride: string | undefined = opts.workspaceOverride;
     if (wsOverride) {

@@ -249,12 +249,14 @@ export async function selectWorkspaceInteractively(
     workspaces: WorkspaceLookupRecord[],
     dependencies: WorkspaceSelectionDependencies = {},
 ): Promise<WorkspaceLookupRecord | undefined> {
+    // Status text, not a command's own output — stdout is reserved for machine-parseable
+    // output (e.g. `--json`), same reasoning as the workspace banner in api.ts.
     if (workspaces.length === 0) {
-        console.log(chalk.yellow('No workspaces found. Create one at your SolidActions dashboard, then run `solidactions workspace set <name>`.'));
+        console.error(chalk.yellow('No workspaces found. Create one at your SolidActions dashboard, then run `solidactions workspace set <name>`.'));
         return undefined;
     }
     if (workspaces.length === 1) {
-        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(workspaces[0])}`));
+        console.error(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(workspaces[0])}`));
         return workspaces[0];
     }
 
@@ -312,7 +314,8 @@ export async function selectWorkspaceInteractively(
             const index = parseInt(answer, 10) - 1;
             if (!isNaN(index) && index >= 0 && index < workspaces.length) {
                 const selected = workspaces[index];
-                console.log(chalk.green(`Selected: ${formatWorkspaceWithOrg(selected)}`));
+                // Status text, not a command's own output — same reasoning as above.
+                console.error(chalk.green(`Selected: ${formatWorkspaceWithOrg(selected)}`));
                 return selected;
             }
             console.error(chalk.red('Invalid selection. Enter one of the numbers shown.'));

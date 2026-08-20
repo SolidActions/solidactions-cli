@@ -152,6 +152,59 @@ For each field (`host`, `apiKey`, `workspaceId`), the CLI resolves independently
 
 You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while letting `host` and `apiKey` come from a file.
 
+### Workspace safety
+
+Resolution order layers 2 and 3 mean the active workspace can come from *where you are
+standing*: a `./.solidactions/config.json` in the current folder or any ancestor. That's
+convenient in a single project, but running a command from the wrong directory can silently
+target a different workspace than the one you last used.
+
+The CLI remembers the workspace it last **wrote** to in `~/.solidactions/state.json` (a
+cosmetic/advisory file — deleting it just means the next command has nothing to compare
+against). Read-only commands never update it — a read must never consume the change that
+gates a write, so the warning below keeps firing until you actually write. When a
+CWD-inferred workspace differs from that last-written-to one, the CLI warns:
+
+```
+warn: workspace changed to <name> — organization <org> (<workspaceId>) — inferred from <path>; last used was <last-used-name-or-id>. Pin it with -w <workspaceId>.
+```
+
+For commands that **write** to the server, it also asks for confirmation before proceeding:
+
+```
+This command WRITES to <name> — organization <org> (<workspaceId>). Proceed?
+```
+
+Consent to a workspace is exactly two things: stating it explicitly with
+`-w <id-or-slug-or-name>` or `SOLIDACTIONS_WORKSPACE_ID` (either of which skips the prompt
+entirely), or answering the prompt. A command's **own** `--yes` is not workspace consent — it
+acknowledges that command's own destructive act (`database push` requires `-y`, `database
+pull --yes` means "overwrite the local file") and says nothing about which workspace you meant. A
+non-interactive shell is refused rather than guessed:
+
+```
+re-run with -w <workspaceId> to confirm the target workspace
+```
+
+**Breaking change for existing non-interactive automation.** A script, cron job, or CI step
+that writes from a directory whose `.solidactions/config.json` supplies the workspace, without
+passing `-w` or setting `SOLIDACTIONS_WORKSPACE_ID`, now **exits 1** as soon as
+`~/.solidactions/state.json` records a different workspace as the last one written to. On a
+persistent runner that is not only the first run: any run after the box has written to some
+other workspace — a second project's job, a manual command in another folder — will refuse,
+because the guard compares against whatever was written last, not against a per-directory
+memory. Passing `-w <id>` (or exporting `SOLIDACTIONS_WORKSPACE_ID`) restores the previous
+behaviour and is the recommended fix for every non-interactive caller; it is also what the
+refusal message tells you to do. Deleting `state.json` silences one run, not the next.
+
+Read-only commands are never prompted — at most they print the `warn:` line above. Every
+mutating command prints its resolved workspace, organization-qualified, as its first output
+line:
+
+```
+Workspace: <name> — organization <org> (<workspaceId>)
+```
+
 ### `solidactions login` flags
 
 - With no positional argument, `login` securely prompts for the API key using
