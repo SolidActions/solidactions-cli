@@ -223,6 +223,43 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         expect(allOutput).not.toContain('Backup saved to');
     });
 
+    // app#1197 + app#1196: the pre-write guard refuses whatever
+    // `classifyWorkspaceInput` refuses, not just an outright miss. An input
+    // that is BOTH an org name and a workspace name is ambiguous, and must
+    // bail with the collision copy before the destination/confirm/backup
+    // block runs — a first-match resolver would instead pick a workspace the
+    // user never named and go on to back up and overwrite the config.
+    it('ambiguous --workspace (org name that is also a workspace name): exits 1 with the collision message, without backing up or overwriting', async () => {
+        const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
+        const oldRaw = fs.readFileSync(globalPath, 'utf-8');
+
+        const config: Config = { host: HOST(), apiKey: 'new-api-key' };
+        const collidingWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: '10TC', slug: 'tentc', org_name: '10TC' },
+            { id: 'ws-2', name: '10TC Sales', slug: 'tentc-sales', org_name: '10TC' },
+        ];
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await completeLogin(config, collidingWorkspaces, { global: true, workspace: '10TC' });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(fs.readFileSync(globalPath, 'utf-8')).toBe(oldRaw);
+
+        const dir = path.dirname(globalPath);
+        const backups = fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'));
+        expect(backups).toHaveLength(0);
+
+        const allOutput = [...logLines, ...errorLines].join('\n');
+        expect(allOutput).toContain('is both an organization name and a workspace name');
+        expect(allOutput).not.toContain('will be overwritten');
+        expect(allOutput).not.toContain('Backup saved to');
+    });
+
     // app#1197 finding 3: the decline path through the hoisted confirm/backup
     // block must abort BEFORE the workspace picker is ever reached, not just
     // before the answer 'y' is exercised.
