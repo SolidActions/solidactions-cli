@@ -41,7 +41,7 @@ export function getStateFilePath(homeDir: string = os.homedir()): string {
     return path.join(homeDir, STATE_DIR_NAME, STATE_FILE_NAME);
 }
 
-/** Read the recorded last-used workspace. Returns null when absent, unreadable, or malformed. */
+/** Read the recorded last-written-to workspace. Returns null when absent, unreadable, or malformed. */
 export function readLastUsedWorkspace(homeDir: string = os.homedir()): LastUsedWorkspace | null {
     const filePath = getStateFilePath(homeDir);
     if (!fs.existsSync(filePath)) {
@@ -62,7 +62,9 @@ export function readLastUsedWorkspace(homeDir: string = os.homedir()): LastUsedW
 }
 
 /**
- * Record the last-used workspace. Never throws — a failure to persist must not break a command.
+ * Record the workspace a command just wrote to. Callers must only invoke this for mutating
+ * commands — a read must never consume the change that gates a write confirmation. Never
+ * throws — a failure to persist must not break a command.
  *
  * Atomic write mirroring writeConfigFile in src/utils/config.ts: write to `<path>.tmp`, then
  * fs.renameSync into place; create the parent dir with mode 0o700 if missing. Unlike config.json,

@@ -158,9 +158,11 @@ standing*: a `./.solidactions/config.json` in the current folder or any ancestor
 convenient in a single project, but running a command from the wrong directory can silently
 target a different workspace than the one you last used.
 
-The CLI remembers the last workspace it used in `~/.solidactions/state.json` (a
+The CLI remembers the workspace it last **wrote** to in `~/.solidactions/state.json` (a
 cosmetic/advisory file — deleting it just means the next command has nothing to compare
-against). When a CWD-inferred workspace differs from that last-used one, the CLI warns:
+against). Read-only commands never update it — a read must never consume the change that
+gates a write, so the warning below keeps firing until you actually write. When a
+CWD-inferred workspace differs from that last-written-to one, the CLI warns:
 
 ```
 warn: workspace changed to <name> — organization <org> (<workspaceId>) — inferred from <path>; last used was <last-used-name-or-id>. Pin it with -w <workspaceId>.

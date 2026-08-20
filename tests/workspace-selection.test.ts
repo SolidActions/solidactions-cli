@@ -27,16 +27,22 @@ describe('interactive login workspace selection', () => {
 
 describe('interactive login workspace selection: org grouping', () => {
     let originalLog: typeof console.log;
+    let originalError: typeof console.error;
     let logLines: string[];
+    let errorLines: string[];
 
     beforeEach(() => {
         originalLog = console.log;
         logLines = [];
         console.log = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+        originalError = console.error;
+        errorLines = [];
+        console.error = (...args: unknown[]) => { errorLines.push(args.map(String).join(' ')); };
     });
 
     afterEach(() => {
         console.log = originalLog;
+        console.error = originalError;
     });
 
     const multiOrgWorkspaces = [
@@ -128,7 +134,8 @@ describe('interactive login workspace selection: org grouping', () => {
         });
 
         expect(selected?.id).toBe('ws-4');
-        expect(logLines.some((line) => line.includes('Selected: Fourth Workspace') && line.includes('Globex'))).toBe(true);
+        // "Selected:" is status text on stderr, not the command's own output.
+        expect(errorLines.some((line) => line.includes('Selected: Fourth Workspace') && line.includes('Globex'))).toBe(true);
     });
 
     it('echoes the resolved selection without an org clause when the list has no orgs', async () => {
@@ -141,7 +148,8 @@ describe('interactive login workspace selection: org grouping', () => {
             question: async () => '2',
         });
 
-        expect(logLines.some((line) => line.includes('Selected: Second Workspace') && !line.includes('organization'))).toBe(true);
+        // "Selected:" is status text on stderr, not the command's own output.
+        expect(errorLines.some((line) => line.includes('Selected: Second Workspace') && !line.includes('organization'))).toBe(true);
     });
 
     it('disambiguates two workspaces sharing the same name across different orgs via org headers and qualified rows', async () => {
@@ -157,7 +165,8 @@ describe('interactive login workspace selection: org grouping', () => {
         expect(selected?.id).toBe('ws-2');
         expect(logLines.some((line) => line.trim() === 'Acme Org')).toBe(true);
         expect(logLines.some((line) => line.trim() === 'Globex')).toBe(true);
-        expect(logLines.some((line) => line.includes('Selected: Production') && line.includes('Globex'))).toBe(true);
+        // "Selected:" is status text on stderr, not the command's own output.
+        expect(errorLines.some((line) => line.includes('Selected: Production') && line.includes('Globex'))).toBe(true);
     });
 
     it('names the org in the auto-selected single-workspace confirmation when known', async () => {
@@ -168,6 +177,7 @@ describe('interactive login workspace selection: org grouping', () => {
         const selected = await selectWorkspaceInteractively(singleWorkspaceWithOrg);
 
         expect(selected?.id).toBe('ws-1');
-        expect(logLines.some((line) => line.includes('Auto-selected workspace: Only Workspace') && line.includes('Acme Org'))).toBe(true);
+        // "Auto-selected workspace:" is status text on stderr, not the command's own output.
+        expect(errorLines.some((line) => line.includes('Auto-selected workspace: Only Workspace') && line.includes('Acme Org'))).toBe(true);
     });
 });

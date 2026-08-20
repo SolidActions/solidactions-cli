@@ -65,7 +65,7 @@ function makeIo(home: string, opts: { isTty?: boolean; confirmResult?: boolean }
 }
 
 describe('applyWorkspaceGuard', () => {
-    it('read command + changed CWD-inferred workspace: exactly one stderr warn line, proceeds, last-used updated', async () => {
+    it('read command + changed CWD-inferred workspace: exactly one stderr warn line, proceeds, does not record last-used', async () => {
         const env = makeTmpEnv();
         try {
             writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
@@ -88,7 +88,42 @@ describe('applyWorkspaceGuard', () => {
             expect(warns[0]).toContain('Pin it with -w ws-new');
             expect(confirmCalls).toHaveLength(0);
             expect(announces).toHaveLength(0); // non-mutating: no banner
-            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-new');
+            // A read must never consume the change that gates a write: state.json still
+            // holds what it held before this read, unchanged.
+            expect(readLastUsedWorkspace(env.home)).toEqual({ workspaceId: 'ws-old', label: 'old-ws' });
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    it('read-then-write regression: a read into a changed CWD-inferred workspace does not disarm the following write\'s confirmation', async () => {
+        const env = makeTmpEnv();
+        try {
+            writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
+
+            // Step 1: a read-only command resolves the changed, CWD-inferred workspace.
+            const read = makeIo(env.home, { isTty: false });
+            await applyWorkspaceGuard(
+                makeConfig(),
+                sources(LOCAL_PATH),
+                { mutating: false, explicitOverride: false, assumeYes: false },
+                read.io,
+            );
+
+            // Step 2: a mutating command in the same directory, non-interactive, no --yes.
+            // If step 1 had recorded itself as last-used, decideWorkspaceGuard would now see
+            // resolved === lastUsed and let the write through silently — that's the bug.
+            const write = makeIo(env.home, { isTty: false });
+            await expect(
+                applyWorkspaceGuard(
+                    makeConfig(),
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false, assumeYes: false },
+                    write.io,
+                ),
+            ).rejects.toMatchObject({ exitCode: 1 });
+
+            expect(write.confirmCalls).toHaveLength(0);
         } finally {
             env.cleanup();
         }
@@ -224,6 +259,7 @@ describe('applyWorkspaceGuard', () => {
 
             expect(warns).toHaveLength(0);
             expect(confirmCalls).toHaveLength(0);
+            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-new');
         } finally {
             env.cleanup();
         }

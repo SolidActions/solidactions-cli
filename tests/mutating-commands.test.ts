@@ -47,7 +47,7 @@ describe('mutating-commands classification', () => {
     });
 
     describe('completeness against the built command manifest', () => {
-        it('classifies every leaf, non-hidden, non-help command as mutating or read-only', () => {
+        it('classifies every leaf, non-help command as mutating or read-only', () => {
             const leafPaths = classifiableLeafPaths();
 
             const unclassified = leafPaths.filter(

@@ -19,9 +19,18 @@ against the wrong workspace with no warning.
 
 The guard keys on **change**, not on inference alone: it only acts when the resolved
 workspace was CWD-inferred (per `isCwdInferredWorkspace` in `src/utils/workspace-guard.ts`)
-**and** differs from the last workspace the CLI used (recorded in `~/.solidactions/state.json`).
-If the CWD-inferred workspace is the same one used last time, nothing happens — the normal
-same-project workflow stays prompt-free.
+**and** differs from the workspace the CLI last *wrote* to (recorded in
+`~/.solidactions/state.json` — only mutating commands update it; a read-only command must
+never consume the change that gates a write confirmation). If the CWD-inferred workspace is
+the same one last written to, nothing happens — the normal same-project workflow stays
+prompt-free.
+
+An early build recorded `state.json` unconditionally, including for read-only commands. That
+let a harmless read (e.g. `project list`) silently disarm the following write's confirmation:
+the read would record the newly-inferred workspace as last-used, so the very next write in
+that directory saw "last used == resolved" and skipped the guard entirely. Found by live smoke
+against the dev stack, not by the test suite. Fixed by gating the `state.json` write on
+`options.mutating`.
 
 When the workspace has changed:
 - Read-only commands print a `warn:` line naming both workspaces and the config file the new
@@ -46,10 +55,10 @@ always visible for a write, not just on the first run after a change.
 
 ## Consequences
 
-- A new file, `~/.solidactions/state.json`, is written after (almost) every command that
-  resolves a workspace. It holds only a workspace UUID, an optional display label, and a
-  timestamp — no secret — and is advisory: deleting it just means the next command has nothing
-  to compare against.
+- A new file, `~/.solidactions/state.json`, is written after every **mutating** command that
+  resolves a workspace — read-only commands never write it. It holds only a workspace UUID, an
+  optional display label, and a timestamp — no secret — and is advisory: deleting it just means
+  the next command has nothing to compare against.
 - Command classification (`src/utils/mutating-commands.ts`) fails safe: a command path not
   explicitly listed as read-only or mutating is treated as **mutating** by default, so a newly
   added command can never silently skip the confirmation prompt.

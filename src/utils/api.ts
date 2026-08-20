@@ -366,7 +366,9 @@ export async function ensureWorkspaceSelected(
 
     if (workspaces.length === 1) {
         selected = workspaces[0];
-        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(selected)}`));
+        // Status text, not a command's own output — stdout is reserved for machine-parseable
+        // output (e.g. `--json`), same reasoning as the workspace banner above.
+        console.error(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(selected)}`));
     } else {
         if (!process.stdin.isTTY) {
             console.error(chalk.red(
@@ -493,7 +495,10 @@ export async function applyWorkspaceGuard(
         announce(chalk.gray(`Workspace: ${workspaceLabel(config)} (${config.workspaceId})`));
     }
 
-    if (config.workspaceId) {
+    // state.json means "the workspace you last WROTE to" — that is precisely what the write
+    // confirmation above compares against. A read must never consume the change that gates a
+    // write, so only a mutating command records here; reads stay purely advisory.
+    if (options.mutating && config.workspaceId) {
         writeLastUsedWorkspace(
             { workspaceId: config.workspaceId, label: config.workspace, at: now().toISOString() },
             io.homeDir,
