@@ -260,6 +260,146 @@ describe('login — overwrite guard (cleanroom Sev-4)', () => {
         expect(allOutput).not.toContain('Backup saved to');
     });
 
+    // R3 (review pair): `org-only` is the third refusal kind and rode in on
+    // `kind !== 'match'` with no integration coverage of its own — an input
+    // naming an org that owns no workspace of that name must refuse with the
+    // org listing, and must refuse at the same pre-write point as the others.
+    it('org-only --workspace (an organization that owns no workspace of that name): exits 1 with the org listing, without backing up or overwriting', async () => {
+        const globalPath = writeGlobal(env.home, { host: 'http://old-host.example', apiKey: 'old-api-key' });
+        const oldRaw = fs.readFileSync(globalPath, 'utf-8');
+
+        const config: Config = { host: HOST(), apiKey: 'new-api-key' };
+        const orgOwnedWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'Engineering', slug: 'engineering', org_name: 'Acme' },
+            { id: 'ws-2', name: 'Marketing', slug: 'marketing', org_name: 'Acme' },
+        ];
+
+        let caught: ProcessExitError | null = null;
+        try {
+            await completeLogin(config, orgOwnedWorkspaces, { global: true, workspace: 'Acme' });
+        } catch (e) {
+            if (e instanceof ProcessExitError) caught = e;
+            else throw e;
+        }
+
+        expect(caught?.code).toBe(1);
+        expect(fs.readFileSync(globalPath, 'utf-8')).toBe(oldRaw);
+
+        const dir = path.dirname(globalPath);
+        expect(fs.readdirSync(dir).filter((f) => f.startsWith('config.json.bak-'))).toHaveLength(0);
+
+        const allOutput = [...logLines, ...errorLines].join('\n');
+        expect(allOutput).toContain('"Acme" is an organization, not a workspace.');
+        expect(allOutput).toContain('Engineering');
+        expect(allOutput).toContain('Marketing');
+        expect(allOutput).not.toContain('will be overwritten');
+        expect(allOutput).not.toContain('Backup saved to');
+    });
+
+    // R1 (review pair, P1): the credentials-only isDestructive compare cannot
+    // see a workspace pin being lost, and writeConfigFile writes wholesale. A
+    // same-credential re-login on a multi-workspace account where NO workspace
+    // resolves (picker cancelled here; the non-interactive branch is the same
+    // shape) therefore used to silently delete the existing workspace pin —
+    // with no prompt and no .bak, because same credentials are not
+    // "destructive". The pin must survive instead.
+    it('same-credential re-login, multiple workspaces, cancelled picker: preserves the existing workspace pin instead of deleting it', async () => {
+        const globalPath = writeGlobal(env.home, {
+            host: HOST(),
+            apiKey: 'same-api-key',
+            workspace: 'pinned-workspace',
+            workspaceId: 'ws-pinned',
+            workspaceOrg: 'Pinned Org',
+        });
+
+        Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+
+        const config: Config = { host: HOST(), apiKey: 'same-api-key' };
+        const multipleWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+            { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+        ];
+
+        await completeLogin(config, multipleWorkspaces, { global: true }, null, null, {
+            // Cancelling the picker (EOF) resolves to undefined — the app#1197
+            // path this whole branch exists for.
+            selectWorkspace: async () => undefined,
+        });
+
+        const written = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(written.workspace).toBe('pinned-workspace');
+        expect(written.workspaceId).toBe('ws-pinned');
+        expect(written.workspaceOrg).toBe('Pinned Org');
+        expect(written.apiKey).toBe('same-api-key');
+
+        // The user cancelled the picker, so they must be told the old pin is
+        // what they are left on — otherwise the retained pin is as silent as
+        // the deletion it replaced.
+        expect(logLines.join('\n')).toContain('Keeping the workspace already pinned in this config: pinned-workspace');
+    });
+
+    // Same shape as above on the non-interactive branch, which reaches the
+    // wholesale write by a different route (no picker at all).
+    it('same-credential re-login, multiple workspaces, non-interactive: preserves the existing workspace pin', async () => {
+        const globalPath = writeGlobal(env.home, {
+            host: HOST(),
+            apiKey: 'same-api-key',
+            workspace: 'pinned-workspace',
+            workspaceId: 'ws-pinned',
+            workspaceOrg: 'Pinned Org',
+        });
+
+        // beforeEach already sets isTTY undefined; be explicit about the branch.
+        Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+
+        const config: Config = { host: HOST(), apiKey: 'same-api-key' };
+        const multipleWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+            { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+        ];
+
+        await completeLogin(config, multipleWorkspaces, { global: true }, null, null, {});
+
+        const written = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(written.workspace).toBe('pinned-workspace');
+        expect(written.workspaceId).toBe('ws-pinned');
+        expect(written.workspaceOrg).toBe('Pinned Org');
+    });
+
+    // The carry-forward must NOT cross accounts: when the credentials change,
+    // the existing pin belongs to a different account and re-pinning it would
+    // point the new session at a workspace it may not even be able to see.
+    // That path is already prompted + backed up, so losing the pin is
+    // consented-to; carrying it forward would be the bug.
+    it('different-credential re-login with no workspace resolved: does NOT carry the previous account\'s workspace pin forward', async () => {
+        const globalPath = writeGlobal(env.home, {
+            host: 'http://old-host.example',
+            apiKey: 'old-api-key',
+            workspace: 'pinned-workspace',
+            workspaceId: 'ws-pinned',
+            workspaceOrg: 'Pinned Org',
+        });
+
+        Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+
+        const config: Config = { host: HOST(), apiKey: 'new-api-key' };
+        const multipleWorkspaces: WorkspaceLookupRecord[] = [
+            { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+            { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+        ];
+
+        await completeLogin(config, multipleWorkspaces, { global: true }, null, null, {
+            overwriteQuestion: async () => 'y',
+            selectWorkspace: async () => undefined,
+        });
+
+        const written = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
+        expect(written.workspace).toBeUndefined();
+        expect(written.workspaceId).toBeUndefined();
+        expect(written.workspaceOrg).toBeUndefined();
+        expect(written.apiKey).toBe('new-api-key');
+    });
+
     // app#1197 finding 3: the decline path through the hoisted confirm/backup
     // block must abort BEFORE the workspace picker is ever reached, not just
     // before the answer 'y' is exercised.

@@ -334,6 +334,7 @@ export async function completeLogin(
     // Device login has already persisted its base credential via a preflight.
     let target: WriteTarget | undefined;
     let targetPath: string | undefined;
+    let sameCredentialExisting: Partial<Config> | null = null;
     if (!preflight) {
         target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
         targetPath = pathForTarget(target);
@@ -348,6 +349,9 @@ export async function completeLogin(
             try {
                 const existing = JSON.parse(existingRaw);
                 isDestructive = existing.host !== config.host || existing.apiKey !== config.apiKey;
+                if (!isDestructive) {
+                    sameCredentialExisting = existing;
+                }
             } catch {
                 isDestructive = true;
             }
@@ -370,18 +374,22 @@ export async function completeLogin(
     if (options.workspace) {
         const result = classifyWorkspaceInput(options.workspace, workspaces);
         if (result.kind !== 'match') {
-            if (preflight?.credentialPersisted) {
-                writeConfigFile(preflight.targetPath, config);
-                console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
-                console.error(chalk.yellow(
-                    `Authentication was saved to ${preflight.targetPath}.`,
-                ));
-                console.error(chalk.yellow(
-                    'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
-                ));
-            } else {
-                console.error(chalk.red(describeWorkspaceMatchFailure(result)));
-            }
+            // Device login only. The pre-write guard above exits every
+            // `!preflight` refusal, and the sole preflight caller
+            // (`device-login`) runs `persistPreflightedLoginCredential` —
+            // which sets `credentialPersisted` unconditionally — before
+            // calling in, so the credential is always already on disk here.
+            // Hence no `credentialPersisted` test and no non-preflight
+            // fallback: that branch was unreachable and only duplicated the
+            // guard's copy.
+            writeConfigFile(preflight!.targetPath, config);
+            console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
+            console.error(chalk.yellow(
+                `Authentication was saved to ${preflight!.targetPath}.`,
+            ));
+            console.error(chalk.yellow(
+                'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
+            ));
             process.exit(1);
             return;
         }
@@ -410,6 +418,22 @@ export async function completeLogin(
             'Multiple workspaces are available, so no workspace was selected. '
             + 'Run `solidactions workspace list`, then `solidactions workspace set <name>`.',
         ));
+    }
+
+    // `writeConfigFile` writes the config wholesale, and the credentials-only
+    // compare above cannot see a workspace pin going missing — so a
+    // same-credential re-login that resolves no workspace of its own (picker
+    // cancelled, or non-interactive with several workspaces) used to delete an
+    // existing pin silently: no prompt and no .bak, because identical
+    // credentials are not "destructive". The pin is still valid for this exact
+    // account, so carry every workspace field forward instead. Deliberately
+    // gated on unchanged credentials: when they differ, the pin belongs to a
+    // different account and that path is already prompted and backed up.
+    if (!config.workspaceId && sameCredentialExisting?.workspaceId) {
+        config.workspace = sameCredentialExisting.workspace;
+        config.workspaceId = sameCredentialExisting.workspaceId;
+        config.workspaceOrg = sameCredentialExisting.workspaceOrg;
+        console.log(chalk.gray(`Keeping the workspace already pinned in this config: ${config.workspace ?? config.workspaceId}`));
     }
 
     let savedTargetPath: string;
