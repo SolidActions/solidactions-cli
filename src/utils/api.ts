@@ -431,6 +431,16 @@ function workspaceLabel(config: Config): string {
 }
 
 /**
+ * The `prompts` question for the workspace-write confirmation. stdout is reserved for a
+ * command's own machine-parseable output (see the `announce` comment in applyWorkspaceGuard
+ * below), so this prompt must render to stderr — `prompts` defaults to stdout unless told
+ * otherwise, which would corrupt a captured `--json` stream while stdin is still a TTY (#1437).
+ */
+export function buildWorkspaceConfirmPrompt(message: string): prompts.PromptObject {
+    return { type: 'confirm', name: 'confirm', message, initial: false, stdout: process.stderr };
+}
+
+/**
  * Applies the CWD-inference guard to an already-resolved config, then records it as last-used.
  * Returns the config, or throws WorkspaceGuardAbort when the user declines / cannot be asked
  * (the caller is responsible for turning that into process.exit).
@@ -487,7 +497,7 @@ export async function applyWorkspaceGuard(
         }
 
         const confirmFn = io.confirm ?? (async (message: string) => {
-            const response = await prompts({ type: 'confirm', name: 'confirm', message, initial: false });
+            const response = await prompts(buildWorkspaceConfirmPrompt(message));
             return !!response.confirm;
         });
         const proceed = await confirmFn(`This command WRITES to ${workspaceLabel(config)} (${config.workspaceId}). Proceed?`);

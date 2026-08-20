@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     applyWorkspaceGuard,
+    buildWorkspaceConfirmPrompt,
     WorkspaceGuardAbort,
     type WorkspaceGuardIo,
 } from '../src/utils/api';
@@ -396,5 +397,23 @@ describe('applyWorkspaceGuard', () => {
         const abort = new WorkspaceGuardAbort(1, 'refused');
         expect(abort.exitCode).toBe(1);
         expect(abort).toBeInstanceOf(Error);
+    });
+});
+
+// The default confirmFn used by applyWorkspaceGuard when no io.confirm is injected renders
+// its prompt via this question object. stdout is reserved for a command's own
+// machine-parseable output (see the `announce` comment above applyWorkspaceGuard), so this
+// prompt must render to stderr — otherwise its interactive ANSI UI corrupts a captured
+// `--json` stdout stream while stdin is still a TTY (#1437).
+describe('buildWorkspaceConfirmPrompt', () => {
+    it('renders to stderr, not stdout', () => {
+        const question = buildWorkspaceConfirmPrompt('This command WRITES to acme (ws-1). Proceed?');
+        expect(question).toEqual({
+            type: 'confirm',
+            name: 'confirm',
+            message: 'This command WRITES to acme (ws-1). Proceed?',
+            initial: false,
+            stdout: process.stderr,
+        });
     });
 });
