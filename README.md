@@ -174,12 +174,16 @@ For commands that **write** to the server, it also asks for confirmation before 
 This command WRITES to <name> — organization <org> (<workspaceId>). Proceed?
 ```
 
-`-w <id-or-slug-or-name>` (stating the workspace explicitly) and `--yes` both skip the prompt.
-A non-interactive shell with neither is refused rather than guessed:
+`-w <id-or-slug-or-name>` (stating the workspace explicitly) always skips the prompt; `--yes`
+does too, but only on the commands that declare it — most mutating commands don't. A
+non-interactive shell with neither is refused rather than guessed:
 
 ```
-re-run with -w <workspaceId> to confirm the target workspace, or --yes to accept the inferred one
+re-run with -w <workspaceId> to confirm the target workspace
 ```
+
+(commands that do declare `--yes` append `, or --yes to accept the inferred one` to that
+message).
 
 Read-only commands are never prompted — at most they print the `warn:` line above. Every
 mutating command prints its resolved workspace, organization-qualified, as its first output

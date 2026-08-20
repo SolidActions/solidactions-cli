@@ -36,8 +36,10 @@ When the workspace has changed:
 - Read-only commands print a `warn:` line naming both workspaces and the config file the new
   one came from, and proceed.
 - Server-mutating commands (`isMutatingCommand` in `src/utils/mutating-commands.ts`) instead
-  ask for confirmation before proceeding. `-w <id-or-slug-or-name>` and `--yes` both skip the
-  prompt; a non-interactive shell with neither is refused.
+  ask for confirmation before proceeding. `-w <id-or-slug-or-name>` always skips the prompt;
+  `--yes` does too, but only on the commands that declare it. A non-interactive shell with
+  neither is refused, and the refusal hint mentions `--yes` only when the active command
+  actually has it (`getSupportsAssumeYes()` in `src/utils/mutating-commands.ts`).
 
 Every mutating command additionally prints its resolved workspace, organization-qualified, as
 its first line of output — independent of whether the guard fired — so the target workspace is

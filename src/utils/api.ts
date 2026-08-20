@@ -9,7 +9,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
-import { activeCommandIsMutating, getAssumeYes } from './mutating-commands';
+import { activeCommandIsMutating, getAssumeYes, getSupportsAssumeYes } from './mutating-commands';
 import {
     decideWorkspaceGuard,
     isCwdInferredWorkspace,
@@ -438,7 +438,7 @@ function workspaceLabel(config: Config): string {
 export async function applyWorkspaceGuard(
     config: Config,
     sources: ResolvedConfig['sources'],
-    options: { mutating: boolean; explicitOverride: boolean; assumeYes: boolean },
+    options: { mutating: boolean; explicitOverride: boolean; assumeYes: boolean; supportsAssumeYes?: boolean },
     io: WorkspaceGuardIo = {},
 ): Promise<Config> {
     const isTty = io.isTty ?? (() => !!process.stdin.isTTY);
@@ -476,7 +476,13 @@ export async function applyWorkspaceGuard(
 
     if (action === 'confirm' && !options.assumeYes) {
         if (!isTty()) {
-            warn(`re-run with -w ${config.workspaceId} to confirm the target workspace, or --yes to accept the inferred one`);
+            // Only mention --yes when the active command actually declares it — the
+            // majority of mutating commands don't (see MUTATING_COMMANDS' doc comment),
+            // and telling a non-interactive caller to pass a flag that doesn't exist on
+            // that command is a dead end.
+            const supportsAssumeYes = options.supportsAssumeYes ?? true;
+            const yesClause = supportsAssumeYes ? ', or --yes to accept the inferred one' : '';
+            warn(`re-run with -w ${config.workspaceId} to confirm the target workspace${yesClause}`);
             throw new WorkspaceGuardAbort(1, 'workspace guard: refused (non-interactive, no --yes)');
         }
 
@@ -528,6 +534,7 @@ export async function requireConfigWithWorkspace(): Promise<Config> {
             mutating: activeCommandIsMutating(),
             explicitOverride,
             assumeYes: getAssumeYes(),
+            supportsAssumeYes: getSupportsAssumeYes(),
         });
     } catch (error) {
         if (error instanceof WorkspaceGuardAbort) {

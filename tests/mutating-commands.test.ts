@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import path from 'path';
 import fs from 'fs';
+import { Command } from 'commander';
 import {
     MUTATING_COMMANDS,
     READONLY_COMMANDS,
@@ -12,6 +13,8 @@ import {
     setActiveCommandPath,
     getActiveCommandPath,
     activeCommandIsMutating,
+    setSupportsAssumeYes,
+    getSupportsAssumeYes,
 } from '../src/utils/mutating-commands';
 
 const MANIFEST_PATH = path.resolve(__dirname, '../dist/command-manifest.json');
@@ -122,6 +125,28 @@ describe('mutating-commands classification', () => {
 
         it('reports false when no active command has been recorded', () => {
             expect(activeCommandIsMutating()).toBe(false);
+        });
+    });
+
+    describe('setSupportsAssumeYes / getSupportsAssumeYes', () => {
+        afterEach(() => {
+            setSupportsAssumeYes(false);
+        });
+
+        it('detects true for a command that declares --yes, via the same options.some check src/index.ts uses', () => {
+            const withYes = new Command('database').option('-y, --yes', 'Skip confirmation');
+
+            setSupportsAssumeYes(withYes.options.some((o) => o.long === '--yes'));
+
+            expect(getSupportsAssumeYes()).toBe(true);
+        });
+
+        it('detects false for a command that does not declare --yes', () => {
+            const withoutYes = new Command('project');
+
+            setSupportsAssumeYes(withoutYes.options.some((o) => o.long === '--yes'));
+
+            expect(getSupportsAssumeYes()).toBe(false);
         });
     });
 });

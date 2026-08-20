@@ -72,7 +72,7 @@ import {
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
-import { setActiveCommandPath, setAssumeYes } from './utils/mutating-commands';
+import { setActiveCommandPath, setAssumeYes, setSupportsAssumeYes } from './utils/mutating-commands';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -123,6 +123,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
     }
     setActiveCommandPath(commandPath);
     setAssumeYes(!!actionCommand.opts().yes);
+    setSupportsAssumeYes(actionCommand.options.some((o) => o.long === '--yes'));
 
     const opts = thisCommand.opts();
     const wsOverride: string | undefined = opts.workspaceOverride;

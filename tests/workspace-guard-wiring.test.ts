@@ -200,6 +200,54 @@ describe('applyWorkspaceGuard', () => {
         }
     });
 
+    it('write command + non-TTY + no --yes support: refuses, hint omits --yes but keeps -w', async () => {
+        const env = makeTmpEnv();
+        try {
+            writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
+            const { io, warns, confirmCalls } = makeIo(env.home, { isTty: false });
+
+            const config = makeConfig();
+            await expect(
+                applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false, assumeYes: false, supportsAssumeYes: false },
+                    io,
+                ),
+            ).rejects.toMatchObject({ exitCode: 1 });
+
+            expect(confirmCalls).toHaveLength(0);
+            expect(warns.some((line) => line.startsWith('re-run with -w ws-new') && !line.includes('--yes'))).toBe(true);
+            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-old');
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    it('write command + non-TTY + --yes support: refuses, hint keeps both -w and --yes', async () => {
+        const env = makeTmpEnv();
+        try {
+            writeLastUsedWorkspace({ workspaceId: 'ws-old', label: 'old-ws' }, env.home);
+            const { io, warns, confirmCalls } = makeIo(env.home, { isTty: false });
+
+            const config = makeConfig();
+            await expect(
+                applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false, assumeYes: false, supportsAssumeYes: true },
+                    io,
+                ),
+            ).rejects.toMatchObject({ exitCode: 1 });
+
+            expect(confirmCalls).toHaveLength(0);
+            expect(warns.some((line) => line.startsWith('re-run with -w ws-new') && line.includes('--yes'))).toBe(true);
+            expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-old');
+        } finally {
+            env.cleanup();
+        }
+    });
+
     it('write command + non-TTY + assumeYes: proceeds without prompting', async () => {
         const env = makeTmpEnv();
         try {

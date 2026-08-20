@@ -187,3 +187,19 @@ export function setAssumeYes(value: boolean): void {
 export function getAssumeYes(): boolean {
     return assumeYes;
 }
+
+let supportsAssumeYes = true;
+
+/**
+ * Set from the preAction hook, reflecting whether the active command itself declares a
+ * --yes/-y option (most mutating commands don't — see MUTATING_COMMANDS' doc comment).
+ * Module-level state — set once at CLI startup before the command runs.
+ */
+export function setSupportsAssumeYes(value: boolean): void {
+    supportsAssumeYes = value;
+}
+
+/** The value recorded by setSupportsAssumeYes. */
+export function getSupportsAssumeYes(): boolean {
+    return supportsAssumeYes;
+}
