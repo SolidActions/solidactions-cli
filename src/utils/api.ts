@@ -214,21 +214,58 @@ export function getApiHeaders(config: Config, contentType?: string): Record<stri
     return headers;
 }
 
+export interface ProjectFamilyEnvironments {
+    /** Environment names the family actually has, e.g. ["production", "dev"]. */
+    environments: string[];
+    /** The real server-side slug per environment, e.g. { production: "my-app", dev: "my-app-dev" }. */
+    slugs: Record<string, string>;
+}
+
 /**
- * Best-effort lookup of the environments a project family actually has
- * (e.g. "production, dev"), for a friendlier 404 message. Returns null on
- * any failure — callers should treat that as "no extra detail available."
+ * Best-effort lookup of the environments a project family actually has, with
+ * the real slug the server uses for each, for a friendlier 404 message.
+ * Returns null on any failure — callers should treat that as "no extra detail
+ * available."
  */
-export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+export async function lookupProjectFamilyEnvironments(config: Config, projectName: string): Promise<ProjectFamilyEnvironments | null> {
     try {
         const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
         const rows = res.data?.data ?? res.data ?? [];
         const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
-        const envs: string[] | undefined = hit?.environments;
-        return envs?.length ? envs.join(', ') : null;
+        const environments: string[] | undefined = hit?.environments;
+        if (!environments?.length) {
+            return null;
+        }
+
+        const slugs: Record<string, string> = {};
+        for (const detail of hit?.environment_details ?? []) {
+            if (typeof detail?.environment === 'string' && typeof detail?.slug === 'string') {
+                slugs[detail.environment] = detail.slug;
+            }
+        }
+
+        return { environments, slugs };
     } catch {
         return null;
     }
+}
+
+/**
+ * Best-effort lookup of the environments a project family actually has
+ * (e.g. ["production", "dev"]), for a friendlier 404 message. Returns null
+ * on any failure — callers should treat that as "no extra detail available."
+ */
+export async function listProjectEnvironments(config: Config, projectName: string): Promise<string[] | null> {
+    return (await lookupProjectFamilyEnvironments(config, projectName))?.environments ?? null;
+}
+
+/**
+ * Same lookup as `listProjectEnvironments`, joined for display (e.g.
+ * "production, dev"). Returns null on any failure.
+ */
+export async function describeProjectEnvironments(config: Config, projectName: string): Promise<string | null> {
+    const envs = await listProjectEnvironments(config, projectName);
+    return envs ? envs.join(', ') : null;
 }
 
 /**

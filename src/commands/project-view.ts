@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
@@ -87,6 +87,15 @@ export function projectViewJsonProjection(project: ProjectDeploymentDetail): Rec
         deployment_matches_deployed_hash: project.deployment_matches_deployed_hash ?? false,
         latest_successful_deployment: deployment === null ? null : deploymentJsonProjection(deployment),
     };
+}
+
+/**
+ * Quote a copy-pasteable command argument so the printed remedy survives a
+ * shell. Slugs from the API are normally bare words needing nothing; anything
+ * with whitespace or shell metacharacters gets single-quoted.
+ */
+export function quoteCommandArg(arg: string): string {
+    return /^[A-Za-z0-9._/-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
@@ -194,9 +203,10 @@ export async function projectViewWithConfig(
     config: Config,
     writeLine: (line: string) => void = console.log,
 ): Promise<void> {
+    const environment = options.env ?? 'dev';
     let slug: string;
     try {
-        slug = projectSlugForView(project, options.env ?? 'dev');
+        slug = projectSlugForView(project, environment);
     } catch (error: any) {
         console.error(chalk.red(error.message));
         process.exit(1);
@@ -219,9 +229,29 @@ export async function projectViewWithConfig(
         if (error.response?.status === 401) {
             console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
         } else if (error.response?.status === 404) {
-            const message = sanitizeDisplayText(error.response.data?.message, 500)
-                ?? `Project "${slug}" not found.`;
-            console.error(chalk.red(message));
+            const family = await lookupProjectFamilyEnvironments(config, project);
+            const envs = family?.environments ?? [];
+            // Only claim the environment is missing when the family genuinely lacks it.
+            // `GET /api/v1/projects` can report the requested environment (a standalone
+            // env row, or a row created before its deployment landed) while the detail
+            // endpoint 404s for that exact slug; asserting "has no dev environment"
+            // against a list that says dev exists is self-contradictory, so let the
+            // server's own message through instead.
+            if (envs.length > 0 && !envs.includes(environment)) {
+                const suggested = envs.includes('production') ? 'production' : envs[0];
+                // The remedy must name the environment's REAL slug: `project view` passes a
+                // production argument through un-slugified, so echoing back a name-typed
+                // argument ("My App") would print a command that 404s in its turn.
+                const suggestedSlug = sanitizeDisplayText(family?.slugs[suggested], 255);
+                console.error(chalk.red(`Project "${project}" has no ${environment} environment (exists in: ${envs.join(', ')}).`));
+                if (suggestedSlug) {
+                    console.error(`  solidactions project view ${quoteCommandArg(suggestedSlug)} -e ${suggested}`);
+                }
+            } else {
+                const message = sanitizeDisplayText(error.response.data?.message, 500)
+                    ?? `Project "${slug}" not found.`;
+                console.error(chalk.red(message));
+            }
         } else if (error.response) {
             console.error(chalk.red(`Failed to view project: ${error.response.status}`));
         } else {
