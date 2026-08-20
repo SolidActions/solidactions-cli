@@ -250,6 +250,26 @@ describe('device login destination and credential hardening', () => {
         );
     });
 
+    it('does not claim success when a device login ends with no workspace selected (multiple workspaces, non-interactive)', async () => {
+        workspaceBody = {
+            data: [
+                { id: 'ws-1', name: 'First Workspace', slug: 'first-workspace' },
+                { id: 'ws-2', name: 'Second Workspace', slug: 'second-workspace' },
+            ],
+            scope: { mode: 'all', workspace_ids: [] },
+        };
+
+        await deviceLogin({ host: host(), global: true });
+
+        const output = [...logLines, ...errorLines].join('\n');
+        expect(output).not.toContain('Logged in successfully!');
+        expect(output).not.toContain('Next step');
+        expect(output).not.toContain('Quick start');
+        expect(output).toContain(`Authentication saved to ${globalPath()}`);
+
+        expect(JSON.parse(fs.readFileSync(globalPath(), 'utf-8')).workspaceId).toBeUndefined();
+    });
+
     it('keeps the approved credential when an explicit workspace does not match', async () => {
         workspaceBody = {
             data: [{ id: 'ws-1', name: 'Only Workspace', slug: 'only-workspace' }],

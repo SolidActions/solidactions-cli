@@ -301,6 +301,10 @@ export async function completeLogin(
     options: { workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
     scope: WorkspaceScope | null = null,
     preflight: LoginWritePreflight | null = null,
+    dependencies: {
+        selectWorkspace?: typeof selectWorkspaceInteractively;
+        overwriteQuestion?: WritePromptDependencies['question'];
+    } = {},
 ): Promise<void> {
     // Device-flow tokens carry a scope (mode + workspace_ids) that later
     // gates `workspace set`; absent for user-scoped Sanctum PATs.
@@ -309,23 +313,83 @@ export async function completeLogin(
         config.scopedWorkspaceIds = scope.workspace_ids;
     }
 
+    // A --workspace the resolver refuses (not-found, ambiguous, or org-only)
+    // never reaches writeConfigFile below on an API-key login, so it must exit
+    // before the destination/confirm/backup block runs — otherwise the block
+    // backs up and claims to overwrite a config that was never touched
+    // (app#1197 finding 1). Device login (preflight set) keeps its own
+    // --workspace-refusal handling below, which persists the credential first.
+    if (!preflight && options.workspace) {
+        const preflightMatch = classifyWorkspaceInput(options.workspace, workspaces);
+        if (preflightMatch.kind !== 'match') {
+            console.error(chalk.red(describeWorkspaceMatchFailure(preflightMatch)));
+            process.exit(1);
+            return;
+        }
+    }
+
+    // Decide the destination and confirm any destructive overwrite BEFORE
+    // workspace resolution (including the interactive picker), so the y/N
+    // lands before the user has done the picker work, not after (app#1197).
+    // Device login has already persisted its base credential via a preflight.
+    let target: WriteTarget | undefined;
+    let targetPath: string | undefined;
+    let sameCredentialExisting: Partial<Config> | null = null;
+    if (!preflight) {
+        target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
+        targetPath = pathForTarget(target);
+
+        // The final config (which gains workspace/workspaceId) isn't known
+        // until the workspace is chosen below, so we can't byte-compare
+        // against it here. Compare credentials instead — the guard exists to
+        // protect a *different* account's config from being clobbered.
+        const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
+        let isDestructive = false;
+        if (existingRaw !== null) {
+            try {
+                const existing = JSON.parse(existingRaw);
+                isDestructive = existing.host !== config.host || existing.apiKey !== config.apiKey;
+                if (!isDestructive) {
+                    sameCredentialExisting = existing;
+                }
+            } catch {
+                isDestructive = true;
+            }
+        }
+
+        if (isDestructive) {
+            const backupPath = backupPathFor(targetPath);
+            const proceed = await confirmOverwrite(targetPath, backupPath, { question: dependencies.overwriteQuestion });
+            if (!proceed) {
+                console.log(chalk.yellow('Aborted. No changes were made.'));
+                process.exit(0);
+            }
+            fs.copyFileSync(targetPath, backupPath);
+            console.log(chalk.gray(`Backup saved to ${backupPath}`));
+        }
+    }
+
     // Resolve the workspace. Device login has already persisted its base
     // credential; API-key login still resolves before its first write.
     if (options.workspace) {
         const result = classifyWorkspaceInput(options.workspace, workspaces);
         if (result.kind !== 'match') {
-            if (preflight?.credentialPersisted) {
-                writeConfigFile(preflight.targetPath, config);
-                console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
-                console.error(chalk.yellow(
-                    `Authentication was saved to ${preflight.targetPath}.`,
-                ));
-                console.error(chalk.yellow(
-                    'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
-                ));
-            } else {
-                console.error(chalk.red(describeWorkspaceMatchFailure(result)));
-            }
+            // Device login only. The pre-write guard above exits every
+            // `!preflight` refusal, and the sole preflight caller
+            // (`device-login`) runs `persistPreflightedLoginCredential` —
+            // which sets `credentialPersisted` unconditionally — before
+            // calling in, so the credential is always already on disk here.
+            // Hence no `credentialPersisted` test and no non-preflight
+            // fallback: that branch was unreachable and only duplicated the
+            // guard's copy.
+            writeConfigFile(preflight!.targetPath, config);
+            console.error(chalk.yellow(describeWorkspaceMatchFailure(result)));
+            console.error(chalk.yellow(
+                `Authentication was saved to ${preflight!.targetPath}.`,
+            ));
+            console.error(chalk.yellow(
+                'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
+            ));
             process.exit(1);
             return;
         }
@@ -343,7 +407,8 @@ export async function completeLogin(
             + 'run `solidactions workspace set <name>`.',
         ));
     } else if (process.stdin.isTTY) {
-        const selected = await selectWorkspaceInteractively(workspaces);
+        const selectWorkspace = dependencies.selectWorkspace ?? selectWorkspaceInteractively;
+        const selected = await selectWorkspace(workspaces);
         if (selected) {
             config.workspace = selected.slug ?? selected.name;
             config.workspaceId = selected.id;
@@ -355,47 +420,55 @@ export async function completeLogin(
         ));
     }
 
+    // `writeConfigFile` writes the config wholesale, and the credentials-only
+    // compare above cannot see a workspace pin going missing — so a
+    // same-credential re-login that resolves no workspace of its own (picker
+    // cancelled, or non-interactive with several workspaces) used to delete an
+    // existing pin silently: no prompt and no .bak, because identical
+    // credentials are not "destructive". The pin is still valid for this exact
+    // account, so carry every workspace field forward instead. Deliberately
+    // gated on unchanged credentials: when they differ, the pin belongs to a
+    // different account and that path is already prompted and backed up.
+    if (!config.workspaceId && sameCredentialExisting?.workspaceId) {
+        config.workspace = sameCredentialExisting.workspace;
+        config.workspaceId = sameCredentialExisting.workspaceId;
+        config.workspaceOrg = sameCredentialExisting.workspaceOrg;
+        console.log(chalk.gray(`Keeping the workspace already pinned in this config: ${config.workspace ?? config.workspaceId}`));
+    }
+
     let savedTargetPath: string;
     if (preflight) {
         savedTargetPath = preflight.targetPath;
         writeConfigFile(preflight.targetPath, config);
     } else {
-        const target = await decideWriteTarget({ local: options.local, global: options.global }, undefined, LOGIN_REFUSAL_MESSAGE);
-        const targetPath = pathForTarget(target);
-        savedTargetPath = targetPath;
-
-        const existingRaw = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null;
-        const wouldChange = existingRaw !== null && existingRaw.trim() !== JSON.stringify(config, null, 2).trim();
-
-        if (wouldChange) {
-            const backupPath = backupPathFor(targetPath);
-            const proceed = await confirmOverwrite(targetPath, backupPath);
-            if (!proceed) {
-                console.log(chalk.yellow('Aborted. No changes were made.'));
-                process.exit(0);
-            }
-            fs.copyFileSync(targetPath, backupPath);
-            console.log(chalk.gray(`Backup saved to ${backupPath}`));
-        }
-
-        writeConfigFile(targetPath, config);
+        savedTargetPath = targetPath!;
+        writeConfigFile(targetPath!, config);
 
         if (target === 'local') {
             await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
         }
     }
 
-    console.log(chalk.green('Logged in successfully!'));
-    console.log(chalk.gray(`Configuration saved to ${savedTargetPath}`));
-    console.log('');
-    console.log(chalk.blue('Next step — scaffold a new project (includes AI tooling):'));
-    console.log(chalk.gray('  solidactions init <project-name>      Creates ./<project-name>/ with scaffold + AI skills'));
-    console.log(chalk.gray('  solidactions init                     Scaffolds in the current (empty) directory'));
-    console.log('');
-    console.log(chalk.blue('Quick start:'));
-    console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
-    console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
-    console.log(chalk.gray('  solidactions run list                 List recent runs'));
+    if (config.workspaceId) {
+        console.log(chalk.green('Logged in successfully!'));
+        console.log(chalk.gray(`Configuration saved to ${savedTargetPath}`));
+        console.log('');
+        console.log(chalk.blue('Next step — scaffold a new project (includes AI tooling):'));
+        console.log(chalk.gray('  solidactions init <project-name>      Creates ./<project-name>/ with scaffold + AI skills'));
+        console.log(chalk.gray('  solidactions init                     Scaffolds in the current (empty) directory'));
+        console.log('');
+        console.log(chalk.blue('Quick start:'));
+        console.log(chalk.gray('  solidactions project deploy <name>    Deploy current directory'));
+        console.log(chalk.gray('  solidactions run start <proj> <wf>    Run a workflow'));
+        console.log(chalk.gray('  solidactions run list                 List recent runs'));
+    } else {
+        console.log(chalk.yellow(`Authentication saved to ${savedTargetPath}.`));
+        if (workspaces.length > 0) {
+            console.log(chalk.yellow(
+                'Run `solidactions workspace list`, then `solidactions workspace set <name>` to finish setup.',
+            ));
+        }
+    }
 }
 
 export async function login(
