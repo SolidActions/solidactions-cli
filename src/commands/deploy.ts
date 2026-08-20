@@ -264,6 +264,54 @@ export function safeCollectSourceMetadata(
 }
 
 /**
+ * Raw warning shape returned by the server's sync-yaml endpoint
+ * (`ProjectApiController::syncYamlDeclarations`) when a YAML declaration
+ * names a resource that does not (yet) exist in the workspace. Non-fatal —
+ * the declaration is still saved so it resolves once the resource exists.
+ */
+interface SyncYamlWarning {
+    env_name?: string;
+    reason?: string;
+    key?: string;
+    name?: string;
+    [key: string]: unknown;
+}
+
+/**
+ * Turns the raw `warnings` array from the sync-yaml response into
+ * human-readable lines. Pure, defensive: any non-array input (undefined,
+ * null, an object, a string) yields `[]`, and an unrecognized/future
+ * `reason` still produces a readable line instead of crashing or printing
+ * "undefined" (app#1150).
+ */
+export function formatSyncYamlWarnings(warnings: unknown): string[] {
+    if (!Array.isArray(warnings)) {
+        return [];
+    }
+
+    return warnings.map((warning: SyncYamlWarning) => {
+        const envName = warning?.env_name ?? 'unknown';
+        // The server always sends `key`/`name` alongside its reason; if one is
+        // ever missing, fall through to the generic line rather than naming the
+        // unresolved resource "undefined".
+        const target = warning?.key ?? warning?.name;
+
+        if (typeof target === 'string' && target !== '') {
+            switch (warning?.reason) {
+                case 'global_variable_not_found_in_workspace':
+                    return `${envName} → no workspace variable with key "${target}"`;
+                case 'oauth_connection_not_found_in_workspace':
+                    return `${envName} → no OAuth connection named "${target}"`;
+                case 'workspace_database_not_found_in_workspace':
+                    return `${envName} → no workspace database named "${target}"`;
+            }
+        }
+
+        return `${envName} → unresolved (${warning?.reason ?? 'unknown reason'})`;
+    });
+}
+
+/**
  * Push YAML env declarations to the project.
  * This registers all YAML-declared vars and their mappings.
  *
@@ -291,14 +339,36 @@ export async function pushYamlDeclarations(
         source: 'yaml' as const,
     }));
 
-    await axios.post(
+    const response = await axios.post(
         `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
         { declarations },
         {
             headers: getApiHeaders(config, 'application/json'),
         }
     );
-    console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations`));
+
+    // Non-fatal: a warning means a declared resource doesn't exist in the
+    // workspace yet, not that the sync failed (app#1150).
+    const body = response?.data;
+    const rawWarnings = (body !== null && typeof body === 'object') ? body.warnings : undefined;
+    const warnings = formatSyncYamlWarnings(rawWarnings);
+    const unresolvedSuffix = warnings.length > 0 ? ` (${warnings.length} unresolved)` : '';
+    console.log(chalk.gray(`Synced ${declarations.length} YAML env declarations${unresolvedSuffix}`));
+
+    // A `warnings` key that isn't an array means the response shape changed
+    // under us. Say so rather than silently reporting plain success, which is
+    // the exact bug app#1150 fixed. An ABSENT key is not a surprise — an older
+    // server simply doesn't send one — so it stays quiet.
+    if (rawWarnings !== undefined && !Array.isArray(rawWarnings)) {
+        console.log(chalk.gray('  Server returned warnings in an unrecognized shape; unresolved declarations may not be listed.'));
+    }
+
+    for (const warning of warnings) {
+        console.log(chalk.yellow(`  ⚠ ${warning}`));
+    }
+    if (warnings.length > 0) {
+        console.log(chalk.yellow("  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies)."));
+    }
 }
 
 /**

@@ -18,12 +18,20 @@
  */
 import * as http from 'http';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { pushYamlDeclarations } from '../src/commands/deploy';
+import { formatSyncYamlWarnings, pushYamlDeclarations } from '../src/commands/deploy';
 import { SolidActionsConfig } from '../src/utils/env';
 
 let server: http.Server;
 let port: number;
 let lastRequest: { path: string; body: any } | null = null;
+
+/** Patch console.log to capture output lines (matches tests/doc-push.test.ts). */
+function captureStdout(): { lines: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (m?: any) => { lines.push(String(m ?? '')); };
+    return { lines, restore: () => { console.log = orig; } };
+}
 
 beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -34,6 +42,30 @@ beforeAll(async () => {
             if (req.url?.includes('/projects/fail-project/')) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ message: 'Sync target unreachable.' }));
+                return;
+            }
+            if (req.url?.includes('/projects/shape-project/')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    message: 'YAML declarations synced.',
+                    count: 1,
+                    warnings: { unexpected: 'object instead of array' },
+                }));
+                return;
+            }
+            if (req.url?.includes('/projects/warn-project/')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    message: 'YAML declarations synced.',
+                    count: 1,
+                    warnings: [
+                        {
+                            env_name: 'ANALYTICS_DB',
+                            reason: 'workspace_database_not_found_in_workspace',
+                            name: 'does-not-exist',
+                        },
+                    ],
+                }));
                 return;
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -110,5 +142,152 @@ describe('pushYamlDeclarations: a failed sync throws instead of being swallowed 
         const yamlConfig: SolidActionsConfig = { workflows: [], env: [] };
 
         await expect(pushYamlDeclarations(config(), 'fail-project', yamlConfig)).rejects.toThrow();
+    });
+});
+
+// Issue app#1150 — sync-yaml warnings (unresolved resource references) were
+// silently discarded; pushYamlDeclarations() must surface them.
+describe('formatSyncYamlWarnings', () => {
+    it('formats a global_variable_not_found_in_workspace warning', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'API_KEY', reason: 'global_variable_not_found_in_workspace', key: 'MISSING_KEY' },
+        ]);
+        expect(lines).toEqual(['API_KEY → no workspace variable with key "MISSING_KEY"']);
+    });
+
+    it('formats an oauth_connection_not_found_in_workspace warning', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'GH_TOKEN', reason: 'oauth_connection_not_found_in_workspace', name: 'github-main' },
+        ]);
+        expect(lines).toEqual(['GH_TOKEN → no OAuth connection named "github-main"']);
+    });
+
+    it('formats a workspace_database_not_found_in_workspace warning', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'ANALYTICS_DB', reason: 'workspace_database_not_found_in_workspace', name: 'does-not-exist' },
+        ]);
+        expect(lines).toEqual(['ANALYTICS_DB → no workspace database named "does-not-exist"']);
+    });
+
+    it('formats multiple warnings in order', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'API_KEY', reason: 'global_variable_not_found_in_workspace', key: 'MISSING_KEY' },
+            { env_name: 'GH_TOKEN', reason: 'oauth_connection_not_found_in_workspace', name: 'github-main' },
+        ]);
+        expect(lines).toEqual([
+            'API_KEY → no workspace variable with key "MISSING_KEY"',
+            'GH_TOKEN → no OAuth connection named "github-main"',
+        ]);
+    });
+
+    it('falls back gracefully on an unknown/future reason, without printing "undefined"', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'FUTURE_VAR', reason: 'some_future_reason_not_yet_known' },
+        ]);
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('FUTURE_VAR');
+        expect(lines[0]).toContain('some_future_reason_not_yet_known');
+        expect(lines[0]).not.toContain('undefined');
+    });
+
+    it('never crashes and never prints "undefined" on a warning missing its reason', () => {
+        const lines = formatSyncYamlWarnings([{ env_name: 'NO_REASON' }]);
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('NO_REASON');
+        expect(lines[0]).not.toContain('undefined');
+    });
+
+    it('never prints "undefined" when a known reason arrives without its key/name field', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'NO_KEY', reason: 'global_variable_not_found_in_workspace' },
+            { env_name: 'NO_NAME', reason: 'workspace_database_not_found_in_workspace' },
+        ]);
+
+        expect(lines).toHaveLength(2);
+        expect(lines[0]).toContain('NO_KEY');
+        expect(lines[0]).not.toContain('undefined');
+        expect(lines[1]).toContain('NO_NAME');
+        expect(lines[1]).not.toContain('undefined');
+    });
+
+    it.each([
+        ['undefined', undefined],
+        ['null', null],
+        ['a non-array object', { foo: 'bar' }],
+        ['a string', 'not-an-array'],
+        ['an empty array', []],
+    ])('returns an empty array for %s', (_label, input) => {
+        expect(formatSyncYamlWarnings(input as any)).toEqual([]);
+    });
+});
+
+describe('pushYamlDeclarations: prints sync-yaml warnings from the response body (app#1150)', () => {
+    it('appends an unresolved count and one indented warning line per warning', async () => {
+        const yamlConfig: SolidActionsConfig = { workflows: [], env: [{ ANALYTICS_DB: { database: 'does-not-exist' } }] };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'warn-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        // Exact equality, not toContain: the PR claims a precise rendering, and
+        // chalk is level 0 under vitest so these are the literal bytes a user
+        // sees (shop rule "commit the golden check", app#547/#1150 R1).
+        expect(capture.lines).toEqual([
+            'Synced 1 YAML env declarations (1 unresolved)',
+            '  ⚠ ANALYTICS_DB → no workspace database named "does-not-exist"',
+            "  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies).",
+        ]);
+    });
+
+    it('prints the unchanged single summary line when the response has no warnings', async () => {
+        const yamlConfig: SolidActionsConfig = { workflows: [], env: [] };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'my-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        // The "byte-identical when there are no warnings" claim, as an exact test.
+        expect(capture.lines).toEqual(['Synced 0 YAML env declarations']);
+    });
+
+    it('does not crash when the response body is missing `warnings` entirely', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: [{ MYDB: { database: 'analytics' } }],
+        };
+        const capture = captureStdout();
+
+        try {
+            await expect(pushYamlDeclarations(config(), 'my-project', yamlConfig)).resolves.toBeUndefined();
+        } finally {
+            capture.restore();
+        }
+
+        expect(capture.lines).toEqual(['Synced 1 YAML env declarations']);
+    });
+
+    it('says so when the response carries `warnings` in a shape that is not an array', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: [{ MYDB: { database: 'analytics' } }],
+        };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'shape-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        expect(capture.lines).toEqual([
+            'Synced 1 YAML env declarations',
+            '  Server returned warnings in an unrecognized shape; unresolved declarations may not be listed.',
+        ]);
     });
 });
