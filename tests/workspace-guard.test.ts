@@ -232,13 +232,24 @@ describe('decideWorkspaceGuard', () => {
         ).toBe('none');
     });
 
-    it('lastUsedWorkspaceId falsy (first run, do not nag) -> none', () => {
+    it('lastUsedWorkspaceId falsy, mutating true (fresh install, first write) -> warn-no-baseline', () => {
         expect(
             decideWorkspaceGuard({
                 resolvedWorkspaceId: 'ws-resolved',
                 lastUsedWorkspaceId: undefined,
                 cwdInferred: true,
                 mutating: true,
+            }),
+        ).toBe('warn-no-baseline');
+    });
+
+    it('lastUsedWorkspaceId falsy, mutating false (reads stay frictionless, first run) -> none', () => {
+        expect(
+            decideWorkspaceGuard({
+                resolvedWorkspaceId: 'ws-resolved',
+                lastUsedWorkspaceId: undefined,
+                cwdInferred: true,
+                mutating: false,
             }),
         ).toBe('none');
     });

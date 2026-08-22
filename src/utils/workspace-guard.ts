@@ -86,18 +86,19 @@ export function writeLastUsedWorkspace(entry: LastUsedWorkspace, homeDir: string
     }
 }
 
-export type WorkspaceGuardAction = 'none' | 'warn' | 'confirm';
+export type WorkspaceGuardAction = 'none' | 'warn' | 'confirm' | 'warn-no-baseline';
 
 /**
  * Decision table:
- * | condition                                                     | result    |
- * |----------------------------------------------------------------|-----------|
- * | resolvedWorkspaceId falsy                                      | 'none'    |
- * | cwdInferred is false                                           | 'none'    |
- * | lastUsedWorkspaceId falsy (first run, do not nag)               | 'none'    |
- * | resolved === lastUsed                                          | 'none'    |
- * | resolved !== lastUsed, mutating false                          | 'warn'    |
- * | resolved !== lastUsed, mutating true                           | 'confirm' |
+ * | condition                                                     | result             |
+ * |------------------------------------------------------------------|--------------------|
+ * | resolvedWorkspaceId falsy                                      | 'none'             |
+ * | cwdInferred is false                                           | 'none'             |
+ * | lastUsedWorkspaceId falsy, mutating true (fresh install, first write) | 'warn-no-baseline' |
+ * | lastUsedWorkspaceId falsy, mutating false (reads stay frictionless)   | 'none'             |
+ * | resolved === lastUsed                                          | 'none'             |
+ * | resolved !== lastUsed, mutating false                          | 'warn'             |
+ * | resolved !== lastUsed, mutating true                           | 'confirm'          |
  */
 export function decideWorkspaceGuard(input: {
     resolvedWorkspaceId: string | undefined;
@@ -112,7 +113,7 @@ export function decideWorkspaceGuard(input: {
         return 'none';
     }
     if (!input.lastUsedWorkspaceId) {
-        return 'none';
+        return input.mutating ? 'warn-no-baseline' : 'none';
     }
     if (input.resolvedWorkspaceId === input.lastUsedWorkspaceId) {
         return 'none';

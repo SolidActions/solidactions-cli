@@ -82,8 +82,36 @@ always visible for a write, not just on the first run after a change.
   (or a deleted state file) gets exactly one free CWD-inferred write before the guard has a
   baseline to compare against. Accepted: prompting on a first run, before the CLI has ever
   observed a workspace change, is friction with no signal behind it.
+  **Superseded by the amendment below (app#1481).**
 - The workspace shown in the banner, warning, and prompt is printed **without** its display
   name whenever that name was not resolved from the same config layer as the workspace id
   (e.g. `SOLIDACTIONS_WORKSPACE_ID` set on its own over a config file naming a different
   workspace) — an id alone is less useful than a name, but a name that belongs to another
   workspace is worse than useless on a line whose whole job is saying where a write is going.
+
+## Amendment (2026-08-22, app#1481)
+
+The Consequences bullet above — "with no `state.json` at all, the next CWD-inferred write is
+unguarded" — was accepted as a deliberate gap at the time, but it left the very first write on a
+fresh install or a fresh CI container with *no signal at all*, not even a warning. That gap is
+the accepted residual tracked by [SolidActions/solidactions-app#1481](https://github.com/SolidActions/solidactions-app/issues/1481).
+
+`decideWorkspaceGuard` now returns a new action, `'warn-no-baseline'`, when the resolved
+workspace is CWD-inferred, the command is mutating, and there is no recorded last-used
+workspace to compare against (no `state.json`, or one that fails to parse). It emits a distinct
+`warn:` line — it cannot claim the workspace "changed" or name a "last used" workspace, because
+there is nothing to compare against — and then the command proceeds exactly as it would have
+before: it prints its usual `Workspace: …` banner and records `state.json`, so the warning fires
+once, on write #1, and never again for that same workspace.
+
+Read-only commands are **not** extended by this amendment and still return `'none'` in the
+no-baseline case: a read never writes `state.json`, so warning there would nag on every single
+read forever rather than exactly once.
+
+`'warn-no-baseline'` deliberately only warns — it does **not** confirm and does **not** refuse in
+a non-interactive shell. This was a conscious choice, not an oversight: ADR 0002's own
+"Alternatives considered" section already rejected "always confirm CWD-inferred writes" as
+training operators to reflexively answer "yes"; extending that to the very first write on a
+machine would do the same. More concretely, a refusal here would break every fresh CI runner
+that infers its workspace from CWD on its very first run — exactly the case a fresh container
+hits every time, not just once.

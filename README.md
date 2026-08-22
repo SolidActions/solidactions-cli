@@ -169,6 +169,18 @@ CWD-inferred workspace differs from that last-written-to one, the CLI warns:
 warn: workspace changed to <name> — organization <org> (<workspaceId>) — inferred from <path>; last used was <last-used-name-or-id>. Pin it with -w <workspaceId>.
 ```
 
+On a fresh install (or a fresh CI container) there's no `state.json` yet, so a CWD-inferred
+write has nothing to compare against. A **write** in that case still warns — once, on that
+first write — even though nothing has "changed":
+
+```
+warn: about to write to <name> — organization <org> (<workspaceId>) — inferred from <path>; no previously recorded workspace to compare against. Pin it with -w <workspaceId>.
+```
+
+This warns and proceeds; it never confirms or refuses. That first write records `state.json`,
+so this line cannot fire again — from then on there is a baseline, and a later CWD-inferred
+write against a *different* workspace gets the `workspace changed to …` treatment above.
+
 For commands that **write** to the server, it also asks for confirmation before proceeding:
 
 ```
