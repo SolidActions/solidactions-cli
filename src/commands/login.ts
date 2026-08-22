@@ -23,7 +23,6 @@ import {
     classifyWorkspaceInput,
     describeWorkspaceMatchFailure,
     fetchWorkspaces,
-    formatWorkspaceWithOrg,
     selectWorkspaceInteractively,
     WorkspaceLookupRecord,
     WorkspaceScope,
@@ -396,17 +395,12 @@ export async function completeLogin(
         const match = result.workspace;
         config.workspace = match.slug ?? match.name;
         config.workspaceId = match.id;
-    } else if (workspaces.length === 1) {
-        const selected = workspaces[0];
-        console.log(chalk.gray(`Auto-selected workspace: ${formatWorkspaceWithOrg(selected)}`));
-        config.workspace = selected.slug ?? selected.name;
-        config.workspaceId = selected.id;
-    } else if (workspaces.length === 0) {
-        console.log(chalk.yellow(
-            'No workspaces found. Create one at your SolidActions dashboard, then '
-            + 'run `solidactions workspace set <name>`.',
-        ));
-    } else if (process.stdin.isTTY) {
+    } else if (workspaces.length <= 1 || process.stdin.isTTY) {
+        // 0 and 1 workspace need no interactive prompt, but their status copy
+        // ("No workspaces found."/"Auto-selected workspace:") already lives in
+        // selectWorkspaceInteractively (cli#137, on stderr) — route them
+        // through it too so those strings have exactly one call site instead
+        // of a stdout duplicate here (app#1482).
         const selectWorkspace = dependencies.selectWorkspace ?? selectWorkspaceInteractively;
         const selected = await selectWorkspace(workspaces);
         if (selected) {

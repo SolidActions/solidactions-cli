@@ -246,9 +246,34 @@ describe('login — validates before writing (F-C2)', () => {
         const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
         expect(config.workspaceId).toBe('ws-1');
         expect(config.workspace).toBe('some-workspace');
-        const out = logLines.join(' ');
-        expect(out).toContain('Auto-selected workspace: Some Workspace');
-        expect(out).toContain('Logged in successfully!');
+        // "Auto-selected workspace:" is status text on stderr, not the command's own output.
+        expect(errorLines.join(' ')).toContain('Auto-selected workspace: Some Workspace');
+        expect(logLines.join(' ')).toContain('Logged in successfully!');
+    });
+
+    // app#1482 — completeLogin used to print its own duplicate of the
+    // "Auto-selected workspace:"/"No workspaces found." copy to stdout, while
+    // selectWorkspaceInteractively (cli#137) already prints the same strings
+    // to stderr. Pin the canonical stream (stderr) so scripted consumers see
+    // one consistent answer regardless of which branch runs.
+    it('non-interactive, no --workspace: sole-workspace auto-select and zero-workspace messages land on stderr, not stdout (app#1482)', async () => {
+        nextStatus = 200;
+        nextBody = { data: [{ id: 'ws-1', name: 'Some Workspace', slug: 'some-workspace' }] };
+
+        await login('good-key', { global: true, host: HOST() });
+
+        expect(errorLines.join(' ')).toContain('Auto-selected workspace: Some Workspace');
+        expect(logLines.join(' ')).not.toContain('Auto-selected workspace:');
+    });
+
+    it('non-interactive, no --workspace: zero-workspace message lands on stderr, not stdout (app#1482)', async () => {
+        nextStatus = 200;
+        nextBody = { data: [] };
+
+        await login('good-key', { global: true, host: HOST() });
+
+        expect(errorLines.join(' ')).toContain('No workspaces found. Create one');
+        expect(logLines.join(' ')).not.toContain('No workspaces found. Create one');
     });
 
     it('non-interactive, no --workspace: auto-selects the sole workspace with an org-qualified confirmation (real grouped-object payload)', async () => {
@@ -275,8 +300,8 @@ describe('login — validates before writing (F-C2)', () => {
         const config = JSON.parse(fs.readFileSync(globalPath, 'utf-8'));
         expect(config.workspaceId).toBe('ws-1');
         expect(config.workspace).toBe('only-workspace');
-        const out = logLines.join(' ');
-        expect(out).toContain('Auto-selected workspace: Only Workspace — organization Acme Org');
+        // "Auto-selected workspace:" is status text on stderr, not the command's own output.
+        expect(errorLines.join(' ')).toContain('Auto-selected workspace: Only Workspace — organization Acme Org');
     });
 
     it('non-interactive, no --workspace: leaves multiple workspaces unset with recovery guidance', async () => {

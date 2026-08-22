@@ -223,7 +223,8 @@ describe('device login destination and credential hardening', () => {
             scopeMode: 'single',
             scopedWorkspaceIds: ['ws-1'],
         });
-        expect(logLines.join('\n')).toContain('Auto-selected workspace: Only Workspace');
+        // "Auto-selected workspace:" is status text on stderr, not the command's own output.
+        expect(errorLines.join('\n')).toContain('Auto-selected workspace: Only Workspace');
     });
 
     it('keeps a backup and the approved credential when workspace discovery fails', async () => {
