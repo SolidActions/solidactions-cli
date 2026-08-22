@@ -120,7 +120,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
     for (let cmd: Command | null = actionCommand; cmd && cmd !== program; cmd = cmd.parent) {
         commandPath.unshift(cmd.name());
     }
-    setActiveCommandPath(commandPath);
+    setActiveCommandPath(commandPath, actionCommand.opts());
 
     const opts = thisCommand.opts();
     const wsOverride: string | undefined = opts.workspaceOverride;

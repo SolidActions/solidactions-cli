@@ -531,6 +531,19 @@ export async function applyWorkspaceGuard(
         );
     }
 
+    if (action === 'warn-no-baseline') {
+        // Fresh install / fresh CI container: no state.json exists yet, so there is nothing
+        // to compare against. This warns once, on write #1, and deliberately does NOT confirm
+        // or refuse — ADR 0002 rejected "always confirm CWD-inferred writes", and refusing here
+        // would break every fresh CI runner that infers its workspace from CWD (app#1481).
+        const inferredFrom = sources.workspaceId as string;
+        warn(
+            chalk.yellow('warn:') + ` about to write to ${describeWorkspace(config, sources)} `
+            + `— inferred from ${inferredFrom}; no previously recorded workspace to compare against. `
+            + `Pin it with -w ${config.workspaceId}.`,
+        );
+    }
+
     if (action === 'confirm') {
         // Consent to a workspace is exactly two things: stating it explicitly (-w /
         // SOLIDACTIONS_WORKSPACE_ID, both of which make this branch unreachable), or

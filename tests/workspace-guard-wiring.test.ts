@@ -369,6 +369,107 @@ describe('applyWorkspaceGuard', () => {
         });
     });
 
+    describe('warn-no-baseline (fresh install / fresh HOME, no state.json)', () => {
+        it('write command + CWD-inferred + TTY: exactly one distinct stderr warn line, no confirm, proceeds, prints banner, records last-used', async () => {
+            const env = makeTmpEnv();
+            try {
+                const { io, warns, announces, confirmCalls } = makeIo(env.home, { isTty: true });
+
+                const config = makeConfig();
+                await applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false },
+                    io,
+                );
+
+                expect(warns).toHaveLength(1);
+                expect(warns[0]).not.toContain('workspace changed to');
+                expect(warns[0]).not.toContain('last used was');
+                expect(warns[0]).toContain('no previously recorded workspace to compare against');
+                expect(warns[0]).toContain(LOCAL_PATH);
+                expect(warns[0]).toContain('Pin it with -w ws-new');
+                expect(confirmCalls).toHaveLength(0);
+                expect(announces.some((line) => line.includes('Workspace:'))).toBe(true);
+                expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-new');
+            } finally {
+                env.cleanup();
+            }
+        });
+
+        it('write command + CWD-inferred + non-TTY: still warns and proceeds, does not throw WorkspaceGuardAbort, records last-used', async () => {
+            const env = makeTmpEnv();
+            try {
+                const { io, warns, confirmCalls } = makeIo(env.home, { isTty: false });
+
+                const config = makeConfig();
+                await applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false },
+                    io,
+                );
+
+                expect(warns).toHaveLength(1);
+                expect(warns[0]).toContain('no previously recorded workspace to compare against');
+                expect(confirmCalls).toHaveLength(0);
+                expect(readLastUsedWorkspace(env.home)?.workspaceId).toBe('ws-new');
+            } finally {
+                env.cleanup();
+            }
+        });
+
+        it('read-only command + CWD-inferred, no state.json: silent, no banner, does not record last-used', async () => {
+            const env = makeTmpEnv();
+            try {
+                const { io, warns, announces, confirmCalls } = makeIo(env.home);
+
+                const config = makeConfig();
+                await applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: false, explicitOverride: false },
+                    io,
+                );
+
+                expect(warns).toHaveLength(0);
+                expect(announces).toHaveLength(0);
+                expect(confirmCalls).toHaveLength(0);
+                expect(readLastUsedWorkspace(env.home)).toBeNull();
+            } finally {
+                env.cleanup();
+            }
+        });
+
+        it('second write right after the first, same workspace, state.json now recorded: silent (once-per-fresh-install)', async () => {
+            const env = makeTmpEnv();
+            try {
+                const first = makeIo(env.home, { isTty: true });
+                const config = makeConfig();
+                await applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false },
+                    first.io,
+                );
+                expect(first.warns).toHaveLength(1);
+
+                const second = makeIo(env.home, { isTty: true });
+                await applyWorkspaceGuard(
+                    config,
+                    sources(LOCAL_PATH),
+                    { mutating: true, explicitOverride: false },
+                    second.io,
+                );
+
+                expect(second.warns).toHaveLength(0);
+                expect(second.confirmCalls).toHaveLength(0);
+            } finally {
+                env.cleanup();
+            }
+        });
+    });
+
     it('WorkspaceGuardAbort exposes exitCode', () => {
         const abort = new WorkspaceGuardAbort(1, 'refused');
         expect(abort.exitCode).toBe(1);
