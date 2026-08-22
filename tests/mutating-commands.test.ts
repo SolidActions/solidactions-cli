@@ -76,8 +76,16 @@ describe('mutating-commands classification', () => {
             expect(isMutatingCommand(['project', 'deploy'])).toBe(true);
         });
 
-        it('returns true for `database pull` because --writable opens a live write REPL, even though the plain form is read-only', () => {
+        it('returns true for `database pull` with no options (fail safe: unobserved flags never guess read from absence)', () => {
             expect(isMutatingCommand(['database', 'pull'])).toBe(true);
+        });
+
+        it('returns false for `database pull` with options and no --writable (flag-sensitive refinement: plain pull is a read)', () => {
+            expect(isMutatingCommand(['database', 'pull'], {})).toBe(false);
+        });
+
+        it('returns true for `database pull --writable` (flag-sensitive refinement: --writable is a server write)', () => {
+            expect(isMutatingCommand(['database', 'pull'], { writable: true })).toBe(true);
         });
 
         it('returns false for a known read-only path', () => {

@@ -286,4 +286,32 @@ describe('decideWorkspaceGuard', () => {
             }),
         ).toBe('confirm');
     });
+
+    // Deliberate, not accidental: a corrupt state.json reads as null (same as absent), and a
+    // null baseline for a mutating CWD-inferred command takes the 'warn-no-baseline' branch —
+    // warning is the conservative answer for an unknown baseline. Pinned here so a future
+    // change that special-cases "corrupt" differently from "absent" has to update this test
+    // deliberately, not by accident.
+    it('a corrupt state.json is treated as no baseline: warns rather than silently proceeding', () => {
+        const env = makeTmpEnv();
+        try {
+            const dir = path.join(env.home, '.solidactions');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'state.json'), '{not valid json');
+
+            const lastUsed = readLastUsedWorkspace(env.home);
+            expect(lastUsed).toBeNull();
+
+            expect(
+                decideWorkspaceGuard({
+                    resolvedWorkspaceId: 'ws-resolved',
+                    lastUsedWorkspaceId: lastUsed?.workspaceId,
+                    cwdInferred: true,
+                    mutating: true,
+                }),
+            ).toBe('warn-no-baseline');
+        } finally {
+            env.cleanup();
+        }
+    });
 });

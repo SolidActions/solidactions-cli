@@ -113,6 +113,10 @@ export function decideWorkspaceGuard(input: {
         return 'none';
     }
     if (!input.lastUsedWorkspaceId) {
+        // Deliberate: readLastUsedWorkspace() returns null for an absent state.json AND for
+        // an unreadable/malformed one. Both mean "no baseline to compare against" — an
+        // unreadable baseline is an unknown baseline, not a known-safe one — so both take
+        // the same conservative branch: warn on a write rather than silently confirming.
         return input.mutating ? 'warn-no-baseline' : 'none';
     }
     if (input.resolvedWorkspaceId === input.lastUsedWorkspaceId) {
