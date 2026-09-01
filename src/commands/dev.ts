@@ -36,6 +36,34 @@ export interface PlatformVar {
     workspace_database_name?: string | null;
     /** True when the mapping points at a database row that no longer resolves. */
     workspace_database_broken?: boolean;
+    /** The database name a `solidactions.yaml` `database:` declaration asked for. */
+    yaml_default_workspace_database_name?: string | null;
+    /** True when the YAML-declared default (global/oauth/database) could not be resolved. */
+    yaml_default_not_found?: boolean;
+}
+
+/**
+ * Does this mapping declare a database in `solidactions.yaml` that the platform
+ * could not find?
+ *
+ * A typo'd or not-yet-created database name never becomes a
+ * `workspace_database` mapping at all — the platform records the YAML
+ * declaration and flags `yaml_default_not_found`, leaving `source_type` as an
+ * ordinary valueless var. Without this discriminator such a mapping falls into
+ * the generic "declared var had no value in this env and was skipped" bucket,
+ * which tells the user nothing about the actual cause: the name in their YAML
+ * does not match any database in the workspace.
+ *
+ * Mirrors the discriminator `env list` already uses to render
+ * `<name> (not configured)`, so the three surfaces agree on the shape.
+ */
+export function isUnresolvedDatabaseDeclaration(
+    pv: Pick<PlatformVar, 'source_type' | 'yaml_default_not_found' | 'yaml_default_workspace_database_name'>,
+): boolean {
+    return pv.source_type !== 'workspace_database'
+        && pv.yaml_default_not_found === true
+        && typeof pv.yaml_default_workspace_database_name === 'string'
+        && pv.yaml_default_workspace_database_name.length > 0;
 }
 
 /**
@@ -594,6 +622,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     let droppedCount = 0;
     let droppedSecretCount = 0;
     const databaseMappings: PlatformVar[] = [];
+    let unresolvedDatabaseCount = 0;
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -602,6 +631,15 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
                 proxyToken: pv.proxy_token,
             };
             connectionCount++;
+        } else if (isUnresolvedDatabaseDeclaration(pv)) {
+            // Named, never counted as a generic skipped var (#140 review R1).
+            err(
+                `${pv.env_name}: mapped database not found — check the database name in `
+                + `solidactions.yaml: no database named '${pv.yaml_default_workspace_database_name}' `
+                + 'exists in this workspace. `solidactions database list` shows what does; '
+                + '`solidactions database create ' + pv.yaml_default_workspace_database_name + '` creates it.',
+            );
+            unresolvedDatabaseCount++;
         } else if (pv.source_type === 'workspace_database') {
             // Never counted as dropped: a database mapping ALWAYS arrives with a
             // null resolved_value (the mappings endpoint deliberately does not
@@ -684,6 +722,9 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
         if (droppedCount > 0) {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
+        }
+        if (unresolvedDatabaseCount > 0) {
+            summary += ` — ${unresolvedDatabaseCount} declared ${unresolvedDatabaseCount === 1 ? 'database was' : 'databases were'} not found in this workspace (see above)`;
         }
         if (droppedSecretCount > 0) {
             if (apiClient!.revealDenied) {

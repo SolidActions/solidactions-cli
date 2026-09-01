@@ -26,9 +26,11 @@
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
  * Currently: the merged solidactions-examples mainline as of CLI v3.8.0
- * (includes ex#31 "refresh workspace database guidance"). Repinned at release
- * per the standing #1146 contract: on every CLI release, repin EXAMPLES_REF to
- * the examples repo's merged mainline SHA and verify the exact ref during the
- * release ritual.
+ * (includes ex#34 "workspace-database + Drizzle example", which is what makes
+ * `ai examples` able to install workspace-database-drizzle — the runnable
+ * connect + drizzle-kit-migration example #140 exists to point people at).
+ * Repinned at release per the standing #1146 contract: on every CLI release,
+ * repin EXAMPLES_REF to the examples repo's merged mainline SHA and verify the
+ * exact ref during the release ritual.
  */
-export const EXAMPLES_REF = '5eaaaab417ef510401618b814a1eedf238752057';
+export const EXAMPLES_REF = '47e887d348b45ab948c904a29c1354cbbc23cdab';

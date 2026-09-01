@@ -187,6 +187,76 @@ describe('runDev with a mapped workspace database', () => {
 // The production client's mint, against a real control-plane server
 // ---------------------------------------------------------------------------
 
+describe('runDev with a YAML-declared database that does not exist', () => {
+    // A typo'd or not-yet-created database name never becomes a
+    // `workspace_database` mapping: the platform keeps the YAML declaration and
+    // flags yaml_default_not_found, leaving source_type an ordinary valueless
+    // var. Before #140's review round that landed in the generic
+    // "declared var had no value in this env and was skipped" bucket, which
+    // names neither the variable's real problem nor the missing database.
+    const TYPO_MAPPING: PlatformVar = {
+        env_name: 'APP_DB',
+        source_type: 'local',
+        resolved_value: null,
+        yaml_default_workspace_database_name: 'ordrs',
+        yaml_default_not_found: true,
+    };
+
+    it('names the variable AND the missing database, never the generic skipped bucket', async () => {
+        const out = await runDev({
+            entry: ECHO_DB_FIXTURE,
+            input: '{}',
+            env: 'staging',
+            api: fakeApi([TYPO_MAPPING], async () => {
+                throw new Error('must not mint for a database that was never found');
+            }),
+        });
+
+        expect(out.stderr).toContain(
+            "APP_DB: mapped database not found — check the database name in solidactions.yaml: "
+            + "no database named 'ordrs' exists in this workspace.",
+        );
+        expect(out.stderr).toContain('`solidactions database create ordrs`');
+
+        // The generic bucket must NOT claim it.
+        expect(out.stdout).not.toMatch(/had no value in this env/);
+        // And it is disclosed on the summary line rather than passing silently.
+        expect(out.stdout).toMatch(/1 declared database was not found in this workspace/);
+
+        // The run still completes — a bad name is not fatal to the whole run.
+        expect(out.result.status).toBe('completed');
+    }, 20_000);
+
+    it('is not counted as a resolved database', async () => {
+        const out = await runDev({
+            entry: ECHO_DB_FIXTURE,
+            input: '{}',
+            env: 'staging',
+            api: fakeApi([TYPO_MAPPING]),
+        });
+        expect(out.stdout).not.toMatch(/\+ 1 database\b/);
+    }, 20_000);
+
+    it('does not swallow an ordinary valueless var that declares no database', async () => {
+        // Same yaml_default_not_found flag, but the unresolved default is a
+        // GLOBAL key, not a database — that must stay in the skipped bucket.
+        const out = await runDev({
+            entry: ECHO_DB_FIXTURE,
+            input: '{}',
+            env: 'staging',
+            api: fakeApi([{
+                env_name: 'SOME_VAR',
+                source_type: 'local',
+                resolved_value: null,
+                yaml_default_not_found: true,
+            }]),
+        });
+
+        expect(out.stdout).toMatch(/1 declared var had no value in this env/);
+        expect(out.stderr).not.toMatch(/mapped database not found/);
+    }, 20_000);
+});
+
 describe('buildSaApiClient.resolveDatabaseCredential', () => {
     it('mints write mode and returns the RuntimeEnvBuilder envelope', async () => {
         const bodies: any[] = [];
@@ -225,6 +295,41 @@ describe('buildSaApiClient.resolveDatabaseCredential', () => {
                     code: 'writes_exhausted',
                     message: 'This organization has spent its monthly write budget.',
                 }));
+                return;
+            }
+            res.end(JSON.stringify({
+                url: 'libsql://orders-acme.turso.io',
+                token: 'read-token',
+                mode: 'read',
+                expires_at: '2026-08-31T00:10:00Z',
+            }));
+        });
+
+        const client = buildSaApiClient(cfg(host), 'my-proj');
+        const credential = await client.resolveDatabaseCredential!('orders');
+
+        expect(modes).toEqual(['write', 'read']);
+        expect(credential.read_only).toBe(true);
+        expect(credential.token).toBe('read-token');
+    });
+
+    it.each([
+        ['token_missing_ability', 403, 'The token is missing the databases:edit ability.'],
+        ['storage_exhausted', 403, 'This organization is over its storage pool.'],
+        ['forbidden', 403, 'You do not have permission to manage workspace databases.'],
+    ])('downgrades to read-only on the %s write refusal', async (code, status, message) => {
+        // Every code in WRITE_AUTHORITY_REFUSAL_CODES means "no WRITE authority
+        // here", not "this database is unreachable" — so each must fall back to
+        // a read mint rather than failing the run. writes_exhausted is covered
+        // by the test above; these are the remaining three.
+        const modes: string[] = [];
+        const host = await startServer(async (req, res) => {
+            const body = await readBody(req);
+            modes.push(body.mode);
+            res.setHeader('content-type', 'application/json');
+            if (body.mode === 'write') {
+                res.statusCode = status as number;
+                res.end(JSON.stringify({ code, message }));
                 return;
             }
             res.end(JSON.stringify({

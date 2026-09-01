@@ -42,6 +42,18 @@ const FIXTURE_VARS = [
         yaml_default_workspace_database_name: 'reports',
         is_secret: false,
     },
+    {
+        // A typo'd / not-yet-created database name. The platform never promotes
+        // this to a `workspace_database` mapping: it keeps the YAML declaration
+        // and flags yaml_default_not_found, leaving source_type an ordinary
+        // valueless var. Same shape `env list` renders as "(not configured)".
+        env_name: 'TYPO_DB',
+        resolved_value: null,
+        source_type: 'local',
+        yaml_default_workspace_database_name: 'ordrs',
+        yaml_default_not_found: true,
+        is_secret: false,
+    },
 ];
 
 let stubServer: http.Server;
@@ -82,13 +94,24 @@ describe('env pull — mapped database explanation', () => {
         env.cleanup();
     });
 
-    async function pull(environment = 'staging'): Promise<{ content: string; output: string }> {
+    async function pull(environment = 'staging'): Promise<{ content: string; output: string; logLines: string[] }> {
         const outputPath = path.join(env.cwd, `.env.${environment}`);
         await envPull('my-project', { env: environment, output: outputPath, yes: true });
         return {
             content: fs.readFileSync(outputPath, 'utf8'),
             output: stripAnsi(logged.join('\n')),
+            logLines: logged.map(stripAnsi),
         };
+    }
+
+    /** The consecutive `#` comment lines that make up one variable's block. */
+    function commentBlockAt(content: string, firstLine: string): string[] {
+        const lines = content.split('\n');
+        const at = lines.findIndex((l) => l.startsWith(firstLine));
+        expect(at).toBeGreaterThan(-1);
+        const block: string[] = [];
+        for (let i = at; i < lines.length && lines[i].startsWith('#'); i++) block.push(lines[i]);
+        return block;
     }
 
     it('never renders a mapped database as a bare "no value configured" blank', async () => {
@@ -132,17 +155,52 @@ describe('env pull — mapped database explanation', () => {
     });
 
     it('ends BOTH surfaces with the copy-pasteable hint naming the pulled env', async () => {
-        const { content, output } = await pull('staging');
+        const { content, logLines } = await pull('staging');
         const hint = devEnvHintLine('staging');
 
         expect(hint).toBe(
             'To run locally with live platform vars + this database: '
             + 'solidactions dev <your-workflow-file> --env staging',
         );
-        // In the .env, as a comment line.
-        expect(content).toContain(`# ${hint}`);
-        // In the CLI output.
-        expect(output).toContain(hint);
+
+        // The hint is the LAST line of the .env comment block, not merely
+        // present somewhere in it — it is the thing the reader should act on,
+        // so nothing may follow it and bury it.
+        const envBlock = commentBlockAt(content, '# APP_DB: mapped database');
+        expect(envBlock[envBlock.length - 1]).toBe(`# ${hint}`);
+
+        // Likewise the CLI note block ENDS with the hint.
+        const noteAt = logLines.findIndex((l) => l.includes('NOTE: APP_DB is a mapped database'));
+        expect(noteAt).toBeGreaterThan(-1);
+        const cliBlock = logLines.slice(noteAt, noteAt + 2);
+        expect(cliBlock[cliBlock.length - 1].trimEnd().endsWith(hint)).toBe(true);
+    });
+
+    it('names a YAML-declared database that does not exist, never the generic no-value bucket', async () => {
+        const { content, output } = await pull();
+
+        // The generic branch would have written this and hidden the real cause.
+        expect(content).not.toContain('# TYPO_DB= (no value configured)');
+
+        const block = commentBlockAt(content, '# TYPO_DB: mapped database NOT FOUND');
+        expect(block[0]).toContain('check the database name in solidactions.yaml');
+        expect(block[1]).toContain("no database named 'ordrs' exists in this workspace");
+        expect(block[2]).toContain('`solidactions database create ordrs`');
+
+        expect(output).toContain(
+            "NOTE: TYPO_DB is a mapped database that was NOT FOUND — check the database name in "
+            + "solidactions.yaml: no database named 'ordrs' exists in this workspace.",
+        );
+        expect(output).toContain('`solidactions database list` shows what does');
+    });
+
+    it('keeps a not-found database distinct from a healthy mapped one', async () => {
+        // The healthy block promises credentials resolve live; the not-found
+        // block must NOT, because nothing will resolve until the name is fixed.
+        const { content } = await pull();
+        const notFound = commentBlockAt(content, '# TYPO_DB: mapped database NOT FOUND').join('\n');
+        expect(notFound).not.toContain('Credentials resolve live at run time');
+        expect(notFound).not.toContain(devEnvHintLine('staging'));
     });
 
     it('substitutes the ACTUAL pulled env, not a hardcoded default', async () => {
