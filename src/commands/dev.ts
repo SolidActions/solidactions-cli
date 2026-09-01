@@ -617,9 +617,12 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
     }
 
-    // 3b. Resolve mapped workspace databases into the SAME `{url, token, name,
-    //     read_only}` JSON envelope the platform's RuntimeEnvBuilder injects
-    //     into a deployed sandbox, so a workflow parses one shape either way.
+    // 3b. Resolve mapped workspace databases onto ctx.vars as {@link
+    //     DevDatabaseVar} — the same object a DEPLOYED workflow reads. The
+    //     platform injects RuntimeEnvBuilder's `{url, token, name, read_only}`
+    //     JSON string into a sandbox's env and the SDK's context-adapter parses
+    //     it; `dev` builds ctx.vars itself and never runs that adapter, so the
+    //     conversion happens here instead (see DevDatabaseVar).
     //
     //     The credentials are short-TTL (the control plane's 600s floor) and
     //     live only in this process's memory: they reach the workflow through
@@ -629,7 +632,14 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     for (const pv of databaseMappings) {
         const dbName = pv.workspace_database_name;
         if (pv.workspace_database_broken || !dbName) {
-            err(`${pv.env_name}: mapped database no longer exists — re-map it with \`solidactions env map\`.`);
+            // NOT `env map` — that maps GLOBAL VARIABLES and has no --database
+            // flag. A project's database mapping is a solidactions.yaml
+            // declaration synced by `project deploy`.
+            err(
+                `${pv.env_name}: mapped database no longer exists. Point it at a live database in `
+                + 'solidactions.yaml (`- ' + pv.env_name + ':` / `    database: "<name>"`), then re-run '
+                + '`solidactions project deploy <project> <path>`. `solidactions database list` shows what exists.',
+            );
             continue;
         }
         if (!apiClient!.resolveDatabaseCredential) {

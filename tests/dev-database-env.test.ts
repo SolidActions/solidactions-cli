@@ -172,9 +172,13 @@ describe('runDev with a mapped workspace database', () => {
             }),
         });
 
-        expect(out.stderr).toMatch(
-            /APP_DB: mapped database no longer exists — re-map it with `solidactions env map`\./,
-        );
+        // It must name the REAL fix — the solidactions.yaml declaration synced
+        // by `project deploy` — never `env map`, which maps global variables
+        // and has no --database flag.
+        expect(out.stderr).toContain('APP_DB: mapped database no longer exists.');
+        expect(out.stderr).toContain('solidactions.yaml');
+        expect(out.stderr).toContain('solidactions project deploy <project> <path>');
+        expect(out.stderr).not.toMatch(/\bsolidactions env map\b/);
         expect(out.result.status).toBe('completed');
     }, 20_000);
 });
