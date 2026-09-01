@@ -3,10 +3,13 @@
  * DATABASE credentials, not just plain vars and OAuth connections.
  *
  * The contract under test:
- *   - a `workspace_database` mapping lands on `ctx.vars` as the SAME
- *     `{url, token, name, read_only}` JSON envelope the platform's
- *     RuntimeEnvBuilder injects into a deployed sandbox, so a workflow parses
- *     one shape either way;
+ *   - a `workspace_database` mapping lands on `ctx.vars` as the SDK's
+ *     `DatabaseVar` — `{name, url, token, readOnly}` — which is what a DEPLOYED
+ *     workflow sees. The platform injects RuntimeEnvBuilder's
+ *     `{url, token, name, read_only}` JSON string into the sandbox env and the
+ *     SDK's context-adapter parses it; `dev` builds ctx.vars itself and never
+ *     runs that adapter, so the CLI must do the conversion or a local workflow
+ *     gets a string where a deployed one gets an object;
  *   - it is reported in the summary line and is NEVER counted as a dropped
  *     "declared var had no value in this env" (its resolved_value is always
  *     null on the mappings endpoint by design);
@@ -99,7 +102,8 @@ describe('runDev with a mapped workspace database', () => {
             })),
         });
 
-        // The workflow parsed the envelope: same four keys the sandbox gets.
+        // The workflow read a DatabaseVar OBJECT — not a JSON string it had to
+        // parse — with the SDK's camelCased `readOnly`, exactly as deployed.
         expect(out.result).toEqual({
             status: 'completed',
             output: {
@@ -107,7 +111,7 @@ describe('runDev with a mapped workspace database', () => {
                 url: 'libsql://orders-acme.turso.io',
                 token: 'mint-token',
                 name: 'orders',
-                read_only: false,
+                readOnly: false,
             },
         });
 
@@ -136,7 +140,7 @@ describe('runDev with a mapped workspace database', () => {
         expect(out.stdout).not.toMatch(/\+ 1 database/);
         // The run itself still completes — a database failure is not fatal.
         expect(out.result.status).toBe('completed');
-        expect(out.result.output).toEqual({ present: false });
+        expect(out.result.output).toMatchObject({ present: false });
     }, 20_000);
 
     it('warns that writes will fail when the credential comes back read-only', async () => {
@@ -155,7 +159,7 @@ describe('runDev with a mapped workspace database', () => {
         expect(out.stderr).toMatch(
             /APP_DB: database 'orders' resolved READ-ONLY — writes \(including drizzle-kit migrations\) will fail\./,
         );
-        expect(out.result.output).toMatchObject({ read_only: true });
+        expect(out.result.output).toMatchObject({ readOnly: true });
     }, 20_000);
 
     it('names the variable when the mapping points at a database that no longer exists', async () => {

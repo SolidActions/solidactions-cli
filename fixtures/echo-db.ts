@@ -1,19 +1,18 @@
 /**
  * Fixture workflow for the mapped-workspace-database dev test (#140).
  *
- * Parses the `APP_DB` var exactly the way a real Drizzle workflow does — the
- * value is a JSON envelope, identical in shape whether the platform's
- * RuntimeEnvBuilder injected it into a deployed sandbox or `dev --env` resolved
- * it locally — and returns it so the test can assert on the parsed shape rather
- * than on a raw string.
+ * Reads `ctx.vars.APP_DB` exactly the way the SDK reference tells a workflow
+ * author to — as a `DatabaseVar` object with a camelCased `readOnly` — so the
+ * test proves local dev hands the workflow the SAME shape a deployed sandbox
+ * does, rather than a raw JSON string it would have to parse itself.
  */
 import { defineWorkflow } from '@solidactions/sdk';
 
 export default defineWorkflow({
     name: 'echo-db',
     run: async (ctx) => {
-        const raw = ctx.vars.APP_DB;
-        if (typeof raw !== 'string') return { present: false };
-        return { present: true, ...JSON.parse(raw) };
+        const db = ctx.vars.APP_DB as { name: string; url: string; token: string; readOnly: boolean } | undefined;
+        if (!db || typeof db !== 'object') return { present: false, type: typeof db };
+        return { present: true, name: db.name, url: db.url, token: db.token, readOnly: db.readOnly };
     },
 });

@@ -54,6 +54,30 @@ export interface MappedDatabaseCredential {
 }
 
 /**
+ * What a mapped database looks like ON `ctx.vars` — the SDK's `DatabaseVar`.
+ *
+ * A deployed sandbox receives {@link MappedDatabaseCredential} as a JSON STRING
+ * in its env, and the SDK's own context-adapter parses it into this camelCased
+ * object before the workflow ever sees it. `dev` builds `ctx.vars` itself and
+ * never runs that adapter, so the CLI has to do the same conversion here —
+ * otherwise a local workflow would get a string where a deployed one gets an
+ * object, and `createDatabaseClient(ctx.vars.MYDB)` would break locally. That
+ * asymmetry is exactly what this parity work exists to remove.
+ */
+export interface DevDatabaseVar {
+    name: string;
+    url: string;
+    token: string;
+    readOnly: boolean;
+}
+
+/** The value types `ctx.vars` can carry in local dev, mirroring the SDK's `VarValue`. */
+export type DevVarValue =
+    | string
+    | { key: string; proxyUrl: string; proxyToken: string }
+    | DevDatabaseVar;
+
+/**
  * Injection seam for the SA API — real production impl uses axios, tests use
  * a real local HTTP server (no mock libraries). The seam exposes only the
  * minimum surface runDev() needs.
@@ -163,7 +187,7 @@ export interface DevShimContext {
     /** JSON-serialised workflow input (e.g. '{"n":2}'). */
     input: string;
     /** ctx.vars built from platform vars + overrides. */
-    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>;
+    vars: Record<string, DevVarValue>;
     /** baseUrl of the mock server started by the parent. */
     mockBaseUrl: string;
     /** API key for the mock server. */
@@ -384,7 +408,7 @@ function findSolidActionsRoot(startPath: string): string | null {
 async function runDevViaShim(
     entryPath: string,
     input: string,
-    vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }>,
+    vars: Record<string, DevVarValue>,
     mockBaseUrl: string,
     runUuid: string,
     workerSessionId: string,
@@ -565,7 +589,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     //    — and must NOT be counted in the summary (BUG #1). A dropped SECRET is
     //    reported separately (it's genuinely unavailable to local dev, not
     //    merely "unset" — the platform never resolves secret values to the CLI).
-    const vars: Record<string, string | { key: string; proxyUrl: string; proxyToken: string }> = {};
+    const vars: Record<string, DevVarValue> = {};
     let connectionCount = 0;
     let droppedCount = 0;
     let droppedSecretCount = 0;
@@ -614,7 +638,12 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
         try {
             const credential = await apiClient!.resolveDatabaseCredential(dbName);
-            vars[pv.env_name] = JSON.stringify(credential);
+            vars[pv.env_name] = {
+                name: credential.name,
+                url: credential.url,
+                token: credential.token,
+                readOnly: credential.read_only,
+            };
             databaseCount++;
             if (credential.read_only) {
                 err(`${pv.env_name}: database '${dbName}' resolved READ-ONLY — writes (including drizzle-kit migrations) will fail.`);

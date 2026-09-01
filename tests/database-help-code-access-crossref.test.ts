@@ -37,6 +37,9 @@ describe('database --help — cross-reference to the run-time access path', () =
     it('points at `dev --env` for using a database from code', () => {
         const help = databaseHelp();
         expect(help).toContain('solidactions dev <your-workflow-file> --env <env>');
+        // `project deploy`, never the nonexistent top-level `solidactions deploy`.
+        expect(help).toContain('solidactions project deploy <project> <path>');
+        expect(help).not.toMatch(/\bsolidactions deploy\b/);
         expect(help).toMatch(/resolves your platform variables AND every mapped database's\s+credentials/);
     });
 
@@ -58,7 +61,12 @@ describe('database --help — cross-reference to the run-time access path', () =
         expect(help).toMatch(/not how code reads or writes a database at run time/);
     });
 
-    it('names the JSON envelope shape the variable carries', () => {
-        expect(databaseHelp()).toContain('{"url","token","name","read_only"}');
+    it('names the shape the variable actually arrives as in a workflow', () => {
+        // The SDK hands the workflow a DatabaseVar object, not a JSON string —
+        // help that said "JSON" would send an agent to write a JSON.parse that
+        // throws on an object.
+        const help = databaseHelp();
+        expect(help).toContain('{name, url, token, readOnly}');
+        expect(help).toContain('createDatabaseClient()');
     });
 });
