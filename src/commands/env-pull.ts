@@ -30,6 +30,37 @@ async function confirm(message: string): Promise<boolean> {
     });
 }
 
+/**
+ * The copy-pasteable next step a reader of either surface should run (#140).
+ *
+ * Both the CLI note and the `.env` comment END with this line, with the ACTUAL
+ * pulled environment substituted, so whoever hits the missing value can paste
+ * one command and go rather than reverse-engineering the flag.
+ */
+export function devEnvHintLine(environment: string): string {
+    return `To run locally with live platform vars + this database: solidactions dev <your-workflow-file> --env ${environment}`;
+}
+
+/**
+ * Is this mapping a workspace database?
+ *
+ * A database mapping ALWAYS pulls with a null value: the platform deliberately
+ * does not resolve database credentials to a file-writing command. Without an
+ * explicit branch it lands in the generic `# KEY= (no value configured)` line,
+ * where a blank reads as broken or unsupported — the failure this issue exists
+ * to fix. The absence is a security posture, and both surfaces must say so.
+ */
+function isDatabaseMapping(variable: any): boolean {
+    return variable?.source_type === 'workspace_database';
+}
+
+/** Best-known display name for a mapped database, however the mapping is bound. */
+function databaseDisplayName(variable: any): string {
+    return variable?.workspace_database_name
+        || variable?.yaml_default_workspace_database_name
+        || 'unknown';
+}
+
 export async function envPull(projectName: string, options: EnvPullOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -188,10 +219,22 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
 
         let count = 0;
         let secretCount = 0;
+        const databaseVars: Array<{ key: string; dbName: string }> = [];
 
         for (const variable of variables) {
             const key = variable.env_name;
             const value = variable.resolved_value ?? variable.value;
+
+            // A mapped database explains itself IN PLACE, before the generic
+            // no-value branch can render it as a blank (#140).
+            if (isDatabaseMapping(variable)) {
+                const dbName = databaseDisplayName(variable);
+                lines.push(`# ${key}: mapped database (${dbName}). Credentials resolve live at run time via`);
+                lines.push(`# 'solidactions dev --env ${environment}' or in deployed workflows — never stored in this file.`);
+                lines.push(`# ${devEnvHintLine(environment)}`);
+                databaseVars.push({ key, dbName });
+                continue;
+            }
 
             if (value === null || value === undefined) {
                 // Skip variables with no value
@@ -239,6 +282,18 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
         console.log(chalk.green(`\n✓ Wrote ${count} variables to ${outputFile}`));
         if (secretCount > 0) {
             console.log(chalk.yellow(`  (includes ${secretCount} secret value${secretCount > 1 ? 's' : ''})`));
+        }
+
+        // Say out loud why each mapped database has no value here. The same
+        // explanation is written into the .env at the variable's own position;
+        // an agent reads one surface or the other, so both must carry it.
+        for (const { key, dbName } of databaseVars) {
+            console.log(chalk.cyan(
+                `\nNOTE: ${key} is a mapped database (${dbName}) — credentials are resolved live at run time `
+                + `('solidactions dev --env ${environment}' locally, automatic in deployed workflows) `
+                + 'and are never written to files.',
+            ));
+            console.log(chalk.cyan(`  ${devEnvHintLine(environment)}`));
         }
 
         // Print any OAuth warnings

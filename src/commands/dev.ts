@@ -32,6 +32,25 @@ export interface PlatformVar {
     connection_key?: string | null;
     /** Whether this mapping is a secret — a valueless secret is not fetchable locally, unlike a plain var. */
     is_secret?: boolean;
+    /** Workspace database name (set when source_type === 'workspace_database'). */
+    workspace_database_name?: string | null;
+    /** True when the mapping points at a database row that no longer resolves. */
+    workspace_database_broken?: boolean;
+}
+
+/**
+ * The credential envelope a mapped workspace database resolves to.
+ *
+ * Byte-for-byte the shape the platform's `RuntimeEnvBuilder` JSON-encodes into
+ * a deployed sandbox's env, so a workflow parses ONE shape whether it runs
+ * locally under `dev --env` or deployed. Do not reorder or rename fields
+ * casually — example code and user workflows destructure it.
+ */
+export interface MappedDatabaseCredential {
+    url: string;
+    token: string;
+    name: string;
+    read_only: boolean;
 }
 
 /**
@@ -44,9 +63,30 @@ export interface SaApiClient {
     projectSlug: string;
     /** Fetch declared variable-mappings for the given env from the SA API. */
     fetchVarsAndConnections(env: string): Promise<PlatformVar[]>;
+    /**
+     * Mint a short-TTL credential for a mapped workspace database, in memory.
+     *
+     * Optional on the seam so existing test clients (and any caller that has no
+     * database mappings to resolve) need not implement it; `runDev` treats an
+     * absent implementation as "cannot resolve" and says so rather than
+     * throwing.
+     */
+    resolveDatabaseCredential?(databaseName: string): Promise<MappedDatabaseCredential>;
     /** Set true when the API token lacks `env:reveal` and the reveal request had to fall back. */
     revealDenied?: boolean;
 }
+
+/**
+ * Control-plane refusal codes that mean "you may not mint a WRITE credential
+ * here", as opposed to "this database cannot be reached at all". Only these
+ * downgrade a `dev --env` mint from write to read-only.
+ */
+const WRITE_AUTHORITY_REFUSAL_CODES = new Set([
+    'token_missing_ability',  // the CLI token carries databases:read but not databases:edit
+    'writes_exhausted',       // WriteFuse: monthly org write budget spent
+    'storage_exhausted',      // WriteFuse: org over its storage pool
+    'forbidden',              // workspace role may read databases but not use/build them
+]);
 
 /**
  * Build the production `SaApiClient`: fetches `variable-mappings` with
@@ -74,6 +114,32 @@ export function buildSaApiClient(config: Config, projectSlug: string): SaApiClie
                 }
                 throw e;
             }
+        },
+        async resolveDatabaseCredential(databaseName: string): Promise<MappedDatabaseCredential> {
+            const { requestDatabaseAccess } = await import('../utils/database-data-plane');
+
+            // Parity with the platform's RuntimeEnvBuilder, whose authorization
+            // is WriteFuse::authorizationFor() — full-access unless the fuse has
+            // degraded. So ask for `write` first and settle for `read` only when
+            // the refusal is specifically about WRITE authority. A refusal about
+            // the DATABASE (missing, not ready, plan-denied, reads exhausted,
+            // rate-limited) must NOT be retried as a read: the read would fail
+            // the same way, and the second call burns another mint against the
+            // 20/min limit while replacing the accurate error with a vaguer one.
+            let access;
+            try {
+                access = await requestDatabaseAccess(config, databaseName, 'write');
+            } catch (e: any) {
+                if (!WRITE_AUTHORITY_REFUSAL_CODES.has(e?.code)) throw e;
+                access = await requestDatabaseAccess(config, databaseName, 'read');
+            }
+
+            return {
+                url: access.url,
+                token: access.token,
+                name: databaseName,
+                read_only: access.mode === 'read',
+            };
         },
     };
     return client;
@@ -503,6 +569,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     let connectionCount = 0;
     let droppedCount = 0;
     let droppedSecretCount = 0;
+    const databaseMappings: PlatformVar[] = [];
     for (const pv of platformVars) {
         if (pv.source_type === 'oauth_connection' && pv.proxy_url && pv.proxy_token && pv.connection_key) {
             vars[pv.env_name] = {
@@ -511,12 +578,49 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
                 proxyToken: pv.proxy_token,
             };
             connectionCount++;
+        } else if (pv.source_type === 'workspace_database') {
+            // Never counted as dropped: a database mapping ALWAYS arrives with a
+            // null resolved_value (the mappings endpoint deliberately does not
+            // carry credentials), so counting it here would report a healthy
+            // mapping as "had no value in this env and was skipped" (#140).
+            databaseMappings.push(pv);
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
         } else if (pv.is_secret) {
             droppedSecretCount++;
         } else {
             droppedCount++;
+        }
+    }
+
+    // 3b. Resolve mapped workspace databases into the SAME `{url, token, name,
+    //     read_only}` JSON envelope the platform's RuntimeEnvBuilder injects
+    //     into a deployed sandbox, so a workflow parses one shape either way.
+    //
+    //     The credentials are short-TTL (the control plane's 600s floor) and
+    //     live only in this process's memory: they reach the workflow through
+    //     ctx.vars and are never written to a file. `env pull` deliberately does
+    //     NOT resolve them for exactly that reason — it writes to disk.
+    let databaseCount = 0;
+    for (const pv of databaseMappings) {
+        const dbName = pv.workspace_database_name;
+        if (pv.workspace_database_broken || !dbName) {
+            err(`${pv.env_name}: mapped database no longer exists — re-map it with \`solidactions env map\`.`);
+            continue;
+        }
+        if (!apiClient!.resolveDatabaseCredential) {
+            err(`${pv.env_name}: cannot resolve database '${dbName}' — this client cannot mint credentials.`);
+            continue;
+        }
+        try {
+            const credential = await apiClient!.resolveDatabaseCredential(dbName);
+            vars[pv.env_name] = JSON.stringify(credential);
+            databaseCount++;
+            if (credential.read_only) {
+                err(`${pv.env_name}: database '${dbName}' resolved READ-ONLY — writes (including drizzle-kit migrations) will fail.`);
+            }
+        } catch (e: any) {
+            err(`${pv.env_name}: failed to resolve database '${dbName}': ${e?.message ?? e}`);
         }
     }
 
@@ -534,8 +638,11 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
     //    plain-var count is the number of plain vars actually placed in `vars`
     //    (total keys minus connection entries), never the raw mapping count.
     if (opts.env) {
-        const plainVarCount = Object.keys(vars).length - connectionCount;
+        const plainVarCount = Object.keys(vars).length - connectionCount - databaseCount;
         let summary = `Loaded ${plainVarCount} vars + ${connectionCount} connections from ${apiClient!.projectSlug} / env ${opts.env}`;
+        if (databaseCount > 0) {
+            summary += ` + ${databaseCount} ${databaseCount === 1 ? 'database' : 'databases'}`;
+        }
         if (droppedCount > 0) {
             summary += ` (${droppedCount} declared ${droppedCount === 1 ? 'var' : 'vars'} had no value in this env and ${droppedCount === 1 ? 'was' : 'were'} skipped)`;
         }
