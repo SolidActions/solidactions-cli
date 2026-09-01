@@ -18,7 +18,7 @@ import * as path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EXAMPLES_REF } from '../src/utils/examples-ref';
 import { rawContentUrl } from '../src/utils/github';
-import { installSkills, fetchAiHelperContent } from '../src/utils/skills';
+import { BUNDLED_SKILLS_VERSION, SKILLS_VERSION_FILE, installSkills, fetchAiHelperContent } from '../src/utils/skills';
 
 const PRE_DATABASE_GUIDANCE_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
 const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
@@ -123,7 +123,8 @@ describe('solidactions-examples fetches pass the pinned ref at the call site', (
 
     it('installSkills requests every skill at the pinned ref', async () => {
         requested = [];
-        await installSkills(path.join(tmpDir, 'skills'));
+        const skillsDir = path.join(tmpDir, 'skills');
+        await installSkills(skillsDir);
 
         expect(requested.length).toBeGreaterThan(0);
         for (const url of requested) {
@@ -133,6 +134,7 @@ describe('solidactions-examples fetches pass the pinned ref at the call site', (
         expect(requested.some((url) => url.endsWith(
             `/${EXAMPLES_REF}/content/skills/solidactions-deploy-and-config.md`,
         ))).toBe(true);
+        expect(fs.readFileSync(path.join(skillsDir, SKILLS_VERSION_FILE), 'utf8').trim()).toBe(BUNDLED_SKILLS_VERSION);
     });
 
     it('fetchAiHelperContent requests the helper file at the pinned ref', async () => {

@@ -75,8 +75,22 @@ instructions. Then ask: “Which SolidActions skills are installed, and which
 one should you use to deploy this workflow?” The answer should identify the
 installed skills and select `solidactions-deploy-and-config` for deployment.
 
-For an existing project, install or refresh the same tooling with
-`solidactions ai init --claude` or `solidactions ai init --agents`.
+For an existing project, install the same tooling with
+`solidactions ai init --claude` or `solidactions ai init --agents`. Installed
+skill directories carry a `.solidactions-version` stamp; when the CLI reports
+that stamp is stale, run `solidactions ai init --update` to refresh the existing
+helper target.
+
+### Agent freshness notices
+
+The CLI may print four kinds of one-line `AGENT NOTE` notices to stderr: a cached
+daily outdated-CLI notice, a missing- or stale-skills prompt, and a notice in a
+Claude Cowork sandbox that its project skills are not auto-loaded. The npm
+registry refresh runs detached and silently; normal invocations read only its
+daily cache. These notices never alter stdout, including `--json` output.
+
+Set `SOLIDACTIONS_NO_AGENT_NUDGES=1` to suppress all four notices and the
+background update refresh.
 
 ## Database CLI
 
@@ -464,7 +478,7 @@ You do **not** need `--overwrite` to keep an edited file whose doc was deleted o
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `ai init` | `--claude`, `--agents` | Install AI skills and SDK reference into an **existing** project (use `init` for new projects) |
+| `ai init` | `--claude`, `--agents`, `--update` | Install or refresh AI skills and SDK reference in an **existing** project (use `init` for new projects) |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
 `ai init` installs five auto-activating SolidActions skills and a

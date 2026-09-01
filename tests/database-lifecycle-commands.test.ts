@@ -467,7 +467,7 @@ function runBuiltCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: nu
     return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [cli, ...args], {
             cwd: path.resolve(__dirname, '..'),
-            env: { ...process.env, ...env, NO_COLOR: '1' },
+            env: { ...process.env, ...env, NO_COLOR: '1', SOLIDACTIONS_NO_AGENT_NUDGES: '1' },
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         const stdout: Buffer[] = [];
