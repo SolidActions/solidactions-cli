@@ -30,6 +30,55 @@ async function confirm(message: string): Promise<boolean> {
     });
 }
 
+/**
+ * The copy-pasteable next step a reader of either surface should run (#140).
+ *
+ * Both the CLI note and the `.env` comment END with this line, with the ACTUAL
+ * pulled environment substituted, so whoever hits the missing value can paste
+ * one command and go rather than reverse-engineering the flag.
+ */
+export function devEnvHintLine(environment: string): string {
+    return `To run locally with live platform vars + this database: solidactions dev <your-workflow-file> --env ${environment}`;
+}
+
+/**
+ * Is this mapping a workspace database?
+ *
+ * A database mapping ALWAYS pulls with a null value: the platform deliberately
+ * does not resolve database credentials to a file-writing command. Without an
+ * explicit branch it lands in the generic `# KEY= (no value configured)` line,
+ * where a blank reads as broken or unsupported — the failure this issue exists
+ * to fix. The absence is a security posture, and both surfaces must say so.
+ */
+function isDatabaseMapping(variable: any): boolean {
+    return variable?.source_type === 'workspace_database';
+}
+
+/**
+ * Does this mapping declare a database in `solidactions.yaml` that the platform
+ * could not find?
+ *
+ * A typo'd or not-yet-created database name never becomes a
+ * `workspace_database` mapping — the platform records the YAML declaration and
+ * flags `yaml_default_not_found`, leaving `source_type` an ordinary valueless
+ * var. Without this branch it renders as `# KEY= (no value configured)`, which
+ * hides the real cause: the name in the YAML matches no database in the
+ * workspace. Mirrors `env list`'s `<name> (not configured)` discriminator.
+ */
+function isUnresolvedDatabaseDeclaration(variable: any): boolean {
+    return variable?.source_type !== 'workspace_database'
+        && variable?.yaml_default_not_found === true
+        && typeof variable?.yaml_default_workspace_database_name === 'string'
+        && variable.yaml_default_workspace_database_name.length > 0;
+}
+
+/** Best-known display name for a mapped database, however the mapping is bound. */
+function databaseDisplayName(variable: any): string {
+    return variable?.workspace_database_name
+        || variable?.yaml_default_workspace_database_name
+        || 'unknown';
+}
+
 export async function envPull(projectName: string, options: EnvPullOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -188,10 +237,43 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
 
         let count = 0;
         let secretCount = 0;
+        const databaseVars: Array<{ key: string; dbName: string }> = [];
+        const unresolvedDatabaseVars: Array<{ key: string; wanted: string }> = [];
 
         for (const variable of variables) {
             const key = variable.env_name;
             const value = variable.resolved_value ?? variable.value;
+
+            // A YAML-declared database the platform could not find explains the
+            // ACTUAL cause in place — a typo'd name is not "no value
+            // configured" (#140 review R1).
+            if (isUnresolvedDatabaseDeclaration(variable)) {
+                const wanted = variable.yaml_default_workspace_database_name;
+                lines.push(`# ${key}: mapped database NOT FOUND — check the database name in solidactions.yaml:`);
+                lines.push(`# no database named '${wanted}' exists in this workspace.`);
+                lines.push(`# \`solidactions database list\` shows what does; \`solidactions database create ${wanted}\` creates it.`);
+                // Blank line closes the block: several database variables in a
+                // row would otherwise run together as one wall of comments,
+                // with no way to see which explanation belongs to which var.
+                lines.push('');
+                unresolvedDatabaseVars.push({ key, wanted });
+                continue;
+            }
+
+            // A mapped database explains itself IN PLACE, before the generic
+            // no-value branch can render it as a blank (#140).
+            if (isDatabaseMapping(variable)) {
+                const dbName = databaseDisplayName(variable);
+                lines.push(`# ${key}: mapped database (${dbName}). Credentials resolve live at run time via`);
+                lines.push(`# 'solidactions dev --env ${environment}' or in deployed workflows — never stored in this file.`);
+                lines.push(`# ${devEnvHintLine(environment)}`);
+                // Blank line closes the block (see above) — and keeps the hint
+                // the LAST line of this variable's explanation, not something
+                // buried mid-way through the next variable's.
+                lines.push('');
+                databaseVars.push({ key, dbName });
+                continue;
+            }
 
             if (value === null || value === undefined) {
                 // Skip variables with no value
@@ -239,6 +321,30 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
         console.log(chalk.green(`\n✓ Wrote ${count} variables to ${outputFile}`));
         if (secretCount > 0) {
             console.log(chalk.yellow(`  (includes ${secretCount} secret value${secretCount > 1 ? 's' : ''})`));
+        }
+
+        // A declared-but-missing database is a different problem from a healthy
+        // mapped one, and gets its own note naming what to fix.
+        for (const { key, wanted } of unresolvedDatabaseVars) {
+            console.log(chalk.yellow(
+                `\nNOTE: ${key} is a mapped database that was NOT FOUND — check the database name in `
+                + `solidactions.yaml: no database named '${wanted}' exists in this workspace.`,
+            ));
+            console.log(chalk.yellow(
+                `  \`solidactions database list\` shows what does; \`solidactions database create ${wanted}\` creates it.`,
+            ));
+        }
+
+        // Say out loud why each mapped database has no value here. The same
+        // explanation is written into the .env at the variable's own position;
+        // an agent reads one surface or the other, so both must carry it.
+        for (const { key, dbName } of databaseVars) {
+            console.log(chalk.cyan(
+                `\nNOTE: ${key} is a mapped database (${dbName}) — credentials are resolved live at run time `
+                + `('solidactions dev --env ${environment}' locally, automatic in deployed workflows) `
+                + 'and are never written to files.',
+            ));
+            console.log(chalk.cyan(`  ${devEnvHintLine(environment)}`));
         }
 
         // Print any OAuth warnings

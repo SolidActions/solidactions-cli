@@ -21,17 +21,28 @@ import { rawContentUrl } from '../src/utils/github';
 import { BUNDLED_SKILLS_VERSION, SKILLS_VERSION_FILE, installSkills, fetchAiHelperContent } from '../src/utils/skills';
 
 const PRE_DATABASE_GUIDANCE_REF = '3ca5fd4d3107659b27889775791f6691cf173303';
+/** The pin before ex#34 merged — `ai examples` could not reach the Drizzle example at it. */
+const PRE_DRIZZLE_EXAMPLE_REF = '5eaaaab417ef510401618b814a1eedf238752057';
 const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
 
 describe('EXAMPLES_REF', () => {
     it('pins the merged examples mainline for CLI v3.8.0 (repinned per the #1146 release contract)', () => {
-        expect(EXAMPLES_REF).toBe('5eaaaab417ef510401618b814a1eedf238752057');
+        expect(EXAMPLES_REF).toBe('47e887d348b45ab948c904a29c1354cbbc23cdab');
+    });
+
+    it('moves past the pin that predates the workspace-database Drizzle example (#140)', () => {
+        // `ai examples` lists the example repo's top-level directories AT THIS
+        // REF. Pinned before ex#34 merged, `workspace-database-drizzle` simply
+        // does not exist there — so the example #140's help text and docs send
+        // people to would be uninstallable.
+        expect(EXAMPLES_REF).not.toBe(PRE_DRIZZLE_EXAMPLE_REF);
     });
 
     it('records the mainline repin and the standing release-ritual contract without a fabricated override', () => {
         const source = fs.readFileSync(path.resolve(__dirname, '../src/utils/examples-ref.ts'), 'utf8');
 
         expect(source).toContain('merged solidactions-examples mainline');
+        expect(source).toContain('workspace-database-drizzle');
         expect(source).toContain('mainline SHA');
         expect(source).toMatch(/on every CLI release/i);
         expect(source).toMatch(/release ritual/i);

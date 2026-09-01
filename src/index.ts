@@ -221,6 +221,24 @@ const database = program
     .command('database')
     .description('Manage workspace databases')
     .addHelpText('after', `
+To USE a database from your code, map it to a project variable and run — don't
+copy the data around. Declare the mapping in solidactions.yaml:
+  env:
+    - APP_DB:
+        database: "<database name>"
+then \`solidactions project deploy <project> <path>\` to register it (\`solidactions env
+list <project>\` shows it), and run locally with:
+  solidactions dev <your-workflow-file> --env <env>
+'dev --env' resolves your platform variables AND every mapped database's
+credentials live from SolidActions — short-lived, held in memory, never written
+to a file — so Drizzle, @libsql/client and drizzle-kit work locally exactly as
+they do in a deployed workflow, which gets the same credentials automatically.
+In your workflow the variable arrives as {name, url, token, readOnly} — pass it
+straight to createDatabaseClient(), or to @libsql/client / Drizzle.
+
+'database import' is for BULK DATA LOADING only (pushing a .sql file into a
+database). It is not how code reads or writes a database at run time.
+
 Connect to a Workspace Database directly (any HTTP client or libSQL-compatible
 driver): https://www.solidactions.com/docs/workspace-databases/`);
 
