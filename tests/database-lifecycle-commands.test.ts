@@ -1,4 +1,6 @@
 import * as http from 'http';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { AddressInfo } from 'net';
@@ -467,7 +469,7 @@ function runBuiltCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: nu
     return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [cli, ...args], {
             cwd: path.resolve(__dirname, '..'),
-            env: { ...process.env, ...env, NO_COLOR: '1', SOLIDACTIONS_NO_AGENT_NUDGES: '1' },
+            env: { ...process.env, NO_COLOR: '1', SOLIDACTIONS_NO_AGENT_NUDGES: '1', ...env },
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         const stdout: Buffer[] = [];
@@ -484,7 +486,7 @@ function runBuiltCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: nu
 }
 
 describe('database lifecycle real CLI registration', () => {
-    it('dispatches database list through the built command action', async () => {
+    it('keeps built JSON stdout byte-pure while an outdated-CLI nudge is active', async () => {
         const requests: Array<{ method: string; url: string; body: string; headers: http.IncomingHttpHeaders }> = [];
         const server = http.createServer((request, response) => {
             const chunks: Buffer[] = [];
@@ -502,6 +504,12 @@ describe('database lifecycle real CLI registration', () => {
         });
         await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
         const port = (server.address() as AddressInfo).port;
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-database-json-nudge-'));
+        fs.mkdirSync(path.join(home, '.solidactions'));
+        fs.writeFileSync(path.join(home, '.solidactions', 'agent-update-check.json'), JSON.stringify({
+            checkedAt: new Date().toISOString(),
+            latestVersion: '9.8.7',
+        }));
 
         let result: Awaited<ReturnType<typeof runBuiltCli>>;
         try {
@@ -509,13 +517,16 @@ describe('database lifecycle real CLI registration', () => {
                 SOLIDACTIONS_HOST: `http://127.0.0.1:${port}`,
                 SOLIDACTIONS_API_KEY: 'built-process-pat',
                 SOLIDACTIONS_WORKSPACE_ID: 'built-workspace',
+                SOLIDACTIONS_NO_AGENT_NUDGES: '0',
+                HOME: home,
             });
         } finally {
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         }
 
         expect(result.code).toBe(0);
-        expect(result.stderr).toBe('');
+        expect(result.stderr).toContain('AGENT NOTE: CLI 1.33.0 outdated (9.8.7 available)');
+        expect(result.stdout).toBe(`${JSON.stringify(LIST_RESPONSE, null, 2)}\n`);
         expect(JSON.parse(result.stdout)).toEqual(LIST_RESPONSE);
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({

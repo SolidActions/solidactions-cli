@@ -3,7 +3,17 @@ import https from 'https';
 import path from 'path';
 
 const cacheFile = process.argv[2];
+const claimFile = process.argv[3];
 const registryUrl = 'https://registry.npmjs.org/@solidactions%2Fcli/latest';
+
+let finished = false;
+function finish(): void {
+    if (finished) return;
+    finished = true;
+    if (claimFile) {
+        try { fs.unlinkSync(claimFile); } catch { /* best effort */ }
+    }
+}
 
 function writeCache(latestVersion: string): void {
     const dir = path.dirname(cacheFile);
@@ -20,6 +30,7 @@ if (cacheFile) {
     }, (response) => {
         if (response.statusCode !== 200) {
             response.resume();
+            response.on('end', finish);
             return;
         }
         let body = '';
@@ -35,9 +46,12 @@ if (cacheFile) {
                 }
             } catch {
                 // Offline, malformed, and unwritable-cache failures are silent.
+            } finally {
+                finish();
             }
         });
+        response.on('error', finish);
     });
     request.on('timeout', () => request.destroy());
-    request.on('error', () => undefined);
+    request.on('error', finish);
 }

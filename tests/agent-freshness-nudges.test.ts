@@ -5,7 +5,10 @@ import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import {
     NUDGE_SUPPRESSION_ENV,
+    UPDATE_CLAIM_SUFFIX,
+    UPDATE_CLAIM_TTL_MS,
     UPDATE_CACHE_FILE,
+    claimUpdateCheck,
     collectAgentFreshness,
     emitAgentFreshnessNudges,
     isCoworkSandbox,
@@ -37,6 +40,17 @@ describe('agent freshness nudge decisions', () => {
         expect(isNewerVersion('3.14.9', '3.15.0')).toBe(false);
         expect(isNewerVersion('3.15.0', '3.15.0-rc.1')).toBe(true);
         expect(isNewerVersion('not-a-version', '3.15.0')).toBe(false);
+        for (const malformed of [
+            '03.15.0',
+            '3.15.0-rc.01',
+            '3.15.0-rc..1',
+            '3.15.0+build..1',
+            'v3.15.0',
+            ' 3.15.0',
+        ]) {
+            expect(isNewerVersion(malformed, '3.14.0')).toBe(false);
+            expect(isNewerVersion('3.15.0', malformed)).toBe(false);
+        }
     });
 
     it('uses explicit Cowork markers and does not classify an ordinary sandbox alone as Cowork', () => {
@@ -65,6 +79,29 @@ describe('agent freshness nudge decisions', () => {
         const result = collectAgentFreshness({ cwd: root, homeDir: root, env: {}, currentVersion: '1.0.0' });
 
         expect(result.lines).toEqual([
+            'AGENT NOTE: Install SolidActions skills for this project. Run: solidactions ai init',
+        ]);
+    });
+
+    it('does not print Cowork outside a project or beside an absent skills directory', () => {
+        const outside = tempDir('sa-nudge-cowork-outside-');
+        writeUpdateCache(outside, '1.0.0');
+        expect(collectAgentFreshness({
+            cwd: outside,
+            homeDir: outside,
+            env: { CLAUDE_CODE_IS_COWORK: '1' },
+            currentVersion: '1.0.0',
+        }).lines).toEqual([]);
+
+        const project = tempDir('sa-nudge-cowork-missing-');
+        makeProject(project);
+        writeUpdateCache(project, '1.0.0');
+        expect(collectAgentFreshness({
+            cwd: project,
+            homeDir: project,
+            env: { CLAUDE_CODE_IS_COWORK: '1' },
+            currentVersion: '1.0.0',
+        }).lines).toEqual([
             'AGENT NOTE: Install SolidActions skills for this project. Run: solidactions ai init',
         ]);
     });
@@ -142,10 +179,32 @@ describe('agent freshness nudge decisions', () => {
             checkedAt: now.toISOString(),
         });
     });
+
+    it('uses an exclusive claim, skips EEXIST, and retakes an expired claim', () => {
+        const home = tempDir('sa-nudge-claim-');
+        const claimFile = path.join(home, '.solidactions', `${UPDATE_CACHE_FILE}${UPDATE_CLAIM_SUFFIX}`);
+        const now = new Date('2026-09-01T12:00:00.000Z');
+
+        expect(claimUpdateCheck(claimFile, now)).toBe(true);
+        expect(claimUpdateCheck(claimFile, now)).toBe(false);
+
+        const stale = new Date(now.getTime() - UPDATE_CLAIM_TTL_MS - 1);
+        fs.utimesSync(claimFile, stale, stale);
+        expect(claimUpdateCheck(claimFile, now)).toBe(true);
+    });
+
+    it('treats any future-dated checkedAt as stale', () => {
+        const home = tempDir('sa-nudge-future-');
+        const now = new Date('2026-09-01T12:00:00.000Z');
+        writeUpdateCache(home, '1.0.0', new Date(now.getTime() + 1));
+
+        expect(collectAgentFreshness({ cwd: home, homeDir: home, env: {}, currentVersion: '1.0.0', now })
+            .shouldRefreshUpdateCache).toBe(true);
+    });
 });
 
 describe('built CLI nudge I/O contract', () => {
-    it('keeps command stdout exact while sending every notice to stderr', () => {
+    it('keeps command stdout exact while sending outdated and install notices to stderr', () => {
         const root = tempDir('sa-nudge-built-');
         const home = path.join(root, 'home');
         fs.mkdirSync(home);
@@ -162,7 +221,59 @@ describe('built CLI nudge I/O contract', () => {
         expect(run.stdout).toBe('1.33.0\n');
         expect(run.stderr).toContain('AGENT NOTE: CLI 1.33.0 outdated (9.8.7 available)');
         expect(run.stderr).toContain('AGENT NOTE: Install SolidActions skills for this project.');
-        expect(run.stderr).toContain('AGENT NOTE: skills at');
+        expect(run.stderr).not.toContain('not auto-loaded');
         for (const line of run.stderr.trimEnd().split('\n')) expect(line).toMatch(/^AGENT NOTE: /);
+    });
+
+    it('reports stale skills through the built CLI', () => {
+        const root = tempDir('sa-nudge-built-stale-');
+        const home = path.join(root, 'home');
+        const skills = path.join(root, '.agents', 'skills');
+        fs.mkdirSync(home);
+        fs.mkdirSync(skills, { recursive: true });
+        makeProject(root);
+        fs.writeFileSync(path.join(skills, 'solidactions-getting-started.md'), '# skill\n');
+        fs.writeFileSync(path.join(skills, '.solidactions-version'), 'old\n');
+        writeUpdateCache(home, '1.33.0');
+
+        const run = spawnSync(process.execPath, [path.resolve(__dirname, '../dist/index.js'), '--version'], {
+            cwd: root,
+            env: { ...process.env, HOME: home, NO_COLOR: '1' },
+            encoding: 'utf8',
+        });
+
+        expect(run.status).toBe(0);
+        expect(run.stdout).toBe('1.33.0\n');
+        expect(run.stderr).toBe(
+            `AGENT NOTE: Refresh stale SolidActions skills at ${skills}. Run: solidactions ai init --update\n`,
+        );
+    });
+
+    it('suppresses every built-CLI nudge', () => {
+        const root = tempDir('sa-nudge-built-suppressed-');
+        const home = path.join(root, 'home');
+        const skills = path.join(root, '.claude', 'skills');
+        fs.mkdirSync(home);
+        fs.mkdirSync(skills, { recursive: true });
+        makeProject(root);
+        fs.writeFileSync(path.join(skills, 'solidactions-getting-started.md'), '# skill\n');
+        fs.writeFileSync(path.join(skills, '.solidactions-version'), 'old\n');
+        writeUpdateCache(home, '9.8.7');
+
+        const run = spawnSync(process.execPath, [path.resolve(__dirname, '../dist/index.js'), '--version'], {
+            cwd: root,
+            env: {
+                ...process.env,
+                HOME: home,
+                CLAUDE_CODE_IS_COWORK: '1',
+                [NUDGE_SUPPRESSION_ENV]: '1',
+                NO_COLOR: '1',
+            },
+            encoding: 'utf8',
+        });
+
+        expect(run.status).toBe(0);
+        expect(run.stdout).toBe('1.33.0\n');
+        expect(run.stderr).toBe('');
     });
 });
