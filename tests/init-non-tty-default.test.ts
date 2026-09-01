@@ -18,8 +18,12 @@
  * files from GitHub — see CLAUDE.md test conventions ("don't make tests
  * depend on network").
  */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, expect, it, afterEach } from 'vitest';
 import { resolveAiHelperTarget, NON_TTY_DEFAULT_NOTICE } from '../src/commands/ai-init';
+import { BUNDLED_SKILLS_VERSION } from '../src/utils/skills';
 
 class ProcessExitError extends Error {
     constructor(public readonly code: number | undefined) {
@@ -45,8 +49,11 @@ function captureLog(): { lines: string[]; restore: () => void } {
 }
 
 describe('resolveAiHelperTarget — non-TTY default (cleanroom finding)', () => {
+    const originalCwd = process.cwd();
+
     afterEach(() => {
         Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+        process.chdir(originalCwd);
     });
 
     it('non-TTY + no flags: resolves to CLAUDE.md and prints the default notice, without prompting', async () => {
@@ -80,6 +87,30 @@ describe('resolveAiHelperTarget — non-TTY default (cleanroom finding)', () => 
         let target: string;
         try {
             target = await withNonTty(() => resolveAiHelperTarget({ agents: true }));
+        } finally {
+            log.restore();
+        }
+
+        expect(target).toBe('AGENTS.md');
+        expect(log.lines.join('\n')).not.toContain(NON_TTY_DEFAULT_NOTICE);
+    });
+
+    it('non-TTY + --update: selects the one stale installed target without prompting', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-ai-update-target-'));
+        const claudeSkills = path.join(root, '.claude', 'skills');
+        const agentSkills = path.join(root, '.agents', 'skills');
+        for (const dir of [claudeSkills, agentSkills]) {
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'solidactions-getting-started.md'), '# skill\n');
+        }
+        fs.writeFileSync(path.join(claudeSkills, '.solidactions-version'), `${BUNDLED_SKILLS_VERSION}\n`);
+        fs.writeFileSync(path.join(agentSkills, '.solidactions-version'), 'old\n');
+        process.chdir(root);
+
+        const log = captureLog();
+        let target: string;
+        try {
+            target = await withNonTty(() => resolveAiHelperTarget({ update: true }));
         } finally {
             log.restore();
         }

@@ -73,6 +73,7 @@ import {
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
 import { setActiveCommandPath } from './utils/mutating-commands';
+import { emitAgentFreshnessNudges } from './utils/agent-freshness';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../package.json');
@@ -877,6 +878,7 @@ ai
     .description('Install SolidActions AI skills and SDK reference for AI-assisted development')
     .option('--claude', 'Use CLAUDE.md (for Claude Code)')
     .option('--agents', 'Use AGENTS.md (for Codex, Cursor, Gemini, Windsurf, etc.)')
+    .option('--update', 'Refresh the installed helper target and its version-stamped skills')
     .action((options) => { aiInit(options); });
 
 ai
@@ -1051,6 +1053,7 @@ doc
 // bin). The #1004 command-manifest generator requires this module to walk the
 // assembled command tree; that must not consume the caller's argv or exit.
 if (require.main === module) {
+    emitAgentFreshnessNudges({ currentVersion: pkg.version });
     program.parseAsync().catch((err) => {
         console.error(chalk.red(err.message ?? String(err)));
         process.exit(1);

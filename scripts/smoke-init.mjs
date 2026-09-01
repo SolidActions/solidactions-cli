@@ -48,6 +48,9 @@ function findSibling(override, candidateNames) {
 const examplesDir = findSibling(process.env.SOLIDACTIONS_EXAMPLES_DIR, ['solidactions-examples', 'examples']);
 const sdkDir = findSibling(process.env.SOLIDACTIONS_SDK_DIR, ['solidactions-ts-sdk', 'ts-sdk']);
 const packageJson = JSON.parse(await readFile(path.join(cliDir, 'package.json'), 'utf8'));
+const examplesRefSource = await readFile(path.join(cliDir, 'src', 'utils', 'examples-ref.ts'), 'utf8');
+const examplesRef = examplesRefSource.match(/export const EXAMPLES_REF = '([0-9a-f]{40})'/)?.[1];
+assert(examplesRef, 'could not read EXAMPLES_REF from src/utils/examples-ref.ts');
 const skillNames = [
   'solidactions-getting-started',
   'solidactions-workflow-coding',
@@ -256,6 +259,11 @@ async function verifyScaffold(projectDir, target) {
     .map((file) => file.slice(0, -3))
     .sort();
   assert.deepEqual(installedSkills, [...skillNames].sort(), `${target} skill manifest drifted`);
+  assert.equal(
+    (await readFile(path.join(skillDir, '.solidactions-version'), 'utf8')).trim(),
+    examplesRef,
+    `${target} skill version stamp drifted`,
+  );
   assert((await stat(path.join(projectDir, '.solidactions', 'sdk-reference.md'))).isFile(), 'SDK reference missing');
 
   const deploySkill = await readFile(path.join(skillDir, 'solidactions-deploy-and-config.md'), 'utf8');

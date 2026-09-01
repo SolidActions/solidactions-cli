@@ -6,11 +6,12 @@ import path from 'path';
 import { fetchRawFile } from '../utils/github';
 import { sdkDocsRef } from '../utils/sdk-version';
 import { upsertMarkerSection } from '../utils/markers';
-import { AiHelperTarget, skillTargetDir, installSkills, fetchAiHelperContent } from '../utils/skills';
+import { AiHelperTarget, findInstalledSkillDirs, isSkillDirCurrent, skillTargetDir, installSkills, fetchAiHelperContent } from '../utils/skills';
 
 interface AiInitOptions {
     claude?: boolean;
     agents?: boolean;
+    update?: boolean;
 }
 
 export const NON_TTY_DEFAULT_NOTICE =
@@ -34,6 +35,15 @@ export async function resolveAiHelperTarget(options: AiInitOptions = {}): Promis
     }
     if (options.agents) {
         return 'AGENTS.md';
+    }
+
+    if (options.update) {
+        const installed = findInstalledSkillDirs(process.cwd());
+        const stale = installed.filter((dir) => !isSkillDirCurrent(dir));
+        const candidates = stale.length > 0 ? stale : installed;
+        if (candidates.length === 1) {
+            return candidates[0].includes(`${path.sep}.agents${path.sep}`) ? 'AGENTS.md' : 'CLAUDE.md';
+        }
     }
 
     if (process.stdin.isTTY) {
