@@ -217,6 +217,88 @@ describe('database lifecycle control-plane contract', () => {
         expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
     });
 
+    it('throws provisioning_timeout and stops polling once the deadline passes while still provisioning', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            return { data: { database: provisioning } };
+        };
+        const sleeps: number[] = [];
+        (test.dependencies as any).sleep = async (ms: number) => { sleeps.push(ms); };
+        // deadline = call#1 (0) + 5min (300_000) = 300_000.
+        // call#2 (loop check, 1_000) is under the deadline -> one poll happens.
+        // call#3 (loop check after that poll, 400_000) is past the deadline -> loop stops.
+        const timestamps = [0, 1_000, 400_000];
+        let nowCalls = 0;
+        (test.dependencies as any).now = () => timestamps[Math.min(nowCalls++, timestamps.length - 1)];
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'provisioning_timeout' });
+        expect(caught?.message).toMatch(/Orders/);
+        // Exactly one show poll happened (create + one show) — a broken loop
+        // condition (e.g. an inverted comparison, or ignoring the deadline)
+        // would poll unboundedly or zero times instead.
+        expect(calls).toEqual([
+            { operation: 'create', name: 'Orders', kind: 'duckdb' },
+            { operation: 'show', name: 'Orders' },
+        ]);
+        expect(sleeps).toEqual([2_000]);
+    });
+
+    it('throws provisioning_failed when the database reaches a terminal non-ready status', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const failed = { ...ACTIVE, kind: 'duckdb', status: 'error' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            if (body.operation === 'create') return { data: { database: provisioning } };
+            return { data: { database: failed } };
+        };
+        (test.dependencies as any).sleep = async () => undefined;
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'provisioning_failed' });
+        expect(caught?.message).toMatch(/Orders/);
+        expect(caught?.message).toMatch(/error/);
+        expect(calls).toEqual([
+            { operation: 'create', name: 'Orders', kind: 'duckdb' },
+            { operation: 'show', name: 'Orders' },
+        ]);
+    });
+
+    it('rejects an unrecognized --kind before sending any request', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdbb' as any, json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_kind' });
+        expect(caught?.message).toMatch(/duckdbb/);
+        expect(test.calls).toEqual([]);
+    });
+
     it('undeletes with the exact operation and renders the stable response payload as JSON', async () => {
         const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
         const payload = { database: ACTIVE };

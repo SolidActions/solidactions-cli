@@ -1093,6 +1093,12 @@ export async function databaseCreateWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'invalid_kind',
+            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+        );
+    }
     const kind: DatabaseKind = options.kind === 'duckdb' ? 'duckdb' : 'libsql';
     const preparedSource = options.from && !io.importDatabase
         ? await prepareDatabaseImportSource(options.from, io.cwd, io.filesystem)
