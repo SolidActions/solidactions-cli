@@ -9,7 +9,7 @@ const MANIFEST_PATH = path.join(DIST, 'command-manifest.json');
 const pkg = require('../package.json');
 
 const COMMANDS = [
-    { verb: 'list', args: [], options: ['--json'] },
+    { verb: 'list', args: [], options: ['--kind', '--json'] },
     { verb: 'create', args: [['name', true]], options: ['--kind', '--from', '--no-wait', '--json'] },
     { verb: 'show', args: [['name', true]], options: ['--json'] },
     { verb: 'delete', args: [['name', true]], options: ['--yes', '--json'] },

@@ -246,6 +246,7 @@ driver): https://www.solidactions.com/docs/workspace-databases/`);
 database
     .command('list')
     .description('List workspace databases')
+    .option('--kind <kind>', 'Filter by kind: libsql or duckdb')
     .option('--json', 'Output as JSON')
     .action(async (options) => {
         await databaseList(options);

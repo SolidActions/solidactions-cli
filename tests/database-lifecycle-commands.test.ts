@@ -11,9 +11,11 @@ interface DatabaseRecord {
     name: string;
     kind: string;
     status: string;
+    activity?: string;
     deleted_at: string | null;
     purge_at: string | null;
     size_bytes: number;
+    size_limit_bytes?: number;
 }
 
 interface Config {
@@ -67,9 +69,24 @@ const DELETED: DatabaseRecord = {
     size_bytes: 5678,
 };
 
+const ANALYTICAL: DatabaseRecord = {
+    id: 'database-analytical-id',
+    name: 'Warehouse',
+    kind: 'duckdb',
+    status: 'ready',
+    activity: 'idle',
+    deleted_at: null,
+    purge_at: null,
+    size_bytes: 1_288_490_188,
+    size_limit_bytes: 2_147_483_648,
+};
+
 const LIST_RESPONSE = {
-    databases: [ACTIVE, DELETED],
-    quota: { used: 1, limit: 5 },
+    databases: [ACTIVE, DELETED, ANALYTICAL],
+    quota: {
+        libsql: { used: 2, limit: 5, scope: 'workspace' },
+        duckdb: { used: 1, limit: 3, scope: 'org' },
+    },
 };
 
 async function loadDatabaseCommands(): Promise<Record<string, unknown>> {
@@ -147,8 +164,47 @@ describe('database lifecycle control-plane contract', () => {
         expect(output).toContain(ACTIVE.status);
         expect(output).toContain(DELETED.deleted_at);
         expect(output).toContain(DELETED.purge_at);
-        expect(output).toMatch(/quota.*1.*5/i);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('lists KIND/ACTIVITY/SIZE columns for analytical rows and filters by --kind', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        await databaseListWithConfig({}, CONFIG, test.dependencies);
+
+        const output = test.stdout.join('\n');
+        expect(output).toMatch(/KIND/i);
+        expect(output).toMatch(/ACTIVITY/i);
+        expect(output).toContain('duckdb');
+        expect(output).toContain('idle');
+        expect(output).toContain('1.2 GB / 2.0 GB');
+        expect(output).toMatch(/libsql.*2.*5/is);
+        expect(output).toMatch(/duckdb.*1.*3/is);
+
+        const stdoutBeforeFilteredCall = test.stdout.length;
+        await databaseListWithConfig({ kind: 'duckdb' } as any, CONFIG, test.dependencies);
+        expectControlPost(test.calls[1], { operation: 'list' });
+        const filtered = test.stdout.slice(stdoutBeforeFilteredCall).join('\n');
+        expect(filtered).toContain('Warehouse');
+        expect(filtered).not.toContain('Analytics');
+        expect(filtered).not.toContain('Retired');
+    });
+
+    it('rejects an unrecognized --kind before sending any request', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        let caught: any;
+        try {
+            await databaseListWithConfig({ kind: 'duckdbb' } as any, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_kind' });
+        expect(caught?.message).toMatch(/duckdbb/);
+        expect(test.calls).toEqual([]);
     });
 
     it('writes the complete list response as JSON with no decoration', async () => {

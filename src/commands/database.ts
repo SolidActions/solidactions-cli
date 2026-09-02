@@ -57,11 +57,17 @@ export interface DatabaseRecord {
     updated_at?: string;
 }
 
+export interface DatabaseQuota {
+    used: number;
+    limit: number;
+    scope: 'workspace' | 'org';
+}
+
 interface DatabaseListResponse {
     databases: DatabaseRecord[];
     quota: {
-        used: number;
-        limit: number;
+        libsql: DatabaseQuota;
+        duckdb: DatabaseQuota;
     };
 }
 
@@ -70,6 +76,7 @@ interface DatabaseMutationResponse {
 }
 
 interface DatabaseListOptions {
+    kind?: DatabaseKind;
     json?: boolean;
 }
 
@@ -273,21 +280,28 @@ function stableDatabaseResponse(data: DatabaseMutationResponse): DatabaseMutatio
     return { database: stableDatabaseRecord(data?.database) };
 }
 
-function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
+function stableQuota(quota: DatabaseQuota | null | undefined): DatabaseQuota {
     if (
-        !data
-        || !Array.isArray(data.databases)
-        || typeof data.quota?.used !== 'number'
-        || typeof data.quota?.limit !== 'number'
+        !quota
+        || typeof quota.used !== 'number'
+        || typeof quota.limit !== 'number'
+        || (quota.scope !== 'workspace' && quota.scope !== 'org')
     ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { used: quota.used, limit: quota.limit, scope: quota.scope };
+}
+
+function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
+    if (!data || !Array.isArray(data.databases)) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
     }
 
     return {
         databases: data.databases.map(stableDatabaseRecord),
         quota: {
-            used: data.quota.used,
-            limit: data.quota.limit,
+            libsql: stableQuota(data.quota?.libsql),
+            duckdb: stableQuota(data.quota?.duckdb),
         },
     };
 }
@@ -295,8 +309,12 @@ function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
 function databaseRows(databases: DatabaseRecord[]): string[][] {
     return databases.map((database) => [
         database.name,
+        database.kind,
         database.status,
-        String(database.size_bytes),
+        database.kind === 'duckdb' ? (database.activity ?? '-') : '-',
+        database.kind === 'duckdb'
+            ? `${formatByteSize(database.size_bytes)} / ${formatByteSize(database.size_limit_bytes ?? 0)}`
+            : String(database.size_bytes),
         database.deleted_at ?? '-',
         database.purge_at ?? '-',
     ]);
@@ -304,9 +322,16 @@ function databaseRows(databases: DatabaseRecord[]): string[][] {
 
 function renderDatabaseTable(databases: DatabaseRecord[]): string {
     return renderTable(
-        ['NAME', 'STATUS', 'SIZE (BYTES)', 'DELETED AT', 'PURGE AT'],
+        ['NAME', 'KIND', 'STATUS', 'ACTIVITY', 'SIZE', 'DELETED AT', 'PURGE AT'],
         databaseRows(databases),
     ).join('\n');
+}
+
+function renderQuota(quota: DatabaseListResponse['quota']): string {
+    return [
+        `Quota: libsql ${quota.libsql.used} / ${quota.libsql.limit} (${quota.libsql.scope})`,
+        `       duckdb ${quota.duckdb.used} / ${quota.duckdb.limit} (${quota.duckdb.scope})`,
+    ].join('\n');
 }
 
 function renderMutation(
@@ -1069,18 +1094,32 @@ export async function databaseListWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    // The server's `list` operation takes no `kind` parameter — CliDatabaseRequest
+    // prohibits it on anything but `create` — so the filter is applied here,
+    // client-side, against the full row set.
+    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'invalid_kind',
+            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+        );
+    }
+
     const data = stableListResponse(await requestDatabaseOperation<DatabaseListResponse>(
         config,
         { operation: 'list' },
         requestDependencies(io),
     ));
 
+    const databases = options.kind
+        ? data.databases.filter((database) => database.kind === options.kind)
+        : data.databases;
+
     if (options.json) {
-        writeJson(io.stdout, data);
+        writeJson(io.stdout, options.kind ? { ...data, databases } : data);
         return;
     }
 
-    io.stdout(`${renderDatabaseTable(data.databases)}\nQuota: ${data.quota.used} / ${data.quota.limit}`);
+    io.stdout(`${renderDatabaseTable(databases)}\n${renderQuota(data.quota)}`);
 }
 
 const CREATE_POLL_INTERVAL_MS = 2_000;
