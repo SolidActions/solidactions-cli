@@ -101,6 +101,7 @@ interface DatabaseSchemaOptions {
 }
 
 interface DatabaseQueryOptions {
+    limit?: number;
     json?: boolean;
 }
 
@@ -584,6 +585,66 @@ function renderSchema(schema: DatabaseSchemaResponse): string {
     }
 
     return sections.join('\n\n');
+}
+
+interface AnalyticalSchemaColumn {
+    name: string;
+    type: string;
+}
+
+interface AnalyticalSchemaTable {
+    name: string;
+    columns: AnalyticalSchemaColumn[];
+    row_count: number;
+    last_loaded_at: string | null;
+}
+
+interface AnalyticalSchemaResponse {
+    tables: AnalyticalSchemaTable[];
+}
+
+function stableAnalyticalSchemaColumn(column: AnalyticalSchemaColumn): AnalyticalSchemaColumn {
+    if (!column || typeof column.name !== 'string' || typeof column.type !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { name: column.name, type: column.type };
+}
+
+function stableAnalyticalSchema(data: AnalyticalSchemaResponse): AnalyticalSchemaResponse {
+    if (!data || !Array.isArray(data.tables)) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        tables: data.tables.map((table) => {
+            if (
+                !table
+                || typeof table.name !== 'string'
+                || !Array.isArray(table.columns)
+                || typeof table.row_count !== 'number'
+                || (table.last_loaded_at !== null && typeof table.last_loaded_at !== 'string')
+            ) {
+                throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+            }
+            return {
+                name: table.name,
+                columns: table.columns.map(stableAnalyticalSchemaColumn),
+                row_count: table.row_count,
+                last_loaded_at: table.last_loaded_at,
+            };
+        }),
+    };
+}
+
+function renderAnalyticalSchema(schema: AnalyticalSchemaResponse): string {
+    if (schema.tables.length === 0) {
+        return 'No tables.';
+    }
+
+    return schema.tables.map((table) => {
+        const columns = table.columns.map((column) => `${column.name} (${column.type})`).join(', ');
+        return `${table.name} — ${table.row_count} rows, last loaded ${table.last_loaded_at ?? 'never'}\n  ${columns}`;
+    }).join('\n\n');
 }
 
 /** "1.2 GB", "512.0 MB", "900 B" — used by `show`, `list`, and `ingest`. */
@@ -1362,6 +1423,26 @@ export async function databaseSchemaWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb') {
+        // Read-intent, served from the cached catalog — never wakes a
+        // paused database (spec:568/598).
+        const schema = stableAnalyticalSchema(await requestDatabaseOperation<AnalyticalSchemaResponse>(
+            config,
+            { operation: 'schema', name },
+            requestDependencies(io),
+        ));
+
+        if (options.json) {
+            writeJson(io.stdout, schema);
+            return;
+        }
+
+        io.stdout(renderAnalyticalSchema(schema));
+        return;
+    }
+
     const schema = await withDatabaseClient(
         config,
         name,
@@ -1378,6 +1459,93 @@ export async function databaseSchemaWithConfig(
     io.stdout(renderSchema(schema));
 }
 
+interface AnalyticalQueryResult {
+    columns: string[];
+    rows: unknown[][];
+    truncated: boolean;
+    elapsed_ms: number;
+}
+
+interface AnalyticalWakingResponse {
+    code: 'waking';
+    message?: string;
+    retry_after_ms?: number;
+}
+
+function isAnalyticalWaking(value: unknown): value is AnalyticalWakingResponse {
+    const candidate = value as { code?: unknown } | null;
+    return candidate?.code === 'waking';
+}
+
+function stableAnalyticalQueryResult(data: AnalyticalQueryResult): AnalyticalQueryResult {
+    if (
+        !data
+        || !Array.isArray(data.columns)
+        || !data.columns.every((column) => typeof column === 'string')
+        || !Array.isArray(data.rows)
+        || !data.rows.every((row) => Array.isArray(row))
+        || typeof data.truncated !== 'boolean'
+        || typeof data.elapsed_ms !== 'number'
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        columns: [...data.columns],
+        rows: data.rows.map((row) => [...row]),
+        truncated: data.truncated,
+        elapsed_ms: data.elapsed_ms,
+    };
+}
+
+// CLI-surface cap (`services.analytical.query_row_limit_cli` on the server;
+// `config/services.php`) — the server clamps to the same value when
+// `row_limit` is omitted, so this is both the client-side validation bound
+// and the number shown for an un-limited truncation.
+const ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX = 10_000;
+
+// Bounds how long the CLI itself waits out a `waking` database before giving
+// up and surfacing the condition as an error; the server keeps retrying on
+// its own schedule via `retry_after_ms`.
+const ANALYTICAL_QUERY_MAX_WAIT_MS = 60_000;
+
+async function requestAnalyticalQuery(
+    config: Config,
+    name: string,
+    sql: string,
+    rowLimit: number | undefined,
+    io: ResolvedCommandDependencies,
+): Promise<AnalyticalQueryResult> {
+    const body: Record<string, unknown> = { operation: 'query', name, sql };
+    if (rowLimit !== undefined) {
+        body.row_limit = rowLimit;
+    }
+
+    const deadline = io.now() + ANALYTICAL_QUERY_MAX_WAIT_MS;
+    let announced = false;
+    for (;;) {
+        const response = await requestDatabaseOperation<AnalyticalQueryResult | AnalyticalWakingResponse>(
+            config,
+            body,
+            requestDependencies(io),
+        );
+        if (!isAnalyticalWaking(response)) {
+            return stableAnalyticalQueryResult(response);
+        }
+        if (io.now() >= deadline) {
+            throw new DatabaseOperationError(
+                'waking',
+                response.message ?? `${name} is still waking up — try again in a moment.`,
+            );
+        }
+        if (!announced) {
+            io.stderr(`Waking ${name}…`);
+            announced = true;
+        }
+        await io.sleep(response.retry_after_ms ?? 3_000);
+    }
+}
+
 export async function databaseQueryWithConfig(
     name: string,
     sql: string,
@@ -1386,6 +1554,32 @@ export async function databaseQueryWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb') {
+        if (options.limit !== undefined && (options.limit < 1 || options.limit > ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX)) {
+            throw new DatabaseOperationError(
+                'invalid_limit',
+                `--limit must be between 1 and ${ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} (received "${options.limit}").`,
+            );
+        }
+
+        const result = await requestAnalyticalQuery(config, name, sql, options.limit, io);
+
+        if (options.json) {
+            writeJson(io.stdout, result);
+            return;
+        }
+
+        io.stdout(result.columns.length > 0
+            ? renderTable(result.columns, result.rows.map((resultRow) => resultRow.map((value) => String(value)))).join('\n')
+            : 'No rows returned.');
+        if (result.truncated) {
+            io.stdout(`(truncated at ${options.limit ?? ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} rows)`);
+        }
+        return;
+    }
+
     const result = await withDatabaseClient(
         config,
         name,

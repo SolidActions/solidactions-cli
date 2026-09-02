@@ -15,7 +15,7 @@ const COMMANDS = [
     { verb: 'delete', args: [['name', true]], options: ['--yes', '--json'] },
     { verb: 'undelete', args: [['name', true]], options: ['--json'] },
     { verb: 'schema', args: [['name', true]], options: ['--json'] },
-    { verb: 'query', args: [['name', true], ['sql', true]], options: ['--json'] },
+    { verb: 'query', args: [['name', true], ['sql', true]], options: ['--limit', '--json'] },
     { verb: 'exec', args: [['name', true], ['sql', true]], options: ['--yes', '--json'] },
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
     { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
@@ -23,7 +23,7 @@ const COMMANDS = [
     { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first

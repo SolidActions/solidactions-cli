@@ -27,6 +27,22 @@ const ACCESS = {
     expires_at: '2026-08-07T12:10:00Z',
 };
 
+// The `show`-first kind dispatch (#1700 Plan D Task 4) means every direct
+// (libsql) command now mints an extra control-plane `show` before the
+// `access` credential — this file's `directHarness` answers it with a
+// stable libsql row so the pre-existing direct-client assertions below
+// keep testing only the libsql path they were written for.
+const SHOW_ROW = {
+    database: {
+        name: 'Analytics',
+        kind: 'libsql' as const,
+        status: 'ready',
+        size_bytes: 0,
+        deleted_at: null,
+        purge_at: null,
+    },
+};
+
 async function loadDatabaseCommands(): Promise<Record<string, unknown>> {
     const moduleUrl = pathToFileURL(path.resolve(__dirname, '../src/commands/database.ts')).href;
 
@@ -90,6 +106,9 @@ function directHarness(
         ) => {
             events.push('mint');
             posts.push({ url, body, options: postOptions });
+            if (body.operation === 'show') {
+                return { data: SHOW_ROW };
+            }
             return {
                 data: {
                     ...ACCESS,
@@ -124,10 +143,10 @@ function statementSql(statement: unknown): string {
     return '';
 }
 
-function expectSingleAccessPost(test: ReturnType<typeof directHarness>, mode: 'read' | 'write'): void {
-    expect(test.posts).toEqual([{
+function expectedPost(body: Record<string, unknown>): PostCall {
+    return {
         url: 'https://app.example.test/api/v1/databases',
-        body: { operation: 'access', name: 'Analytics', mode },
+        body,
         options: {
             headers: {
                 Accept: 'application/json',
@@ -138,7 +157,22 @@ function expectSingleAccessPost(test: ReturnType<typeof directHarness>, mode: 'r
             signal: expect.any(AbortSignal),
             timeout: 30_000,
         },
-    }]);
+    };
+}
+
+function expectSingleAccessPost(test: ReturnType<typeof directHarness>, mode: 'read' | 'write'): void {
+    expect(test.posts).toEqual([expectedPost({ operation: 'access', name: 'Analytics', mode })]);
+}
+
+// `schema`/`query` kind-dispatch (#1700 Plan D Task 4): a `show` always
+// precedes the `access` mint, so those verbs' direct-path tests assert this
+// two-post sequence instead of the single `access` post other direct verbs
+// (e.g. `exec`, which does not kind-dispatch) still send.
+function expectShowThenAccessPost(test: ReturnType<typeof directHarness>, mode: 'read' | 'write'): void {
+    expect(test.posts).toEqual([
+        expectedPost({ operation: 'show', name: 'Analytics' }),
+        expectedPost({ operation: 'access', name: 'Analytics', mode }),
+    ]);
 }
 
 function expectEphemeralClient(test: ReturnType<typeof directHarness>): void {
@@ -148,8 +182,9 @@ function expectEphemeralClient(test: ReturnType<typeof directHarness>): void {
         intMode: 'string',
     }]);
     expect(test.close).toHaveBeenCalledOnce();
-    expect(test.events[0]).toBe('load');
-    expect(test.events.indexOf('load')).toBeLessThan(test.events.indexOf('mint'));
+    // Native support is loaded before the `access` mint — regardless of
+    // whether an earlier `show` mint already ran ahead of it.
+    expect(test.events.indexOf('load')).toBeLessThan(test.events.lastIndexOf('mint'));
 }
 
 describe('database schema direct action', () => {
@@ -181,7 +216,7 @@ describe('database schema direct action', () => {
 
         await databaseSchemaWithConfig('Analytics', { json: true }, CONFIG, test.dependencies);
 
-        expectSingleAccessPost(test, 'read');
+        expectShowThenAccessPost(test, 'read');
         expectEphemeralClient(test);
         expect(test.statements.map(statementSql)).toEqual(expect.arrayContaining([
             expect.stringMatching(/sqlite_master.*type\s*=\s*'table'/i),
@@ -257,7 +292,7 @@ describe('database schema direct action', () => {
         expect(output).not.toContain(ACCESS.url);
         expect(output).not.toContain('physical-db.sentinel.invalid');
         expect(test.stderr).toEqual([]);
-        expectSingleAccessPost(test, 'read');
+        expectShowThenAccessPost(test, 'read');
         expectEphemeralClient(test);
     });
 });
@@ -279,8 +314,11 @@ describe('database query direct action', () => {
             test.dependencies,
         )).rejects.toMatchObject({ code: 'database_client_unsupported' });
 
-        expect(test.events).toEqual(['load']);
-        expect(test.posts).toEqual([]);
+        // The kind-dispatch `show` mints and succeeds first (it is how the
+        // libsql path is even reached); native support is still checked
+        // before the `access` mint that would follow it.
+        expect(test.events).toEqual(['mint', 'load']);
+        expect(test.posts).toEqual([expectedPost({ operation: 'show', name: 'Analytics' })]);
         expect(test.clientConfigs).toEqual([]);
         expect(test.stdout).toEqual([]);
         expect(test.stderr).toEqual([]);
@@ -296,7 +334,7 @@ describe('database query direct action', () => {
 
         await databaseQueryWithConfig('Analytics', sql, { json: true }, CONFIG, test.dependencies);
 
-        expectSingleAccessPost(test, 'read');
+        expectShowThenAccessPost(test, 'read');
         expectEphemeralClient(test);
         expect(test.statements).toEqual([sql]);
         expect(JSON.stringify(test.posts)).not.toContain(sql);
@@ -333,7 +371,7 @@ describe('database query direct action', () => {
 
         await databaseQueryWithConfig('Analytics', sql, { json: true }, CONFIG, test.dependencies);
 
-        expectSingleAccessPost(test, 'read');
+        expectShowThenAccessPost(test, 'read');
         expect(test.statements).toEqual([sql]);
         expect(JSON.stringify(test.posts)).not.toContain(sql);
     });
