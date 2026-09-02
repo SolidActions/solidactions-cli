@@ -122,6 +122,23 @@ function importHarness(root: string, options: HarnessOptions = {}) {
         post: async (url: string, body: Record<string, unknown>, requestOptions: Record<string, unknown>) => {
             posts.push({ url, body, options: requestOptions });
             events.push(`post:${String(body.operation)}`);
+            // The analytical-name guard (#1700 Plan D Task 5) mints a `show`
+            // before any other work; every case in this file targets a
+            // libsql database, so the guard observes this row and proceeds.
+            if (body.operation === 'show') {
+                return {
+                    data: {
+                        database: {
+                            name: String(body.name),
+                            kind: 'libsql',
+                            status: 'ready',
+                            size_bytes: 0,
+                            deleted_at: null,
+                            purge_at: null,
+                        },
+                    },
+                };
+            }
             if (body.operation === 'create') {
                 if (options.post) return { data: await options.post(0, body) };
                 return {
@@ -166,6 +183,27 @@ function managedEnvelope(statements: string[]): string {
 
 function accessPosts(test: ReturnType<typeof importHarness>) {
     return test.posts.filter((call) => call.body.operation === 'access');
+}
+
+// The analytical-name guard (#1700 Plan D Task 5) mints a `show` as the very
+// first thing `databaseImportWithConfig` does — before confirmation, source
+// validation, or checkpoint handling. Cases that used to refuse purely
+// locally (with zero posts) now send exactly this one post first.
+function showPost(name: string) {
+    return {
+        url: 'https://app.example.test/api/v1/databases',
+        body: { operation: 'show', name },
+        options: {
+            headers: {
+                Accept: 'application/json',
+                Authorization: 'Bearer control-plane-pat-sentinel',
+                'Content-Type': 'application/json',
+                'X-Workspace-Id': 'workspace-1146',
+            },
+            signal: expect.any(AbortSignal),
+            timeout: 30_000,
+        },
+    };
 }
 
 function expectWriteAccess(test: ReturnType<typeof importHarness>): void {
@@ -293,7 +331,9 @@ describe('database import preflight and execution', () => {
 
         expect(test.confirm).not.toHaveBeenCalled();
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the unsafe
+        // source is refused (#1700 Plan D Task 5).
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.executions).toEqual([]);
     });
 
@@ -306,7 +346,9 @@ describe('database import preflight and execution', () => {
         await databaseImportWithConfig('Analytics', source, {}, CONFIG, declined.dependencies);
 
         expect(declined.confirm).toHaveBeenCalledOnce();
-        expect(declined.events).toEqual(['confirm']);
+        // The analytical-name guard's `show` mints before the confirmation
+        // prompt (#1700 Plan D Task 5).
+        expect(declined.events).toEqual(['post:show', 'confirm']);
         expect(declined.stdout).toEqual(['Cancelled.']);
 
         const accepted = importHarness(root);
@@ -324,8 +366,10 @@ describe('database import preflight and execution', () => {
 
         await expect(databaseImportWithConfig('Analytics', source, {}, CONFIG, test.dependencies))
             .rejects.toMatchObject({ code: 'confirmation_required' });
-        expect(test.events).toEqual([]);
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the --yes
+        // check (#1700 Plan D Task 5).
+        expect(test.events).toEqual(['post:show']);
+        expect(test.posts).toEqual([showPost('Analytics')]);
     });
 
     it('refuses a matching deterministic checkpoint without --resume before minting or replaying work', async () => {
@@ -361,7 +405,9 @@ describe('database import preflight and execution', () => {
         }
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the matching
+        // checkpoint is refused (#1700 Plan D Task 5).
+        expect(test.posts).toEqual([showPost(database)]);
         expect(test.executions).toEqual([]);
         expect(fs.readFileSync(checkpoint)).toEqual(before);
         const lines = report(caught, test).split('\n').filter((line) => line.startsWith('Resume with:'));
@@ -885,7 +931,7 @@ describe('database import preflight and execution', () => {
             .rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.executions).toEqual([]);
         expect(fs.readFileSync(victim, 'utf8')).toBe('VICTIM MUST REMAIN');
         expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
@@ -907,7 +953,7 @@ describe('database import preflight and execution', () => {
             .rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(fs.readdirSync(victimDirectory)).toEqual(['keep.txt']);
         expect(fs.readFileSync(path.join(victimDirectory, 'keep.txt'), 'utf8')).toBe('VICTIM MUST REMAIN');
     });
@@ -969,7 +1015,7 @@ describe('database import resume validation', () => {
         )).rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
     });
 
     it('requires --resume to name a regular non-symlink checkpoint file', async () => {
@@ -987,7 +1033,7 @@ describe('database import resume validation', () => {
         )).rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(fs.readFileSync(victim)).toEqual(before);
         expect(fs.lstatSync(resume).isSymbolicLink()).toBe(true);
     });
@@ -1011,7 +1057,7 @@ describe('database import resume validation', () => {
         )).rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(fs.readFileSync(victim)).toEqual(before);
     });
 
@@ -1045,7 +1091,7 @@ describe('database import resume validation', () => {
         )).rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.executions).toEqual([]);
     });
 
@@ -1077,7 +1123,7 @@ describe('database import resume validation', () => {
         )).rejects.toMatchObject({ code: 'import_failed' });
 
         expect(test.events).not.toContain('native:load');
-        expect(test.posts).toEqual([]);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.executions).toEqual([]);
     });
 
@@ -1105,7 +1151,7 @@ describe('database import resume validation', () => {
             'Analytics', source, { yes: true, resume: valid }, CONFIG, changedTest.dependencies,
         )).rejects.toMatchObject({ code: 'import_failed' });
         expect(changedTest.events).not.toContain('native:load');
-        expect(changedTest.posts).toEqual([]);
+        expect(changedTest.posts).toEqual([showPost('Analytics')]);
     });
 
     it('continues from a valid parser boundary, skips completed groups, and removes the checkpoint on success', async () => {
@@ -1327,7 +1373,7 @@ describe('database create --from real importer', () => {
         }
 
         expect(plain.events).not.toContain('native:load');
-        expect(plain.posts).toEqual([]);
+        expect(plain.posts).toEqual([showPost('Analytics')]);
         expect(plain.executions).toEqual([]);
         expect(fs.readFileSync(checkpoint)).toEqual(before);
         expect(report(caught, plain).split('\n')).toContain(resumeLine('Analytics', source, checkpoint));

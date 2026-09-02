@@ -7,6 +7,7 @@ import { pathToFileURL } from 'url';
 import { createClient } from '@libsql/client';
 import { Config } from '../utils/config';
 import { DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, DatabaseOperationError, DatabaseRequestDependencies, requestDatabaseOperation } from '../utils/database-data-plane';
+import { refuseIfAnalytical } from './database';
 
 const MAX_BYTES = 20_000_000_000;
 const PAGE_SIZE = 4096;
@@ -233,6 +234,7 @@ export async function databasePushWithConfig(name: string, file: string, options
     if (!options.yes) throw new DatabaseOperationError('confirmation_required', 'Database push is destructive and requires --yes.');
     const key = options.idempotencyKey ?? randomUUID();
     if (!IDEMPOTENCY_UUID.test(key)) throw new DatabaseOperationError('invalid_bulk_database', '--idempotency-key must be a UUID.');
+    await refuseIfAnalytical(config, name, 'sqlite-only', { post: dependencies.post });
     const stdout = dependencies.stdout ?? console.log;
     const sleep = dependencies.sleep ?? ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     const normalized = await normalizeDatabaseForPush(file, dependencies);

@@ -160,14 +160,9 @@ function expectedPost(body: Record<string, unknown>): PostCall {
     };
 }
 
-function expectSingleAccessPost(test: ReturnType<typeof directHarness>, mode: 'read' | 'write'): void {
-    expect(test.posts).toEqual([expectedPost({ operation: 'access', name: 'Analytics', mode })]);
-}
-
-// `schema`/`query` kind-dispatch (#1700 Plan D Task 4): a `show` always
-// precedes the `access` mint, so those verbs' direct-path tests assert this
-// two-post sequence instead of the single `access` post other direct verbs
-// (e.g. `exec`, which does not kind-dispatch) still send.
+// `schema`/`query` kind-dispatch (#1700 Plan D Task 4) and the `exec`
+// analytical-name guard (#1700 Plan D Task 5) both mint a `show` before the
+// `access` mint, so every direct verb's tests assert this two-post sequence.
 function expectShowThenAccessPost(test: ReturnType<typeof directHarness>, mode: 'read' | 'write'): void {
     expect(test.posts).toEqual([
         expectedPost({ operation: 'show', name: 'Analytics' }),
@@ -391,7 +386,7 @@ describe('database exec direct action', () => {
         await databaseExecWithConfig('Analytics', sql, { yes: true, json: true }, CONFIG, test.dependencies);
 
         expect(test.confirm).not.toHaveBeenCalled();
-        expectSingleAccessPost(test, 'write');
+        expectShowThenAccessPost(test, 'write');
         expectEphemeralClient(test);
         expect(test.statements).toEqual([sql]);
         expect(JSON.stringify(test.posts)).not.toContain(sql);
@@ -418,7 +413,9 @@ describe('database exec direct action', () => {
 
         expect(test.confirm).toHaveBeenCalledOnce();
         expect(test.confirm.mock.calls[0][0]).toMatch(/Analytics/);
-        expect(test.events).toEqual(['confirm', 'load', 'mint', 'create', 'execute', 'close']);
+        // The analytical-name guard's `show` mints before the confirmation
+        // prompt (#1700 Plan D Task 5).
+        expect(test.events).toEqual(['mint', 'confirm', 'load', 'mint', 'create', 'execute', 'close']);
         const output = test.stdout.join('\n');
         expect(output).toMatch(/1\s+row.*affected|rows affected.*1/i);
         expect(output).toContain('id');
@@ -436,8 +433,10 @@ describe('database exec direct action', () => {
         await databaseExecWithConfig('Analytics', 'DROP TABLE events', {}, CONFIG, test.dependencies);
 
         expect(test.confirm).toHaveBeenCalledOnce();
-        expect(test.events).toEqual(['confirm']);
-        expect(test.posts).toEqual([]);
+        // The analytical-name guard's `show` mints before the confirmation
+        // prompt (#1700 Plan D Task 5).
+        expect(test.events).toEqual(['mint', 'confirm']);
+        expect(test.posts).toEqual([expectedPost({ operation: 'show', name: 'Analytics' })]);
         expect(test.clientConfigs).toEqual([]);
         expect(test.statements).toEqual([]);
         expect(test.stdout.join('\n')).toMatch(/cancelled/i);
@@ -447,7 +446,7 @@ describe('database exec direct action', () => {
     it.each([
         ['JSON', { json: true }, true],
         ['non-interactive', {}, false],
-    ])('requires --yes in %s mode without prompting, loading, minting, or creating a client', async (_label, options, isTTY) => {
+    ])('requires --yes in %s mode without prompting, loading, or creating a client', async (_label, options, isTTY) => {
         const databaseExecWithConfig = await requireExport('databaseExecWithConfig');
         const test = directHarness(async () => ({ columns: [], rows: [] }), { isTTY });
 
@@ -455,8 +454,11 @@ describe('database exec direct action', () => {
             .rejects.toMatchObject({ code: 'confirmation_required' });
 
         expect(test.confirm).not.toHaveBeenCalled();
-        expect(test.events).toEqual([]);
-        expect(test.posts).toEqual([]);
+        // The analytical-name guard's `show` mints before the --yes check
+        // (#1700 Plan D Task 5); it does not observe the libsql row here, so
+        // no further loading/minting/client creation happens either.
+        expect(test.events).toEqual(['mint']);
+        expect(test.posts).toEqual([expectedPost({ operation: 'show', name: 'Analytics' })]);
         expect(test.clientConfigs).toEqual([]);
         expect(test.statements).toEqual([]);
         expect(test.stdout).toEqual([]);

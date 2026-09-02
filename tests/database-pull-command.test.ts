@@ -65,6 +65,7 @@ function pullHarness(
     const stderr: string[] = [];
     const confirm = vi.fn(async () => true as boolean | undefined);
     let attempt = 0;
+    let mintCount = 0;
 
     const dependencies = {
         cwd: root,
@@ -104,9 +105,32 @@ function pullHarness(
             };
         },
         post: async (url: string, body: Record<string, unknown>, options: Record<string, unknown>) => {
-            const mint = posts.length + 1;
-            events.push(`mint:${mint}`);
             posts.push({ url, body, options });
+            // The analytical-name guard (#1700 Plan D Task 5) mints a `show`
+            // before any other work; every case in this file targets a
+            // libsql database, so the guard observes this row and proceeds.
+            // It is deliberately excluded from the read-access mint counter
+            // below so existing `fresh-read-token-sentinel-N` numbering and
+            // attempt-count assertions stay unchanged.
+            if (body.operation === 'show') {
+                events.push('mint:show');
+                return {
+                    data: {
+                        database: {
+                            name: String(body.name),
+                            kind: 'libsql',
+                            status: 'ready',
+                            size_bytes: 0,
+                            deleted_at: null,
+                            purge_at: null,
+                        },
+                    },
+                };
+            }
+
+            mintCount += 1;
+            const mint = mintCount;
+            events.push(`mint:${mint}`);
             return {
                 data: {
                     url: 'libsql://physical-hostname.sentinel.invalid',
@@ -135,9 +159,15 @@ function pullHarness(
     };
 }
 
+// The analytical-name guard (#1700 Plan D Task 5) mints exactly one `show`
+// before any access mint; strip it (asserting its own shape) so callers can
+// keep asserting the rest of `posts` is pure read-access mints.
 function expectOnlyReadAccess(posts: ReturnType<typeof pullHarness>['posts'], name = 'Analytics'): void {
     expect(posts.length).toBeGreaterThan(0);
-    for (const post of posts) {
+    const [first, ...rest] = posts;
+    expect(first).toEqual(showPost(name));
+    expect(rest.length).toBeGreaterThan(0);
+    for (const post of rest) {
         expect(post).toEqual({
             url: 'https://app.example.test/api/v1/databases',
             body: { operation: 'access', name, mode: 'read' },
@@ -155,6 +185,23 @@ function expectOnlyReadAccess(posts: ReturnType<typeof pullHarness>['posts'], na
     }
     expect(JSON.stringify(posts)).not.toContain('READ ONLY REPLICA');
     expect(JSON.stringify(posts)).not.toContain('SELECT');
+}
+
+function showPost(name: string) {
+    return {
+        url: 'https://app.example.test/api/v1/databases',
+        body: { operation: 'show', name },
+        options: {
+            headers: {
+                Accept: 'application/json',
+                Authorization: 'Bearer control-plane-pat-sentinel',
+                'Content-Type': 'application/json',
+                'X-Workspace-Id': 'workspace-1146',
+            },
+            signal: expect.any(AbortSignal),
+            timeout: 30_000,
+        },
+    };
 }
 
 function replicaCompanions(temp: string): string[] {
@@ -181,7 +228,9 @@ describe('database pull read-only replica contract', () => {
         await expect(databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
             .rejects.toMatchObject({ code: 'upstream_unavailable' });
 
-        expect(test.posts).toHaveLength(3);
+        // One `show` from the analytical-name guard (#1700 Plan D Task 5),
+        // then three read-access mints across the retries.
+        expect(test.posts).toHaveLength(4);
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2', 'close:3']);
         expect(delays).toEqual([250, 500]);
         expect(fs.existsSync(target)).toBe(false);
@@ -243,13 +292,16 @@ describe('database pull read-only replica contract', () => {
         };
         const originalPost = test.dependencies.post;
         test.dependencies.post = async (...args: any[]) => {
-            events.push('mint');
+            // The analytical-name guard's `show` mint (#1700 Plan D Task 5)
+            // precedes native loading entirely; only the read-access mint
+            // is asserted to follow it below.
+            events.push(`mint:${String(args[1]?.operation)}`);
             return (originalPost as any)(...args);
         };
 
         await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
 
-        expect(events.indexOf('load')).toBeLessThan(events.indexOf('mint'));
+        expect(events.indexOf('load')).toBeLessThan(events.indexOf('mint:access'));
         expect(events.indexOf('close')).toBeLessThan(events.indexOf('chmod'));
         expect(events.indexOf('chmod')).toBeLessThan(events.indexOf('rename'));
         expect(fs.readFileSync(target, 'utf8')).toBe('READ ONLY REPLICA');
@@ -270,7 +322,7 @@ describe('database pull read-only replica contract', () => {
         { label: 'non-TTY', isTTY: false, answer: true },
         { label: 'decline', isTTY: true, answer: false },
         { label: 'EOF', isTTY: true, answer: undefined },
-    ])('$label refuses an existing target before native load, mint, or file changes', async ({ isTTY, answer }) => {
+    ])('$label refuses an existing target before native load or file changes', async ({ isTTY, answer }) => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const target = path.join(root, 'existing.db');
@@ -283,13 +335,15 @@ describe('database pull read-only replica contract', () => {
         if (isTTY) await outcome;
         else await expect(outcome).rejects.toMatchObject({ code: 'confirmation_required' });
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the overwrite
+        // confirmation (#1700 Plan D Task 5).
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.clientConfigs).toEqual([]);
-        expect(test.events).toEqual([]);
+        expect(test.events).toEqual(['mint:show']);
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
     });
 
-    it('refuses a destination symlink before native load or mint, even with --yes', async () => {
+    it('refuses a destination symlink before native load, even with --yes', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const outside = path.join(root, 'outside.db');
@@ -301,14 +355,16 @@ describe('database pull read-only replica contract', () => {
         await expect(databasePullWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies))
             .rejects.toThrow(/symbolic link/i);
 
-        expect(test.events).toEqual([]);
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs first (#1700 Plan D
+        // Task 5) — the symlink refusal happens before any further request.
+        expect(test.events).toEqual(['mint:show']);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.confirm).not.toHaveBeenCalled();
         expect(fs.readFileSync(outside, 'utf8')).toBe('DO NOT REPLACE');
         expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
     });
 
-    it('refuses a symlinked destination parent before native load, mint, or file creation', async () => {
+    it('refuses a symlinked destination parent before native load or file creation', async () => {
         const databasePullWithConfig = await requirePull();
         const root = tempRoot();
         const outside = path.join(root, 'outside');
@@ -326,8 +382,10 @@ describe('database pull read-only replica contract', () => {
             test.dependencies,
         )).rejects.toThrow(/symbolic link/i);
 
-        expect(test.events).toEqual([]);
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs first (#1700 Plan D
+        // Task 5) — the symlink refusal happens before any further request.
+        expect(test.events).toEqual(['mint:show']);
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.confirm).not.toHaveBeenCalled();
         expect(fs.readFileSync(path.join(outside, 'analytics.db'), 'utf8')).toBe('OUTSIDE REPLICA');
         expect(fs.readdirSync(outside)).toEqual(['analytics.db']);
@@ -344,7 +402,9 @@ describe('database pull read-only replica contract', () => {
         await expect(databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
             .rejects.toThrow(/temporary|already exists|failed/i);
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the
+        // collision is detected (#1700 Plan D Task 5).
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.clientConfigs).toEqual([]);
         expect(fs.existsSync(target)).toBe(false);
         expect(fs.readFileSync(temp, 'utf8')).toBe('PRE-EXISTING TEMP OWNED BY SOMEONE ELSE');
@@ -379,7 +439,7 @@ describe('database pull read-only replica contract', () => {
             caught = error;
         }
 
-        expect(test.posts).toHaveLength(3);
+        expect(test.posts).toHaveLength(4);
         expectOnlyReadAccess(test.posts);
         expect(test.clientConfigs).toHaveLength(3);
         expect(new Set(test.clientConfigs.map((config) => config.url))).toHaveLength(1);
@@ -422,7 +482,7 @@ describe('database pull read-only replica contract', () => {
 
         await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
 
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expect(test.clientConfigs).toHaveLength(2);
         expect(test.clientConfigs[0].url).toBe(test.clientConfigs[1].url);
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1', 'close:2']);
@@ -452,7 +512,7 @@ describe('database pull read-only replica contract', () => {
             caught = error;
         }
 
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(test.clientConfigs).toHaveLength(1);
         expect(test.events.filter((event) => event.startsWith('close:'))).toEqual(['close:1']);
         expect(delays).toEqual([]);
@@ -520,7 +580,7 @@ describe('database pull read-only replica contract', () => {
 
         expect(loads).toBe(2);
         expect(creates).toBe(2);
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expectOnlyReadAccess(test.posts);
         expect(fs.readFileSync(target, 'utf8')).toBe('COMPLETE REPLICA');
         expect(fs.statSync(target).mode & 0o777).toBe(0o444);
@@ -567,7 +627,7 @@ describe('database pull read-only replica contract', () => {
 
         await databasePullWithConfig('Analytics', target, {}, CONFIG, test.dependencies);
 
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expectOnlyReadAccess(test.posts);
         expect(test.clientConfigs).toHaveLength(1);
         expect(test.finalizerConfigs).toEqual([{ url: pathToFileURL(temp).href, intMode: 'string' }]);
@@ -621,7 +681,7 @@ describe('database pull read-only replica contract', () => {
             expect(publicError).not.toContain('RAW_CHECKPOINT_TOKEN_HOST_SENTINEL');
             expect(publicError).not.toContain(CONFIG.apiKey);
             expect(publicError).not.toContain('physical-hostname.sentinel.invalid');
-            expect(test.posts).toHaveLength(1);
+            expect(test.posts).toHaveLength(2);
             expectOnlyReadAccess(test.posts);
             expect(test.finalizerConfigs).toHaveLength(1);
             expect(test.finalizerStatements).toEqual(['PRAGMA wal_checkpoint(TRUNCATE)']);
@@ -661,7 +721,7 @@ describe('database pull read-only replica contract', () => {
         const publicError = `${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`;
         expect(publicError).not.toContain('RAW_CONSTRUCTOR_TOKEN_HOST_SENTINEL');
         expect(publicError).not.toContain(CONFIG.apiKey);
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
         expect(fs.existsSync(temp)).toBe(false);
         for (const companion of replicaCompanions(temp)) expect(fs.existsSync(companion)).toBe(false);
@@ -724,7 +784,10 @@ describe('database pull read-only replica contract', () => {
         expect(caught).toMatchObject({ code: 'database_client_unsupported' });
         expect(`${caught?.message ?? ''} ${caught?.stack ?? ''} ${JSON.stringify(caught)}`)
             .not.toContain('NATIVE_LOAD_SECRET_SENTINEL');
-        expect(test.posts).toEqual([]);
+        // The analytical-name guard's `show` runs before the temp
+        // reservation (#1700 Plan D Task 5); native loading then fails
+        // before any read-access mint.
+        expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.clientConfigs).toEqual([]);
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
         expect(fs.existsSync(ownTemp)).toBe(false);

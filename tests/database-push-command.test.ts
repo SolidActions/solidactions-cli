@@ -136,27 +136,37 @@ describe('database push normalization', () => {
     });
 });
 
+// The analytical-name guard (#1700 Plan D Task 5) mints a `show` before any
+// other work in `databasePushWithConfig`; every case in this describe block
+// targets a libsql database named 'analytics', so each `post` mock below
+// answers it with this stable row before falling through to its own
+// bulk-load-specific behavior.
+const SHOW_ROW = { data: { database: { name: 'analytics', kind: 'libsql', status: 'ready', size_bytes: 0, deleted_at: null, purge_at: null } } };
+
 describe('database push workflow', () => {
     it('prepares, uploads exact bytes with a candidate bearer, promotes, and polls without logging credentials', async () => {
         const source = await fixture();
         const posts: Array<Record<string, unknown>> = [];
         const upload = vi.fn(async (_url, body, options) => {
             expect(options.headers.Authorization).toBe('Bearer candidate-secret');
-            expect(options.headers['Content-Length']).toBe(String(posts[0].input_bytes));
+            // posts[0] is the analytical-name guard's `show` (#1700 Plan D
+            // Task 5); posts[1] is the `bulk_load_prepare` body.
+            expect(options.headers['Content-Length']).toBe(String(posts[1].input_bytes));
             expect(body).toBeDefined();
             return { status: 200, data: { secret: 'must-not-log' } };
         });
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
             posts.push(body);
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret', expires_at: '2099-01-01T00:00:00Z' } }, status: 202 };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
             return { data: { operation: { id: body.operation_id, phase: 'promoted', rows_loaded: 1, measured_bytes: 16384, cleanup_state: 'complete', failure_code: null } }, status: 200 };
         });
         const output: string[] = [];
         await databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'control-secret', workspaceId: 'w1' }, { post, upload, stdout: (line) => output.push(line), sleep: async () => undefined });
-        expect(posts.map((body) => body.operation)).toEqual(['bulk_load_prepare', 'bulk_load_promote', 'bulk_load_status']);
-        expect(posts[0]).toMatchObject({ bulk_mode: 'replace', allow_empty: false });
-        expect(posts[1]).toMatchObject({ upload_http_status: 200 });
+        expect(posts.map((body) => body.operation)).toEqual(['show', 'bulk_load_prepare', 'bulk_load_promote', 'bulk_load_status']);
+        expect(posts[1]).toMatchObject({ bulk_mode: 'replace', allow_empty: false });
+        expect(posts[2]).toMatchObject({ upload_http_status: 200 });
         expect(output.join('\n')).not.toContain('candidate-secret').not.toContain('must-not-log');
         expect(output.join('\n').toLowerCase()).toContain('reacquire');
         expect(output.join('\n')).toContain('countable rows');
@@ -169,6 +179,7 @@ describe('database push workflow', () => {
         const uploadPut = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
         const operationId = '0198f36e-7b2a-7cc2-8f1a-123456789abc';
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: operationId, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: operationId, phase: 'validating' } } };
             return { data: { operation: { id: operationId, phase: 'promoted' } } };
@@ -188,6 +199,7 @@ describe('database push workflow', () => {
         const operationId = '0198f36e-7b2a-7cc2-8f1a-123456789abc';
         const idempotencyKey = '0198f36e-7b2b-7dd3-9a2b-abcdef012345';
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: operationId, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: operationId, phase: 'validating' } } };
             return { data: { operation: { id: operationId, phase: 'promoted' } } };
@@ -200,7 +212,9 @@ describe('database push workflow', () => {
         const source = await fixture();
         const leaked = 'secret-operation-id-candidate-token';
         const output: string[] = [];
-        const post = vi.fn(async () => ({ data: { operation: { id: leaked, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } }));
+        const post = vi.fn(async (_url: string, body: Record<string, unknown>) => body.operation === 'show'
+            ? SHOW_ROW
+            : { data: { operation: { id: leaked, phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret' } } });
         await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post, stdout: (line) => output.push(line) }))
             .rejects.toMatchObject({ code: 'upstream_unavailable', message: expect.not.stringContaining(leaked) });
         expect(output.join('\n')).not.toContain(leaked).not.toContain('candidate-secret');
@@ -208,10 +222,13 @@ describe('database push workflow', () => {
 
     it('rejects zero countable rows unless --allow-empty is explicit', async () => {
         const source = await fixture(true);
-        const post = vi.fn();
+        const post = vi.fn(async (_url: string, body: Record<string, unknown>) => body.operation === 'show' ? SHOW_ROW : undefined);
         await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post }))
             .rejects.toMatchObject({ code: 'invalid_bulk_database' });
-        expect(post).not.toHaveBeenCalled();
+        // Only the analytical-name guard's `show` runs before the
+        // zero-row rejection (#1700 Plan D Task 5) — no bulk-load request.
+        expect(post).toHaveBeenCalledTimes(1);
+        expect(post).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ operation: 'show' }), expect.any(Object));
     });
 
     it('rejects a sparse file above the decimal 20 GB ceiling before loading SQLite', async () => {
@@ -228,6 +245,7 @@ describe('database push workflow', () => {
         const bodies: Record<string, unknown>[] = [];
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
             bodies.push(body);
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } } };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } } };
             throw new Error('transient status transport details');
@@ -242,12 +260,13 @@ describe('database push workflow', () => {
         const bodies: Record<string, unknown>[] = [];
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
             bodies.push(body);
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } } };
             return { data: { operation: { id: body.operation_id, phase: 'aborted' } } };
         });
         await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post, upload: async () => { throw new Error('secret upstream body'); } }))
             .rejects.toMatchObject({ code: 'upstream_unavailable' });
-        expect(bodies.map((body) => body.operation)).toEqual(['bulk_load_prepare', 'bulk_load_abort']);
+        expect(bodies.map((body) => body.operation)).toEqual(['show', 'bulk_load_prepare', 'bulk_load_abort']);
     });
 
     it('renews every five minutes during a deferred upload and stops before promote', async () => {
@@ -260,6 +279,7 @@ describe('database push workflow', () => {
             let prepares = 0;
             const post = vi.fn(async (_url, body: Record<string, unknown>) => {
                 bodies.push(body);
+                if (body.operation === 'show') return SHOW_ROW;
                 if (body.operation === 'bulk_load_prepare') {
                     prepares++;
                     // Only the FIRST prepare carries a credential; a renewal
@@ -275,8 +295,9 @@ describe('database push workflow', () => {
             const running = databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post, upload, stdout: (line) => output.push(line), sleep: async () => undefined });
             await vi.waitFor(() => expect(upload).toHaveBeenCalledOnce());
             await vi.advanceTimersByTimeAsync(10 * 60_000);
-            expect(bodies.filter((body) => body.operation === 'bulk_load_prepare')).toHaveLength(3);
-            expect(bodies.slice(0, 3).every((body) => body.idempotency_key === bodies[0].idempotency_key)).toBe(true);
+            const prepareBodies = bodies.filter((body) => body.operation === 'bulk_load_prepare');
+            expect(prepareBodies).toHaveLength(3);
+            expect(prepareBodies.every((body) => body.idempotency_key === prepareBodies[0].idempotency_key)).toBe(true);
             finishUpload();
             await running;
             const count = bodies.filter((body) => body.operation === 'bulk_load_prepare').length;
@@ -293,6 +314,7 @@ describe('database push workflow', () => {
         let clock = 1_000_000;
         const statuses: string[] = [];
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } }, status: 202 };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
             statuses.push('poll');
@@ -314,6 +336,7 @@ describe('database push workflow', () => {
         const source = await fixture();
         let clock = 1_000_000;
         const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'show') return SHOW_ROW;
             if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } }, status: 202 };
             if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
             clock += 20 * 60_000;
@@ -327,9 +350,12 @@ describe('database push workflow', () => {
 
     it('maps upload 413 to bulk_load_too_large without exposing its body', async () => {
         const source = await fixture();
-        const post = vi.fn(async (_url, body: Record<string, unknown>) => body.operation === 'bulk_load_prepare'
-            ? { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } } }
-            : { data: { operation: { id: body.operation_id, phase: 'aborted' } } });
+        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
+            if (body.operation === 'show') return SHOW_ROW;
+            return body.operation === 'bulk_load_prepare'
+                ? { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'secret' } } }
+                : { data: { operation: { id: body.operation_id, phase: 'aborted' } } };
+        });
         await expect(databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'secret' }, { post, upload: async (_url, _body, options) => {
             expect(options.validateStatus(413)).toBe(true);
             return { status: 413, data: 'private upstream rejection' };

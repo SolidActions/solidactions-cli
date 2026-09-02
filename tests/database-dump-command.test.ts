@@ -16,6 +16,15 @@ const CONFIG: Config = {
     workspaceId: 'workspace-1146',
 };
 
+// The analytical-name guard (#1700 Plan D Task 5) mints a `show` before any
+// other work; every case below is exercised against a libsql database, so
+// the guard observes this row and lets the dump proceed.
+function showRow(name: string): unknown {
+    return {
+        database: { id: 'db-dump', name, kind: 'libsql', status: 'ready', size_bytes: 0, deleted_at: null, purge_at: null },
+    };
+}
+
 const roots: string[] = [];
 
 afterEach(() => {
@@ -65,6 +74,9 @@ function dumpHarness(root: string, data: unknown = chunks('SELECT 1;\n')) {
         tempPath: (target: string) => path.join(path.dirname(target), `.${path.basename(target)}.solidactions-task7.tmp`),
         post: async (url: string, body: Record<string, unknown>, options: Record<string, unknown>) => {
             posts.push({ url, body, options });
+            if (body.operation === 'show') {
+                return { status: 200, data: showRow(String(body.name)) };
+            }
             return { status: 200, data };
         },
         stdout: (line: string) => stdout.push(line),
@@ -74,6 +86,11 @@ function dumpHarness(root: string, data: unknown = chunks('SELECT 1;\n')) {
     };
 
     return { posts, stdout, stderr, confirm, dependencies };
+}
+
+function expectShowPost(post: { url: string; body: Record<string, unknown>; options: Record<string, unknown> }, name: string): void {
+    expect(post.url).toBe('https://app.example.test/api/v1/databases');
+    expect(post.body).toEqual({ operation: 'show', name });
 }
 
 function expectDumpPost(post: { url: string; body: Record<string, unknown>; options: Record<string, unknown> }, name: string): void {
@@ -105,8 +122,9 @@ describe('database dump atomic file contract', () => {
         const target = path.join(root, expected);
         expect(fs.readFileSync(target, 'utf8')).toBe('-- complete\n');
         expect(path.dirname(target)).toBe(root);
-        expect(test.posts).toHaveLength(1);
-        expectDumpPost(test.posts[0], name);
+        expect(test.posts).toHaveLength(2);
+        expectShowPost(test.posts[0], name);
+        expectDumpPost(test.posts[1], name);
         expect(test.stdout.join('\n')).toContain(expected);
         expect(test.stderr).toEqual([]);
     });
@@ -160,7 +178,7 @@ describe('database dump atomic file contract', () => {
         { label: 'non-TTY', isTTY: false, answer: true },
         { label: 'decline', isTTY: true, answer: false },
         { label: 'EOF', isTTY: true, answer: undefined },
-    ])('$label refuses an existing target before any request or write', async ({ isTTY, answer }) => {
+    ])('$label refuses an existing target before any write', async ({ isTTY, answer }) => {
         const databaseDumpWithConfig = await requireDump();
         const root = tempRoot();
         const target = path.join(root, 'existing.sql');
@@ -173,12 +191,15 @@ describe('database dump atomic file contract', () => {
         if (isTTY) await outcome;
         else await expect(outcome).rejects.toMatchObject({ code: 'confirmation_required' });
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the
+        // overwrite confirmation (#1700 Plan D Task 5) — no dump request.
+        expect(test.posts).toHaveLength(1);
+        expectShowPost(test.posts[0], 'Analytics');
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD DUMP');
         expect(fs.readdirSync(root)).toEqual(['existing.sql']);
     });
 
-    it('refuses a destination symlink before prompting or requesting, even with --yes', async () => {
+    it('refuses a destination symlink before prompting or writing, even with --yes', async () => {
         const databaseDumpWithConfig = await requireDump();
         const root = tempRoot();
         const outside = path.join(root, 'outside.sql');
@@ -190,13 +211,16 @@ describe('database dump atomic file contract', () => {
         await expect(databaseDumpWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies))
             .rejects.toThrow(/symbolic link/i);
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs first (#1700 Plan D
+        // Task 5) — the symlink refusal happens before any dump request.
+        expect(test.posts).toHaveLength(1);
+        expectShowPost(test.posts[0], 'Analytics');
         expect(test.confirm).not.toHaveBeenCalled();
         expect(fs.readFileSync(outside, 'utf8')).toBe('DO NOT REPLACE');
         expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
     });
 
-    it('refuses a symlinked destination parent before requesting or creating files', async () => {
+    it('refuses a symlinked destination parent before creating files', async () => {
         const databaseDumpWithConfig = await requireDump();
         const root = tempRoot();
         const outside = path.join(root, 'outside');
@@ -214,13 +238,16 @@ describe('database dump atomic file contract', () => {
             test.dependencies,
         )).rejects.toThrow(/symbolic link/i);
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs first (#1700 Plan D
+        // Task 5) — the symlink refusal happens before any dump request.
+        expect(test.posts).toHaveLength(1);
+        expectShowPost(test.posts[0], 'Analytics');
         expect(test.confirm).not.toHaveBeenCalled();
         expect(fs.readFileSync(path.join(outside, 'analytics.sql'), 'utf8')).toBe('OUTSIDE DUMP');
         expect(fs.readdirSync(outside)).toEqual(['analytics.sql']);
     });
 
-    it('reserves its deterministic sibling temp exclusively without posting or removing a collision', async () => {
+    it('reserves its deterministic sibling temp exclusively without a dump post or removing a collision', async () => {
         const databaseDumpWithConfig = await requireDump();
         const root = tempRoot();
         const target = path.join(root, 'analytics.sql');
@@ -231,7 +258,10 @@ describe('database dump atomic file contract', () => {
         await expect(databaseDumpWithConfig('Analytics', target, {}, CONFIG, test.dependencies))
             .rejects.toThrow(/temporary|already exists|failed/i);
 
-        expect(test.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the
+        // collision is detected (#1700 Plan D Task 5) — no dump post.
+        expect(test.posts).toHaveLength(1);
+        expectShowPost(test.posts[0], 'Analytics');
         expect(fs.existsSync(target)).toBe(false);
         expect(fs.readFileSync(temp, 'utf8')).toBe('PRE-EXISTING TEMP OWNED BY SOMEONE ELSE');
     });

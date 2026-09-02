@@ -1300,6 +1300,33 @@ export async function requestDatabaseRecord(
     )).database;
 }
 
+// Refuses an analytical (duckdb) name for the SQLite-only verbs (exec, dump,
+// pull, push, import), reusing the same `show`-first lookup as `schema` and
+// `query` above. The server (`HandleCliDatabaseOperation`) already refuses
+// these operations with `kind_mismatch`; this guard only makes the refusal
+// fast (before any file read, temp file, or data-plane mint) and legible.
+export async function refuseIfAnalytical(
+    config: Config,
+    name: string,
+    verb: 'exec' | 'sqlite-only',
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    if (row.kind !== 'duckdb') return;
+
+    if (verb === 'exec') {
+        throw new DatabaseOperationError(
+            'read_only',
+            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step",
+        );
+    }
+
+    throw new DatabaseOperationError(
+        'kind_mismatch',
+        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it`,
+    );
+}
+
 export async function databaseShowWithConfig(
     name: string,
     options: DatabaseShowOptions,
@@ -1325,6 +1352,7 @@ export async function databaseImportWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     const prepared = await prepareDatabaseImport(
         name,
         file,
@@ -1608,6 +1636,7 @@ export async function databaseExecWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'exec', io);
 
     if (!options.yes) {
         if (options.json || !io.isTTY) {
@@ -1657,6 +1686,7 @@ export async function databaseDumpWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     const target = resolveDatabaseDestination(io, file, `${safeDatabaseStem(name)}.sql`);
     let temp: string | undefined;
     let handle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
@@ -2040,6 +2070,7 @@ export async function databasePullWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     if (options.writable) {
         return databaseWritablePullWithConfig(name, destination, options, config, io);
     }
