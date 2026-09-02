@@ -170,9 +170,51 @@ describe('database lifecycle control-plane contract', () => {
         await databaseCreateWithConfig('Analytics', { json: true }, CONFIG, test.dependencies);
 
         expect(test.calls).toHaveLength(1);
-        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics' });
+        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('creates a duckdb database with --kind and polls show until ready', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const ready = { ...ACTIVE, kind: 'duckdb', status: 'ready' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        const sleeps: number[] = [];
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            if (body.operation === 'create') return { data: { database: provisioning } };
+            return { data: { database: ready } };
+        };
+        (test.dependencies as any).sleep = async (ms: number) => { sleeps.push(ms); };
+
+        await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+
+        expect(calls[0]).toEqual({ operation: 'create', name: 'Orders', kind: 'duckdb' });
+        expect(calls[1]).toEqual({ operation: 'show', name: 'Orders' });
+        expect(sleeps.length).toBeGreaterThan(0);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ready });
+    });
+
+    it('does not poll when --no-wait is passed', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const test = harness({ database: provisioning });
+
+        await databaseCreateWithConfig('Orders', { kind: 'duckdb', wait: false, json: true }, CONFIG, test.dependencies);
+
+        expect(test.calls).toHaveLength(1);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: provisioning });
+    });
+
+    it('defaults --kind to libsql and creates synchronously', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        await databaseCreateWithConfig('Analytics', {}, CONFIG, test.dependencies);
+
+        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
     });
 
     it('undeletes with the exact operation and renders the stable response payload as JSON', async () => {
@@ -210,6 +252,7 @@ describe('database lifecycle control-plane contract', () => {
             options: {},
             response: { database: ACTIVE },
             operation: 'create',
+            extraBody: { kind: 'libsql' },
             success: /creat/i,
             requiredValues: ['Analytics', 'ready'],
         },
@@ -245,7 +288,7 @@ describe('database lifecycle control-plane contract', () => {
         await handler(scenario.name, scenario.options, CONFIG, test.dependencies);
 
         expect(test.calls).toHaveLength(1);
-        expectControlPost(test.calls[0], { operation: scenario.operation, name: scenario.name });
+        expectControlPost(test.calls[0], { operation: scenario.operation, name: scenario.name, ...(scenario as any).extraBody });
         const output = test.stdout.join('\n');
         expect(output).toMatch(scenario.success);
         for (const value of scenario.requiredValues) {
@@ -335,7 +378,7 @@ describe('database create --from importer handoff', () => {
         );
 
         expect(events).toEqual(['provision', 'import:Analytics:fixtures/seed.sql']);
-        expectControlPost(test.calls[0], { operation: 'create', name: 'requested-name' });
+        expectControlPost(test.calls[0], { operation: 'create', name: 'requested-name', kind: 'libsql' });
     });
 
     it('reports that the created database remains in place when the later import fails', async () => {

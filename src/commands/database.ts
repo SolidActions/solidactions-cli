@@ -75,6 +75,8 @@ interface DatabaseListOptions {
 
 interface DatabaseCreateOptions {
     from?: string;
+    kind?: DatabaseKind;
+    wait?: boolean;
     json?: boolean;
 }
 
@@ -1081,6 +1083,9 @@ export async function databaseListWithConfig(
     io.stdout(`${renderDatabaseTable(data.databases)}\nQuota: ${data.quota.used} / ${data.quota.limit}`);
 }
 
+const CREATE_POLL_INTERVAL_MS = 2_000;
+const CREATE_POLL_TIMEOUT_MS = 5 * 60_000;
+
 export async function databaseCreateWithConfig(
     name: string,
     options: DatabaseCreateOptions,
@@ -1088,14 +1093,41 @@ export async function databaseCreateWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const kind: DatabaseKind = options.kind === 'duckdb' ? 'duckdb' : 'libsql';
     const preparedSource = options.from && !io.importDatabase
         ? await prepareDatabaseImportSource(options.from, io.cwd, io.filesystem)
         : undefined;
-    const data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
+    let data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
         config,
-        { operation: 'create', name },
+        { operation: 'create', name, kind },
         requestDependencies(io),
     ));
+
+    if (kind === 'duckdb' && options.wait !== false && data.database.status === 'provisioning') {
+        if (!options.json) {
+            io.stdout(`Provisioning ${kindLabel(kind)} database "${data.database.name}"… this can take about a minute.`);
+        }
+        const deadline = io.now() + CREATE_POLL_TIMEOUT_MS;
+        let record = data.database;
+        while (record.status === 'provisioning' && io.now() < deadline) {
+            await io.sleep(CREATE_POLL_INTERVAL_MS);
+            record = await requestDatabaseRecord(name, config, dependencies);
+        }
+        data = { database: record };
+
+        if (record.status !== 'ready') {
+            if (record.status === 'provisioning') {
+                throw new DatabaseOperationError(
+                    'provisioning_timeout',
+                    `Database "${name}" is still provisioning after ${Math.round(CREATE_POLL_TIMEOUT_MS / 60_000)} minute(s). It remains in place; check status with \`solidactions database show ${name}\`.`,
+                );
+            }
+            throw new DatabaseOperationError(
+                'provisioning_failed',
+                `Database "${name}" failed to provision (status: ${record.status}). Check \`solidactions database show ${name}\` for details.`,
+            );
+        }
+    }
 
     if (options.from) {
         try {

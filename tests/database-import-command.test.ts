@@ -1217,7 +1217,7 @@ describe('database create --from real importer', () => {
         await databaseCreateWithConfig('requested-name', { from: source }, CONFIG, test.dependencies);
 
         expect(test.posts.map((call) => call.body)).toEqual([
-            { operation: 'create', name: 'requested-name' },
+            { operation: 'create', name: 'requested-name', kind: 'libsql' },
             { operation: 'access', name: 'Analytics', mode: 'write' },
         ]);
         expect(test.executions).toEqual([{ client: 1, sql: managedEnvelope([statement]) }]);

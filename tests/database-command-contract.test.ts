@@ -10,7 +10,7 @@ const pkg = require('../package.json');
 
 const COMMANDS = [
     { verb: 'list', args: [], options: ['--json'] },
-    { verb: 'create', args: [['name', true]], options: ['--from', '--json'] },
+    { verb: 'create', args: [['name', true]], options: ['--kind', '--from', '--no-wait', '--json'] },
     { verb: 'show', args: [['name', true]], options: ['--json'] },
     { verb: 'delete', args: [['name', true]], options: ['--yes', '--json'] },
     { verb: 'undelete', args: [['name', true]], options: ['--json'] },
@@ -23,7 +23,7 @@ const COMMANDS = [
     { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first

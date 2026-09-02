@@ -255,7 +255,9 @@ database
     .command('create')
     .description('Create a workspace database')
     .argument('<name>', 'Database name')
+    .option('--kind <kind>', 'Database kind: libsql (default) or duckdb', 'libsql')
     .option('--from <file.sql>', 'Import a SQL file after creation')
+    .option('--no-wait', 'Do not wait for analytical (duckdb) provisioning to finish')
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
         await databaseCreate(name, options);
