@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 interface DatabaseRecord {
     name: string;
+    kind: string;
     status: string;
     deleted_at: string | null;
     purge_at: string | null;
@@ -49,6 +50,7 @@ const CONFIG: Config = {
 const ACTIVE: DatabaseRecord = {
     id: 'database-active-id',
     name: 'Analytics',
+    kind: 'libsql',
     status: 'ready',
     deleted_at: null,
     purge_at: null,
@@ -58,6 +60,7 @@ const ACTIVE: DatabaseRecord = {
 const DELETED: DatabaseRecord = {
     id: 'database-deleted-id',
     name: 'Retired',
+    kind: 'libsql',
     status: 'ready',
     deleted_at: '2026-08-07T12:00:00.000000Z',
     purge_at: '2026-09-06T12:00:00.000000Z',

@@ -1232,6 +1232,7 @@ describe('database create --from real importer', () => {
         const expected = {
             database: {
                 name: 'Analytics',
+                kind: 'libsql',
                 status: 'ready',
                 deleted_at: null,
                 purge_at: null,

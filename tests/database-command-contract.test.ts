@@ -11,6 +11,7 @@ const pkg = require('../package.json');
 const COMMANDS = [
     { verb: 'list', args: [], options: ['--json'] },
     { verb: 'create', args: [['name', true]], options: ['--from', '--json'] },
+    { verb: 'show', args: [['name', true]], options: ['--json'] },
     { verb: 'delete', args: [['name', true]], options: ['--yes', '--json'] },
     { verb: 'undelete', args: [['name', true]], options: ['--json'] },
     { verb: 'schema', args: [['name', true]], options: ['--json'] },

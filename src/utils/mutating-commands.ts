@@ -94,6 +94,7 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     // Runs locally; does not touch server state for any workspace.
     'dev',
     'database list',
+    'database show',
     'database schema',
     'database query',
     // Downloads a dump and writes it to a local file only, like the `pull`

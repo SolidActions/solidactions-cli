@@ -36,13 +36,25 @@ import {
 } from '../utils/database-sql-import-runner';
 import { renderTable } from '../utils/table';
 
+export type DatabaseKind = 'libsql' | 'duckdb';
+export type DatabaseActivity = 'active' | 'idle' | 'idle_no_credit' | 'waking' | 'optimizing';
+
 export interface DatabaseRecord {
     id?: string;
     name: string;
+    kind: DatabaseKind;
     status: string;
+    activity?: DatabaseActivity;
     deleted_at: string | null;
     purge_at: string | null;
     size_bytes: number;
+    size_limit_bytes?: number;
+    over_cap?: boolean;
+    table_count?: number;
+    last_loaded_at?: string | null;
+    last_optimized_at?: string | null;
+    created_at?: string;
+    updated_at?: string;
 }
 
 interface DatabaseListResponse {
@@ -211,17 +223,47 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
         || typeof database.size_bytes !== 'number'
         || (database.deleted_at !== null && typeof database.deleted_at !== 'string')
         || (database.purge_at !== null && typeof database.purge_at !== 'string')
+        || (database.kind !== undefined && database.kind !== 'libsql' && database.kind !== 'duckdb')
+        || (database.activity !== undefined && typeof database.activity !== 'string')
+        || (database.size_limit_bytes !== undefined && typeof database.size_limit_bytes !== 'number')
+        || (database.over_cap !== undefined && typeof database.over_cap !== 'boolean')
+        || (database.table_count !== undefined && typeof database.table_count !== 'number')
+        || (
+            database.last_loaded_at !== undefined
+            && database.last_loaded_at !== null
+            && typeof database.last_loaded_at !== 'string'
+        )
+        || (
+            database.last_optimized_at !== undefined
+            && database.last_optimized_at !== null
+            && typeof database.last_optimized_at !== 'string'
+        )
+        || (database.created_at !== undefined && typeof database.created_at !== 'string')
+        || (database.updated_at !== undefined && typeof database.updated_at !== 'string')
     ) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
     }
 
+    // `kind` defaults to 'libsql' for a server response that predates this
+    // field — every existing fixture across the suite keeps validating.
+    const kind: DatabaseKind = database.kind === 'duckdb' ? 'duckdb' : 'libsql';
+
     return {
         ...(database.id === undefined ? {} : { id: database.id }),
         name: database.name,
+        kind,
         status: database.status,
+        ...(database.activity === undefined ? {} : { activity: database.activity }),
         deleted_at: database.deleted_at,
         purge_at: database.purge_at,
         size_bytes: database.size_bytes,
+        ...(database.size_limit_bytes === undefined ? {} : { size_limit_bytes: database.size_limit_bytes }),
+        ...(database.over_cap === undefined ? {} : { over_cap: database.over_cap }),
+        ...(database.table_count === undefined ? {} : { table_count: database.table_count }),
+        ...(database.last_loaded_at === undefined ? {} : { last_loaded_at: database.last_loaded_at }),
+        ...(database.last_optimized_at === undefined ? {} : { last_optimized_at: database.last_optimized_at }),
+        ...(database.created_at === undefined ? {} : { created_at: database.created_at }),
+        ...(database.updated_at === undefined ? {} : { updated_at: database.updated_at }),
     };
 }
 
@@ -515,6 +557,43 @@ function renderSchema(schema: DatabaseSchemaResponse): string {
     }
 
     return sections.join('\n\n');
+}
+
+/** "1.2 GB", "512.0 MB", "900 B" — used by `show`, `list`, and `ingest`. */
+export function formatByteSize(bytes: number): string {
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+}
+
+interface DatabaseShowOptions {
+    json?: boolean;
+}
+
+// The analytical (DuckDB) kind is Beta on every surface — this label is the
+// canonical rendering; standard (libSQL) rows keep the plain kind value.
+function kindLabel(kind: DatabaseKind): string {
+    return kind === 'duckdb' ? 'Analytical · DuckDB (Beta)' : kind;
+}
+
+function renderShow(database: DatabaseRecord): string {
+    const lines = [
+        `Name: ${database.name}`,
+        `Kind: ${kindLabel(database.kind)}`,
+        `Status: ${database.status}`,
+    ];
+    if (database.kind === 'duckdb') {
+        lines.push(`Activity: ${database.activity ?? 'unknown'}`);
+        lines.push(`Size: ${formatByteSize(database.size_bytes)} of ${formatByteSize(database.size_limit_bytes ?? 0)}`);
+        lines.push(`Tables: ${database.table_count ?? 0}`);
+        lines.push(`Last loaded: ${database.last_loaded_at ?? 'never'}`);
+        lines.push(`Last optimized: ${database.last_optimized_at ?? 'never'}`);
+    } else {
+        lines.push(`Size: ${formatByteSize(database.size_bytes)}`);
+    }
+    lines.push(`Created: ${database.created_at ?? '-'}`);
+    return lines.join('\n');
 }
 
 const INCOMPLETE_DUMP_MARKER = '-- DOWNLOAD INCOMPLETE';
@@ -1065,6 +1144,39 @@ export async function databaseCreateWithConfig(
     }
 
     io.stdout(renderMutation('create', data.database));
+}
+
+// The "call show first, branch on `.kind`" helper every later analytical verb
+// (schema/query/exec/dump/pull/push/import/ingest) reuses to learn a
+// database's kind before dispatching to the libsql or duckdb code path.
+export async function requestDatabaseRecord(
+    name: string,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<DatabaseRecord> {
+    const io = resolveDependencies(dependencies);
+    return stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
+        config,
+        { operation: 'show', name },
+        requestDependencies(io),
+    )).database;
+}
+
+export async function databaseShowWithConfig(
+    name: string,
+    options: DatabaseShowOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const database = await requestDatabaseRecord(name, config, dependencies);
+
+    if (options.json) {
+        writeJson(io.stdout, { database });
+        return;
+    }
+
+    io.stdout(renderShow(database));
 }
 
 export async function databaseImportWithConfig(
@@ -1825,6 +1937,14 @@ export async function databaseCreate(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databaseCreateWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databaseShow(
+    name: string,
+    options: DatabaseShowOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseShowWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
 }
 
 export async function databaseDelete(

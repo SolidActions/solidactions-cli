@@ -68,6 +68,7 @@ import {
     databasePull,
     databaseQuery,
     databaseSchema,
+    databaseShow,
     databaseUndelete,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
@@ -258,6 +259,15 @@ database
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
         await databaseCreate(name, options);
+    });
+
+database
+    .command('show')
+    .description('Show database details')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseShow(name, options);
     });
 
 database
