@@ -143,6 +143,20 @@ function expectControlPost(call: PostCall, body: Record<string, unknown>): void 
     });
 }
 
+/**
+ * Locate the rendered table row (from a `renderDatabaseTable` line-per-record
+ * table) that contains `match` and split it into its column cell values.
+ * Columns are padded with at least two trailing spaces by `renderTable`, so
+ * splitting on runs of 2+ spaces reliably isolates NAME/KIND/STATUS/ACTIVITY/etc.
+ */
+function tableRow(output: string, match: string): string[] {
+    const line = output.split('\n').find((candidate) => candidate.trim().startsWith(match));
+    if (line === undefined) {
+        throw new Error(`no table row starting with "${match}" in:\n${output}`);
+    }
+    return line.trim().split(/ {2,}/);
+}
+
 describe('database lifecycle control-plane contract', () => {
     it('lists active and deleted rows with stable fields and quota in the shared table style', async () => {
         const databaseListWithConfig = await requireExport('databaseListWithConfig');
@@ -179,8 +193,16 @@ describe('database lifecycle control-plane contract', () => {
         expect(output).toContain('duckdb');
         expect(output).toContain('idle');
         expect(output).toContain('1.2 GB / 2.0 GB');
-        expect(output).toMatch(/libsql.*2.*5/is);
-        expect(output).toMatch(/duckdb.*1.*3/is);
+        // Pin used/limit to their scope on the SAME line, specifically enough
+        // that swapping which scope string renders under which kind fails:
+        // standard (libsql) databases are limited per workspace, analytical
+        // (duckdb) per organisation.
+        expect(output).toContain(
+            `libsql ${LIST_RESPONSE.quota.libsql.used} / ${LIST_RESPONSE.quota.libsql.limit} (${LIST_RESPONSE.quota.libsql.scope})`,
+        );
+        expect(output).toContain(
+            `duckdb ${LIST_RESPONSE.quota.duckdb.used} / ${LIST_RESPONSE.quota.duckdb.limit} (${LIST_RESPONSE.quota.duckdb.scope})`,
+        );
 
         const stdoutBeforeFilteredCall = test.stdout.length;
         await databaseListWithConfig({ kind: 'duckdb' } as any, CONFIG, test.dependencies);
@@ -216,6 +238,18 @@ describe('database lifecycle control-plane contract', () => {
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(LIST_RESPONSE);
         expect(test.stderr).toEqual([]);
         expect(test.stdout.join('\n')).not.toMatch(/Databases:|Quota:|\u001b\[/);
+    });
+
+    it('filters JSON output to the matching kind while keeping the full quota', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        await databaseListWithConfig({ kind: 'duckdb', json: true } as any, CONFIG, test.dependencies);
+
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({
+            databases: [ANALYTICAL],
+            quota: LIST_RESPONSE.quota,
+        });
     });
 
     it('creates with the exact operation and renders the stable response payload as JSON', async () => {
@@ -271,6 +305,34 @@ describe('database lifecycle control-plane contract', () => {
         await databaseCreateWithConfig('Analytics', {}, CONFIG, test.dependencies);
 
         expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
+    });
+
+    it('renders KIND and the ACTIVITY placeholder on a libsql mutation table', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        await databaseCreateWithConfig('Analytics', {}, CONFIG, test.dependencies);
+
+        const row = tableRow(test.stdout.join('\n'), ACTIVE.name);
+        expect(row[1]).toBe('libsql');
+        expect(row[3]).toBe('-');
+    });
+
+    it('renders KIND and the real ACTIVITY value on a duckdb mutation table', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const duckdbActive: DatabaseRecord = {
+            ...ACTIVE,
+            name: 'Warehouse',
+            kind: 'duckdb',
+            activity: 'active',
+        };
+        const test = harness({ database: duckdbActive });
+
+        await databaseCreateWithConfig('Warehouse', { kind: 'duckdb' }, CONFIG, test.dependencies);
+
+        const row = tableRow(test.stdout.join('\n'), duckdbActive.name);
+        expect(row[1]).toBe('duckdb');
+        expect(row[3]).toBe('active');
     });
 
     it('throws provisioning_timeout and stops polling once the deadline passes while still provisioning', async () => {
