@@ -242,7 +242,7 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
         || typeof database.size_bytes !== 'number'
         || (database.deleted_at !== null && typeof database.deleted_at !== 'string')
         || (database.purge_at !== null && typeof database.purge_at !== 'string')
-        || (database.kind !== undefined && database.kind !== 'libsql' && database.kind !== 'duckdb')
+        || (database.kind !== 'libsql' && database.kind !== 'duckdb')
         || (database.activity !== undefined && typeof database.activity !== 'string')
         || (database.size_limit_bytes !== undefined && typeof database.size_limit_bytes !== 'number')
         || (database.over_cap !== undefined && typeof database.over_cap !== 'boolean')
@@ -263,9 +263,10 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
     }
 
-    // `kind` defaults to 'libsql' for a server response that predates this
-    // field — every existing fixture across the suite keeps validating.
-    const kind: DatabaseKind = database.kind === 'duckdb' ? 'duckdb' : 'libsql';
+    // A missing or unrecognized `kind` is rejected above (upstream_unavailable)
+    // rather than defaulted — silently treating an unknown kind as 'libsql'
+    // would make analytical-only refusals (read-only, dump) fail open (#1700 R10).
+    const kind: DatabaseKind = database.kind;
 
     return {
         ...(database.id === undefined ? {} : { id: database.id }),

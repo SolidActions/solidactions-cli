@@ -145,6 +145,7 @@ function importHarness(root: string, options: HarnessOptions = {}) {
                     data: {
                         database: {
                             name: 'Analytics',
+                            kind: 'libsql',
                             status: 'ready',
                             deleted_at: null,
                             purge_at: null,

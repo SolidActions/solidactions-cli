@@ -108,4 +108,41 @@ describe('database show', () => {
 
         expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ANALYTICAL_ROW });
     });
+
+    // #1700 R10: a missing or unrecognized `kind` must not be defaulted to
+    // 'libsql' — that would make analytical-only refusals (read-only, dump)
+    // fail open. Both cases are rejected as `upstream_unavailable`, the same
+    // way `stableAnalyticalSchema` rejects an unrecognized /schema shape.
+    it('rejects a show response with a missing kind instead of defaulting to libsql', async () => {
+        const module = await loadDatabaseCommands();
+        const databaseShowWithConfig = module.databaseShowWithConfig as Function;
+        const { kind: _omitted, ...rowWithoutKind } = STANDARD_ROW;
+        const test = harness({ database: rowWithoutKind });
+
+        let caught: any;
+        try {
+            await databaseShowWithConfig('app', {}, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.stdout).toEqual([]);
+    });
+
+    it('rejects a show response with an unrecognized kind instead of defaulting to libsql', async () => {
+        const module = await loadDatabaseCommands();
+        const databaseShowWithConfig = module.databaseShowWithConfig as Function;
+        const test = harness({ database: { ...STANDARD_ROW, kind: 'postgres' } });
+
+        let caught: any;
+        try {
+            await databaseShowWithConfig('app', {}, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.stdout).toEqual([]);
+    });
 });

@@ -362,4 +362,48 @@ describe('database dump atomic file contract', () => {
         expect(fs.existsSync(ownTemp)).toBe(false);
         expect(fs.readFileSync(unrelated, 'utf8')).toBe('NOT OUR FILE');
     });
+
+    // #1700 R10: the analytical-name guard reads `show`'s `kind` to decide
+    // whether to refuse the dump. A missing `kind` must not be treated as
+    // 'libsql' — that would let an analytical database's dump proceed instead
+    // of being refused (the fail-open the ruling calls out). The `dump`
+    // operation here is wired to succeed (not throw) so this proves the
+    // refusal happens before any dump request is ever sent, not merely that
+    // *some* later call happens to fail.
+    it('refuses the dump when the show response omits kind, instead of assuming libsql and streaming it', async () => {
+        const databaseDumpWithConfig = await requireDump();
+        const root = tempRoot();
+        const target = path.join(root, 'unknown-kind.sql');
+        const test = dumpHarness(root, chunks('SELECT 1;\n'));
+        test.dependencies.post = async (url: string, body: Record<string, unknown>, options: Record<string, unknown>) => {
+            test.posts.push({ url, body, options });
+            if (body.operation === 'show') {
+                return {
+                    status: 200,
+                    data: {
+                        database: {
+                            id: 'db-dump',
+                            name: String(body.name),
+                            status: 'ready',
+                            size_bytes: 0,
+                            deleted_at: null,
+                            purge_at: null,
+                        },
+                    },
+                };
+            }
+            return { status: 200, data: chunks('SELECT 1;\n') };
+        };
+
+        let caught: any;
+        try {
+            await databaseDumpWithConfig('Analytics', target, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.posts.map((post) => post.body.operation)).toEqual(['show']);
+        expect(fs.existsSync(target)).toBe(false);
+    });
 });
