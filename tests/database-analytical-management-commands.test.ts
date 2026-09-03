@@ -160,17 +160,34 @@ describe('optimize', () => {
         ]);
     });
 
-    it('renders a running operation as already running, not an error', async () => {
+    it('renders a running operation that predates the call as already running, not an error', async () => {
         const module = await loadDatabaseCommands();
         const databaseOptimizeWithConfig = module.databaseOptimizeWithConfig as Function;
         const test = harness({
             show: DUCKDB_SHOW,
-            optimize: { operation_id: 'op-1', state: 'running', started_at: 'now' },
+            optimize: { operation_id: 'op-1', state: 'running', started_at: new Date(Date.now() - 60_000).toISOString() },
         });
 
         await databaseOptimizeWithConfig('orders', {}, CONFIG, test.dependencies);
 
         expect(test.stdout.join('\n')).toMatch(/already running/i);
+    });
+
+    it('renders a running operation started by this same call as started, not already running', async () => {
+        // C-1: the server returns an identical `{state: 'running', started_at}` body for a
+        // freshly-dispatched optimize and for one already in flight (Appendix A.7) — the CLI
+        // must not claim "already running" for the one it just started.
+        const module = await loadDatabaseCommands();
+        const databaseOptimizeWithConfig = module.databaseOptimizeWithConfig as Function;
+        const test = harness({
+            show: DUCKDB_SHOW,
+            optimize: { operation_id: 'op-1', state: 'running', started_at: new Date().toISOString() },
+        });
+
+        await databaseOptimizeWithConfig('orders', {}, CONFIG, test.dependencies);
+
+        expect(test.stdout.join('\n')).toMatch(/optimize started/i);
+        expect(test.stdout.join('\n')).not.toMatch(/already running/i);
     });
 
     it('rides out a waking admission response on the initial call', async () => {
@@ -228,12 +245,14 @@ describe('optimize', () => {
                 optimize: { operation_id: 'op-1', state: 'running', started_at: 'now' },
                 optimize_status: { operation_id: 'op-1', state: 'running', started_at: 'now' },
             });
-            // now() call order: (1) the initial optimize call's unused
-            // wake-wait deadline, (2) the --wait poll deadline (= 0 here),
-            // (3) the first loop check (1_000, under deadline -> one poll
-            // happens), (4) the second loop check (950_000, past the
-            // deadline -> loop stops and the timeout is thrown).
-            const timestamps = [0, 0, 1_000, 950_000];
+            // now() call order: (1) the pre-request `requestedAt` capture
+            // (C-1's already-running-vs-just-started heuristic; unused here
+            // since the timeout throws first), (2) the initial optimize
+            // call's unused wake-wait deadline, (3) the --wait poll deadline
+            // (= 0 here), (4) the first loop check (1_000, under deadline ->
+            // one poll happens), (5) the second loop check (950_000, past
+            // the deadline -> loop stops and the timeout is thrown).
+            const timestamps = [0, 0, 0, 1_000, 950_000];
             let nowCalls = 0;
             (test.dependencies as any).now = () => timestamps[Math.min(nowCalls++, timestamps.length - 1)];
 

@@ -80,7 +80,7 @@ describe('database show', () => {
         const output = test.stdout.join('\n');
         expect(output).toContain('Kind: Analytical · DuckDB (Beta)');
         expect(output).toContain('Activity: active');
-        expect(output).toContain('1.2 GB of 2.0 GB');
+        expect(output).toContain('1.2 GiB of 2.0 GiB');
         expect(output).toContain('Tables: 3');
         expect(output).toContain('Last loaded: 2026-09-01T12:00:00Z');
         expect(output).toContain('Last optimized: 2026-08-30T04:00:00Z');

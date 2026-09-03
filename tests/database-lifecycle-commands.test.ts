@@ -192,7 +192,7 @@ describe('database lifecycle control-plane contract', () => {
         expect(output).toMatch(/ACTIVITY/i);
         expect(output).toContain('duckdb');
         expect(output).toContain('idle');
-        expect(output).toContain('1.2 GB / 2.0 GB');
+        expect(output).toContain('1.2 GiB / 2.0 GiB');
         // Pin used/limit to their scope on the SAME line, specifically enough
         // that swapping which scope string renders under which kind fails:
         // standard (libsql) databases are limited per workspace, analytical
@@ -417,6 +417,27 @@ describe('database lifecycle control-plane contract', () => {
         expect(test.calls).toEqual([]);
     });
 
+    it('rejects --kind duckdb combined with --from before sending any request (C-2)', async () => {
+        // An analytical database is a billable, org-quota-scoped resource — if this
+        // combination reached the server it would create and bill the database, wait
+        // out provisioning, and only then fail the (inapplicable) SQL import, leaving
+        // the database behind consuming quota. Must be rejected up front, with no POST.
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', from: 'schema.sql', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_flag_combination' });
+        expect(caught?.message).toMatch(/--from/);
+        expect(caught?.message).toMatch(/--kind duckdb/);
+        expect(test.calls).toEqual([]);
+    });
+
     it('undeletes with the exact operation and renders the stable response payload as JSON', async () => {
         const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
         const payload = { database: ACTIVE };
@@ -428,6 +449,48 @@ describe('database lifecycle control-plane contract', () => {
         expectControlPost(test.calls[0], { operation: 'undelete', name: 'Analytics' });
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('undeletes an analytical database through the same generic operation, with no client-side kind gating (C-4)', async () => {
+        // `undelete` applies no kind-based refusal on the CLI side (unlike `dump`/`pull`/
+        // `push`/`import`/`exec`) — it dispatches straight to the shared operation, so an
+        // analytical database undeletes exactly like a standard one and any server-side
+        // refusal (or success) is surfaced verbatim through the generic error boundary.
+        const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
+        const payload = { database: ANALYTICAL };
+        const test = harness(payload);
+
+        await databaseUndeleteWithConfig('Warehouse', { json: true }, CONFIG, test.dependencies);
+
+        expect(test.calls).toHaveLength(1);
+        expectControlPost(test.calls[0], { operation: 'undelete', name: 'Warehouse' });
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
+    });
+
+    it('surfaces a server-side undelete refusal for an analytical database verbatim (C-4)', async () => {
+        const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
+        const test = harness();
+        test.dependencies.post = async () => {
+            const error: any = new Error('Request failed with status code 422');
+            error.response = {
+                status: 422,
+                data: { code: 'kind_mismatch', message: '"Warehouse" is an analytical database and cannot be undeleted yet.' },
+            };
+            throw error;
+        };
+
+        let caught: any;
+        try {
+            await databaseUndeleteWithConfig('Warehouse', { json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({
+            code: 'kind_mismatch',
+            message: '"Warehouse" is an analytical database and cannot be undeleted yet.',
+            status: 422,
+        });
     });
 
     it('deletes with --yes without prompting and preserves the stable JSON payload', async () => {

@@ -122,12 +122,42 @@ describe('kind-dispatched query', () => {
         ]);
     });
 
+    it('renders NULL and a JSON/STRUCT cell legibly in the human table, not as the string "null" or "[object Object]"', async () => {
+        const module = await loadDatabaseCommands();
+        const databaseQueryWithConfig = module.databaseQueryWithConfig as Function;
+        const test = harness({
+            show: DUCKDB_ROW,
+            query: { columns: ['note', 'tags'], rows: [[null, { a: 1 }]], truncated: false, elapsed_ms: 5 },
+        });
+
+        await databaseQueryWithConfig('orders', 'select 1', {}, CONFIG, test.dependencies);
+
+        const output = test.stdout.join('\n');
+        expect(output).toContain('NULL');
+        expect(output).not.toMatch(/\bnull\b/);
+        expect(output).toContain('{"a":1}');
+        expect(output).not.toContain('[object Object]');
+    });
+
     it('rejects a --limit outside 1..10000 before making a request', async () => {
         const module = await loadDatabaseCommands();
         const databaseQueryWithConfig = module.databaseQueryWithConfig as Function;
         const test = harness({ show: DUCKDB_ROW });
 
         await expect(databaseQueryWithConfig('orders', 'select 1', { json: true, limit: 10001 }, CONFIG, test.dependencies))
+            .rejects.toMatchObject({ code: 'invalid_limit' });
+        expect(test.calls).toEqual([{ operation: 'show', name: 'orders' }]);
+    });
+
+    it('rejects a non-numeric --limit (parseInt NaN) as invalid_limit instead of silently passing it through', async () => {
+        // `--limit abc` parses via `parseInt(value, 10)` in index.ts, producing NaN. NaN
+        // fails both `< 1` and `> 10000`, so the naive range guard let it through, where it
+        // would serialize as `row_limit: null` and surface as a generic server 422.
+        const module = await loadDatabaseCommands();
+        const databaseQueryWithConfig = module.databaseQueryWithConfig as Function;
+        const test = harness({ show: DUCKDB_ROW });
+
+        await expect(databaseQueryWithConfig('orders', 'select 1', { json: true, limit: Number.NaN }, CONFIG, test.dependencies))
             .rejects.toMatchObject({ code: 'invalid_limit' });
         expect(test.calls).toEqual([{ operation: 'show', name: 'orders' }]);
     });

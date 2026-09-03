@@ -129,7 +129,110 @@ describe('database ingest', () => {
         expect(calls[3]).toEqual({ operation: 'ingest_status', name: 'orders', batch_id: 'ba2245e691043668f70b69e6217e9bfb' });
         expect(calls[4]).toEqual({ operation: 'ingest_status', name: 'orders', batch_id: 'ba2245e691043668f70b69e6217e9bfb' });
         expect(statusPolls).toBe(2);
-        expect(stdout.join('\n')).toMatch(/1 row.*4\.0 KB/is);
+        expect(stdout.join('\n')).toMatch(/1 row.*4\.0 KiB/is);
+    });
+
+    it('threads dataPlaneTimeoutMs into the presigned R2 PUT so a stalled upload cannot hang forever (C-3)', async () => {
+        fs.writeFileSync(tmpFile, CONTENT);
+        const module = await loadDatabaseCommands();
+        const databaseIngestWithConfig = module.databaseIngestWithConfig as Function;
+
+        let putTimeout: number | undefined;
+        const dependencies = {
+            post: async (_url: string, body: Record<string, unknown>) => {
+                if (body.operation === 'show') return { data: DUCKDB_ROW };
+                if (body.operation === 'ingest_prepare') {
+                    return {
+                        data: {
+                            batch_id: body.batch_id,
+                            upload_url: 'https://r2.example.test/staging/x.csv',
+                            upload_headers: { 'Content-Length': String(CONTENT.length), 'x-amz-checksum-sha256': 'YmFzZTY0' },
+                            expires_at: '2026-09-02T00:00:00Z',
+                        },
+                    };
+                }
+                if (body.operation === 'ingest_commit') {
+                    return { data: { batch_id: body.batch_id, state: 'applying' } };
+                }
+                if (body.operation === 'ingest_status') {
+                    return { data: { batch_id: body.batch_id, state: 'acked', rows: 1, durable: true, live_bytes: 4096, acked_at: '2026-09-02T00:00:01Z' } };
+                }
+                throw new Error(`unexpected operation ${body.operation}`);
+            },
+            put: async (_url: string, body: unknown, options: { headers: Record<string, string>; timeout?: number }) => {
+                putTimeout = options.timeout;
+                drainIfStream(body);
+                return { data: '', status: 200 };
+            },
+            stdout: () => undefined,
+            stderr: () => undefined,
+            isTTY: false,
+            sleep: async () => undefined,
+            filesystem: fs.promises,
+            dataPlaneTimeoutMs: 45_000,
+        };
+
+        await databaseIngestWithConfig('orders', tmpFile, { table: 'events' }, CONFIG, dependencies);
+
+        expect(putTimeout).toBe(45_000);
+    });
+
+    it('normalizes --json output to the stable IngestOutcome shape, stripping unknown server fields', async () => {
+        // `ingest`'s `--json` body was the only new-verb response never run through a stable
+        // normalizer — this pins that `ingest_commit`'s response is validated/narrowed the
+        // same way every other mutation response is, not written to stdout verbatim.
+        fs.writeFileSync(tmpFile, CONTENT);
+        const module = await loadDatabaseCommands();
+        const databaseIngestWithConfig = module.databaseIngestWithConfig as Function;
+        const stdout: string[] = [];
+
+        const dependencies = {
+            post: async (_url: string, body: Record<string, unknown>) => {
+                if (body.operation === 'show') return { data: DUCKDB_ROW };
+                if (body.operation === 'ingest_prepare') {
+                    return {
+                        data: {
+                            batch_id: body.batch_id,
+                            upload_url: 'https://r2.example.test/staging/x.csv',
+                            upload_headers: { 'Content-Length': String(CONTENT.length), 'x-amz-checksum-sha256': 'YmFzZTY0' },
+                            expires_at: '2026-09-02T00:00:00Z',
+                        },
+                    };
+                }
+                if (body.operation === 'ingest_commit') {
+                    return {
+                        data: {
+                            batch_id: body.batch_id,
+                            state: 'acked',
+                            rows: 1,
+                            durable: true,
+                            live_bytes: 4096,
+                            acked_at: '2026-09-02T00:00:01Z',
+                            // Not part of `IngestOutcome` — must not reach `--json` stdout.
+                            internal_debug_trace: 'server-only diagnostic',
+                        },
+                    };
+                }
+                throw new Error(`unexpected operation ${body.operation}`);
+            },
+            put: async (_url: string, body: unknown) => { drainIfStream(body); return { data: '', status: 200 }; },
+            stdout: (line: string) => stdout.push(line),
+            stderr: () => undefined,
+            isTTY: false,
+            sleep: async () => undefined,
+            filesystem: fs.promises,
+        };
+
+        await databaseIngestWithConfig('orders', tmpFile, { table: 'events', json: true }, CONFIG, dependencies);
+
+        expect(JSON.parse(stdout.join('\n'))).toEqual({
+            batch_id: 'ba2245e691043668f70b69e6217e9bfb',
+            state: 'acked',
+            rows: 1,
+            durable: true,
+            live_bytes: 4096,
+            acked_at: '2026-09-02T00:00:01Z',
+        });
     });
 
     it('uses an explicit --batch-id when given instead of the canonical default, and sends mode=replace when requested', async () => {
@@ -260,7 +363,7 @@ describe('database ingest', () => {
         await expect(databaseIngestWithConfig('orders', tmpFile, { table: 'events' }, CONFIG, dependencies))
             .rejects.toMatchObject({
                 code: 'size_limit_exceeded',
-                message: expect.stringMatching(/storage limit.*\(limit 1\.0 GB\)/is),
+                message: expect.stringMatching(/storage limit.*\(limit 1\.0 GiB\)/is),
             });
     });
 
@@ -392,6 +495,6 @@ describe('database ingest', () => {
 
         expect(statusPolls).toBe(4);
         expect(sleeps.length).toBe(4);
-        expect(stdout.join('\n')).toMatch(/5 row.*2\.0 KB/is);
+        expect(stdout.join('\n')).toMatch(/5 row.*2\.0 KiB/is);
     });
 });

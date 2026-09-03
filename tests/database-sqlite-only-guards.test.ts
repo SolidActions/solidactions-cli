@@ -94,6 +94,17 @@ describe('SQLite-only verbs refuse an analytical name', () => {
         expect(test.calls).toEqual([{ operation: 'show', name: 'orders' }]);
     });
 
+    it('push refuses with kind_mismatch even without --yes — not the less useful confirmation_required', async () => {
+        const test = harness();
+
+        await expect(databasePushWithConfig('orders', '/tmp/does-not-matter.db', {}, CONFIG, test.dependencies))
+            .rejects.toMatchObject({
+                code: 'kind_mismatch',
+                message: KIND_MISMATCH_MESSAGE,
+            });
+        expect(test.calls).toEqual([{ operation: 'show', name: 'orders' }]);
+    });
+
     it('import refuses with the kind_mismatch hint', async () => {
         const module = await loadDatabaseCommands();
         const databaseImportWithConfig = module.databaseImportWithConfig as Function;
