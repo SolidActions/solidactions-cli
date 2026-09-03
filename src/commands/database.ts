@@ -2432,6 +2432,24 @@ function terminalIngestOutcome(outcome: IngestOutcome): boolean {
     return outcome.state === 'acked' || outcome.state === 'failed' || outcome.state === 'outcome_unknown';
 }
 
+/**
+ * A terminal `acked` outcome's `live_bytes` is read from the database's own
+ * column at response time; the server refreshes that column from the
+ * guest's `/stats` only *after* the ack itself lands (spec:1680-1681,
+ * `AnalyticalIngestBatchAcker::finalizeAck()`), so a fresh apply can go
+ * terminal before that refresh has landed. Printing `0 B` right after rows
+ * were genuinely just loaded reads as "nothing was loaded" rather than "not
+ * measured yet" (#1700 cleanroom finding) — zero rows legitimately means
+ * zero bytes, but zero bytes alongside reported rows does not.
+ */
+function liveSizeClause(outcome: IngestOutcome): string {
+    const bytes = outcome.live_bytes;
+    if (bytes === undefined || (bytes === 0 && (outcome.rows ?? 0) > 0)) {
+        return 'live size still settling';
+    }
+    return `live size now ${formatByteSize(bytes)}`;
+}
+
 function throwOnFailedIngest(outcome: IngestOutcome): void {
     if (outcome.state === 'failed') {
         throw new DatabaseOperationError(outcome.error_code ?? 'ingest_failed', outcome.message ?? 'Ingest failed.');
@@ -2523,7 +2541,15 @@ export async function databaseIngestWithConfig(
         throw error;
     }
 
+    // `ingest_prepare` omits `upload_url` only on a same-digest replay of an
+    // already-known batch (spec:571) — the branch taken here is the CLI's
+    // one authoritative signal of "the front door was actually called with
+    // new bytes" versus "this exact batch was already recognized", so it
+    // drives the human-readable wording below (#1700 cleanroom finding: a
+    // replay printed the identical "Ingested N row(s)" sentence as a fresh
+    // apply, with no way to tell them apart short of --json).
     let outcome: IngestOutcome;
+    const isReplay = !('upload_url' in prepared && prepared.upload_url);
     if ('upload_url' in prepared && prepared.upload_url) {
         const headers = prepared.upload_headers;
         if (!headers) {
@@ -2594,7 +2620,11 @@ export async function databaseIngestWithConfig(
     }
 
     throwOnFailedIngest(outcome);
-    io.stdout(`Ingested ${outcome.rows ?? 0} row(s) into "${options.table}" (live size now ${formatByteSize(outcome.live_bytes ?? 0)}).`);
+    io.stdout(
+        isReplay
+            ? `Batch "${batchId}" was already ingested into "${options.table}" — ${outcome.rows ?? 0} row(s) recognized from a previous run, nothing re-loaded (${liveSizeClause(outcome)}).`
+            : `Ingested ${outcome.rows ?? 0} row(s) into "${options.table}" (${liveSizeClause(outcome)}).`,
+    );
 }
 
 export async function databaseIngest(

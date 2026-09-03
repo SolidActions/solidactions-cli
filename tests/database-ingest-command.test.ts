@@ -329,6 +329,123 @@ describe('database ingest', () => {
         expect(statusPolls).toBe(2);
     });
 
+    // #1700 cleanroom finding: re-running an identical `database ingest`
+    // printed the exact same "Ingested N row(s)..." sentence as the first,
+    // genuine load — a user could only tell them apart by adding --json and
+    // reading `state`, then independently counting rows themselves. The
+    // human-readable message must say something different when
+    // `ingest_prepare` hands back an already-acked outcome directly (no
+    // `upload_url` at all — this IS a same-digest replay, spec:571), never
+    // claiming a fresh load happened.
+    it('tells a same-digest replay of an already-acked batch apart from a fresh load in the plain-text message', async () => {
+        fs.writeFileSync(tmpFile, CONTENT);
+        const module = await loadDatabaseCommands();
+        const databaseIngestWithConfig = module.databaseIngestWithConfig as Function;
+        const stdout: string[] = [];
+
+        const dependencies = {
+            post: async (_url: string, body: Record<string, unknown>) => {
+                if (body.operation === 'show') return { data: DUCKDB_ROW };
+                if (body.operation === 'ingest_prepare') {
+                    // Real replay-of-a-terminal-batch shape: the outcome is
+                    // already `acked` — no upload_url, no commit, nothing
+                    // left to poll.
+                    return { data: { batch_id: body.batch_id, state: 'acked', rows: 3, durable: true, live_bytes: 504, acked_at: '2026-09-02T00:00:01Z' } };
+                }
+                if (body.operation === 'ingest_commit' || body.operation === 'ingest_status') {
+                    throw new Error(`${body.operation} must not be called for a same-digest replay of an already-terminal batch`);
+                }
+                throw new Error(`unexpected operation ${body.operation}`);
+            },
+            put: async (_url: string, body: unknown) => { drainIfStream(body); return { data: '', status: 200 }; },
+            stdout: (line: string) => stdout.push(line),
+            stderr: () => undefined,
+            isTTY: false,
+            sleep: async () => undefined,
+        };
+
+        await databaseIngestWithConfig('orders', tmpFile, { table: 'events' }, CONFIG, dependencies);
+
+        const message = stdout.join('\n');
+        expect(message).toMatch(/already ingested/i);
+        expect(message).not.toMatch(/^Ingested/);
+        expect(message).toContain('504 B');
+    });
+
+    // Companion to the replay test above: a genuinely fresh apply must keep
+    // using the original "Ingested N row(s)..." wording, not the replay one.
+    it('keeps the original "Ingested N row(s)" wording for a genuinely fresh apply', async () => {
+        fs.writeFileSync(tmpFile, CONTENT);
+        const module = await loadDatabaseCommands();
+        const databaseIngestWithConfig = module.databaseIngestWithConfig as Function;
+        const stdout: string[] = [];
+
+        const dependencies = {
+            post: async (_url: string, body: Record<string, unknown>) => {
+                if (body.operation === 'show') return { data: DUCKDB_ROW };
+                if (body.operation === 'ingest_prepare') {
+                    return { data: { batch_id: body.batch_id, upload_url: 'https://r2.example.test/staging/x.csv', upload_headers: { 'Content-Length': String(CONTENT.length), 'x-amz-checksum-sha256': 'YmFzZTY0' }, expires_at: '2026-09-02T00:00:00Z' } };
+                }
+                if (body.operation === 'ingest_commit') {
+                    return { data: { batch_id: body.batch_id, state: 'acked', rows: 3, durable: true, live_bytes: 504, acked_at: '2026-09-02T00:00:01Z' } };
+                }
+                throw new Error(`unexpected operation ${body.operation}`);
+            },
+            put: async (_url: string, body: unknown) => { drainIfStream(body); return { data: '', status: 200 }; },
+            stdout: (line: string) => stdout.push(line),
+            stderr: () => undefined,
+            isTTY: false,
+            sleep: async () => undefined,
+        };
+
+        await databaseIngestWithConfig('orders', tmpFile, { table: 'events' }, CONFIG, dependencies);
+
+        const message = stdout.join('\n');
+        expect(message).toMatch(/^Ingested 3 row\(s\)/);
+        expect(message).not.toMatch(/already ingested/i);
+        expect(message).toContain('504 B');
+    });
+
+    // #1700 cleanroom finding: the first ingest printed "(live size now 0 B)"
+    // immediately after successfully loading rows — the server's live_bytes
+    // refresh (`AnalyticalIngestBatchAcker::finalizeAck()`'s /stats call)
+    // hadn't landed yet, so a genuinely-just-loaded table read as if nothing
+    // was loaded. Zero bytes alongside reported rows is that ambiguous case;
+    // the message must not print a bare "0 B" for it.
+    it('does not print a bare 0 B live size right after a fresh apply whose size has not settled yet', async () => {
+        fs.writeFileSync(tmpFile, CONTENT);
+        const module = await loadDatabaseCommands();
+        const databaseIngestWithConfig = module.databaseIngestWithConfig as Function;
+        const stdout: string[] = [];
+
+        const dependencies = {
+            post: async (_url: string, body: Record<string, unknown>) => {
+                if (body.operation === 'show') return { data: DUCKDB_ROW };
+                if (body.operation === 'ingest_prepare') {
+                    return { data: { batch_id: body.batch_id, upload_url: 'https://r2.example.test/staging/x.csv', upload_headers: { 'Content-Length': String(CONTENT.length), 'x-amz-checksum-sha256': 'YmFzZTY0' }, expires_at: '2026-09-02T00:00:00Z' } };
+                }
+                if (body.operation === 'ingest_commit') {
+                    // The row's own live_bytes column has not been refreshed
+                    // from /stats yet, even though rows were genuinely acked.
+                    return { data: { batch_id: body.batch_id, state: 'acked', rows: 3, durable: true, live_bytes: 0, acked_at: '2026-09-02T00:00:01Z' } };
+                }
+                throw new Error(`unexpected operation ${body.operation}`);
+            },
+            put: async (_url: string, body: unknown) => { drainIfStream(body); return { data: '', status: 200 }; },
+            stdout: (line: string) => stdout.push(line),
+            stderr: () => undefined,
+            isTTY: false,
+            sleep: async () => undefined,
+        };
+
+        await databaseIngestWithConfig('orders', tmpFile, { table: 'events' }, CONFIG, dependencies);
+
+        const message = stdout.join('\n');
+        expect(message).toMatch(/^Ingested 3 row\(s\)/);
+        expect(message).not.toContain('0 B');
+        expect(message).toMatch(/still settling/i);
+    });
+
     it('surfaces size_limit_exceeded from ingest_prepare with the limit included in the message', async () => {
         fs.writeFileSync(tmpFile, CONTENT);
         const module = await loadDatabaseCommands();
