@@ -2535,3 +2535,376 @@ export async function databaseIngest(
 ): Promise<void> {
     await databaseIngestWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
 }
+
+// Analytical-only guard shared by drop-table/optimize/connect/wake (mirrors
+// `databaseIngestWithConfig`'s own check): unlike `refuseIfAnalytical`, which
+// refuses an analytical name on the SQLite-only verbs, these four verbs only
+// ever operate on the analytical (duckdb) kind, so a libsql name is the
+// refusal — before any operation-specific request goes out.
+function refuseUnlessAnalytical(name: string, row: DatabaseRecord, verb: string): void {
+    if (row.kind === 'duckdb') return;
+
+    throw new DatabaseOperationError(
+        'kind_mismatch',
+        `"${name}" is not an analytical database — \`database ${verb}\` only works on analytical (duckdb) databases.`,
+    );
+}
+
+/**
+ * Shared by `drop-table` and `optimize`: `admit()` on the server — the same
+ * gate `query` goes through (`requestAnalyticalQuery` above) — can answer
+ * either op with a `waking` refusal (202) if the database is still coming up
+ * after its own internal wait. `wake` itself is this same admission call, so
+ * it reuses this loop directly. Bounded by the same
+ * `ANALYTICAL_QUERY_MAX_WAIT_MS` `query` uses to give up on a `waking`
+ * database.
+ */
+async function requestAnalyticalOperationAwaitingWake<T>(
+    config: Config,
+    body: Record<string, unknown>,
+    name: string,
+    io: ResolvedCommandDependencies,
+): Promise<T> {
+    const deadline = io.now() + ANALYTICAL_QUERY_MAX_WAIT_MS;
+    let announced = false;
+    for (;;) {
+        const response = await requestDatabaseOperation<T | AnalyticalWakingResponse>(
+            config,
+            body,
+            requestDependencies(io),
+        );
+        if (!isAnalyticalWaking(response)) {
+            return response as T;
+        }
+        if (io.now() >= deadline) {
+            throw new DatabaseOperationError(
+                'waking',
+                response.message ?? `${name} is still waking up — try again in a moment.`,
+            );
+        }
+        if (!announced) {
+            io.stderr(`Waking ${name}…`);
+            announced = true;
+        }
+        await io.sleep(response.retry_after_ms ?? 3_000);
+    }
+}
+
+interface DatabaseDropTableOptions {
+    yes?: boolean;
+    json?: boolean;
+}
+
+/**
+ * Appendix A.6 — deletes one table and frees its space. Destructive, so it
+ * follows the same `--yes`/confirm convention as `delete`/`exec`. Reachable
+ * server error codes (`HandleAnalyticalDatabaseOperation::dropTable()` /
+ * `mapDropTableError()`): `reserved_table` (a `_`-prefixed name, refused
+ * before admission), `table_not_found`, `fenced` (concurrent generation
+ * change — retry), and a draining guest's bare `unavailable` — all passed
+ * through verbatim by `safeDatabaseRequestError`, nothing to translate here.
+ * `dropTable()` DOES call `admit()` before reaching the front door, so a
+ * `waking` refusal is genuinely reachable — unlike `ingest_prepare`/
+ * `ingest_commit`/`ingest_status` (Task 6), which never call it.
+ */
+export async function databaseDropTableWithConfig(
+    name: string,
+    table: string,
+    options: DatabaseDropTableOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'drop-table');
+
+    if (!options.yes) {
+        if (options.json || !io.isTTY) {
+            throw new DatabaseOperationError('confirmation_required', 'Dropping a table requires --yes in JSON or non-interactive mode.');
+        }
+        if (!await io.confirm(`Delete table "${table}" from "${name}"? Its rows are removed and the space is freed. This cannot be undone.`)) {
+            io.stdout('Cancelled.');
+            return;
+        }
+    }
+
+    const data = stableDatabaseResponse(await requestAnalyticalOperationAwaitingWake<DatabaseMutationResponse>(
+        config,
+        { operation: 'drop_table', name, table },
+        name,
+        io,
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, data);
+        return;
+    }
+
+    io.stdout(`Dropped table "${table}" from "${name}". Size is now ${formatByteSize(data.database.size_bytes)}.`);
+}
+
+export async function databaseDropTable(
+    name: string,
+    table: string,
+    options: DatabaseDropTableOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseDropTableWithConfig(name, table, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseOptimizeOptions {
+    wait?: boolean;
+    json?: boolean;
+}
+
+interface OptimizeOperation {
+    operation_id: string;
+    state: 'running' | 'done' | 'failed';
+    started_at?: string;
+    files_before?: number;
+    files_after?: number;
+    finished_at?: string;
+    error_code?: string;
+    message?: string;
+}
+
+function stableOptimizeOperation(data: OptimizeOperation): OptimizeOperation {
+    if (
+        !data
+        || typeof data.operation_id !== 'string'
+        || (data.state !== 'running' && data.state !== 'done' && data.state !== 'failed')
+        || (data.started_at !== undefined && typeof data.started_at !== 'string')
+        || (data.files_before !== undefined && typeof data.files_before !== 'number')
+        || (data.files_after !== undefined && typeof data.files_after !== 'number')
+        || (data.finished_at !== undefined && typeof data.finished_at !== 'string')
+        || (data.error_code !== undefined && typeof data.error_code !== 'string')
+        || (data.message !== undefined && typeof data.message !== 'string')
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        operation_id: data.operation_id,
+        state: data.state,
+        ...(data.started_at === undefined ? {} : { started_at: data.started_at }),
+        ...(data.files_before === undefined ? {} : { files_before: data.files_before }),
+        ...(data.files_after === undefined ? {} : { files_after: data.files_after }),
+        ...(data.finished_at === undefined ? {} : { finished_at: data.finished_at }),
+        ...(data.error_code === undefined ? {} : { error_code: data.error_code }),
+        ...(data.message === undefined ? {} : { message: data.message }),
+    };
+}
+
+const OPTIMIZE_POLL_INTERVAL_MS = 2_000;
+const OPTIMIZE_POLL_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Appendix A.7 — `optimize` is idempotent: a database already mid-optimize
+ * returns its running operation instead of starting a second one, so a
+ * `running` result (with or without `--wait`) is rendered as "already
+ * running", never an error. `--wait` polls `optimize_status` (read-intent,
+ * never calls `admit()`, so no `waking` handling there) to a terminal state,
+ * bounded by `OPTIMIZE_POLL_TIMEOUT_MS` — exiting non-zero if that deadline
+ * passes while still `running`, mirroring `provisioning_timeout` (Task 2)
+ * and `ingest_timeout` (Task 6).
+ */
+export async function databaseOptimizeWithConfig(
+    name: string,
+    options: DatabaseOptimizeOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'optimize');
+
+    let operation = stableOptimizeOperation(await requestAnalyticalOperationAwaitingWake<OptimizeOperation>(
+        config,
+        { operation: 'optimize', name },
+        name,
+        io,
+    ));
+
+    if (options.wait) {
+        const deadline = io.now() + OPTIMIZE_POLL_TIMEOUT_MS;
+        while (operation.state === 'running' && io.now() < deadline) {
+            await io.sleep(OPTIMIZE_POLL_INTERVAL_MS);
+            operation = stableOptimizeOperation(await requestDatabaseOperation<OptimizeOperation>(
+                config,
+                { operation: 'optimize_status', name, operation_id: operation.operation_id },
+                requestDependencies(io),
+            ));
+        }
+
+        if (operation.state === 'running') {
+            throw new DatabaseOperationError(
+                'optimize_timeout',
+                `Optimize for "${name}" did not finish within the CLI's wait window — re-run \`solidactions database optimize ${name} --wait\` to check its status.`,
+            );
+        }
+    }
+
+    if (options.json) {
+        writeJson(io.stdout, operation);
+        if (operation.state === 'failed') {
+            throw new DatabaseOperationError(operation.error_code ?? 'optimize_failed', operation.message ?? 'Optimize failed.');
+        }
+        return;
+    }
+
+    if (operation.state === 'failed') {
+        throw new DatabaseOperationError(operation.error_code ?? 'optimize_failed', operation.message ?? 'Optimize failed.');
+    }
+    if (operation.state === 'done') {
+        io.stdout(`Optimized "${name}" (${operation.files_before} files → ${operation.files_after}).`);
+        return;
+    }
+    io.stdout(`Optimize already running for "${name}" (started ${operation.started_at}).`);
+}
+
+export async function databaseOptimize(
+    name: string,
+    options: DatabaseOptimizeOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseOptimizeWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseConnectOptions {
+    json?: boolean;
+}
+
+interface ConnectResponse {
+    external_read: boolean;
+    cli: { query: string; ingest: string };
+    mcp: string;
+    yaml: string;
+}
+
+function stableConnectResponse(data: ConnectResponse): ConnectResponse {
+    if (
+        !data
+        || typeof data.external_read !== 'boolean'
+        || !data.cli
+        || typeof data.cli.query !== 'string'
+        || typeof data.cli.ingest !== 'string'
+        || typeof data.mcp !== 'string'
+        || typeof data.yaml !== 'string'
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        external_read: data.external_read,
+        cli: { query: data.cli.query, ingest: data.cli.ingest },
+        mcp: data.mcp,
+        yaml: data.yaml,
+    };
+}
+
+function renderConnect(connect: ConnectResponse): string {
+    return [
+        'CLI:',
+        `  ${connect.cli.query}`,
+        `  ${connect.cli.ingest}`,
+        '',
+        'Ask your AI:',
+        `  ${connect.mcp}`,
+        '',
+        'solidactions.yaml:',
+        connect.yaml.split('\n').map((line) => `  ${line}`).join('\n'),
+        '',
+        'Connecting directly from DuckDB or BI tools is coming later.',
+    ].join('\n');
+}
+
+/**
+ * Appendix A.8 — no client credentials for the analytical kind in v1
+ * (deliberate; see spec). `connect()` never calls `admit()` — it is a pure,
+ * synchronous read of the database row, so `waking` is not reachable here.
+ */
+export async function databaseConnectWithConfig(
+    name: string,
+    options: DatabaseConnectOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'connect');
+
+    const connect = stableConnectResponse(await requestDatabaseOperation<ConnectResponse>(
+        config,
+        { operation: 'connect', name },
+        requestDependencies(io),
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, connect);
+        return;
+    }
+
+    io.stdout(renderConnect(connect));
+}
+
+export async function databaseConnect(
+    name: string,
+    options: DatabaseConnectOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseConnectWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseWakeOptions {
+    json?: boolean;
+}
+
+interface WakeActiveResponse {
+    activity: string;
+}
+
+function stableWakeActiveResponse(data: WakeActiveResponse): WakeActiveResponse {
+    if (!data || typeof data.activity !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return { activity: data.activity };
+}
+
+/**
+ * Appendix A.9 — read-intent pre-warm: `wake()` on the server is exactly one
+ * `admit()` call, so this reuses `requestAnalyticalOperationAwaitingWake`
+ * directly rather than hand-rolling its own retry loop.
+ */
+export async function databaseWakeWithConfig(
+    name: string,
+    options: DatabaseWakeOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'wake');
+
+    const response = stableWakeActiveResponse(await requestAnalyticalOperationAwaitingWake<WakeActiveResponse>(
+        config,
+        { operation: 'wake', name },
+        name,
+        io,
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, response);
+        return;
+    }
+
+    io.stdout(`${name} is ${response.activity}.`);
+}
+
+export async function databaseWake(
+    name: string,
+    options: DatabaseWakeOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseWakeWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}

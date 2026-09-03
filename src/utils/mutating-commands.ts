@@ -43,6 +43,12 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'database import',
     'database push',
     'database ingest',
+    'database drop-table',
+    // `optimize` dispatches a real server-side operation that rewrites the
+    // database's stored files (`StartOptimizeOperation` — a job, not just a
+    // read of existing state), the same class of deliberate write action as
+    // `run start`/`skill exec`.
+    'database optimize',
     // Plain `database pull` is read-only (GET, writes a local file only —
     // same family as project/env/doc/skill pull). But `--writable`
     // (databaseWritablePullWithConfig, src/commands/database.ts:1320) mints
@@ -98,6 +104,14 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'database show',
     'database schema',
     'database query',
+    // `connect` never calls the server's admission gate — it is a pure,
+    // synchronous read of the database row (no side effects at all).
+    'database connect',
+    // `wake` is the same admission-only call `query` already makes
+    // incidentally (both can dispatch the async wake job, never touching
+    // application data) — its whole purpose is that read-intent pre-warm,
+    // spec §4.2.
+    'database wake',
     // Downloads a dump and writes it to a local file only, like the `pull`
     // family below — the data-plane request happens to be a POST, but no
     // server state changes.

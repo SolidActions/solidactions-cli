@@ -22,9 +22,13 @@ const COMMANDS = [
     { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
     { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
     { verb: 'ingest', args: [['name', true], ['file', true]], options: ['--table', '--mode', '--batch-id', '--json'] },
+    { verb: 'drop-table', args: [['name', true], ['table', true]], options: ['--yes', '--json'] },
+    { verb: 'optimize', args: [['name', true]], options: ['--wait', '--json'] },
+    { verb: 'connect', args: [['name', true]], options: ['--json'] },
+    { verb: 'wake', args: [['name', true]], options: ['--json'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first

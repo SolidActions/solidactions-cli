@@ -111,6 +111,16 @@ solidactions database pull analytics --writable
 solidactions database import analytics backup.sql --yes
 solidactions database import analytics backup.sql --resume <checkpoint> --yes
 solidactions database push analytics complete.db --yes
+solidactions database create analytics --kind duckdb --json
+solidactions database list --kind duckdb --json
+solidactions database show analytics --json
+solidactions database ingest analytics data.parquet --table events --json
+solidactions database ingest analytics data.csv --table events --mode replace --json
+solidactions database drop-table analytics events --yes --json
+solidactions database optimize analytics --wait --json
+solidactions database connect analytics --json
+solidactions database wake analytics --json
+solidactions database query analytics "select category, sum(amount) from events group by 1" --limit 1000 --json
 ```
 
 `--json` produces machine-readable output where supported. `delete`, `exec`,
@@ -118,6 +128,13 @@ solidactions database push analytics complete.db --yes
 use `--yes` only when that change is already approved. A database `delete` is a
 soft-delete, and its output shows the purge clock during which `undelete` can
 restore it.
+
+`create --kind` defaults to the standard (SQLite) kind; pass `--kind duckdb`
+for an analytical database (waits for provisioning unless `--no-wait`).
+Analytical verbs — `ingest`, `drop-table`, `optimize`, `connect`, `wake` —
+only work against a `duckdb` database. `dump`, `pull`, `push`, `import`, and
+`exec` are for the standard (SQLite) kind only and refuse an analytical name
+with a one-line hint.
 
 `query` is read-only SQL; use `exec` for writes. `schema`, `query`, `exec`,
 `pull --writable`, and imports use ephemeral scoped access held only in memory.

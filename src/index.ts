@@ -59,18 +59,22 @@ import {
 } from './commands/state';
 import { workflowView } from './commands/workflow-view';
 import {
+    databaseConnect,
     databaseCreate,
     databaseDelete,
+    databaseDropTable,
     databaseDump,
     databaseExec,
     databaseImport,
     databaseIngest,
     databaseList,
+    databaseOptimize,
     databasePull,
     databaseQuery,
     databaseSchema,
     databaseShow,
     databaseUndelete,
+    databaseWake,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
@@ -384,6 +388,45 @@ database
     .option('--json', 'Output as JSON')
     .action(async (name, file, options) => {
         await databaseIngest(name, file, { table: options.table, mode: options.mode, batchId: options.batchId, json: options.json });
+    });
+
+database
+    .command('drop-table')
+    .description('Delete one table from an analytical database and free its space')
+    .argument('<name>', 'Database name')
+    .argument('<table>', 'Table name')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, table, options) => {
+        await databaseDropTable(name, table, options);
+    });
+
+database
+    .command('optimize')
+    .description('Consolidate an analytical database\'s stored files now')
+    .argument('<name>', 'Database name')
+    .option('--wait', 'Wait for optimize to finish and print files before/after')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseOptimize(name, options);
+    });
+
+database
+    .command('connect')
+    .description('Show how to connect to an analytical database')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseConnect(name, options);
+    });
+
+database
+    .command('wake')
+    .description('Wake an idle analytical database and wait for it to become active')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseWake(name, options);
     });
 
 // =============================================================================
