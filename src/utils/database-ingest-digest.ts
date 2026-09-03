@@ -34,6 +34,13 @@ export function canonicalIngestDigest(identity: IngestIdentity): string {
     const canonical = canonicalizeFlatObject({
         v: 1,
         database_id: identity.databaseId,
+        // NOTE: JS `.trim()` strips a wider whitespace set than PHP `trim()`
+        // (e.g. NBSP/BOM/OGHAM SPACE MARK/U+3000) — inert here, since the
+        // server PHP-trims the same table name before this digest is ever
+        // computed server-side, so a character JS strips but PHP doesn't
+        // fails the `^[a-z][a-z0-9_]{0,62}$` gate with a 422 first. Do not
+        // "fix" this asymmetry without re-verifying byte-for-byte parity
+        // with the PHP canonical digest (`CanonicalBatchDigest`).
         table: identity.table.trim().toLowerCase(),
         mode: identity.mode,
         ack: 'durable',

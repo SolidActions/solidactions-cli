@@ -145,7 +145,7 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     put?: (
         url: string,
         body: fs.ReadStream | Buffer,
-        options: { headers: Record<string, string> },
+        options: { headers: Record<string, string>; timeout?: number },
     ) => Promise<{ data: unknown; status?: number }>;
 }
 
@@ -656,11 +656,15 @@ function renderAnalyticalSchema(schema: AnalyticalSchemaResponse): string {
     }).join('\n\n');
 }
 
-/** "1.2 GB", "512.0 MB", "900 B" — used by `show`, `list`, and `ingest`. */
+/** "1.2 GiB", "512.0 MiB", "900 B" — used by `show`, `list`, and `ingest`. */
 export function formatByteSize(bytes: number): string {
-    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
-    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    // Binary (1024-based) division — the units must say Gi/Mi/Ki, not G/M/K
+    // (spec:451 writes "1 GiB"; the old "GB"/"MB"/"KB" labels rendered the
+    // 1 GiB cap as "1.0 GB", which is the SI-decimal unit for a different
+    // number of bytes).
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GiB`;
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
     return `${bytes} B`;
 }
 
@@ -1209,6 +1213,17 @@ export async function databaseCreateWithConfig(
         );
     }
     const kind: DatabaseKind = options.kind === 'duckdb' ? 'duckdb' : 'libsql';
+    if (kind === 'duckdb' && options.from) {
+        // C-2: reject before the create POST. An analytical database is a
+        // billable, org-quota-scoped resource (1 per org on Free) — letting
+        // this combination reach the server means it gets created, waits on
+        // provisioning, and only then fails the SQL import with a generic
+        // `import_failed`, leaving the database behind consuming quota.
+        throw new DatabaseOperationError(
+            'invalid_flag_combination',
+            '--from is not supported with --kind duckdb; SQL import only applies to libsql databases. Create the database, then load data with `solidactions database ingest`.',
+        );
+    }
     const preparedSource = options.from && !io.importDatabase
         ? await prepareDatabaseImportSource(options.from, io.cwd, io.filesystem)
         : undefined;
@@ -1583,6 +1598,20 @@ async function requestAnalyticalQuery(
     }
 }
 
+/**
+ * Render one analytical query cell for the human table. Unlike the libsql
+ * path's `formatDatabaseTableValue` (which exists for driver-native
+ * bigint/blob values), analytical rows arrive as plain JSON over the wire —
+ * so a bare `String(value)` rendered SQL NULL as the literal text "null"
+ * (indistinguishable from the string "null") and a JSON/STRUCT column as
+ * "[object Object]".
+ */
+function formatAnalyticalQueryValue(value: unknown): string {
+    if (value === null) return 'NULL';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
 export async function databaseQueryWithConfig(
     name: string,
     sql: string,
@@ -1594,7 +1623,7 @@ export async function databaseQueryWithConfig(
     const row = await requestDatabaseRecord(name, config, dependencies);
 
     if (row.kind === 'duckdb') {
-        if (options.limit !== undefined && (options.limit < 1 || options.limit > ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX)) {
+        if (options.limit !== undefined && (Number.isNaN(options.limit) || options.limit < 1 || options.limit > ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX)) {
             throw new DatabaseOperationError(
                 'invalid_limit',
                 `--limit must be between 1 and ${ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} (received "${options.limit}").`,
@@ -1609,7 +1638,7 @@ export async function databaseQueryWithConfig(
         }
 
         io.stdout(result.columns.length > 0
-            ? renderTable(result.columns, result.rows.map((resultRow) => resultRow.map((value) => String(value)))).join('\n')
+            ? renderTable(result.columns, result.rows.map((resultRow) => resultRow.map(formatAnalyticalQueryValue))).join('\n')
             : 'No rows returned.');
         if (result.truncated) {
             io.stdout(`(truncated at ${options.limit ?? ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} rows)`);
@@ -2356,6 +2385,40 @@ interface IngestOutcome {
     message?: string;
 }
 
+const INGEST_OUTCOME_STATES = ['prepared', 'copying', 'dispatching', 'applying', 'acked', 'failed', 'outcome_unknown'];
+
+// `ingest`'s `--json` body was the only new-verb response never run through a
+// stable normalizer (every other mutation/operation response is) — validate
+// and narrow it the same way `stableOptimizeOperation` does, instead of
+// writing the raw server payload (or an unchecked `prepared as IngestOutcome`
+// cast) straight to stdout.
+function stableIngestOutcome(data: IngestOutcome): IngestOutcome {
+    if (
+        !data
+        || typeof data.batch_id !== 'string'
+        || !INGEST_OUTCOME_STATES.includes(data.state)
+        || (data.rows !== undefined && typeof data.rows !== 'number')
+        || (data.durable !== undefined && typeof data.durable !== 'boolean')
+        || (data.live_bytes !== undefined && typeof data.live_bytes !== 'number')
+        || (data.acked_at !== undefined && typeof data.acked_at !== 'string')
+        || (data.error_code !== undefined && typeof data.error_code !== 'string')
+        || (data.message !== undefined && typeof data.message !== 'string')
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        batch_id: data.batch_id,
+        state: data.state,
+        ...(data.rows === undefined ? {} : { rows: data.rows }),
+        ...(data.durable === undefined ? {} : { durable: data.durable }),
+        ...(data.live_bytes === undefined ? {} : { live_bytes: data.live_bytes }),
+        ...(data.acked_at === undefined ? {} : { acked_at: data.acked_at }),
+        ...(data.error_code === undefined ? {} : { error_code: data.error_code }),
+        ...(data.message === undefined ? {} : { message: data.message }),
+    };
+}
+
 const INGEST_POLL_INTERVAL_MS = 1_000;
 const INGEST_POLL_TIMEOUT_MS = 5 * 60_000;
 
@@ -2477,6 +2540,13 @@ export async function databaseIngestWithConfig(
                     'Content-Length': headers['Content-Length'],
                     'x-amz-checksum-sha256': headers['x-amz-checksum-sha256'],
                 },
+                // C-3: every other network call on this surface is
+                // deadline-bounded (runWithDeadline/positiveTimeout); this
+                // presigned R2 PUT was the one bare call with no timeout, so
+                // a black-holed upload hung `ingest` forever. Re-issuing the
+                // presigned URL for a `prepared` row (ingestPrepareReplay)
+                // already recovers from this once it throws.
+                timeout: io.dataPlaneTimeoutMs,
             });
         } catch {
             throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
@@ -2485,13 +2555,13 @@ export async function databaseIngestWithConfig(
             throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
         }
 
-        outcome = await requestDatabaseOperation<IngestOutcome>(
+        outcome = stableIngestOutcome(await requestDatabaseOperation<IngestOutcome>(
             config,
             { operation: 'ingest_commit', name, batch_id: batchId },
             requestDependencies(io),
-        );
+        ));
     } else {
-        outcome = prepared as IngestOutcome;
+        outcome = stableIngestOutcome(prepared as IngestOutcome);
     }
 
     // The row's state machine (`copying` → `dispatching` → `applying` →
@@ -2503,11 +2573,11 @@ export async function databaseIngestWithConfig(
     const deadline = io.now() + INGEST_POLL_TIMEOUT_MS;
     while (!terminalIngestOutcome(outcome) && io.now() < deadline) {
         await io.sleep(INGEST_POLL_INTERVAL_MS);
-        outcome = await requestDatabaseOperation<IngestOutcome>(
+        outcome = stableIngestOutcome(await requestDatabaseOperation<IngestOutcome>(
             config,
             { operation: 'ingest_status', name, batch_id: batchId },
             requestDependencies(io),
-        );
+        ));
     }
 
     if (!terminalIngestOutcome(outcome)) {
@@ -2698,15 +2768,24 @@ function stableOptimizeOperation(data: OptimizeOperation): OptimizeOperation {
 const OPTIMIZE_POLL_INTERVAL_MS = 2_000;
 const OPTIMIZE_POLL_TIMEOUT_MS = 15 * 60_000;
 
+// A freshly-started operation and one already running elsewhere return the
+// identical wire shape (Appendix A.7) — mirrors the web dialog's own
+// `ALREADY_RUNNING_THRESHOLD_MS` heuristic (analytical-optimize-dialog.tsx):
+// compare this call's own pre-request timestamp against the operation's
+// `started_at`; a gap this large means the operation predates the call.
+const OPTIMIZE_ALREADY_RUNNING_THRESHOLD_MS = 3_000;
+
 /**
  * Appendix A.7 — `optimize` is idempotent: a database already mid-optimize
- * returns its running operation instead of starting a second one, so a
- * `running` result (with or without `--wait`) is rendered as "already
- * running", never an error. `--wait` polls `optimize_status` (read-intent,
- * never calls `admit()`, so no `waking` handling there) to a terminal state,
- * bounded by `OPTIMIZE_POLL_TIMEOUT_MS` — exiting non-zero if that deadline
- * passes while still `running`, mirroring `provisioning_timeout` (Task 2)
- * and `ingest_timeout` (Task 6).
+ * returns its running operation instead of starting a second one. Since the
+ * server's `running` reply is identical either way, the CLI distinguishes
+ * "just started" from "already running" the same way the web dialog does:
+ * by comparing `started_at` against a timestamp captured immediately before
+ * the request. `--wait` polls `optimize_status` (read-intent, never calls
+ * `admit()`, so no `waking` handling there) to a terminal state, bounded by
+ * `OPTIMIZE_POLL_TIMEOUT_MS` — exiting non-zero if that deadline passes
+ * while still `running`, mirroring `provisioning_timeout` (Task 2) and
+ * `ingest_timeout` (Task 6).
  */
 export async function databaseOptimizeWithConfig(
     name: string,
@@ -2718,6 +2797,7 @@ export async function databaseOptimizeWithConfig(
     const row = await requestDatabaseRecord(name, config, dependencies);
     refuseUnlessAnalytical(name, row, 'optimize');
 
+    const requestedAt = io.now();
     let operation = stableOptimizeOperation(await requestAnalyticalOperationAwaitingWake<OptimizeOperation>(
         config,
         { operation: 'optimize', name },
@@ -2759,7 +2839,12 @@ export async function databaseOptimizeWithConfig(
         io.stdout(`Optimized "${name}" (${operation.files_before} files → ${operation.files_after}).`);
         return;
     }
-    io.stdout(`Optimize already running for "${name}" (started ${operation.started_at}).`);
+    const startedAtMs = operation.started_at ? new Date(operation.started_at).getTime() : NaN;
+    const alreadyRunning = Number.isFinite(startedAtMs)
+        && requestedAt - startedAtMs > OPTIMIZE_ALREADY_RUNNING_THRESHOLD_MS;
+    io.stdout(alreadyRunning
+        ? `Optimize already running for "${name}" (started ${operation.started_at}).`
+        : `Optimize started for "${name}" (started ${operation.started_at}).`);
 }
 
 export async function databaseOptimize(

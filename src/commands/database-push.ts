@@ -231,10 +231,14 @@ function stableOperation(data: unknown): Record<string, unknown> {
 }
 
 export async function databasePushWithConfig(name: string, file: string, options: DatabasePushOptions, config: Config, dependencies: PushDependencies = {}): Promise<void> {
+    // Kind refusal fires first (matches `import`'s ordering): pushing an
+    // analytical name without --yes previously reported "confirmation_required"
+    // first, a less useful first error since adding --yes would only surface
+    // kind_mismatch on the next run anyway.
+    await refuseIfAnalytical(config, name, 'sqlite-only', { post: dependencies.post });
     if (!options.yes) throw new DatabaseOperationError('confirmation_required', 'Database push is destructive and requires --yes.');
     const key = options.idempotencyKey ?? randomUUID();
     if (!IDEMPOTENCY_UUID.test(key)) throw new DatabaseOperationError('invalid_bulk_database', '--idempotency-key must be a UUID.');
-    await refuseIfAnalytical(config, name, 'sqlite-only', { post: dependencies.post });
     const stdout = dependencies.stdout ?? console.log;
     const sleep = dependencies.sleep ?? ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     const normalized = await normalizeDatabaseForPush(file, dependencies);
