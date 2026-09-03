@@ -42,6 +42,7 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'database exec',
     'database import',
     'database push',
+    'database ingest',
     // Plain `database pull` is read-only (GET, writes a local file only —
     // same family as project/env/doc/skill pull). But `--writable`
     // (databaseWritablePullWithConfig, src/commands/database.ts:1320) mints

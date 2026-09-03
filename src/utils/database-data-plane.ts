@@ -109,12 +109,20 @@ export const DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS = 120_000;
 export class DatabaseOperationError extends Error {
     readonly code: string;
     readonly status?: number;
+    // Populated only for `size_limit_exceeded` (the storage-cap refusal
+    // `ingest_prepare` and `create` can return) — the one error extra a
+    // caller currently needs beyond `code`/`message`/`status` to compose a
+    // useful message (spec/#1700 ingest: "surfaced with the limit").
+    readonly sizeLimitBytes?: number;
 
-    constructor(code: string, message: string, status?: number) {
+    constructor(code: string, message: string, status?: number, sizeLimitBytes?: number) {
         super(message);
         this.code = code;
         if (status !== undefined) {
             this.status = status;
+        }
+        if (sizeLimitBytes !== undefined) {
+            this.sizeLimitBytes = sizeLimitBytes;
         }
 
         // A public command error is deliberately data-only. In particular, it
@@ -141,8 +149,11 @@ export function safeDatabaseRequestError(error: unknown): DatabaseOperationError
     const message = code === 'unauthenticated'
         ? `${appMessage} Run solidactions login to authenticate again.`
         : appMessage;
+    const sizeLimitBytes = typeof response?.data?.size_limit_bytes === 'number'
+        ? response.data.size_limit_bytes
+        : undefined;
 
-    return new DatabaseOperationError(code, message, status);
+    return new DatabaseOperationError(code, message, status, sizeLimitBytes);
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {

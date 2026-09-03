@@ -64,6 +64,7 @@ import {
     databaseDump,
     databaseExec,
     databaseImport,
+    databaseIngest,
     databaseList,
     databasePull,
     databaseQuery,
@@ -370,6 +371,19 @@ the source. Countable rows include ordinary user tables only. Internal,
 virtual, and shadow tables are excluded from the count.`)
     .action(async (name, file, options) => {
         await databasePush(name, file, options);
+    });
+
+database
+    .command('ingest')
+    .description('Load a batch of rows into an analytical database')
+    .argument('<name>', 'Database name')
+    .argument('<file>', 'Parquet, CSV, or JSONL file to load')
+    .requiredOption('--table <table>', 'Target table name')
+    .option('--mode <mode>', 'append (default) or replace', 'append')
+    .option('--batch-id <id>', 'Idempotency key (default: derived from the file, table, and mode)')
+    .option('--json', 'Output as JSON')
+    .action(async (name, file, options) => {
+        await databaseIngest(name, file, { table: options.table, mode: options.mode, batchId: options.batchId, json: options.json });
     });
 
 // =============================================================================

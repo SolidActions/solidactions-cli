@@ -1,7 +1,8 @@
+import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import * as readline from 'readline';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { pathToFileURL } from 'url';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
@@ -35,6 +36,7 @@ import {
     runPreparedDatabaseImport,
 } from '../utils/database-sql-import-runner';
 import { renderTable } from '../utils/table';
+import { defaultIngestBatchId, ingestFormatFromExtension } from '../utils/database-ingest-digest';
 
 export type DatabaseKind = 'libsql' | 'duckdb';
 export type DatabaseActivity = 'active' | 'idle' | 'idle_no_credit' | 'waking' | 'optimizing';
@@ -140,6 +142,11 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     monotonicNow?: () => number;
     abortSignal?: AbortSignal;
     sleep?: (milliseconds: number) => Promise<void>;
+    put?: (
+        url: string,
+        body: fs.ReadStream | Buffer,
+        options: { headers: Record<string, string> },
+    ) => Promise<{ data: unknown; status?: number }>;
 }
 
 interface ResolvedCommandDependencies {
@@ -160,6 +167,7 @@ interface ResolvedCommandDependencies {
     controlPlaneTimeoutMs: number | undefined;
     dataPlaneTimeoutMs: number;
     sleep: (milliseconds: number) => Promise<void>;
+    put: NonNullable<DatabaseCommandDependencies['put']>;
 }
 
 function defaultConfirmation(message: string): Promise<boolean> {
@@ -205,6 +213,7 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => {
             setTimeout(resolve, milliseconds);
         })),
+        put: dependencies.put ?? axios.put,
     };
 }
 
@@ -2316,4 +2325,213 @@ export async function databaseImport(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databaseImportWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseIngestOptions {
+    table: string;
+    mode?: string;
+    batchId?: string;
+    json?: boolean;
+}
+
+// A.4 `ingest_prepare` response. A same-digest replay of an in-progress or
+// terminal batch omits `upload_url`/`upload_headers` (spec:571) — that shape
+// is `IngestOutcome` (the A.5 status body) below, not this one.
+interface IngestPrepareResponse {
+    batch_id: string;
+    upload_url?: string;
+    upload_headers?: { 'Content-Length': string; 'x-amz-checksum-sha256': string };
+    expires_at?: string;
+}
+
+// A.5 `ingest_commit`/`ingest_status` response.
+interface IngestOutcome {
+    batch_id: string;
+    state: 'prepared' | 'copying' | 'dispatching' | 'applying' | 'acked' | 'failed' | 'outcome_unknown';
+    rows?: number;
+    durable?: boolean;
+    live_bytes?: number;
+    acked_at?: string;
+    error_code?: string;
+    message?: string;
+}
+
+const INGEST_POLL_INTERVAL_MS = 1_000;
+const INGEST_POLL_TIMEOUT_MS = 5 * 60_000;
+
+async function sha256OfFile(filePath: string): Promise<string> {
+    const hash = createHash('sha256');
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk as Buffer);
+    return hash.digest('hex');
+}
+
+function terminalIngestOutcome(outcome: IngestOutcome): boolean {
+    return outcome.state === 'acked' || outcome.state === 'failed' || outcome.state === 'outcome_unknown';
+}
+
+function throwOnFailedIngest(outcome: IngestOutcome): void {
+    if (outcome.state === 'failed') {
+        throw new DatabaseOperationError(outcome.error_code ?? 'ingest_failed', outcome.message ?? 'Ingest failed.');
+    }
+    if (outcome.state === 'outcome_unknown') {
+        throw new DatabaseOperationError(
+            'outcome_unknown',
+            outcome.message
+                ?? `Ingest batch "${outcome.batch_id}" outcome is unknown — re-run this same command (same file, table, and mode) to check its current status; it will not re-upload.`,
+        );
+    }
+}
+
+/**
+ * Loads a local Parquet/CSV/JSONL file into an analytical (duckdb) database
+ * table: hashes the file, derives the §6.4 canonical batch id (unless
+ * `--batch-id` overrides it), calls `ingest_prepare`, PUTs the file to the
+ * presigned URL with exactly the signed `Content-Length`/
+ * `x-amz-checksum-sha256` headers the server returned, calls `ingest_commit`,
+ * then polls `ingest_status` to a terminal state. `ingest_prepare`'s
+ * same-digest replay response omits `upload_url` for an in-progress or
+ * terminal batch — that response IS the outcome, so upload/commit are
+ * skipped and the CLI goes straight to polling it.
+ */
+export async function databaseIngestWithConfig(
+    name: string,
+    file: string,
+    options: DatabaseIngestOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const mode = options.mode ?? 'append';
+    if (mode !== 'append' && mode !== 'replace') {
+        throw new DatabaseOperationError('invalid_mode', `--mode must be "append" or "replace" (received "${mode}").`);
+    }
+    const format = ingestFormatFromExtension(file);
+
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    if (row.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'kind_mismatch',
+            `"${name}" is not an analytical database — \`database ingest\` only loads data into analytical (duckdb) databases.`,
+        );
+    }
+    if (!row.id) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was missing its id.');
+    }
+
+    const stat = await io.filesystem.stat(file);
+    const contentSha256 = await sha256OfFile(file);
+    const batchId = options.batchId ?? defaultIngestBatchId({
+        databaseId: row.id,
+        table: options.table,
+        mode,
+        format,
+        contentSha256,
+    });
+
+    let prepared: IngestPrepareResponse | IngestOutcome;
+    try {
+        prepared = await requestDatabaseOperation<IngestPrepareResponse | IngestOutcome>(
+            config,
+            {
+                operation: 'ingest_prepare',
+                name,
+                table: options.table,
+                mode,
+                batch_id: batchId,
+                format,
+                declared_bytes: stat.size,
+                content_sha256: contentSha256,
+            },
+            requestDependencies(io),
+        );
+    } catch (error) {
+        // Controller ruling (spec/#1700): a `size_limit_exceeded` refusal
+        // must surface the limit, not just the generic server message —
+        // `safeDatabaseRequestError` already lifts `size_limit_bytes` onto
+        // the thrown error for exactly this.
+        if (error instanceof DatabaseOperationError && error.code === 'size_limit_exceeded' && error.sizeLimitBytes !== undefined) {
+            throw new DatabaseOperationError(
+                error.code,
+                `${error.message} (limit ${formatByteSize(error.sizeLimitBytes)})`,
+                error.status,
+                error.sizeLimitBytes,
+            );
+        }
+        throw error;
+    }
+
+    let outcome: IngestOutcome;
+    if ('upload_url' in prepared && prepared.upload_url) {
+        const headers = prepared.upload_headers;
+        if (!headers) {
+            throw new DatabaseOperationError('upstream_unavailable', 'The ingest prepare response was missing upload headers.');
+        }
+
+        let uploaded: { data: unknown; status?: number };
+        try {
+            uploaded = await io.put(prepared.upload_url, fs.createReadStream(file), {
+                // Only the two signed headers R2 verified go on the wire —
+                // never re-derive or reshape them (they are part of the
+                // signature).
+                headers: {
+                    'Content-Length': headers['Content-Length'],
+                    'x-amz-checksum-sha256': headers['x-amz-checksum-sha256'],
+                },
+            });
+        } catch {
+            throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
+        }
+        if (uploaded.status !== undefined && (uploaded.status < 200 || uploaded.status > 299)) {
+            throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
+        }
+
+        outcome = await requestDatabaseOperation<IngestOutcome>(
+            config,
+            { operation: 'ingest_commit', name, batch_id: batchId },
+            requestDependencies(io),
+        );
+    } else {
+        outcome = prepared as IngestOutcome;
+    }
+
+    // The row's state machine (`copying` → `dispatching` → `applying` →
+    // terminal) already absorbs a paused database transparently — the async
+    // `AdvanceIngestBatch` job self-redispatches on a `waking` admission
+    // refusal without ever surfacing `waking` on this poll (unlike
+    // `query`'s synchronous admission gate) — so this loop only needs to
+    // keep polling until a terminal state or its own give-up deadline.
+    const deadline = io.now() + INGEST_POLL_TIMEOUT_MS;
+    while (!terminalIngestOutcome(outcome) && io.now() < deadline) {
+        await io.sleep(INGEST_POLL_INTERVAL_MS);
+        outcome = await requestDatabaseOperation<IngestOutcome>(
+            config,
+            { operation: 'ingest_status', name, batch_id: batchId },
+            requestDependencies(io),
+        );
+    }
+
+    if (!terminalIngestOutcome(outcome)) {
+        throw new DatabaseOperationError(
+            'ingest_timeout',
+            `Ingest batch "${batchId}" did not reach a final state within the CLI's wait window — re-run this same command to check its status (it will not re-upload).`,
+        );
+    }
+
+    if (options.json) {
+        writeJson(io.stdout, outcome);
+        throwOnFailedIngest(outcome);
+        return;
+    }
+
+    throwOnFailedIngest(outcome);
+    io.stdout(`Ingested ${outcome.rows ?? 0} row(s) into "${options.table}" (live size now ${formatByteSize(outcome.live_bytes ?? 0)}).`);
+}
+
+export async function databaseIngest(
+    name: string,
+    file: string,
+    options: DatabaseIngestOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseIngestWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
 }
