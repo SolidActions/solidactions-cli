@@ -1222,7 +1222,8 @@ export async function databaseCreateWithConfig(
         // `import_failed`, leaving the database behind consuming quota.
         throw new DatabaseOperationError(
             'invalid_flag_combination',
-            '--from is not supported with --kind duckdb; SQL import only applies to libsql databases. Create the database, then load data with `solidactions database ingest`.',
+            '--from is not supported with --kind duckdb; SQL import only applies to libsql databases. Create the database, then load data with `solidactions database ingest`.'
+                + ` How analytical databases work: ${ANALYTICAL_DOCS_URL}`,
         );
     }
     const preparedSource = options.from && !io.importDatabase
