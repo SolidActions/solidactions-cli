@@ -401,6 +401,10 @@ database
     .option('--resume <export-id>', 'Resume an existing authorized export')
     .option('--replace', 'Replace a non-reusable ready export without prompting')
     .option('--json', 'Output as JSON')
+    .addHelpText('after', `
+Exports contain Parquet files and manifest.json only. New exports require an absent or empty destination; downloads never overwrite files.
+Downloads verify the manifest against the authenticated API manifest digest, then verify each file byte length and SHA-256. Signed links are refreshed once on expiry.
+Resume an interrupted download with --resume <export-id>. JSON output never includes signed URLs.`)
     .action(async (name, options) => {
         await databaseExport(name, options);
     });
