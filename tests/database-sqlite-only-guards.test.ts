@@ -7,7 +7,7 @@ interface Config { host: string; apiKey: string; workspaceId: string; }
 const CONFIG: Config = { host: 'https://app.example.test', apiKey: 'pat', workspaceId: 'ws' };
 const DUCKDB_SHOW = { database: { id: 'db-1', name: 'orders', kind: 'duckdb', status: 'ready', size_bytes: 1, deleted_at: null, purge_at: null } };
 const ANALYTICAL_DOCS_SUFFIX = ' How analytical databases work: https://www.solidactions.com/docs/analytical-databases';
-const KIND_MISMATCH_MESSAGE = '"orders" is an analytical database — use `database ingest` to load data and `database query` to read it' + ANALYTICAL_DOCS_SUFFIX;
+const KIND_MISMATCH_MESSAGE = '"orders" is an analytical database — use `database ingest` to load data and `database query` to read it.' + ANALYTICAL_DOCS_SUFFIX;
 
 async function loadDatabaseCommands(): Promise<Record<string, unknown>> {
     const moduleUrl = pathToFileURL(path.resolve(__dirname, '../src/commands/database.ts')).href;
@@ -50,7 +50,7 @@ describe('SQLite-only verbs refuse an analytical name', () => {
         await expect(databaseExecWithConfig('orders', 'delete from t', { yes: true }, CONFIG, test.dependencies))
             .rejects.toMatchObject({
                 code: 'read_only',
-                message: "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step" + ANALYTICAL_DOCS_SUFFIX,
+                message: "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step." + ANALYTICAL_DOCS_SUFFIX,
             });
         expect(test.calls).toEqual([{ operation: 'show', name: 'orders' }]);
     });

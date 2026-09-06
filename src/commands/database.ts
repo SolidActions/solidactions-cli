@@ -1346,14 +1346,14 @@ export async function refuseIfAnalytical(
     if (verb === 'exec') {
         throw new DatabaseOperationError(
             'read_only',
-            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step"
+            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step."
                 + ` How analytical databases work: ${ANALYTICAL_DOCS_URL}`,
         );
     }
 
     throw new DatabaseOperationError(
         'kind_mismatch',
-        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it`
+        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it.`
             + ` How analytical databases work: ${ANALYTICAL_DOCS_URL}`,
     );
 }
