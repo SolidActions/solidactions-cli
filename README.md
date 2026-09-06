@@ -111,13 +111,38 @@ solidactions database pull analytics --writable
 solidactions database import analytics backup.sql --yes
 solidactions database import analytics backup.sql --resume <checkpoint> --yes
 solidactions database push analytics complete.db --yes
+solidactions database create analytics --kind duckdb --json
+solidactions database list --kind duckdb --json
+solidactions database show analytics --json
+solidactions database ingest analytics data.parquet --table events --json
+solidactions database ingest analytics data.csv --table events --mode replace --json
+solidactions database drop-table analytics events --yes --json
+solidactions database optimize analytics --wait --json
+solidactions database connect analytics --json
+solidactions database wake analytics --json
+solidactions database query analytics "select category, sum(amount) from events group by 1" --limit 1000 --json
 ```
 
 `--json` produces machine-readable output where supported. `delete`, `exec`,
-`dump` overwrites, `pull` overwrites, and `import` prompt before changing data;
-use `--yes` only when that change is already approved. A database `delete` is a
-soft-delete, and its output shows the purge clock during which `undelete` can
-restore it.
+`dump` overwrites, `pull` overwrites, `drop-table`, and `import` prompt before
+changing data; use `--yes` only when that change is already approved. A
+database `delete` is a soft-delete, and its output shows the purge clock
+during which `undelete` can restore it (either kind).
+
+`create --kind` defaults to the standard (SQLite) kind; pass `--kind duckdb`
+for an analytical database (waits for provisioning unless `--no-wait`).
+`--from` only applies to the standard kind — `create --kind duckdb --from
+<file>` is rejected up front, before the database is created, since SQL
+import is meaningless for an analytical database; load one with `ingest`
+after creation. Analytical verbs — `ingest`, `drop-table`, `optimize`,
+`connect`, `wake` — only work against a `duckdb` database. `dump`, `pull`,
+`push`, `import`, and `exec` are for the standard (SQLite) kind only and
+refuse an analytical name with a one-line hint.
+
+`ingest --mode replace` overwrites a table's contents with no `--yes` prompt
+(unlike `drop-table`, which is a separate, rarer, schema-shaped operation) —
+this is the normal, expected way to refresh an analytical table from an
+unattended pipeline, so it is not gated behind confirmation.
 
 `query` is read-only SQL; use `exec` for writes. `schema`, `query`, `exec`,
 `pull --writable`, and imports use ephemeral scoped access held only in memory.

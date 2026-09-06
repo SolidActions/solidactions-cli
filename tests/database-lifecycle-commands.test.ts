@@ -9,10 +9,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 interface DatabaseRecord {
     name: string;
+    kind: string;
     status: string;
+    activity?: string;
     deleted_at: string | null;
     purge_at: string | null;
     size_bytes: number;
+    size_limit_bytes?: number;
 }
 
 interface Config {
@@ -49,6 +52,7 @@ const CONFIG: Config = {
 const ACTIVE: DatabaseRecord = {
     id: 'database-active-id',
     name: 'Analytics',
+    kind: 'libsql',
     status: 'ready',
     deleted_at: null,
     purge_at: null,
@@ -58,15 +62,31 @@ const ACTIVE: DatabaseRecord = {
 const DELETED: DatabaseRecord = {
     id: 'database-deleted-id',
     name: 'Retired',
+    kind: 'libsql',
     status: 'ready',
     deleted_at: '2026-08-07T12:00:00.000000Z',
     purge_at: '2026-09-06T12:00:00.000000Z',
     size_bytes: 5678,
 };
 
+const ANALYTICAL: DatabaseRecord = {
+    id: 'database-analytical-id',
+    name: 'Warehouse',
+    kind: 'duckdb',
+    status: 'ready',
+    activity: 'idle',
+    deleted_at: null,
+    purge_at: null,
+    size_bytes: 1_288_490_188,
+    size_limit_bytes: 2_147_483_648,
+};
+
 const LIST_RESPONSE = {
-    databases: [ACTIVE, DELETED],
-    quota: { used: 1, limit: 5 },
+    databases: [ACTIVE, DELETED, ANALYTICAL],
+    quota: {
+        libsql: { used: 2, limit: 5, scope: 'workspace' },
+        duckdb: { used: 1, limit: 3, scope: 'org' },
+    },
 };
 
 async function loadDatabaseCommands(): Promise<Record<string, unknown>> {
@@ -123,6 +143,20 @@ function expectControlPost(call: PostCall, body: Record<string, unknown>): void 
     });
 }
 
+/**
+ * Locate the rendered table row (from a `renderDatabaseTable` line-per-record
+ * table) that contains `match` and split it into its column cell values.
+ * Columns are padded with at least two trailing spaces by `renderTable`, so
+ * splitting on runs of 2+ spaces reliably isolates NAME/KIND/STATUS/ACTIVITY/etc.
+ */
+function tableRow(output: string, match: string): string[] {
+    const line = output.split('\n').find((candidate) => candidate.trim().startsWith(match));
+    if (line === undefined) {
+        throw new Error(`no table row starting with "${match}" in:\n${output}`);
+    }
+    return line.trim().split(/ {2,}/);
+}
+
 describe('database lifecycle control-plane contract', () => {
     it('lists active and deleted rows with stable fields and quota in the shared table style', async () => {
         const databaseListWithConfig = await requireExport('databaseListWithConfig');
@@ -144,8 +178,55 @@ describe('database lifecycle control-plane contract', () => {
         expect(output).toContain(ACTIVE.status);
         expect(output).toContain(DELETED.deleted_at);
         expect(output).toContain(DELETED.purge_at);
-        expect(output).toMatch(/quota.*1.*5/i);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('lists KIND/ACTIVITY/SIZE columns for analytical rows and filters by --kind', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        await databaseListWithConfig({}, CONFIG, test.dependencies);
+
+        const output = test.stdout.join('\n');
+        expect(output).toMatch(/KIND/i);
+        expect(output).toMatch(/ACTIVITY/i);
+        expect(output).toContain('duckdb');
+        expect(output).toContain('idle');
+        expect(output).toContain('1.2 GiB / 2.0 GiB');
+        // Pin used/limit to their scope on the SAME line, specifically enough
+        // that swapping which scope string renders under which kind fails:
+        // standard (libsql) databases are limited per workspace, analytical
+        // (duckdb) per organisation.
+        expect(output).toContain(
+            `libsql ${LIST_RESPONSE.quota.libsql.used} / ${LIST_RESPONSE.quota.libsql.limit} (${LIST_RESPONSE.quota.libsql.scope})`,
+        );
+        expect(output).toContain(
+            `duckdb ${LIST_RESPONSE.quota.duckdb.used} / ${LIST_RESPONSE.quota.duckdb.limit} (${LIST_RESPONSE.quota.duckdb.scope})`,
+        );
+
+        const stdoutBeforeFilteredCall = test.stdout.length;
+        await databaseListWithConfig({ kind: 'duckdb' } as any, CONFIG, test.dependencies);
+        expectControlPost(test.calls[1], { operation: 'list' });
+        const filtered = test.stdout.slice(stdoutBeforeFilteredCall).join('\n');
+        expect(filtered).toContain('Warehouse');
+        expect(filtered).not.toContain('Analytics');
+        expect(filtered).not.toContain('Retired');
+    });
+
+    it('rejects an unrecognized --kind before sending any request', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        let caught: any;
+        try {
+            await databaseListWithConfig({ kind: 'duckdbb' } as any, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_kind' });
+        expect(caught?.message).toMatch(/duckdbb/);
+        expect(test.calls).toEqual([]);
     });
 
     it('writes the complete list response as JSON with no decoration', async () => {
@@ -159,6 +240,18 @@ describe('database lifecycle control-plane contract', () => {
         expect(test.stdout.join('\n')).not.toMatch(/Databases:|Quota:|\u001b\[/);
     });
 
+    it('filters JSON output to the matching kind while keeping the full quota', async () => {
+        const databaseListWithConfig = await requireExport('databaseListWithConfig');
+        const test = harness(LIST_RESPONSE);
+
+        await databaseListWithConfig({ kind: 'duckdb', json: true } as any, CONFIG, test.dependencies);
+
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({
+            databases: [ANALYTICAL],
+            quota: LIST_RESPONSE.quota,
+        });
+    });
+
     it('creates with the exact operation and renders the stable response payload as JSON', async () => {
         const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
         const payload = { database: ACTIVE };
@@ -167,9 +260,182 @@ describe('database lifecycle control-plane contract', () => {
         await databaseCreateWithConfig('Analytics', { json: true }, CONFIG, test.dependencies);
 
         expect(test.calls).toHaveLength(1);
-        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics' });
+        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('creates a duckdb database with --kind and polls show until ready', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const ready = { ...ACTIVE, kind: 'duckdb', status: 'ready' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        const sleeps: number[] = [];
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            if (body.operation === 'create') return { data: { database: provisioning } };
+            return { data: { database: ready } };
+        };
+        (test.dependencies as any).sleep = async (ms: number) => { sleeps.push(ms); };
+
+        await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+
+        expect(calls[0]).toEqual({ operation: 'create', name: 'Orders', kind: 'duckdb' });
+        expect(calls[1]).toEqual({ operation: 'show', name: 'Orders' });
+        expect(sleeps.length).toBeGreaterThan(0);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ready });
+    });
+
+    it('does not poll when --no-wait is passed', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const test = harness({ database: provisioning });
+
+        await databaseCreateWithConfig('Orders', { kind: 'duckdb', wait: false, json: true }, CONFIG, test.dependencies);
+
+        expect(test.calls).toHaveLength(1);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: provisioning });
+    });
+
+    it('defaults --kind to libsql and creates synchronously', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        await databaseCreateWithConfig('Analytics', {}, CONFIG, test.dependencies);
+
+        expectControlPost(test.calls[0], { operation: 'create', name: 'Analytics', kind: 'libsql' });
+    });
+
+    it('renders KIND and the ACTIVITY placeholder on a libsql mutation table', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        await databaseCreateWithConfig('Analytics', {}, CONFIG, test.dependencies);
+
+        const row = tableRow(test.stdout.join('\n'), ACTIVE.name);
+        expect(row[1]).toBe('libsql');
+        expect(row[3]).toBe('-');
+    });
+
+    it('renders KIND and the real ACTIVITY value on a duckdb mutation table', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const duckdbActive: DatabaseRecord = {
+            ...ACTIVE,
+            name: 'Warehouse',
+            kind: 'duckdb',
+            activity: 'active',
+        };
+        const test = harness({ database: duckdbActive });
+
+        await databaseCreateWithConfig('Warehouse', { kind: 'duckdb' }, CONFIG, test.dependencies);
+
+        const row = tableRow(test.stdout.join('\n'), duckdbActive.name);
+        expect(row[1]).toBe('duckdb');
+        expect(row[3]).toBe('active');
+    });
+
+    it('throws provisioning_timeout and stops polling once the deadline passes while still provisioning', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            return { data: { database: provisioning } };
+        };
+        const sleeps: number[] = [];
+        (test.dependencies as any).sleep = async (ms: number) => { sleeps.push(ms); };
+        // deadline = call#1 (0) + 5min (300_000) = 300_000.
+        // call#2 (loop check, 1_000) is under the deadline -> one poll happens.
+        // call#3 (loop check after that poll, 400_000) is past the deadline -> loop stops.
+        const timestamps = [0, 1_000, 400_000];
+        let nowCalls = 0;
+        (test.dependencies as any).now = () => timestamps[Math.min(nowCalls++, timestamps.length - 1)];
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'provisioning_timeout' });
+        expect(caught?.message).toMatch(/Orders/);
+        // Exactly one show poll happened (create + one show) — a broken loop
+        // condition (e.g. an inverted comparison, or ignoring the deadline)
+        // would poll unboundedly or zero times instead.
+        expect(calls).toEqual([
+            { operation: 'create', name: 'Orders', kind: 'duckdb' },
+            { operation: 'show', name: 'Orders' },
+        ]);
+        expect(sleeps).toEqual([2_000]);
+    });
+
+    it('throws provisioning_failed when the database reaches a terminal non-ready status', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const provisioning = { ...ACTIVE, kind: 'duckdb', status: 'provisioning' };
+        const failed = { ...ACTIVE, kind: 'duckdb', status: 'error' };
+        const calls: Array<Record<string, unknown>> = [];
+        const test = harness({ database: provisioning });
+        test.dependencies.post = async (url, body) => {
+            calls.push(body);
+            if (body.operation === 'create') return { data: { database: provisioning } };
+            return { data: { database: failed } };
+        };
+        (test.dependencies as any).sleep = async () => undefined;
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'provisioning_failed' });
+        expect(caught?.message).toMatch(/Orders/);
+        expect(caught?.message).toMatch(/error/);
+        expect(calls).toEqual([
+            { operation: 'create', name: 'Orders', kind: 'duckdb' },
+            { operation: 'show', name: 'Orders' },
+        ]);
+    });
+
+    it('rejects an unrecognized --kind before sending any request', async () => {
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdbb' as any, json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_kind' });
+        expect(caught?.message).toMatch(/duckdbb/);
+        expect(test.calls).toEqual([]);
+    });
+
+    it('rejects --kind duckdb combined with --from before sending any request (C-2)', async () => {
+        // An analytical database is a billable, org-quota-scoped resource — if this
+        // combination reached the server it would create and bill the database, wait
+        // out provisioning, and only then fail the (inapplicable) SQL import, leaving
+        // the database behind consuming quota. Must be rejected up front, with no POST.
+        const databaseCreateWithConfig = await requireExport('databaseCreateWithConfig');
+        const test = harness({ database: ACTIVE });
+
+        let caught: any;
+        try {
+            await databaseCreateWithConfig('Orders', { kind: 'duckdb', from: 'schema.sql', json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_flag_combination' });
+        expect(caught?.message).toMatch(/--from/);
+        expect(caught?.message).toMatch(/--kind duckdb/);
+        expect(test.calls).toEqual([]);
     });
 
     it('undeletes with the exact operation and renders the stable response payload as JSON', async () => {
@@ -183,6 +449,48 @@ describe('database lifecycle control-plane contract', () => {
         expectControlPost(test.calls[0], { operation: 'undelete', name: 'Analytics' });
         expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
         expect(test.stderr).toEqual([]);
+    });
+
+    it('undeletes an analytical database through the same generic operation, with no client-side kind gating (C-4)', async () => {
+        // `undelete` applies no kind-based refusal on the CLI side (unlike `dump`/`pull`/
+        // `push`/`import`/`exec`) — it dispatches straight to the shared operation, so an
+        // analytical database undeletes exactly like a standard one and any server-side
+        // refusal (or success) is surfaced verbatim through the generic error boundary.
+        const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
+        const payload = { database: ANALYTICAL };
+        const test = harness(payload);
+
+        await databaseUndeleteWithConfig('Warehouse', { json: true }, CONFIG, test.dependencies);
+
+        expect(test.calls).toHaveLength(1);
+        expectControlPost(test.calls[0], { operation: 'undelete', name: 'Warehouse' });
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
+    });
+
+    it('surfaces a server-side undelete refusal for an analytical database verbatim (C-4)', async () => {
+        const databaseUndeleteWithConfig = await requireExport('databaseUndeleteWithConfig');
+        const test = harness();
+        test.dependencies.post = async () => {
+            const error: any = new Error('Request failed with status code 422');
+            error.response = {
+                status: 422,
+                data: { code: 'kind_mismatch', message: '"Warehouse" is an analytical database and cannot be undeleted yet.' },
+            };
+            throw error;
+        };
+
+        let caught: any;
+        try {
+            await databaseUndeleteWithConfig('Warehouse', { json: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({
+            code: 'kind_mismatch',
+            message: '"Warehouse" is an analytical database and cannot be undeleted yet.',
+            status: 422,
+        });
     });
 
     it('deletes with --yes without prompting and preserves the stable JSON payload', async () => {
@@ -207,6 +515,7 @@ describe('database lifecycle control-plane contract', () => {
             options: {},
             response: { database: ACTIVE },
             operation: 'create',
+            extraBody: { kind: 'libsql' },
             success: /creat/i,
             requiredValues: ['Analytics', 'ready'],
         },
@@ -242,7 +551,7 @@ describe('database lifecycle control-plane contract', () => {
         await handler(scenario.name, scenario.options, CONFIG, test.dependencies);
 
         expect(test.calls).toHaveLength(1);
-        expectControlPost(test.calls[0], { operation: scenario.operation, name: scenario.name });
+        expectControlPost(test.calls[0], { operation: scenario.operation, name: scenario.name, ...(scenario as any).extraBody });
         const output = test.stdout.join('\n');
         expect(output).toMatch(scenario.success);
         for (const value of scenario.requiredValues) {
@@ -332,7 +641,7 @@ describe('database create --from importer handoff', () => {
         );
 
         expect(events).toEqual(['provision', 'import:Analytics:fixtures/seed.sql']);
-        expectControlPost(test.calls[0], { operation: 'create', name: 'requested-name' });
+        expectControlPost(test.calls[0], { operation: 'create', name: 'requested-name', kind: 'libsql' });
     });
 
     it('reports that the created database remains in place when the later import fails', async () => {

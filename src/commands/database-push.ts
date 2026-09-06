@@ -7,6 +7,7 @@ import { pathToFileURL } from 'url';
 import { createClient } from '@libsql/client';
 import { Config } from '../utils/config';
 import { DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, DatabaseOperationError, DatabaseRequestDependencies, requestDatabaseOperation } from '../utils/database-data-plane';
+import { refuseIfAnalytical } from './database';
 
 const MAX_BYTES = 20_000_000_000;
 const PAGE_SIZE = 4096;
@@ -230,6 +231,11 @@ function stableOperation(data: unknown): Record<string, unknown> {
 }
 
 export async function databasePushWithConfig(name: string, file: string, options: DatabasePushOptions, config: Config, dependencies: PushDependencies = {}): Promise<void> {
+    // Kind refusal fires first (matches `import`'s ordering): pushing an
+    // analytical name without --yes previously reported "confirmation_required"
+    // first, a less useful first error since adding --yes would only surface
+    // kind_mismatch on the next run anyway.
+    await refuseIfAnalytical(config, name, 'sqlite-only', { post: dependencies.post });
     if (!options.yes) throw new DatabaseOperationError('confirmation_required', 'Database push is destructive and requires --yes.');
     const key = options.idempotencyKey ?? randomUUID();
     if (!IDEMPOTENCY_UUID.test(key)) throw new DatabaseOperationError('invalid_bulk_database', '--idempotency-key must be a UUID.');

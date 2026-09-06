@@ -9,20 +9,26 @@ const MANIFEST_PATH = path.join(DIST, 'command-manifest.json');
 const pkg = require('../package.json');
 
 const COMMANDS = [
-    { verb: 'list', args: [], options: ['--json'] },
-    { verb: 'create', args: [['name', true]], options: ['--from', '--json'] },
+    { verb: 'list', args: [], options: ['--kind', '--json'] },
+    { verb: 'create', args: [['name', true]], options: ['--kind', '--from', '--no-wait', '--json'] },
+    { verb: 'show', args: [['name', true]], options: ['--json'] },
     { verb: 'delete', args: [['name', true]], options: ['--yes', '--json'] },
     { verb: 'undelete', args: [['name', true]], options: ['--json'] },
     { verb: 'schema', args: [['name', true]], options: ['--json'] },
-    { verb: 'query', args: [['name', true], ['sql', true]], options: ['--json'] },
+    { verb: 'query', args: [['name', true], ['sql', true]], options: ['--limit', '--json'] },
     { verb: 'exec', args: [['name', true], ['sql', true]], options: ['--yes', '--json'] },
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
     { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
     { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
     { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
+    { verb: 'ingest', args: [['name', true], ['file', true]], options: ['--table', '--mode', '--batch-id', '--json'] },
+    { verb: 'drop-table', args: [['name', true], ['table', true]], options: ['--yes', '--json'] },
+    { verb: 'optimize', args: [['name', true]], options: ['--wait', '--json'] },
+    { verb: 'connect', args: [['name', true]], options: ['--json'] },
+    { verb: 'wake', args: [['name', true]], options: ['--json'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first

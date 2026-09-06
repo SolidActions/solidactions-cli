@@ -76,6 +76,7 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
     const closed: number[] = [];
     const expiresAt = options.expiresAt ?? ['2026-08-07T12:10:00.000Z'];
     let attached = 0;
+    let mintCount = 0;
 
     const dependencies: Record<string, unknown> = {
         cwd: root,
@@ -143,8 +144,31 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
             },
         }),
         post: async (url: string, body: Record<string, unknown>, requestOptions: Record<string, unknown>) => {
-            const attempt = posts.length + 1;
             posts.push({ url, body, options: requestOptions });
+            // The analytical-name guard (#1700 Plan D Task 5) mints a `show`
+            // before any other work; every case in this file targets a
+            // libsql database, so the guard observes this row and proceeds.
+            // It is deliberately excluded from the write-access mint counter
+            // below so existing `fresh-write-token-sentinel-N` numbering and
+            // attempt-keyed overrides (`options.mint`) stay unchanged.
+            if (body.operation === 'show') {
+                events.push('mint:show');
+                return {
+                    data: {
+                        database: {
+                            name: String(body.name),
+                            kind: 'libsql',
+                            status: 'ready',
+                            size_bytes: 0,
+                            deleted_at: null,
+                            purge_at: null,
+                        },
+                    },
+                };
+            }
+
+            mintCount += 1;
+            const attempt = mintCount;
             events.push(`mint:${attempt}`);
             if (options.mint) {
                 return { data: await options.mint(attempt) };
@@ -184,9 +208,15 @@ function writableHarness(root: string, options: HarnessOptions = {}) {
     };
 }
 
+// The analytical-name guard (#1700 Plan D Task 5) mints exactly one `show`
+// before any write-access mint; strip it (asserting its own shape) so
+// callers can keep asserting the rest of `posts` is pure write-access mints.
 function expectWriteAccess(posts: ReturnType<typeof writableHarness>['posts']): void {
     expect(posts.length).toBeGreaterThan(0);
-    for (const post of posts) {
+    const [first, ...rest] = posts;
+    expect(first).toEqual(showPost('Analytics'));
+    expect(rest.length).toBeGreaterThan(0);
+    for (const post of rest) {
         expect(post).toEqual({
             url: 'https://app.example.test/api/v1/databases',
             body: { operation: 'access', name: 'Analytics', mode: 'write' },
@@ -202,6 +232,23 @@ function expectWriteAccess(posts: ReturnType<typeof writableHarness>['posts']): 
             },
         });
     }
+}
+
+function showPost(name: string) {
+    return {
+        url: 'https://app.example.test/api/v1/databases',
+        body: { operation: 'show', name },
+        options: {
+            headers: {
+                Accept: 'application/json',
+                Authorization: 'Bearer control-plane-pat-sentinel',
+                'Content-Type': 'application/json',
+                'X-Workspace-Id': 'workspace-1146',
+            },
+            signal: expect.any(AbortSignal),
+            timeout: 30_000,
+        },
+    };
 }
 
 function expectNoSecrets(value: unknown): void {
@@ -362,7 +409,7 @@ describe('database pull --writable foreground attached session', () => {
         await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
 
         expectWriteAccess(test.posts);
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expect(test.events.indexOf('client:1:close')).toBeLessThan(test.events.indexOf('mint:2'));
         expect(test.events.indexOf('mint:2')).toBeLessThan(test.events.indexOf('client:2:sync'));
         expect(test.events.indexOf('client:2:sync')).toBeLessThan(test.events.indexOf('input:2'));
@@ -396,7 +443,7 @@ describe('database pull --writable foreground attached session', () => {
 
         await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
 
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expect(test.executions.map(({ client }) => client)).toEqual([1, 2]);
     });
 
@@ -425,7 +472,7 @@ describe('database pull --writable foreground attached session', () => {
         await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
 
         expect(test.stderr.join('\n')).toContain(label);
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
     });
 
     it('stops before consuming more input when proactive renewal is refused', async () => {
@@ -501,7 +548,7 @@ describe('database pull --writable foreground attached session', () => {
 
         await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
 
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expect(test.executions.map(({ client, sql }) => ({ client, sql }))).toEqual([
             { client: 1, sql: "INSERT INTO ledger(value) VALUES ('once');" },
             { client: 2, sql: 'SELECT count(*) FROM ledger;' },
@@ -524,7 +571,7 @@ describe('database pull --writable foreground attached session', () => {
 
         await databasePullWithConfig('Analytics', path.join(root, 'analytics.db'), { writable: true }, CONFIG, test.dependencies);
 
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(test.executions.map(({ sql }) => sql)).toEqual(['BROKEN SQL;', 'SELECT 2;']);
         expect(test.stderr).toHaveLength(1);
         expectNoSecrets(test.stderr);
@@ -636,7 +683,9 @@ describe('database pull --writable foreground attached session', () => {
 
         await databasePullWithConfig('Analytics', target, { writable: true }, CONFIG, declined.dependencies);
 
-        expect(declined.posts).toEqual([]);
+        // Only the analytical-name guard's `show` runs before the overwrite
+        // confirmation (#1700 Plan D Task 5).
+        expect(declined.posts).toEqual([showPost('Analytics')]);
         expect(declined.events.some((event) => event.startsWith('input:'))).toBe(false);
         expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
 
@@ -650,7 +699,7 @@ describe('database pull --writable foreground attached session', () => {
             CONFIG,
             collision.dependencies,
         )).rejects.toThrow(/temporary|already exists|failed/i);
-        expect(collision.posts).toEqual([]);
+        expect(collision.posts).toEqual([showPost('Analytics')]);
         expect(fs.readFileSync(temp, 'utf8')).toBe('SOMEONE ELSES TEMP');
     });
 
@@ -711,7 +760,7 @@ describe('database pull --writable foreground attached session', () => {
 
             expect(caught).toBeDefined();
             expect(test.closed).toEqual([1]);
-            expect(test.posts).toHaveLength(1);
+            expect(test.posts).toHaveLength(2);
             expect(test.events).not.toContain('input:2');
             expect(test.finalizerConfigs).toEqual([]);
             expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
@@ -759,7 +808,7 @@ describe('database pull --writable foreground attached session', () => {
         }
 
         expect(caught).toBeDefined();
-        expect(test.posts).toHaveLength(2);
+        expect(test.posts).toHaveLength(3);
         expect(test.closed).toEqual([1, 2]);
         expect(test.events).not.toContain('input:2');
         expect(test.finalizerConfigs).toEqual([]);
@@ -847,7 +896,7 @@ describe('database pull --writable foreground attached session', () => {
         }
 
         expect(caught).toBeDefined();
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(test.events).not.toContain('mint:2');
         expect(test.attachedConfigs).toHaveLength(1);
         expect(test.closed).toEqual([1]);
@@ -898,7 +947,7 @@ describe('database pull --writable foreground attached session', () => {
         }
 
         expect(caught).toBeDefined();
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(test.attachedConfigs).toEqual([]);
         expect(test.finalizerConfigs).toEqual([]);
         expect(test.events.some((event) => event.startsWith('input:'))).toBe(false);
@@ -974,7 +1023,7 @@ describe('database pull --writable foreground attached session', () => {
         }
 
         expect(caught).toBeDefined();
-        expect(test.posts).toHaveLength(1);
+        expect(test.posts).toHaveLength(2);
         expect(test.attachedConfigs).toEqual([]);
         expect(test.finalizerConfigs).toEqual([]);
         expect(test.events.some((event) => event.startsWith('input:'))).toBe(false);

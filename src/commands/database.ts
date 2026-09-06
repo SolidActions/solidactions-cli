@@ -1,7 +1,8 @@
+import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import * as readline from 'readline';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { pathToFileURL } from 'url';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
@@ -35,21 +36,40 @@ import {
     runPreparedDatabaseImport,
 } from '../utils/database-sql-import-runner';
 import { renderTable } from '../utils/table';
+import { defaultIngestBatchId, ingestFormatFromExtension } from '../utils/database-ingest-digest';
+
+export type DatabaseKind = 'libsql' | 'duckdb';
+export type DatabaseActivity = 'active' | 'idle' | 'idle_no_credit' | 'waking' | 'optimizing';
 
 export interface DatabaseRecord {
     id?: string;
     name: string;
+    kind: DatabaseKind;
     status: string;
+    activity?: DatabaseActivity;
     deleted_at: string | null;
     purge_at: string | null;
     size_bytes: number;
+    size_limit_bytes?: number;
+    over_cap?: boolean;
+    table_count?: number;
+    last_loaded_at?: string | null;
+    last_optimized_at?: string | null;
+    created_at?: string;
+    updated_at?: string;
+}
+
+export interface DatabaseQuota {
+    used: number;
+    limit: number;
+    scope: 'workspace' | 'org';
 }
 
 interface DatabaseListResponse {
     databases: DatabaseRecord[];
     quota: {
-        used: number;
-        limit: number;
+        libsql: DatabaseQuota;
+        duckdb: DatabaseQuota;
     };
 }
 
@@ -58,11 +78,14 @@ interface DatabaseMutationResponse {
 }
 
 interface DatabaseListOptions {
+    kind?: DatabaseKind;
     json?: boolean;
 }
 
 interface DatabaseCreateOptions {
     from?: string;
+    kind?: DatabaseKind;
+    wait?: boolean;
     json?: boolean;
 }
 
@@ -80,6 +103,7 @@ interface DatabaseSchemaOptions {
 }
 
 interface DatabaseQueryOptions {
+    limit?: number;
     json?: boolean;
 }
 
@@ -118,6 +142,11 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     monotonicNow?: () => number;
     abortSignal?: AbortSignal;
     sleep?: (milliseconds: number) => Promise<void>;
+    put?: (
+        url: string,
+        body: fs.ReadStream | Buffer,
+        options: { headers: Record<string, string>; timeout?: number },
+    ) => Promise<{ data: unknown; status?: number }>;
 }
 
 interface ResolvedCommandDependencies {
@@ -138,6 +167,7 @@ interface ResolvedCommandDependencies {
     controlPlaneTimeoutMs: number | undefined;
     dataPlaneTimeoutMs: number;
     sleep: (milliseconds: number) => Promise<void>;
+    put: NonNullable<DatabaseCommandDependencies['put']>;
 }
 
 function defaultConfirmation(message: string): Promise<boolean> {
@@ -183,6 +213,7 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => {
             setTimeout(resolve, milliseconds);
         })),
+        put: dependencies.put ?? axios.put,
     };
 }
 
@@ -211,17 +242,48 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
         || typeof database.size_bytes !== 'number'
         || (database.deleted_at !== null && typeof database.deleted_at !== 'string')
         || (database.purge_at !== null && typeof database.purge_at !== 'string')
+        || (database.kind !== 'libsql' && database.kind !== 'duckdb')
+        || (database.activity !== undefined && typeof database.activity !== 'string')
+        || (database.size_limit_bytes !== undefined && typeof database.size_limit_bytes !== 'number')
+        || (database.over_cap !== undefined && typeof database.over_cap !== 'boolean')
+        || (database.table_count !== undefined && typeof database.table_count !== 'number')
+        || (
+            database.last_loaded_at !== undefined
+            && database.last_loaded_at !== null
+            && typeof database.last_loaded_at !== 'string'
+        )
+        || (
+            database.last_optimized_at !== undefined
+            && database.last_optimized_at !== null
+            && typeof database.last_optimized_at !== 'string'
+        )
+        || (database.created_at !== undefined && typeof database.created_at !== 'string')
+        || (database.updated_at !== undefined && typeof database.updated_at !== 'string')
     ) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
     }
 
+    // A missing or unrecognized `kind` is rejected above (upstream_unavailable)
+    // rather than defaulted — silently treating an unknown kind as 'libsql'
+    // would make analytical-only refusals (read-only, dump) fail open (#1700 R10).
+    const kind: DatabaseKind = database.kind;
+
     return {
         ...(database.id === undefined ? {} : { id: database.id }),
         name: database.name,
+        kind,
         status: database.status,
+        ...(database.activity === undefined ? {} : { activity: database.activity }),
         deleted_at: database.deleted_at,
         purge_at: database.purge_at,
         size_bytes: database.size_bytes,
+        ...(database.size_limit_bytes === undefined ? {} : { size_limit_bytes: database.size_limit_bytes }),
+        ...(database.over_cap === undefined ? {} : { over_cap: database.over_cap }),
+        ...(database.table_count === undefined ? {} : { table_count: database.table_count }),
+        ...(database.last_loaded_at === undefined ? {} : { last_loaded_at: database.last_loaded_at }),
+        ...(database.last_optimized_at === undefined ? {} : { last_optimized_at: database.last_optimized_at }),
+        ...(database.created_at === undefined ? {} : { created_at: database.created_at }),
+        ...(database.updated_at === undefined ? {} : { updated_at: database.updated_at }),
     };
 }
 
@@ -229,21 +291,28 @@ function stableDatabaseResponse(data: DatabaseMutationResponse): DatabaseMutatio
     return { database: stableDatabaseRecord(data?.database) };
 }
 
-function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
+function stableQuota(quota: DatabaseQuota | null | undefined): DatabaseQuota {
     if (
-        !data
-        || !Array.isArray(data.databases)
-        || typeof data.quota?.used !== 'number'
-        || typeof data.quota?.limit !== 'number'
+        !quota
+        || typeof quota.used !== 'number'
+        || typeof quota.limit !== 'number'
+        || (quota.scope !== 'workspace' && quota.scope !== 'org')
     ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { used: quota.used, limit: quota.limit, scope: quota.scope };
+}
+
+function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
+    if (!data || !Array.isArray(data.databases)) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
     }
 
     return {
         databases: data.databases.map(stableDatabaseRecord),
         quota: {
-            used: data.quota.used,
-            limit: data.quota.limit,
+            libsql: stableQuota(data.quota?.libsql),
+            duckdb: stableQuota(data.quota?.duckdb),
         },
     };
 }
@@ -251,8 +320,12 @@ function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
 function databaseRows(databases: DatabaseRecord[]): string[][] {
     return databases.map((database) => [
         database.name,
+        database.kind,
         database.status,
-        String(database.size_bytes),
+        database.kind === 'duckdb' ? (database.activity ?? '-') : '-',
+        database.kind === 'duckdb'
+            ? `${formatByteSize(database.size_bytes)} / ${formatByteSize(database.size_limit_bytes ?? 0)}`
+            : String(database.size_bytes),
         database.deleted_at ?? '-',
         database.purge_at ?? '-',
     ]);
@@ -260,9 +333,16 @@ function databaseRows(databases: DatabaseRecord[]): string[][] {
 
 function renderDatabaseTable(databases: DatabaseRecord[]): string {
     return renderTable(
-        ['NAME', 'STATUS', 'SIZE (BYTES)', 'DELETED AT', 'PURGE AT'],
+        ['NAME', 'KIND', 'STATUS', 'ACTIVITY', 'SIZE', 'DELETED AT', 'PURGE AT'],
         databaseRows(databases),
     ).join('\n');
+}
+
+function renderQuota(quota: DatabaseListResponse['quota']): string {
+    return [
+        `Quota: libsql ${quota.libsql.used} / ${quota.libsql.limit} (${quota.libsql.scope})`,
+        `       duckdb ${quota.duckdb.used} / ${quota.duckdb.limit} (${quota.duckdb.scope})`,
+    ].join('\n');
 }
 
 function renderMutation(
@@ -515,6 +595,107 @@ function renderSchema(schema: DatabaseSchemaResponse): string {
     }
 
     return sections.join('\n\n');
+}
+
+interface AnalyticalSchemaColumn {
+    name: string;
+    type: string;
+}
+
+interface AnalyticalSchemaTable {
+    name: string;
+    columns: AnalyticalSchemaColumn[];
+    row_count: number;
+    last_loaded_at: string | null;
+}
+
+interface AnalyticalSchemaResponse {
+    tables: AnalyticalSchemaTable[];
+}
+
+function stableAnalyticalSchemaColumn(column: AnalyticalSchemaColumn): AnalyticalSchemaColumn {
+    if (!column || typeof column.name !== 'string' || typeof column.type !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { name: column.name, type: column.type };
+}
+
+function stableAnalyticalSchema(data: AnalyticalSchemaResponse): AnalyticalSchemaResponse {
+    if (!data || !Array.isArray(data.tables)) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        tables: data.tables.map((table) => {
+            if (
+                !table
+                || typeof table.name !== 'string'
+                || !Array.isArray(table.columns)
+                || typeof table.row_count !== 'number'
+                || (table.last_loaded_at !== null && typeof table.last_loaded_at !== 'string')
+            ) {
+                throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+            }
+            return {
+                name: table.name,
+                columns: table.columns.map(stableAnalyticalSchemaColumn),
+                row_count: table.row_count,
+                last_loaded_at: table.last_loaded_at,
+            };
+        }),
+    };
+}
+
+function renderAnalyticalSchema(schema: AnalyticalSchemaResponse): string {
+    if (schema.tables.length === 0) {
+        return 'No tables.';
+    }
+
+    return schema.tables.map((table) => {
+        const columns = table.columns.map((column) => `${column.name} (${column.type})`).join(', ');
+        return `${table.name} — ${table.row_count} rows, last loaded ${table.last_loaded_at ?? 'never'}\n  ${columns}`;
+    }).join('\n\n');
+}
+
+/** "1.2 GiB", "512.0 MiB", "900 B" — used by `show`, `list`, and `ingest`. */
+export function formatByteSize(bytes: number): string {
+    // Binary (1024-based) division — the units must say Gi/Mi/Ki, not G/M/K
+    // (spec:451 writes "1 GiB"; the old "GB"/"MB"/"KB" labels rendered the
+    // 1 GiB cap as "1.0 GB", which is the SI-decimal unit for a different
+    // number of bytes).
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GiB`;
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${bytes} B`;
+}
+
+interface DatabaseShowOptions {
+    json?: boolean;
+}
+
+// The analytical (DuckDB) kind is Beta on every surface — this label is the
+// canonical rendering; standard (libSQL) rows keep the plain kind value.
+function kindLabel(kind: DatabaseKind): string {
+    return kind === 'duckdb' ? 'Analytical · DuckDB (Beta)' : kind;
+}
+
+function renderShow(database: DatabaseRecord): string {
+    const lines = [
+        `Name: ${database.name}`,
+        `Kind: ${kindLabel(database.kind)}`,
+        `Status: ${database.status}`,
+    ];
+    if (database.kind === 'duckdb') {
+        lines.push(`Activity: ${database.activity ?? 'unknown'}`);
+        lines.push(`Size: ${formatByteSize(database.size_bytes)} of ${formatByteSize(database.size_limit_bytes ?? 0)}`);
+        lines.push(`Tables: ${database.table_count ?? 0}`);
+        lines.push(`Last loaded: ${database.last_loaded_at ?? 'never'}`);
+        lines.push(`Last optimized: ${database.last_optimized_at ?? 'never'}`);
+    } else {
+        lines.push(`Size: ${formatByteSize(database.size_bytes)}`);
+    }
+    lines.push(`Created: ${database.created_at ?? '-'}`);
+    return lines.join('\n');
 }
 
 const INCOMPLETE_DUMP_MARKER = '-- DOWNLOAD INCOMPLETE';
@@ -988,19 +1169,36 @@ export async function databaseListWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    // The server's `list` operation takes no `kind` parameter — CliDatabaseRequest
+    // prohibits it on anything but `create` — so the filter is applied here,
+    // client-side, against the full row set.
+    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'invalid_kind',
+            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+        );
+    }
+
     const data = stableListResponse(await requestDatabaseOperation<DatabaseListResponse>(
         config,
         { operation: 'list' },
         requestDependencies(io),
     ));
 
+    const databases = options.kind
+        ? data.databases.filter((database) => database.kind === options.kind)
+        : data.databases;
+
     if (options.json) {
-        writeJson(io.stdout, data);
+        writeJson(io.stdout, options.kind ? { ...data, databases } : data);
         return;
     }
 
-    io.stdout(`${renderDatabaseTable(data.databases)}\nQuota: ${data.quota.used} / ${data.quota.limit}`);
+    io.stdout(`${renderDatabaseTable(databases)}\n${renderQuota(data.quota)}`);
 }
+
+const CREATE_POLL_INTERVAL_MS = 2_000;
+const CREATE_POLL_TIMEOUT_MS = 5 * 60_000;
 
 export async function databaseCreateWithConfig(
     name: string,
@@ -1009,14 +1207,58 @@ export async function databaseCreateWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'invalid_kind',
+            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+        );
+    }
+    const kind: DatabaseKind = options.kind === 'duckdb' ? 'duckdb' : 'libsql';
+    if (kind === 'duckdb' && options.from) {
+        // C-2: reject before the create POST. An analytical database is a
+        // billable, org-quota-scoped resource (1 per org on Free) — letting
+        // this combination reach the server means it gets created, waits on
+        // provisioning, and only then fails the SQL import with a generic
+        // `import_failed`, leaving the database behind consuming quota.
+        throw new DatabaseOperationError(
+            'invalid_flag_combination',
+            '--from is not supported with --kind duckdb; SQL import only applies to libsql databases. Create the database, then load data with `solidactions database ingest`.',
+        );
+    }
     const preparedSource = options.from && !io.importDatabase
         ? await prepareDatabaseImportSource(options.from, io.cwd, io.filesystem)
         : undefined;
-    const data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
+    let data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
         config,
-        { operation: 'create', name },
+        { operation: 'create', name, kind },
         requestDependencies(io),
     ));
+
+    if (kind === 'duckdb' && options.wait !== false && data.database.status === 'provisioning') {
+        if (!options.json) {
+            io.stdout(`Provisioning ${kindLabel(kind)} database "${data.database.name}"… this can take about a minute.`);
+        }
+        const deadline = io.now() + CREATE_POLL_TIMEOUT_MS;
+        let record = data.database;
+        while (record.status === 'provisioning' && io.now() < deadline) {
+            await io.sleep(CREATE_POLL_INTERVAL_MS);
+            record = await requestDatabaseRecord(name, config, dependencies);
+        }
+        data = { database: record };
+
+        if (record.status !== 'ready') {
+            if (record.status === 'provisioning') {
+                throw new DatabaseOperationError(
+                    'provisioning_timeout',
+                    `Database "${name}" is still provisioning after ${Math.round(CREATE_POLL_TIMEOUT_MS / 60_000)} minute(s). It remains in place; check status with \`solidactions database show ${name}\`.`,
+                );
+            }
+            throw new DatabaseOperationError(
+                'provisioning_failed',
+                `Database "${name}" failed to provision (status: ${record.status}). Check \`solidactions database show ${name}\` for details.`,
+            );
+        }
+    }
 
     if (options.from) {
         try {
@@ -1067,6 +1309,66 @@ export async function databaseCreateWithConfig(
     io.stdout(renderMutation('create', data.database));
 }
 
+// The "call show first, branch on `.kind`" helper every later analytical verb
+// (schema/query/exec/dump/pull/push/import/ingest) reuses to learn a
+// database's kind before dispatching to the libsql or duckdb code path.
+export async function requestDatabaseRecord(
+    name: string,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<DatabaseRecord> {
+    const io = resolveDependencies(dependencies);
+    return stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
+        config,
+        { operation: 'show', name },
+        requestDependencies(io),
+    )).database;
+}
+
+// Refuses an analytical (duckdb) name for the SQLite-only verbs (exec, dump,
+// pull, push, import), reusing the same `show`-first lookup as `schema` and
+// `query` above. The server (`HandleCliDatabaseOperation`) already refuses
+// these operations with `kind_mismatch`; this guard only makes the refusal
+// fast (before any file read, temp file, or data-plane mint) and legible.
+export async function refuseIfAnalytical(
+    config: Config,
+    name: string,
+    verb: 'exec' | 'sqlite-only',
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    if (row.kind !== 'duckdb') return;
+
+    if (verb === 'exec') {
+        throw new DatabaseOperationError(
+            'read_only',
+            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step",
+        );
+    }
+
+    throw new DatabaseOperationError(
+        'kind_mismatch',
+        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it`,
+    );
+}
+
+export async function databaseShowWithConfig(
+    name: string,
+    options: DatabaseShowOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const database = await requestDatabaseRecord(name, config, dependencies);
+
+    if (options.json) {
+        writeJson(io.stdout, { database });
+        return;
+    }
+
+    io.stdout(renderShow(database));
+}
+
 export async function databaseImportWithConfig(
     name: string,
     file: string,
@@ -1075,6 +1377,7 @@ export async function databaseImportWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     const prepared = await prepareDatabaseImport(
         name,
         file,
@@ -1173,6 +1476,26 @@ export async function databaseSchemaWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb') {
+        // Read-intent, served from the cached catalog — never wakes a
+        // paused database (spec:568/598).
+        const schema = stableAnalyticalSchema(await requestDatabaseOperation<AnalyticalSchemaResponse>(
+            config,
+            { operation: 'schema', name },
+            requestDependencies(io),
+        ));
+
+        if (options.json) {
+            writeJson(io.stdout, schema);
+            return;
+        }
+
+        io.stdout(renderAnalyticalSchema(schema));
+        return;
+    }
+
     const schema = await withDatabaseClient(
         config,
         name,
@@ -1189,6 +1512,107 @@ export async function databaseSchemaWithConfig(
     io.stdout(renderSchema(schema));
 }
 
+interface AnalyticalQueryResult {
+    columns: string[];
+    rows: unknown[][];
+    truncated: boolean;
+    elapsed_ms: number;
+}
+
+interface AnalyticalWakingResponse {
+    code: 'waking';
+    message?: string;
+    retry_after_ms?: number;
+}
+
+function isAnalyticalWaking(value: unknown): value is AnalyticalWakingResponse {
+    const candidate = value as { code?: unknown } | null;
+    return candidate?.code === 'waking';
+}
+
+function stableAnalyticalQueryResult(data: AnalyticalQueryResult): AnalyticalQueryResult {
+    if (
+        !data
+        || !Array.isArray(data.columns)
+        || !data.columns.every((column) => typeof column === 'string')
+        || !Array.isArray(data.rows)
+        || !data.rows.every((row) => Array.isArray(row))
+        || typeof data.truncated !== 'boolean'
+        || typeof data.elapsed_ms !== 'number'
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        columns: [...data.columns],
+        rows: data.rows.map((row) => [...row]),
+        truncated: data.truncated,
+        elapsed_ms: data.elapsed_ms,
+    };
+}
+
+// CLI-surface cap (`services.analytical.query_row_limit_cli` on the server;
+// `config/services.php`) — the server clamps to the same value when
+// `row_limit` is omitted, so this is both the client-side validation bound
+// and the number shown for an un-limited truncation.
+const ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX = 10_000;
+
+// Bounds how long the CLI itself waits out a `waking` database before giving
+// up and surfacing the condition as an error; the server keeps retrying on
+// its own schedule via `retry_after_ms`.
+const ANALYTICAL_QUERY_MAX_WAIT_MS = 60_000;
+
+async function requestAnalyticalQuery(
+    config: Config,
+    name: string,
+    sql: string,
+    rowLimit: number | undefined,
+    io: ResolvedCommandDependencies,
+): Promise<AnalyticalQueryResult> {
+    const body: Record<string, unknown> = { operation: 'query', name, sql };
+    if (rowLimit !== undefined) {
+        body.row_limit = rowLimit;
+    }
+
+    const deadline = io.now() + ANALYTICAL_QUERY_MAX_WAIT_MS;
+    let announced = false;
+    for (;;) {
+        const response = await requestDatabaseOperation<AnalyticalQueryResult | AnalyticalWakingResponse>(
+            config,
+            body,
+            requestDependencies(io),
+        );
+        if (!isAnalyticalWaking(response)) {
+            return stableAnalyticalQueryResult(response);
+        }
+        if (io.now() >= deadline) {
+            throw new DatabaseOperationError(
+                'waking',
+                response.message ?? `${name} is still waking up — try again in a moment.`,
+            );
+        }
+        if (!announced) {
+            io.stderr(`Waking ${name}…`);
+            announced = true;
+        }
+        await io.sleep(response.retry_after_ms ?? 3_000);
+    }
+}
+
+/**
+ * Render one analytical query cell for the human table. Unlike the libsql
+ * path's `formatDatabaseTableValue` (which exists for driver-native
+ * bigint/blob values), analytical rows arrive as plain JSON over the wire —
+ * so a bare `String(value)` rendered SQL NULL as the literal text "null"
+ * (indistinguishable from the string "null") and a JSON/STRUCT column as
+ * "[object Object]".
+ */
+function formatAnalyticalQueryValue(value: unknown): string {
+    if (value === null) return 'NULL';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
 export async function databaseQueryWithConfig(
     name: string,
     sql: string,
@@ -1197,6 +1621,32 @@ export async function databaseQueryWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb') {
+        if (options.limit !== undefined && (Number.isNaN(options.limit) || options.limit < 1 || options.limit > ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX)) {
+            throw new DatabaseOperationError(
+                'invalid_limit',
+                `--limit must be between 1 and ${ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} (received "${options.limit}").`,
+            );
+        }
+
+        const result = await requestAnalyticalQuery(config, name, sql, options.limit, io);
+
+        if (options.json) {
+            writeJson(io.stdout, result);
+            return;
+        }
+
+        io.stdout(result.columns.length > 0
+            ? renderTable(result.columns, result.rows.map((resultRow) => resultRow.map(formatAnalyticalQueryValue))).join('\n')
+            : 'No rows returned.');
+        if (result.truncated) {
+            io.stdout(`(truncated at ${options.limit ?? ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX} rows)`);
+        }
+        return;
+    }
+
     const result = await withDatabaseClient(
         config,
         name,
@@ -1225,6 +1675,7 @@ export async function databaseExecWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'exec', io);
 
     if (!options.yes) {
         if (options.json || !io.isTTY) {
@@ -1274,6 +1725,7 @@ export async function databaseDumpWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     const target = resolveDatabaseDestination(io, file, `${safeDatabaseStem(name)}.sql`);
     let temp: string | undefined;
     let handle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
@@ -1657,6 +2109,7 @@ export async function databasePullWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    await refuseIfAnalytical(config, name, 'sqlite-only', io);
     if (options.writable) {
         return databaseWritablePullWithConfig(name, destination, options, config, io);
     }
@@ -1827,6 +2280,14 @@ export async function databaseCreate(
     await databaseCreateWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
 }
 
+export async function databaseShow(
+    name: string,
+    options: DatabaseShowOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseShowWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
 export async function databaseDelete(
     name: string,
     options: DatabaseDeleteOptions,
@@ -1894,4 +2355,672 @@ export async function databaseImport(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databaseImportWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseIngestOptions {
+    table: string;
+    mode?: string;
+    batchId?: string;
+    json?: boolean;
+}
+
+// A.4 `ingest_prepare` response. A same-digest replay of an in-progress or
+// terminal batch omits `upload_url`/`upload_headers` (spec:571) — that shape
+// is `IngestOutcome` (the A.5 status body) below, not this one.
+interface IngestPrepareResponse {
+    batch_id: string;
+    upload_url?: string;
+    upload_headers?: { 'Content-Length': string; 'x-amz-checksum-sha256': string };
+    expires_at?: string;
+}
+
+// A.5 `ingest_commit`/`ingest_status` response.
+interface IngestOutcome {
+    batch_id: string;
+    state: 'prepared' | 'copying' | 'dispatching' | 'applying' | 'acked' | 'failed' | 'outcome_unknown';
+    rows?: number;
+    durable?: boolean;
+    live_bytes?: number;
+    acked_at?: string;
+    error_code?: string;
+    message?: string;
+}
+
+const INGEST_OUTCOME_STATES = ['prepared', 'copying', 'dispatching', 'applying', 'acked', 'failed', 'outcome_unknown'];
+
+// `ingest`'s `--json` body was the only new-verb response never run through a
+// stable normalizer (every other mutation/operation response is) — validate
+// and narrow it the same way `stableOptimizeOperation` does, instead of
+// writing the raw server payload (or an unchecked `prepared as IngestOutcome`
+// cast) straight to stdout.
+function stableIngestOutcome(data: IngestOutcome): IngestOutcome {
+    if (
+        !data
+        || typeof data.batch_id !== 'string'
+        || !INGEST_OUTCOME_STATES.includes(data.state)
+        || (data.rows !== undefined && typeof data.rows !== 'number')
+        || (data.durable !== undefined && typeof data.durable !== 'boolean')
+        || (data.live_bytes !== undefined && typeof data.live_bytes !== 'number')
+        || (data.acked_at !== undefined && typeof data.acked_at !== 'string')
+        || (data.error_code !== undefined && typeof data.error_code !== 'string')
+        || (data.message !== undefined && typeof data.message !== 'string')
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        batch_id: data.batch_id,
+        state: data.state,
+        ...(data.rows === undefined ? {} : { rows: data.rows }),
+        ...(data.durable === undefined ? {} : { durable: data.durable }),
+        ...(data.live_bytes === undefined ? {} : { live_bytes: data.live_bytes }),
+        ...(data.acked_at === undefined ? {} : { acked_at: data.acked_at }),
+        ...(data.error_code === undefined ? {} : { error_code: data.error_code }),
+        ...(data.message === undefined ? {} : { message: data.message }),
+    };
+}
+
+const INGEST_POLL_INTERVAL_MS = 1_000;
+const INGEST_POLL_TIMEOUT_MS = 5 * 60_000;
+
+async function sha256OfFile(filePath: string): Promise<string> {
+    const hash = createHash('sha256');
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk as Buffer);
+    return hash.digest('hex');
+}
+
+function terminalIngestOutcome(outcome: IngestOutcome): boolean {
+    return outcome.state === 'acked' || outcome.state === 'failed' || outcome.state === 'outcome_unknown';
+}
+
+/**
+ * A terminal `acked` outcome's `live_bytes` is read from the database's own
+ * column at response time; the server refreshes that column from the
+ * guest's `/stats` only *after* the ack itself lands (spec:1680-1681,
+ * `AnalyticalIngestBatchAcker::finalizeAck()`), so a fresh apply can go
+ * terminal before that refresh has landed. Printing `0 B` right after rows
+ * were genuinely just loaded reads as "nothing was loaded" rather than "not
+ * measured yet" (#1700 cleanroom finding) — zero rows legitimately means
+ * zero bytes, but zero bytes alongside reported rows does not.
+ */
+function liveSizeClause(outcome: IngestOutcome): string {
+    const bytes = outcome.live_bytes;
+    if (bytes === undefined || (bytes === 0 && (outcome.rows ?? 0) > 0)) {
+        return 'live size still settling';
+    }
+    return `live size now ${formatByteSize(bytes)}`;
+}
+
+function throwOnFailedIngest(outcome: IngestOutcome): void {
+    if (outcome.state === 'failed') {
+        throw new DatabaseOperationError(outcome.error_code ?? 'ingest_failed', outcome.message ?? 'Ingest failed.');
+    }
+    if (outcome.state === 'outcome_unknown') {
+        throw new DatabaseOperationError(
+            'outcome_unknown',
+            outcome.message
+                ?? `Ingest batch "${outcome.batch_id}" outcome is unknown — re-run this same command (same file, table, and mode) to check its current status; it will not re-upload.`,
+        );
+    }
+}
+
+/**
+ * Loads a local Parquet/CSV/JSONL file into an analytical (duckdb) database
+ * table: hashes the file, derives the §6.4 canonical batch id (unless
+ * `--batch-id` overrides it), calls `ingest_prepare`, PUTs the file to the
+ * presigned URL with exactly the signed `Content-Length`/
+ * `x-amz-checksum-sha256` headers the server returned, calls `ingest_commit`,
+ * then polls `ingest_status` to a terminal state. `ingest_prepare`'s
+ * same-digest replay response omits `upload_url` for an in-progress or
+ * terminal batch — that response IS the outcome, so upload/commit are
+ * skipped and the CLI goes straight to polling it.
+ */
+export async function databaseIngestWithConfig(
+    name: string,
+    file: string,
+    options: DatabaseIngestOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const mode = options.mode ?? 'append';
+    if (mode !== 'append' && mode !== 'replace') {
+        throw new DatabaseOperationError('invalid_mode', `--mode must be "append" or "replace" (received "${mode}").`);
+    }
+    const format = ingestFormatFromExtension(file);
+
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    if (row.kind !== 'duckdb') {
+        throw new DatabaseOperationError(
+            'kind_mismatch',
+            `"${name}" is not an analytical database — \`database ingest\` only loads data into analytical (duckdb) databases.`,
+        );
+    }
+    if (!row.id) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was missing its id.');
+    }
+
+    const stat = await io.filesystem.stat(file);
+    const contentSha256 = await sha256OfFile(file);
+    const batchId = options.batchId ?? defaultIngestBatchId({
+        databaseId: row.id,
+        table: options.table,
+        mode,
+        format,
+        contentSha256,
+    });
+
+    let prepared: IngestPrepareResponse | IngestOutcome;
+    try {
+        prepared = await requestDatabaseOperation<IngestPrepareResponse | IngestOutcome>(
+            config,
+            {
+                operation: 'ingest_prepare',
+                name,
+                table: options.table,
+                mode,
+                batch_id: batchId,
+                format,
+                declared_bytes: stat.size,
+                content_sha256: contentSha256,
+            },
+            requestDependencies(io),
+        );
+    } catch (error) {
+        // Controller ruling (spec/#1700): a `size_limit_exceeded` refusal
+        // must surface the limit, not just the generic server message —
+        // `safeDatabaseRequestError` already lifts `size_limit_bytes` onto
+        // the thrown error for exactly this.
+        if (error instanceof DatabaseOperationError && error.code === 'size_limit_exceeded' && error.sizeLimitBytes !== undefined) {
+            throw new DatabaseOperationError(
+                error.code,
+                `${error.message} (limit ${formatByteSize(error.sizeLimitBytes)})`,
+                error.status,
+                error.sizeLimitBytes,
+            );
+        }
+        throw error;
+    }
+
+    // `ingest_prepare` omits `upload_url` only on a same-digest replay of an
+    // already-known batch (spec:571) — the branch taken here is the CLI's
+    // one authoritative signal of "the front door was actually called with
+    // new bytes" versus "this exact batch was already recognized", so it
+    // drives the human-readable wording below (#1700 cleanroom finding: a
+    // replay printed the identical "Ingested N row(s)" sentence as a fresh
+    // apply, with no way to tell them apart short of --json).
+    let outcome: IngestOutcome;
+    const isReplay = !('upload_url' in prepared && prepared.upload_url);
+    if ('upload_url' in prepared && prepared.upload_url) {
+        const headers = prepared.upload_headers;
+        if (!headers) {
+            throw new DatabaseOperationError('upstream_unavailable', 'The ingest prepare response was missing upload headers.');
+        }
+
+        let uploaded: { data: unknown; status?: number };
+        try {
+            uploaded = await io.put(prepared.upload_url, fs.createReadStream(file), {
+                // Only the two signed headers R2 verified go on the wire —
+                // never re-derive or reshape them (they are part of the
+                // signature).
+                headers: {
+                    'Content-Length': headers['Content-Length'],
+                    'x-amz-checksum-sha256': headers['x-amz-checksum-sha256'],
+                },
+                // C-3: every other network call on this surface is
+                // deadline-bounded (runWithDeadline/positiveTimeout); this
+                // presigned R2 PUT was the one bare call with no timeout, so
+                // a black-holed upload hung `ingest` forever. Re-issuing the
+                // presigned URL for a `prepared` row (ingestPrepareReplay)
+                // already recovers from this once it throws.
+                timeout: io.dataPlaneTimeoutMs,
+            });
+        } catch {
+            throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
+        }
+        if (uploaded.status !== undefined && (uploaded.status < 200 || uploaded.status > 299)) {
+            throw new DatabaseOperationError('upload_failed', 'The file upload to staging storage failed; the ingest batch was not committed.');
+        }
+
+        outcome = stableIngestOutcome(await requestDatabaseOperation<IngestOutcome>(
+            config,
+            { operation: 'ingest_commit', name, batch_id: batchId },
+            requestDependencies(io),
+        ));
+    } else {
+        outcome = stableIngestOutcome(prepared as IngestOutcome);
+    }
+
+    // The row's state machine (`copying` → `dispatching` → `applying` →
+    // terminal) already absorbs a paused database transparently — the async
+    // `AdvanceIngestBatch` job self-redispatches on a `waking` admission
+    // refusal without ever surfacing `waking` on this poll (unlike
+    // `query`'s synchronous admission gate) — so this loop only needs to
+    // keep polling until a terminal state or its own give-up deadline.
+    const deadline = io.now() + INGEST_POLL_TIMEOUT_MS;
+    while (!terminalIngestOutcome(outcome) && io.now() < deadline) {
+        await io.sleep(INGEST_POLL_INTERVAL_MS);
+        outcome = stableIngestOutcome(await requestDatabaseOperation<IngestOutcome>(
+            config,
+            { operation: 'ingest_status', name, batch_id: batchId },
+            requestDependencies(io),
+        ));
+    }
+
+    if (!terminalIngestOutcome(outcome)) {
+        throw new DatabaseOperationError(
+            'ingest_timeout',
+            `Ingest batch "${batchId}" did not reach a final state within the CLI's wait window — re-run this same command to check its status (it will not re-upload).`,
+        );
+    }
+
+    if (options.json) {
+        writeJson(io.stdout, outcome);
+        throwOnFailedIngest(outcome);
+        return;
+    }
+
+    throwOnFailedIngest(outcome);
+    io.stdout(
+        isReplay
+            ? `Batch "${batchId}" was already ingested into "${options.table}" — ${outcome.rows ?? 0} row(s) recognized from a previous run, nothing re-loaded (${liveSizeClause(outcome)}).`
+            : `Ingested ${outcome.rows ?? 0} row(s) into "${options.table}" (${liveSizeClause(outcome)}).`,
+    );
+}
+
+export async function databaseIngest(
+    name: string,
+    file: string,
+    options: DatabaseIngestOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseIngestWithConfig(name, file, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+// Analytical-only guard shared by drop-table/optimize/connect/wake (mirrors
+// `databaseIngestWithConfig`'s own check): unlike `refuseIfAnalytical`, which
+// refuses an analytical name on the SQLite-only verbs, these four verbs only
+// ever operate on the analytical (duckdb) kind, so a libsql name is the
+// refusal — before any operation-specific request goes out.
+function refuseUnlessAnalytical(name: string, row: DatabaseRecord, verb: string): void {
+    if (row.kind === 'duckdb') return;
+
+    throw new DatabaseOperationError(
+        'kind_mismatch',
+        `"${name}" is not an analytical database — \`database ${verb}\` only works on analytical (duckdb) databases.`,
+    );
+}
+
+/**
+ * Shared by `drop-table` and `optimize`: `admit()` on the server — the same
+ * gate `query` goes through (`requestAnalyticalQuery` above) — can answer
+ * either op with a `waking` refusal (202) if the database is still coming up
+ * after its own internal wait. `wake` itself is this same admission call, so
+ * it reuses this loop directly. Bounded by the same
+ * `ANALYTICAL_QUERY_MAX_WAIT_MS` `query` uses to give up on a `waking`
+ * database.
+ */
+async function requestAnalyticalOperationAwaitingWake<T>(
+    config: Config,
+    body: Record<string, unknown>,
+    name: string,
+    io: ResolvedCommandDependencies,
+): Promise<T> {
+    const deadline = io.now() + ANALYTICAL_QUERY_MAX_WAIT_MS;
+    let announced = false;
+    for (;;) {
+        const response = await requestDatabaseOperation<T | AnalyticalWakingResponse>(
+            config,
+            body,
+            requestDependencies(io),
+        );
+        if (!isAnalyticalWaking(response)) {
+            return response as T;
+        }
+        if (io.now() >= deadline) {
+            throw new DatabaseOperationError(
+                'waking',
+                response.message ?? `${name} is still waking up — try again in a moment.`,
+            );
+        }
+        if (!announced) {
+            io.stderr(`Waking ${name}…`);
+            announced = true;
+        }
+        await io.sleep(response.retry_after_ms ?? 3_000);
+    }
+}
+
+interface DatabaseDropTableOptions {
+    yes?: boolean;
+    json?: boolean;
+}
+
+/**
+ * Appendix A.6 — deletes one table and frees its space. Destructive, so it
+ * follows the same `--yes`/confirm convention as `delete`/`exec`. Reachable
+ * server error codes (`HandleAnalyticalDatabaseOperation::dropTable()` /
+ * `mapDropTableError()`): `reserved_table` (a `_`-prefixed name, refused
+ * before admission), `table_not_found`, `fenced` (concurrent generation
+ * change — retry), and a draining guest's bare `unavailable` — all passed
+ * through verbatim by `safeDatabaseRequestError`, nothing to translate here.
+ * `dropTable()` DOES call `admit()` before reaching the front door, so a
+ * `waking` refusal is genuinely reachable — unlike `ingest_prepare`/
+ * `ingest_commit`/`ingest_status` (Task 6), which never call it.
+ */
+export async function databaseDropTableWithConfig(
+    name: string,
+    table: string,
+    options: DatabaseDropTableOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'drop-table');
+
+    if (!options.yes) {
+        if (options.json || !io.isTTY) {
+            throw new DatabaseOperationError('confirmation_required', 'Dropping a table requires --yes in JSON or non-interactive mode.');
+        }
+        if (!await io.confirm(`Delete table "${table}" from "${name}"? Its rows are removed and the space is freed. This cannot be undone.`)) {
+            io.stdout('Cancelled.');
+            return;
+        }
+    }
+
+    const data = stableDatabaseResponse(await requestAnalyticalOperationAwaitingWake<DatabaseMutationResponse>(
+        config,
+        { operation: 'drop_table', name, table },
+        name,
+        io,
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, data);
+        return;
+    }
+
+    io.stdout(`Dropped table "${table}" from "${name}". Size is now ${formatByteSize(data.database.size_bytes)}.`);
+}
+
+export async function databaseDropTable(
+    name: string,
+    table: string,
+    options: DatabaseDropTableOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseDropTableWithConfig(name, table, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseOptimizeOptions {
+    wait?: boolean;
+    json?: boolean;
+}
+
+interface OptimizeOperation {
+    operation_id: string;
+    state: 'running' | 'done' | 'failed';
+    started_at?: string;
+    files_before?: number;
+    files_after?: number;
+    finished_at?: string;
+    error_code?: string;
+    message?: string;
+}
+
+function stableOptimizeOperation(data: OptimizeOperation): OptimizeOperation {
+    if (
+        !data
+        || typeof data.operation_id !== 'string'
+        || (data.state !== 'running' && data.state !== 'done' && data.state !== 'failed')
+        || (data.started_at !== undefined && typeof data.started_at !== 'string')
+        || (data.files_before !== undefined && typeof data.files_before !== 'number')
+        || (data.files_after !== undefined && typeof data.files_after !== 'number')
+        || (data.finished_at !== undefined && typeof data.finished_at !== 'string')
+        || (data.error_code !== undefined && typeof data.error_code !== 'string')
+        || (data.message !== undefined && typeof data.message !== 'string')
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        operation_id: data.operation_id,
+        state: data.state,
+        ...(data.started_at === undefined ? {} : { started_at: data.started_at }),
+        ...(data.files_before === undefined ? {} : { files_before: data.files_before }),
+        ...(data.files_after === undefined ? {} : { files_after: data.files_after }),
+        ...(data.finished_at === undefined ? {} : { finished_at: data.finished_at }),
+        ...(data.error_code === undefined ? {} : { error_code: data.error_code }),
+        ...(data.message === undefined ? {} : { message: data.message }),
+    };
+}
+
+const OPTIMIZE_POLL_INTERVAL_MS = 2_000;
+const OPTIMIZE_POLL_TIMEOUT_MS = 15 * 60_000;
+
+// A freshly-started operation and one already running elsewhere return the
+// identical wire shape (Appendix A.7) — mirrors the web dialog's own
+// `ALREADY_RUNNING_THRESHOLD_MS` heuristic (analytical-optimize-dialog.tsx):
+// compare this call's own pre-request timestamp against the operation's
+// `started_at`; a gap this large means the operation predates the call.
+const OPTIMIZE_ALREADY_RUNNING_THRESHOLD_MS = 3_000;
+
+/**
+ * Appendix A.7 — `optimize` is idempotent: a database already mid-optimize
+ * returns its running operation instead of starting a second one. Since the
+ * server's `running` reply is identical either way, the CLI distinguishes
+ * "just started" from "already running" the same way the web dialog does:
+ * by comparing `started_at` against a timestamp captured immediately before
+ * the request. `--wait` polls `optimize_status` (read-intent, never calls
+ * `admit()`, so no `waking` handling there) to a terminal state, bounded by
+ * `OPTIMIZE_POLL_TIMEOUT_MS` — exiting non-zero if that deadline passes
+ * while still `running`, mirroring `provisioning_timeout` (Task 2) and
+ * `ingest_timeout` (Task 6).
+ */
+export async function databaseOptimizeWithConfig(
+    name: string,
+    options: DatabaseOptimizeOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'optimize');
+
+    const requestedAt = io.now();
+    let operation = stableOptimizeOperation(await requestAnalyticalOperationAwaitingWake<OptimizeOperation>(
+        config,
+        { operation: 'optimize', name },
+        name,
+        io,
+    ));
+
+    if (options.wait) {
+        const deadline = io.now() + OPTIMIZE_POLL_TIMEOUT_MS;
+        while (operation.state === 'running' && io.now() < deadline) {
+            await io.sleep(OPTIMIZE_POLL_INTERVAL_MS);
+            operation = stableOptimizeOperation(await requestDatabaseOperation<OptimizeOperation>(
+                config,
+                { operation: 'optimize_status', name, operation_id: operation.operation_id },
+                requestDependencies(io),
+            ));
+        }
+
+        if (operation.state === 'running') {
+            throw new DatabaseOperationError(
+                'optimize_timeout',
+                `Optimize for "${name}" did not finish within the CLI's wait window — re-run \`solidactions database optimize ${name} --wait\` to check its status.`,
+            );
+        }
+    }
+
+    if (options.json) {
+        writeJson(io.stdout, operation);
+        if (operation.state === 'failed') {
+            throw new DatabaseOperationError(operation.error_code ?? 'optimize_failed', operation.message ?? 'Optimize failed.');
+        }
+        return;
+    }
+
+    if (operation.state === 'failed') {
+        throw new DatabaseOperationError(operation.error_code ?? 'optimize_failed', operation.message ?? 'Optimize failed.');
+    }
+    if (operation.state === 'done') {
+        io.stdout(`Optimized "${name}" (${operation.files_before} files → ${operation.files_after}).`);
+        return;
+    }
+    const startedAtMs = operation.started_at ? new Date(operation.started_at).getTime() : NaN;
+    const alreadyRunning = Number.isFinite(startedAtMs)
+        && requestedAt - startedAtMs > OPTIMIZE_ALREADY_RUNNING_THRESHOLD_MS;
+    io.stdout(alreadyRunning
+        ? `Optimize already running for "${name}" (started ${operation.started_at}).`
+        : `Optimize started for "${name}" (started ${operation.started_at}).`);
+}
+
+export async function databaseOptimize(
+    name: string,
+    options: DatabaseOptimizeOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseOptimizeWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseConnectOptions {
+    json?: boolean;
+}
+
+interface ConnectResponse {
+    external_read: boolean;
+    cli: { query: string; ingest: string };
+    mcp: string;
+    yaml: string;
+}
+
+function stableConnectResponse(data: ConnectResponse): ConnectResponse {
+    if (
+        !data
+        || typeof data.external_read !== 'boolean'
+        || !data.cli
+        || typeof data.cli.query !== 'string'
+        || typeof data.cli.ingest !== 'string'
+        || typeof data.mcp !== 'string'
+        || typeof data.yaml !== 'string'
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        external_read: data.external_read,
+        cli: { query: data.cli.query, ingest: data.cli.ingest },
+        mcp: data.mcp,
+        yaml: data.yaml,
+    };
+}
+
+function renderConnect(connect: ConnectResponse): string {
+    return [
+        'CLI:',
+        `  ${connect.cli.query}`,
+        `  ${connect.cli.ingest}`,
+        '',
+        'Ask your AI:',
+        `  ${connect.mcp}`,
+        '',
+        'solidactions.yaml:',
+        connect.yaml.split('\n').map((line) => `  ${line}`).join('\n'),
+        '',
+        'Connecting directly from DuckDB or BI tools is coming later.',
+    ].join('\n');
+}
+
+/**
+ * Appendix A.8 — no client credentials for the analytical kind in v1
+ * (deliberate; see spec). `connect()` never calls `admit()` — it is a pure,
+ * synchronous read of the database row, so `waking` is not reachable here.
+ */
+export async function databaseConnectWithConfig(
+    name: string,
+    options: DatabaseConnectOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'connect');
+
+    const connect = stableConnectResponse(await requestDatabaseOperation<ConnectResponse>(
+        config,
+        { operation: 'connect', name },
+        requestDependencies(io),
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, connect);
+        return;
+    }
+
+    io.stdout(renderConnect(connect));
+}
+
+export async function databaseConnect(
+    name: string,
+    options: DatabaseConnectOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseConnectWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+interface DatabaseWakeOptions {
+    json?: boolean;
+}
+
+interface WakeActiveResponse {
+    activity: string;
+}
+
+function stableWakeActiveResponse(data: WakeActiveResponse): WakeActiveResponse {
+    if (!data || typeof data.activity !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return { activity: data.activity };
+}
+
+/**
+ * Appendix A.9 — read-intent pre-warm: `wake()` on the server is exactly one
+ * `admit()` call, so this reuses `requestAnalyticalOperationAwaitingWake`
+ * directly rather than hand-rolling its own retry loop.
+ */
+export async function databaseWakeWithConfig(
+    name: string,
+    options: DatabaseWakeOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseUnlessAnalytical(name, row, 'wake');
+
+    const response = stableWakeActiveResponse(await requestAnalyticalOperationAwaitingWake<WakeActiveResponse>(
+        config,
+        { operation: 'wake', name },
+        name,
+        io,
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, response);
+        return;
+    }
+
+    io.stdout(`${name} is ${response.activity}.`);
+}
+
+export async function databaseWake(
+    name: string,
+    options: DatabaseWakeOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseWakeWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
 }

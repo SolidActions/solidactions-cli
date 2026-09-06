@@ -59,16 +59,22 @@ import {
 } from './commands/state';
 import { workflowView } from './commands/workflow-view';
 import {
+    databaseConnect,
     databaseCreate,
     databaseDelete,
+    databaseDropTable,
     databaseDump,
     databaseExec,
     databaseImport,
+    databaseIngest,
     databaseList,
+    databaseOptimize,
     databasePull,
     databaseQuery,
     databaseSchema,
+    databaseShow,
     databaseUndelete,
+    databaseWake,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { setCliWorkspaceOverride } from './utils/config';
@@ -245,6 +251,7 @@ driver): https://www.solidactions.com/docs/workspace-databases/`);
 database
     .command('list')
     .description('List workspace databases')
+    .option('--kind <kind>', 'Filter by kind: libsql or duckdb')
     .option('--json', 'Output as JSON')
     .action(async (options) => {
         await databaseList(options);
@@ -254,10 +261,21 @@ database
     .command('create')
     .description('Create a workspace database')
     .argument('<name>', 'Database name')
+    .option('--kind <kind>', 'Database kind: libsql (default) or duckdb', 'libsql')
     .option('--from <file.sql>', 'Import a SQL file after creation')
+    .option('--no-wait', 'Do not wait for analytical (duckdb) provisioning to finish')
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
         await databaseCreate(name, options);
+    });
+
+database
+    .command('show')
+    .description('Show database details')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseShow(name, options);
     });
 
 database
@@ -293,6 +311,7 @@ database
     .description('Run a read-only SQL query')
     .argument('<name>', 'Database name')
     .argument('<sql>', 'SQL query')
+    .option('--limit <n>', 'Row cap for analytical queries (max 10000)', (value) => parseInt(value, 10))
     .option('--json', 'Output as JSON')
     .action(async (name, sql, options) => {
         await databaseQuery(name, sql, options);
@@ -356,6 +375,58 @@ the source. Countable rows include ordinary user tables only. Internal,
 virtual, and shadow tables are excluded from the count.`)
     .action(async (name, file, options) => {
         await databasePush(name, file, options);
+    });
+
+database
+    .command('ingest')
+    .description('Load a batch of rows into an analytical database')
+    .argument('<name>', 'Database name')
+    .argument('<file>', 'Parquet, CSV, or JSONL file to load')
+    .requiredOption('--table <table>', 'Target table name')
+    .option('--mode <mode>', 'append (default) or replace', 'append')
+    .option('--batch-id <id>', 'Idempotency key (default: derived from the file, table, and mode)')
+    .option('--json', 'Output as JSON')
+    .action(async (name, file, options) => {
+        await databaseIngest(name, file, { table: options.table, mode: options.mode, batchId: options.batchId, json: options.json });
+    });
+
+database
+    .command('drop-table')
+    .description('Delete one table from an analytical database and free its space')
+    .argument('<name>', 'Database name')
+    .argument('<table>', 'Table name')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, table, options) => {
+        await databaseDropTable(name, table, options);
+    });
+
+database
+    .command('optimize')
+    .description('Consolidate an analytical database\'s stored files now')
+    .argument('<name>', 'Database name')
+    .option('--wait', 'Wait for optimize to finish and print files before/after')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseOptimize(name, options);
+    });
+
+database
+    .command('connect')
+    .description('Show how to connect to an analytical database')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseConnect(name, options);
+    });
+
+database
+    .command('wake')
+    .description('Wake an idle analytical database and wait for it to become active')
+    .argument('<name>', 'Database name')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseWake(name, options);
     });
 
 // =============================================================================
