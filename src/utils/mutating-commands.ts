@@ -43,6 +43,9 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'database import',
     'database push',
     'database ingest',
+    // Export creates durable operation rows and temporary R2 objects and may
+    // wake billed compute, even though authorization is read-capability based.
+    'database export',
     'database drop-table',
     // `optimize` dispatches a real server-side operation that rewrites the
     // database's stored files (`StartOptimizeOperation` — a job, not just a

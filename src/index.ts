@@ -77,6 +77,7 @@ import {
     databaseWake,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
+import { databaseExport } from './commands/database-export';
 import { setCliWorkspaceOverride } from './utils/config';
 import { setActiveCommandPath } from './utils/mutating-commands';
 import { emitAgentFreshnessNudges } from './utils/agent-freshness';
@@ -388,6 +389,20 @@ database
     .option('--json', 'Output as JSON')
     .action(async (name, file, options) => {
         await databaseIngest(name, file, { table: options.table, mode: options.mode, batchId: options.batchId, json: options.json });
+    });
+
+database
+    .command('export')
+    .description('Export an analytical database snapshot as Parquet files and a manifest')
+    .argument('<name>', 'Database name')
+    .option('--table <table>', 'Export one table (repeatable)', (value, previous: string[] = []) => [...previous, value], [])
+    .option('--output <directory>', 'Destination directory')
+    .option('--no-wait', 'Print the accepted export id without waiting or downloading')
+    .option('--resume <export-id>', 'Resume an existing authorized export')
+    .option('--replace', 'Replace a non-reusable ready export without prompting')
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseExport(name, options);
     });
 
 database

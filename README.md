@@ -116,6 +116,9 @@ solidactions database list --kind duckdb --json
 solidactions database show analytics --json
 solidactions database ingest analytics data.parquet --table events --json
 solidactions database ingest analytics data.csv --table events --mode replace --json
+solidactions database export analytics --table events --table orders --output ./snapshot
+solidactions database export analytics --no-wait --json
+solidactions database export analytics --resume <export-id>
 solidactions database drop-table analytics events --yes --json
 solidactions database optimize analytics --wait --json
 solidactions database connect analytics --json
@@ -134,7 +137,7 @@ for an analytical database (waits for provisioning unless `--no-wait`).
 `--from` only applies to the standard kind — `create --kind duckdb --from
 <file>` is rejected up front, before the database is created, since SQL
 import is meaningless for an analytical database; load one with `ingest`
-after creation. Analytical verbs — `ingest`, `drop-table`, `optimize`,
+after creation. Analytical verbs — `ingest`, `export`, `drop-table`, `optimize`,
 `connect`, `wake` — only work against a `duckdb` database. `dump`, `pull`,
 `push`, `import`, and `exec` are for the standard (SQLite) kind only and
 refuse an analytical name with a one-line hint.
@@ -143,6 +146,17 @@ refuse an analytical name with a one-line hint.
 (unlike `drop-table`, which is a separate, rarer, schema-shaped operation) —
 this is the normal, expected way to refresh an analytical table from an
 unattended pipeline, so it is not gated behind confirmation.
+
+`database export <name>` takes a point-in-time analytical snapshot as one
+ZSTD Parquet file per selected table plus `manifest.json`. With no `--table`
+it exports every user table; repeat `--table` for an exact subset. The default
+waits, verifies every byte length and SHA-256, and writes a new deterministic
+directory. Use `--no-wait` to keep only the accepted export id, `--resume <id>`
+after an interruption, `--output <directory>` to choose the target, and
+`--replace` for non-interactive replacement of a non-reusable ready export.
+`--json` provides machine-readable accepted or verified-terminal output.
+Artifacts expire 24 hours after preparation completes. While the snapshot is prepared, new loads
+pause and the awake database uses organisation credits.
 
 `query` is read-only SQL; use `exec` for writes. `schema`, `query`, `exec`,
 `pull --writable`, and imports use ephemeral scoped access held only in memory.
