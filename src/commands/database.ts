@@ -1325,6 +1325,10 @@ export async function requestDatabaseRecord(
     )).database;
 }
 
+// Kept in sync with the identical suffix the server appends to its own
+// shared analytical refusal sentences (solidactions-app#1760).
+const ANALYTICAL_DOCS_URL = 'https://www.solidactions.com/docs/analytical-databases';
+
 // Refuses an analytical (duckdb) name for the SQLite-only verbs (exec, dump,
 // pull, push, import), reusing the same `show`-first lookup as `schema` and
 // `query` above. The server (`HandleCliDatabaseOperation`) already refuses
@@ -1342,13 +1346,15 @@ export async function refuseIfAnalytical(
     if (verb === 'exec') {
         throw new DatabaseOperationError(
             'read_only',
-            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step",
+            "read-only: this is an analytical database — load data with `solidactions database ingest` or your workflow's ingest step."
+                + ` How analytical databases work: ${ANALYTICAL_DOCS_URL}`,
         );
     }
 
     throw new DatabaseOperationError(
         'kind_mismatch',
-        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it`,
+        `"${name}" is an analytical database — use \`database ingest\` to load data and \`database query\` to read it.`
+            + ` How analytical databases work: ${ANALYTICAL_DOCS_URL}`,
     );
 }
 
