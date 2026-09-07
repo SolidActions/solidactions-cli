@@ -245,9 +245,28 @@ async function hashFile(file: string): Promise<{ bytes: number; sha256: string }
     }
 }
 
-async function download(download: ExportDownload, target: string): Promise<{ bytes: number; sha256: string }> {
-    const partial = `${target}.part`;
-    await fs.promises.rm(partial, { force: true });
+async function assertResumeOwnership(directory: string, exportId: string): Promise<void> {
+    if (await directoryIsEmpty(directory)) return;
+    const manifestPath = path.join(directory, 'manifest.json');
+    try {
+        const stat = await fs.promises.lstat(manifestPath);
+        if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new ExportCommandError('unsafe_destination', `Existing export target is unsafe: ${manifestPath}`);
+        }
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8')) as { export_id?: unknown };
+        if (manifest.export_id === exportId) return;
+    } catch (error) {
+        if (error instanceof ExportCommandError) throw error;
+        // A non-empty directory is owned only by its verified export manifest.
+    }
+    throw new ExportCommandError(
+        'resume_destination_mismatch',
+        `Export destination is not owned by ${exportId}: ${directory}`,
+    );
+}
+
+async function download(download: ExportDownload, target: string, replace: boolean): Promise<{ bytes: number; sha256: string }> {
+    const partial = `${target}.tmp-${randomUUID()}`;
     const response = await axios.get(download.url, { responseType: 'stream', validateStatus: () => true });
     if (response.status === 403) {
         response.data.destroy?.();
@@ -275,11 +294,13 @@ async function download(download: ExportDownload, target: string): Promise<{ byt
         if (download.bytes !== undefined && download.bytes !== bytes) throw new ExportCommandError('download_corrupt', `Byte-length verification failed for ${download.filename}.`);
         const expectedDigest = download.sha256 ?? download.digest;
         if (!expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest) || sha256 !== expectedDigest) throw new ExportCommandError('download_corrupt', `SHA-256 verification failed for ${download.filename}.`);
-        try {
-            await fs.promises.lstat(target);
-            throw new ExportCommandError('output_exists', `The CLI will not overwrite ${target}.`);
-        } catch (error: any) {
-            if (error?.code !== 'ENOENT') throw error;
+        if (!replace) {
+            try {
+                await fs.promises.lstat(target);
+                throw new ExportCommandError('output_exists', `The CLI will not overwrite ${target}.`);
+            } catch (error: any) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
         }
         await fs.promises.rename(partial, target);
         return { bytes, sha256 };
@@ -380,10 +401,11 @@ export async function databaseExportWithConfig(
         ) throw new ExportCommandError('upstream_unavailable', 'The export download response was invalid.');
         filenames.add(file.filename);
     }
-    const wanted = [...listing.files, { ...listing.manifest, digest: metadata.manifest_digest }];
+    const wanted = [{ ...listing.manifest, digest: metadata.manifest_digest }, ...listing.files];
     const directory = options.output ? path.resolve(cwd, options.output) : defaultDirectory(cwd, database.name, metadata);
     await assertSafeDirectory(directory);
     if (!options.resume && !await directoryIsEmpty(directory)) throw new ExportCommandError('output_not_empty', `Export destination must be absent or empty: ${directory}`);
+    if (options.resume) await assertResumeOwnership(directory, metadata.export_id);
     await fs.promises.mkdir(directory, { recursive: true });
     await assertSafeDirectory(directory);
     if (options.resume) {
@@ -400,7 +422,6 @@ export async function databaseExportWithConfig(
             if (!options.json) stdout(`Verified ${item.filename} (${existing.bytes} bytes)`);
             continue;
         }
-        if (existing) await fs.promises.rm(target);
         if (!options.json) stderr(`Downloading ${item.filename}…`);
 
         // Mint immediately before each object, never batch URLs ahead of a long download.
@@ -413,7 +434,7 @@ export async function databaseExportWithConfig(
         const fresh = refreshedDownload(listing, metadata.export_id, item);
         if (!fresh) throw new ExportCommandError('export_superseded', 'This export was superseded while downloading. Start a new export.', 409, metadata.export_id);
         try {
-            const verified = await download(fresh, target);
+            const verified = await download(fresh, target, options.resume !== undefined);
             completed.push({ ...(item.table ? { table: item.table } : {}), filename: item.filename, path: target, ...verified });
             if (!options.json) stdout(`Downloaded ${item.filename} (${verified.bytes} bytes)`);
         } catch (error: any) {
@@ -422,7 +443,7 @@ export async function databaseExportWithConfig(
                 const refreshed = await operation<ExportDownloads>(config, { operation: 'export_downloads', name, export_id: metadata.export_id, ...(tables ? { tables } : {}) });
                 const retry = refreshedDownload(refreshed, metadata.export_id, item);
                 if (!retry) throw new ExportCommandError('export_superseded', 'This export was superseded while downloading. Start a new export.', 409, metadata.export_id);
-                const verified = await download(retry, target);
+                const verified = await download(retry, target, options.resume !== undefined);
                 completed.push({ ...(item.table ? { table: item.table } : {}), filename: item.filename, path: target, ...verified });
                 if (!options.json) stdout(`Downloaded ${item.filename} (${verified.bytes} bytes)`);
             } catch (refreshError: any) {

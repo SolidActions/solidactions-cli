@@ -10,13 +10,13 @@ const ID = '01990000-0000-7000-8000-000000000171';
 const CREATED = '2026-09-01T12:34:56Z';
 const EXPIRES = '2026-09-02T12:34:56Z';
 const parquet = Buffer.from('PAR1-real-export-bytes');
-const manifest = Buffer.from('{"version":1}\n');
+const manifest = Buffer.from(`${JSON.stringify({ version: 1, export_id: ID })}\n`);
 const digest = (body: Buffer) => createHash('sha256').update(body).digest('hex');
 const roots: string[] = [];
 
 afterEach(() => roots.splice(0).forEach((root) => fs.rmSync(root, { recursive: true, force: true })));
 
-type Reply = { status?: number; json?: unknown; bytes?: Buffer; headers?: Record<string, string> };
+type Reply = { status?: number; json?: unknown; bytes?: Buffer; headers?: Record<string, string>; stream?: (response: http.ServerResponse) => void };
 type Responder = (request: http.IncomingMessage, body: Record<string, unknown>, attempt: number) => Reply;
 
 async function serve(responder: Responder) {
@@ -33,6 +33,10 @@ async function serve(responder: Responder) {
             attempts.set(key, attempt);
             calls.push({ method: request.method ?? '', url: request.url ?? '', body });
             const reply = responder(request, body, attempt);
+            if (reply.stream) {
+                reply.stream(response);
+                return;
+            }
             const payload = reply.bytes ?? Buffer.from(JSON.stringify(reply.json ?? {}));
             response.writeHead(reply.status ?? 200, { 'Content-Length': String(payload.length), ...(reply.headers ?? {}) });
             response.end(payload);
@@ -98,13 +102,103 @@ describe('database export with real HTTP and filesystem I/O', () => {
             origin = remote.origin;
             const output = path.join(tmp(), 'resume');
             fs.mkdirSync(output);
+            fs.writeFileSync(path.join(output, 'manifest.json'), manifest);
             fs.writeFileSync(path.join(output, 'events.parquet'), parquet);
             fs.writeFileSync(path.join(output, 'events.parquet.part'), 'partial');
             fs.writeFileSync(path.join(output, 'notes.part'), 'mine');
             await databaseExportWithConfig('warehouse', { resume: ID, output }, config(origin), quiet);
             expect(fs.existsSync(path.join(output, 'events.parquet.part'))).toBe(false);
             expect(fs.readFileSync(path.join(output, 'notes.part'), 'utf8')).toBe('mine');
-            expect(remote.calls.filter((call) => call.method === 'GET').map((call) => call.url)).toEqual(['/manifest']);
+            expect(remote.calls.filter((call) => call.method === 'GET')).toEqual([]);
+        });
+    });
+
+    it('refuses a resume directory owned by another export before touching any files', async () => {
+        let origin = '';
+        await scenario((request, body) => normal(() => origin, request, body), async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), 'other-export');
+            fs.mkdirSync(output);
+            const otherManifest = `${JSON.stringify({ version: 1, export_id: '01990000-0000-7000-8000-000000000999' })}\n`;
+            fs.writeFileSync(path.join(output, 'manifest.json'), otherManifest);
+            fs.writeFileSync(path.join(output, 'events.parquet'), 'valuable');
+            fs.writeFileSync(path.join(output, 'events.parquet.part'), 'unfinished');
+            fs.writeFileSync(path.join(output, 'notes.part'), 'mine');
+
+            await expect(databaseExportWithConfig('warehouse', { resume: ID, output }, config(origin), quiet)).rejects.toMatchObject({ code: 'resume_destination_mismatch' });
+
+            expect(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8')).toBe(otherManifest);
+            expect(fs.readFileSync(path.join(output, 'events.parquet'), 'utf8')).toBe('valuable');
+            expect(fs.readFileSync(path.join(output, 'events.parquet.part'), 'utf8')).toBe('unfinished');
+            expect(fs.readFileSync(path.join(output, 'notes.part'), 'utf8')).toBe('mine');
+            expect(remote.calls.some((call) => call.method === 'GET')).toBe(false);
+        });
+    });
+
+    it('preserves a differing resume target and unrelated files when replacement verification fails', async () => {
+        let origin = '';
+        await scenario((request, body) => {
+            const reply = normal(() => origin, request, body);
+            if (request.method === 'GET' && request.url === '/events') return { bytes: Buffer.from('corrupt') };
+            return reply;
+        }, async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), 'failed-replacement');
+            fs.mkdirSync(output);
+            fs.writeFileSync(path.join(output, 'manifest.json'), manifest);
+            fs.writeFileSync(path.join(output, 'events.parquet'), 'valuable-old-copy');
+            fs.writeFileSync(path.join(output, 'unrelated.part'), 'mine');
+
+            await expect(databaseExportWithConfig('warehouse', { resume: ID, output }, config(origin), quiet)).rejects.toMatchObject({ code: 'download_corrupt' });
+
+            expect(fs.readFileSync(path.join(output, 'events.parquet'), 'utf8')).toBe('valuable-old-copy');
+            expect(fs.readFileSync(path.join(output, 'unrelated.part'), 'utf8')).toBe('mine');
+            expect(fs.readdirSync(output).filter((name) => name.includes('.tmp-'))).toEqual([]);
+        });
+    });
+
+    it('atomically renames verified temporary bytes over a differing resume target', async () => {
+        let origin = '';
+        let started!: () => void;
+        let release!: () => void;
+        const downloadStarted = new Promise<void>((resolve) => { started = resolve; });
+        const finishDownload = new Promise<void>((resolve) => { release = resolve; });
+        await scenario((request, body) => {
+            if (request.method === 'GET' && request.url === '/events') {
+                return { stream: (response) => {
+                    response.writeHead(200, { 'Content-Length': String(parquet.length) });
+                    response.write(parquet.subarray(0, 4));
+                    started();
+                    void finishDownload.then(() => response.end(parquet.subarray(4)));
+                } };
+            }
+            return normal(() => origin, request, body);
+        }, async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), 'verified-replacement');
+            fs.mkdirSync(output);
+            fs.writeFileSync(path.join(output, 'manifest.json'), manifest);
+            const target = path.join(output, 'events.parquet');
+            fs.writeFileSync(target, 'old-copy');
+            fs.writeFileSync(path.join(output, 'unrelated.part'), 'mine');
+            const exporting = databaseExportWithConfig('warehouse', { resume: ID, output }, config(origin), quiet);
+            await downloadStarted;
+
+            let inspectionError: unknown;
+            try {
+                expect(fs.readFileSync(target, 'utf8')).toBe('old-copy');
+                await expect.poll(() => fs.readdirSync(output).filter((name) => /events\.parquet\.tmp-/.test(name))).toHaveLength(1);
+                expect(fs.readFileSync(path.join(output, 'unrelated.part'), 'utf8')).toBe('mine');
+            } catch (error) {
+                inspectionError = error;
+            } finally {
+                release();
+            }
+            await exporting;
+            if (inspectionError) throw inspectionError;
+            expect(fs.readFileSync(target)).toEqual(parquet);
+            expect(fs.readdirSync(output).filter((name) => name.includes('.tmp-'))).toEqual([]);
+            expect(fs.readFileSync(path.join(output, 'unrelated.part'), 'utf8')).toBe('mine');
         });
     });
 
@@ -268,6 +362,7 @@ describe('database export with real HTTP and filesystem I/O', () => {
 
             const resume = path.join(root, 'resume-safe');
             fs.mkdirSync(resume);
+            fs.writeFileSync(path.join(resume, 'manifest.json'), manifest);
             const outsideFile = path.join(outside, 'valuable');
             fs.writeFileSync(outsideFile, parquet);
             fs.symlinkSync(outsideFile, path.join(resume, 'events.parquet'));
