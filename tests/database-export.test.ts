@@ -10,8 +10,14 @@ const ID = '01990000-0000-7000-8000-000000000171';
 const CREATED = '2026-09-01T12:34:56Z';
 const EXPIRES = '2026-09-02T12:34:56Z';
 const parquet = Buffer.from('PAR1-real-export-bytes');
-const manifest = Buffer.from(`${JSON.stringify({ version: 1, export_id: ID })}\n`);
 const digest = (body: Buffer) => createHash('sha256').update(body).digest('hex');
+const manifestDocument = {
+    version: 1, export_id: ID, database_id: '01990000-0000-7000-8000-000000000001', database_name: 'warehouse', attempt: 1,
+    generation: 4, snapshot_id: 3762, created_at: CREATED, expires_at: EXPIRES,
+    files: [{ table: 'events', ordinal: 1, filename: 'events.parquet', rows: 1, bytes: parquet.length, sha256: digest(parquet), destination_etag: 'etag-events' }],
+    export_bytes: parquet.length, row_count: 1,
+};
+const manifest = Buffer.from(JSON.stringify(manifestDocument));
 const roots: string[] = [];
 
 afterEach(() => roots.splice(0).forEach((root) => fs.rmSync(root, { recursive: true, force: true })));
@@ -214,7 +220,7 @@ describe('database export with real HTTP and filesystem I/O', () => {
         });
     });
 
-    it.each(['length', 'sha'] as const)('removes the partial after a %s mismatch', async (failure) => {
+    it.each(['length', 'sha'] as const)('rejects an API/manifest %s mismatch before downloading parquet', async (failure) => {
         let origin = '';
         await scenario((request, body) => {
             const reply = normal(() => origin, request, body);
@@ -226,9 +232,10 @@ describe('database export with real HTTP and filesystem I/O', () => {
         }, async (remote) => {
             origin = remote.origin;
             const output = path.join(tmp(), failure);
-            await expect(databaseExportWithConfig('warehouse', { output }, config(origin), quiet)).rejects.toMatchObject({ code: 'download_corrupt', message: expect.stringContaining(`--resume ${ID}`) });
+            await expect(databaseExportWithConfig('warehouse', { output }, config(origin), quiet)).rejects.toMatchObject({ code: 'manifest_mismatch' });
             expect(fs.existsSync(path.join(output, 'events.parquet'))).toBe(false);
             expect(fs.existsSync(path.join(output, 'events.parquet.part'))).toBe(false);
+            expect(remote.calls.some((call) => call.url === '/events')).toBe(false);
         });
     });
 
@@ -241,6 +248,19 @@ describe('database export with real HTTP and filesystem I/O', () => {
             await databaseExportWithConfig('warehouse', { output: path.join(tmp(), 'refresh') }, config(origin), quiet);
             expect(remote.attempts.get('/events')).toBe(2);
             expect(remote.attempts.get('export_downloads')).toBeGreaterThanOrEqual(3);
+        });
+    });
+
+    it('rejects a reminted listing whose authenticated row metadata changed', async () => {
+        let origin = '';
+        await scenario((request, body, attempt) => {
+            if (request.method === 'GET' && request.url === '/events') return { status: 403, json: {} };
+            const reply = normal(() => origin, request, body);
+            if (body.operation === 'export_downloads' && attempt >= 3) (reply.json as any).files[0].rows = 2;
+            return reply;
+        }, async (remote) => {
+            origin = remote.origin;
+            await expect(databaseExportWithConfig('warehouse', { output: path.join(tmp(), 'changed-remint') }, config(origin), quiet)).rejects.toMatchObject({ code: 'export_superseded' });
         });
     });
 
@@ -320,14 +340,52 @@ describe('database export with real HTTP and filesystem I/O', () => {
 
     it('downloads an empty export as manifest-only', async () => {
         let origin = '';
+        const emptyManifest = Buffer.from(JSON.stringify({ ...manifestDocument, files: [], export_bytes: 0, row_count: 0 }));
         await scenario((request, body) => {
             const reply = normal(() => origin, request, body);
-            if (body.operation === 'export_downloads') (reply.json as any).files = [];
+            if (request.method === 'GET' && request.url === '/manifest') return { bytes: emptyManifest };
+            if (body.operation === 'export' || body.operation === 'export_status') (reply.json as any).manifest_digest = digest(emptyManifest);
+            if (body.operation === 'export_downloads') {
+                (reply.json as any).manifest.digest = digest(emptyManifest);
+                (reply.json as any).files = [];
+            }
             return reply;
         }, async (remote) => {
             origin = remote.origin;
             const result = await databaseExportWithConfig('warehouse', { output: path.join(tmp(), 'empty') }, config(origin), quiet);
             expect(result.files.map((file) => file.filename)).toEqual(['manifest.json']);
+        });
+    });
+
+    it.each([
+        ['wrong export', { export_id: '01990000-0000-7000-8000-000000000999' }, {}],
+        ['wrong version', { version: 2 }, {}],
+        ['duplicate manifest file', { files: [manifestDocument.files[0], manifestDocument.files[0]] }, {}],
+        ['missing manifest file', { files: [] }, {}],
+        ['extra manifest file', { files: [...manifestDocument.files, { ...manifestDocument.files[0], table: 'users', filename: 'users.parquet' }] }, {}],
+        ['table mismatch', { files: [{ ...manifestDocument.files[0], table: 'users' }] }, {}],
+        ['filename mismatch', { files: [{ ...manifestDocument.files[0], filename: 'other.parquet' }] }, {}],
+        ['rows mismatch', { files: [{ ...manifestDocument.files[0], rows: 2 }] }, {}],
+        ['bytes mismatch', { files: [{ ...manifestDocument.files[0], bytes: parquet.length + 1 }] }, {}],
+        ['sha mismatch', { files: [{ ...manifestDocument.files[0], sha256: '0'.repeat(64) }] }, {}],
+        ['duplicate API file', {}, { duplicateApiFile: true }],
+    ] as const)('rejects a verified manifest with %s before downloading parquet', async (_case, manifestChanges, apiChanges) => {
+        let origin = '';
+        const changedManifest = Buffer.from(JSON.stringify({ ...manifestDocument, ...manifestChanges }));
+        await scenario((request, body) => {
+            const reply = normal(() => origin, request, body);
+            if (request.method === 'GET' && request.url === '/manifest') return { bytes: changedManifest };
+            if (body.operation === 'export' || body.operation === 'export_status') (reply.json as any).manifest_digest = digest(changedManifest);
+            if (body.operation === 'export_downloads') {
+                (reply.json as any).manifest.digest = digest(changedManifest);
+                if ('duplicateApiFile' in apiChanges) (reply.json as any).files.push({ ...(reply.json as any).files[0] });
+            }
+            return reply;
+        }, async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), 'manifest-mismatch');
+            await expect(databaseExportWithConfig('warehouse', { output }, config(origin), quiet)).rejects.toMatchObject({ code: 'manifest_mismatch' });
+            expect(remote.calls.some((call) => call.url === '/events')).toBe(false);
         });
     });
 
@@ -343,9 +401,9 @@ describe('database export with real HTTP and filesystem I/O', () => {
         }, async (remote) => {
             origin = remote.origin;
             const output = path.join(tmp(), 'hostile');
-            await expect(databaseExportWithConfig('warehouse', { output }, config(origin), quiet)).rejects.toMatchObject({ code: 'upstream_unavailable' });
-            expect(fs.existsSync(output)).toBe(false);
-            expect(remote.calls.some((call) => call.method === 'GET')).toBe(false);
+            await expect(databaseExportWithConfig('warehouse', { output }, config(origin), quiet)).rejects.toMatchObject({ code: attack === 'wrong manifest' ? 'upstream_unavailable' : 'manifest_mismatch' });
+            expect(fs.existsSync(output)).toBe(attack === 'duplicate file');
+            expect(remote.calls.some((call) => call.url === '/events')).toBe(false);
         });
     });
 

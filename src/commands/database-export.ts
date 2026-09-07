@@ -51,6 +51,7 @@ interface ExportMetadata {
 interface ExportDownload {
     table?: string;
     filename: string;
+    rows?: number;
     bytes?: number;
     sha256?: string;
     digest?: string;
@@ -80,7 +81,7 @@ function refreshedDownload(listing: ExportDownloads, exportId: string, expected:
         : Array.isArray(listing.files) ? listing.files.find((file) => file.filename === expected.filename) : undefined;
     if (
         !fresh || fresh.filename !== expected.filename || !safeDownloadUrl(fresh.url)
-        || fresh.table !== expected.table || fresh.bytes !== expected.bytes
+        || fresh.table !== expected.table || fresh.rows !== expected.rows || fresh.bytes !== expected.bytes
         || fresh.sha256 !== expected.sha256 || fresh.digest !== expected.digest
     ) return null;
     return { ...expected, url: fresh.url };
@@ -265,6 +266,52 @@ async function assertResumeOwnership(directory: string, exportId: string): Promi
     );
 }
 
+interface ExportManifestFile {
+    table: string;
+    filename: string;
+    rows: number;
+    bytes: number;
+    sha256: string;
+}
+
+function manifestMismatch(): never {
+    throw new ExportCommandError('manifest_mismatch', 'The verified export manifest does not match the authenticated download listing.');
+}
+
+async function verifyManifestListing(manifestPath: string, exportId: string, downloads: ExportDownload[]): Promise<void> {
+    let document: unknown;
+    try {
+        document = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+    } catch {
+        manifestMismatch();
+    }
+    const manifest = document as { version?: unknown; export_id?: unknown; files?: unknown } | null;
+    if (!manifest || manifest.version !== 1 || manifest.export_id !== exportId || !Array.isArray(manifest.files)) manifestMismatch();
+
+    const apiFiles = new Map<string, ExportDownload>();
+    for (const file of downloads) {
+        if (apiFiles.has(file.filename)) manifestMismatch();
+        apiFiles.set(file.filename, file);
+    }
+    const manifestFiles = new Map<string, ExportManifestFile>();
+    for (const value of manifest.files) {
+        const file = value as Partial<ExportManifestFile> | null;
+        if (
+            !file || typeof file.table !== 'string' || typeof file.filename !== 'string'
+            || !Number.isSafeInteger(file.rows) || (file.rows ?? -1) < 0
+            || !Number.isSafeInteger(file.bytes) || (file.bytes ?? -1) < 0
+            || typeof file.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(file.sha256)
+            || manifestFiles.has(file.filename)
+        ) manifestMismatch();
+        manifestFiles.set(file.filename, file as ExportManifestFile);
+    }
+    if (manifestFiles.size !== apiFiles.size) manifestMismatch();
+    for (const [filename, file] of manifestFiles) {
+        const api = apiFiles.get(filename);
+        if (!api || api.table !== file.table || api.filename !== file.filename || api.rows !== file.rows || api.bytes !== file.bytes || api.sha256 !== file.sha256) manifestMismatch();
+    }
+}
+
 async function download(download: ExportDownload, target: string, replace: boolean): Promise<{ bytes: number; sha256: string }> {
     const partial = `${target}.tmp-${randomUUID()}`;
     const response = await axios.get(download.url, { responseType: 'stream', validateStatus: () => true });
@@ -390,16 +437,14 @@ export async function databaseExportWithConfig(
         || listing.manifest.digest !== metadata.manifest_digest
         || !safeDownloadUrl(listing.manifest.url) || !Array.isArray(listing.files)
     ) throw new ExportCommandError('upstream_unavailable', 'The export download response was invalid.');
-    const filenames = new Set<string>(['manifest.json']);
     for (const file of listing.files) {
         if (
             typeof file.table !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(file.table)
             || file.filename !== `${file.table}.parquet`
             || !safeDownloadUrl(file.url) || !Number.isSafeInteger(file.bytes) || (file.bytes ?? -1) < 0
+            || !Number.isSafeInteger(file.rows) || (file.rows ?? -1) < 0
             || typeof file.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(file.sha256)
-            || filenames.has(file.filename)
         ) throw new ExportCommandError('upstream_unavailable', 'The export download response was invalid.');
-        filenames.add(file.filename);
     }
     const wanted = [{ ...listing.manifest, digest: metadata.manifest_digest }, ...listing.files];
     const directory = options.output ? path.resolve(cwd, options.output) : defaultDirectory(cwd, database.name, metadata);
@@ -420,6 +465,7 @@ export async function databaseExportWithConfig(
         if (existing && existing.bytes === (item.bytes ?? existing.bytes) && existing.sha256 === expected) {
             completed.push({ ...(item.table ? { table: item.table } : {}), filename: item.filename, path: target, ...existing });
             if (!options.json) stdout(`Verified ${item.filename} (${existing.bytes} bytes)`);
+            if (item.filename === 'manifest.json') await verifyManifestListing(target, metadata.export_id, wanted.slice(1));
             continue;
         }
         if (!options.json) stderr(`Downloading ${item.filename}…`);
@@ -437,6 +483,7 @@ export async function databaseExportWithConfig(
             const verified = await download(fresh, target, options.resume !== undefined);
             completed.push({ ...(item.table ? { table: item.table } : {}), filename: item.filename, path: target, ...verified });
             if (!options.json) stdout(`Downloaded ${item.filename} (${verified.bytes} bytes)`);
+            if (item.filename === 'manifest.json') await verifyManifestListing(target, metadata.export_id, wanted.slice(1));
         } catch (error: any) {
             if (error?.status !== 403) throw new ExportCommandError(error.code ?? 'download_failed', `${error.message ?? 'Download failed.'} Completed files were kept. Rerun with --resume ${metadata.export_id}.`, error.status, metadata.export_id);
             try {
@@ -446,6 +493,7 @@ export async function databaseExportWithConfig(
                 const verified = await download(retry, target, options.resume !== undefined);
                 completed.push({ ...(item.table ? { table: item.table } : {}), filename: item.filename, path: target, ...verified });
                 if (!options.json) stdout(`Downloaded ${item.filename} (${verified.bytes} bytes)`);
+                if (item.filename === 'manifest.json') await verifyManifestListing(target, metadata.export_id, wanted.slice(1));
             } catch (refreshError: any) {
                 if (refreshError?.code === 'export_expired') throw new ExportCommandError('export_superseded', 'This export expired or was superseded while downloading. Start a new export.', 409, metadata.export_id);
                 throw refreshError;
