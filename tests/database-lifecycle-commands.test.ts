@@ -435,6 +435,12 @@ describe('database lifecycle control-plane contract', () => {
         expect(caught).toMatchObject({ code: 'invalid_flag_combination' });
         expect(caught?.message).toMatch(/--from/);
         expect(caught?.message).toMatch(/--kind duckdb/);
+        // Pins the literal joint (period + connecting sentence + URL) as one
+        // string, not a startsWith/endsWith pair, so deleting the appended
+        // docs sentence can't stay green.
+        expect(caught?.message).toContain(
+            '`solidactions database ingest`. How analytical databases work: https://www.solidactions.com/docs/analytical-databases',
+        );
         expect(test.calls).toEqual([]);
     });
 
