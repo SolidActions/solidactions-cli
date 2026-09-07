@@ -115,6 +115,40 @@ describe('database export with real HTTP and filesystem I/O', () => {
         });
     });
 
+    it.each([false, true])('accepts gzip chunked responses without Content-Length (corrupt=%s)', async (corrupt) => {
+        let origin = '';
+        await scenario((request, body) => {
+            if (request.method === 'GET' && request.url === '/manifest') {
+                const encoded = gzipSync(manifest);
+                return { stream: (response) => {
+                    response.writeHead(200, { 'Content-Encoding': 'gzip' });
+                    response.write(encoded.subarray(0, 3));
+                    response.end(encoded.subarray(3));
+                } };
+            }
+            if (request.method === 'GET' && request.url === '/events') {
+                const decoded = corrupt ? Buffer.alloc(parquet.length, 0x78) : parquet;
+                const encoded = gzipSync(decoded);
+                return { stream: (response) => {
+                    response.writeHead(200, { 'Content-Encoding': 'gzip' });
+                    response.write(encoded.subarray(0, 3));
+                    response.end(encoded.subarray(3));
+                } };
+            }
+            return normal(() => origin, request, body);
+        }, async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), corrupt ? 'chunked-corrupt' : 'chunked-valid');
+            const run = databaseExportWithConfig('warehouse', { output }, config(origin), quiet);
+            if (corrupt) {
+                await expect(run).rejects.toMatchObject({ code: 'download_corrupt' });
+            } else {
+                await run;
+                expect(fs.readFileSync(path.join(output, 'events.parquet'))).toEqual(parquet);
+            }
+        });
+    });
+
     it('returns the accepted API body for JSON no-wait without polling or downloads', async () => {
         let origin = '';
         await scenario((request, body) => body.operation === 'export'
