@@ -335,9 +335,9 @@ async function download(download: ExportDownload, target: string, replace: boole
     try {
         await pipeline(response.data, meter, fs.createWriteStream(partial, { flags: 'wx' }));
         const sha256 = hash.digest('hex');
-        const contentLength = response.headers['content-length'];
-        const headerLength = typeof contentLength === 'string' && /^\d+$/.test(contentLength) ? Number(contentLength) : Number.NaN;
-        if (!Number.isSafeInteger(headerLength) || headerLength !== bytes) throw new ExportCommandError('download_corrupt', `Content-Length verification failed for ${download.filename}.`);
+        // Content-Length describes the encoded wire body while Axios hands the
+        // stream to us after transport decompression. It is also absent for
+        // chunked responses, so it is not an integrity signal here.
         if (download.bytes !== undefined && download.bytes !== bytes) throw new ExportCommandError('download_corrupt', `Byte-length verification failed for ${download.filename}.`);
         const expectedDigest = download.sha256 ?? download.digest;
         if (!expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest) || sha256 !== expectedDigest) throw new ExportCommandError('download_corrupt', `SHA-256 verification failed for ${download.filename}.`);

@@ -3,6 +3,7 @@ import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
+import { gzipSync } from 'zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { databaseExportWithConfig } from '../src/commands/database-export';
 
@@ -85,6 +86,32 @@ describe('database export with real HTTP and filesystem I/O', () => {
             expect(fs.readFileSync(path.join(result.directory, 'events.parquet'))).toEqual(parquet);
             expect(fs.readFileSync(path.join(result.directory, 'manifest.json'))).toEqual(manifest);
             expect(remote.calls.find((call) => call.body.operation === 'export')?.body).toMatchObject({ tables: ['events'], replace: false });
+        });
+    });
+
+    it.each([false, true])('accepts gzip transport framing and retains SHA-256 verification (corrupt=%s)', async (corrupt) => {
+        let origin = '';
+        await scenario((request, body) => {
+            if (request.method === 'GET' && request.url === '/manifest') {
+                const encoded = gzipSync(manifest);
+                return { bytes: encoded, headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(encoded.length) } };
+            }
+            if (request.method === 'GET' && request.url === '/events') {
+                const decoded = corrupt ? Buffer.alloc(parquet.length, 0x78) : parquet;
+                const encoded = gzipSync(decoded);
+                return { bytes: encoded, headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(encoded.length) } };
+            }
+            return normal(() => origin, request, body);
+        }, async (remote) => {
+            origin = remote.origin;
+            const output = path.join(tmp(), corrupt ? 'gzip-corrupt' : 'gzip-valid');
+            const run = databaseExportWithConfig('warehouse', { output }, config(origin), quiet);
+            if (corrupt) {
+                await expect(run).rejects.toMatchObject({ code: 'download_corrupt' });
+            } else {
+                await run;
+                expect(fs.readFileSync(path.join(output, 'events.parquet'))).toEqual(parquet);
+            }
         });
     });
 
