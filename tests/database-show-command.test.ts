@@ -99,14 +99,26 @@ describe('database show', () => {
         expect(output).not.toContain('Tables:');
     });
 
-    it('prints the show response unchanged as JSON', async () => {
+    it('marks an analytical show record as beta in JSON', async () => {
         const module = await loadDatabaseCommands();
         const databaseShowWithConfig = module.databaseShowWithConfig as Function;
         const test = harness({ database: ANALYTICAL_ROW });
 
         await databaseShowWithConfig('orders', { json: true }, CONFIG, test.dependencies);
 
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ANALYTICAL_ROW });
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({
+            database: { ...ANALYTICAL_ROW, beta: true },
+        });
+    });
+
+    it('keeps the standard show JSON record shape unchanged', async () => {
+        const module = await loadDatabaseCommands();
+        const databaseShowWithConfig = module.databaseShowWithConfig as Function;
+        const test = harness({ database: { ...STANDARD_ROW, beta: true } });
+
+        await databaseShowWithConfig('app', { json: true }, CONFIG, test.dependencies);
+
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: STANDARD_ROW });
     });
 
     // #1700 R10: a missing or unrecognized `kind` must not be defaulted to

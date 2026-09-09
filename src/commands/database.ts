@@ -45,6 +45,7 @@ export interface DatabaseRecord {
     id?: string;
     name: string;
     kind: DatabaseKind;
+    beta?: true;
     status: string;
     activity?: DatabaseActivity;
     deleted_at: string | null;
@@ -272,6 +273,7 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
         ...(database.id === undefined ? {} : { id: database.id }),
         name: database.name,
         kind,
+        ...(kind === 'duckdb' ? { beta: true as const } : {}),
         status: database.status,
         ...(database.activity === undefined ? {} : { activity: database.activity }),
         deleted_at: database.deleted_at,
@@ -320,7 +322,7 @@ function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
 function databaseRows(databases: DatabaseRecord[]): string[][] {
     return databases.map((database) => [
         database.name,
-        database.kind,
+        kindLabel(database.kind),
         database.status,
         database.kind === 'duckdb' ? (database.activity ?? '-') : '-',
         database.kind === 'duckdb'

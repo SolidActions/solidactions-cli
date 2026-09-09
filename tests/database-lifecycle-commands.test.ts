@@ -89,6 +89,13 @@ const LIST_RESPONSE = {
     },
 };
 
+const ANALYTICAL_JSON = { ...ANALYTICAL, beta: true };
+
+const LIST_JSON_RESPONSE = {
+    ...LIST_RESPONSE,
+    databases: [ACTIVE, DELETED, ANALYTICAL_JSON],
+};
+
 async function loadDatabaseCommands(): Promise<Record<string, unknown>> {
     const moduleUrl = pathToFileURL(path.resolve(__dirname, '../src/commands/database.ts')).href;
 
@@ -190,7 +197,7 @@ describe('database lifecycle control-plane contract', () => {
         const output = test.stdout.join('\n');
         expect(output).toMatch(/KIND/i);
         expect(output).toMatch(/ACTIVITY/i);
-        expect(output).toContain('duckdb');
+        expect(tableRow(output, ANALYTICAL.name)[1]).toBe('Analytical · DuckDB (Beta)');
         expect(output).toContain('idle');
         expect(output).toContain('1.2 GiB / 2.0 GiB');
         // Pin used/limit to their scope on the SAME line, specifically enough
@@ -229,13 +236,15 @@ describe('database lifecycle control-plane contract', () => {
         expect(test.calls).toEqual([]);
     });
 
-    it('writes the complete list response as JSON with no decoration', async () => {
+    it('marks analytical list records as beta in JSON while preserving standard records', async () => {
         const databaseListWithConfig = await requireExport('databaseListWithConfig');
         const test = harness(LIST_RESPONSE);
 
         await databaseListWithConfig({ json: true }, CONFIG, test.dependencies);
 
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual(LIST_RESPONSE);
+        const output = JSON.parse(test.stdout.join('\n'));
+        expect(output).toEqual(LIST_JSON_RESPONSE);
+        expect(output.databases[0]).toEqual(ACTIVE);
         expect(test.stderr).toEqual([]);
         expect(test.stdout.join('\n')).not.toMatch(/Databases:|Quota:|\u001b\[/);
     });
@@ -247,7 +256,7 @@ describe('database lifecycle control-plane contract', () => {
         await databaseListWithConfig({ kind: 'duckdb', json: true } as any, CONFIG, test.dependencies);
 
         expect(JSON.parse(test.stdout.join('\n'))).toEqual({
-            databases: [ANALYTICAL],
+            databases: [ANALYTICAL_JSON],
             quota: LIST_RESPONSE.quota,
         });
     });
@@ -284,7 +293,7 @@ describe('database lifecycle control-plane contract', () => {
         expect(calls[0]).toEqual({ operation: 'create', name: 'Orders', kind: 'duckdb' });
         expect(calls[1]).toEqual({ operation: 'show', name: 'Orders' });
         expect(sleeps.length).toBeGreaterThan(0);
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ready });
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: { ...ready, beta: true } });
     });
 
     it('does not poll when --no-wait is passed', async () => {
@@ -295,7 +304,7 @@ describe('database lifecycle control-plane contract', () => {
         await databaseCreateWithConfig('Orders', { kind: 'duckdb', wait: false, json: true }, CONFIG, test.dependencies);
 
         expect(test.calls).toHaveLength(1);
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: provisioning });
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: { ...provisioning, beta: true } });
     });
 
     it('defaults --kind to libsql and creates synchronously', async () => {
@@ -331,7 +340,7 @@ describe('database lifecycle control-plane contract', () => {
         await databaseCreateWithConfig('Warehouse', { kind: 'duckdb' }, CONFIG, test.dependencies);
 
         const row = tableRow(test.stdout.join('\n'), duckdbActive.name);
-        expect(row[1]).toBe('duckdb');
+        expect(row[1]).toBe('Analytical · DuckDB (Beta)');
         expect(row[3]).toBe('active');
     });
 
@@ -470,7 +479,7 @@ describe('database lifecycle control-plane contract', () => {
 
         expect(test.calls).toHaveLength(1);
         expectControlPost(test.calls[0], { operation: 'undelete', name: 'Warehouse' });
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual(payload);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({ database: ANALYTICAL_JSON });
     });
 
     it('surfaces a server-side undelete refusal for an analytical database verbatim (C-4)', async () => {
@@ -841,8 +850,8 @@ describe('database lifecycle real CLI registration', () => {
 
         expect(result.code).toBe(0);
         expect(result.stderr).toContain('AGENT NOTE: CLI 1.33.0 outdated (9.8.7 available)');
-        expect(result.stdout).toBe(`${JSON.stringify(LIST_RESPONSE, null, 2)}\n`);
-        expect(JSON.parse(result.stdout)).toEqual(LIST_RESPONSE);
+        expect(result.stdout).toBe(`${JSON.stringify(JSON.parse(result.stdout), null, 2)}\n`);
+        expect(JSON.parse(result.stdout)).toEqual(LIST_JSON_RESPONSE);
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({
             method: 'POST',
