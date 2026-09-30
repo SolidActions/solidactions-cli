@@ -21,7 +21,7 @@ import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { reconstructSkillMd, fetchBinaryReference } from '../utils/skill-bundle';
-import { writeDirAtomic } from '../utils/atomic-dir';
+import { writeDirAtomic, assertReplaceableDir } from '../utils/atomic-dir';
 
 export interface SkillPullOptions {
     json?: boolean;
@@ -155,6 +155,7 @@ export async function pullSkillWithConfig(
     config: Config,
     opts: { role?: string; inCrew?: string } = {},
 ): Promise<void> {
+    assertReplaceableDir(dest, SKILL_SIDECAR);
     writeDirAtomic(path.resolve(dest), await fetchSkillFiles(config, name, opts));
 }
 
@@ -174,11 +175,21 @@ export async function skillPullWithConfig(
     config: Config,
 ): Promise<void> {
     if (options.inCrew && !options.role) fail('--in-crew requires --role.');
-    if (dest === undefined && (name.includes('/') || name.includes('\\') || name.split(/[\\/]/).includes('..'))) {
+    if (dest === undefined && (name === '.' || name === '..' || name.includes('/') || name.includes('\\'))) {
         fail(`'${name}' cannot be used as a default destination folder; pass an explicit [dest] directory`);
     }
 
     const readOpts: ReadOpts = { role: options.role, inCrew: options.inCrew };
+    const out = dest ?? './' + name;
+
+    // Replacing a folder is destructive: refuse before any network call or write.
+    if (!options.json) {
+        try {
+            assertReplaceableDir(out, SKILL_SIDECAR);
+        } catch (e: any) {
+            fail(e.message);
+        }
+    }
 
     let data: any;
     try {
@@ -200,7 +211,6 @@ export async function skillPullWithConfig(
         fail(e.message);
     }
 
-    const out = dest ?? './' + name;
     try {
         writeDirAtomic(path.resolve(out), files);
     } catch (e: any) {

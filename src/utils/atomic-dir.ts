@@ -36,3 +36,27 @@ export function writeDirAtomic(dest: string, files: Record<string, string | Buff
     }
     if (hadOld) fs.rmSync(old, { recursive: true, force: true });
 }
+
+/**
+ * Guard for callers that replace a whole folder with writeDirAtomic. Throws unless
+ * `dest` is safe to swap out: it must not be the current directory or one of its
+ * parents, must not be a file, and if it already holds anything it must contain
+ * `marker` directly (proof that a previous pull created it). A missing or empty
+ * dest is fine. `cwd` exists so tests can avoid process.chdir.
+ */
+export function assertReplaceableDir(dest: string, marker: string, cwd: string = process.cwd()): void {
+    const resolved = path.resolve(dest);
+    const exists = fs.existsSync(resolved);
+    const real = exists ? fs.realpathSync(resolved) : resolved;
+    const rel = path.relative(real, fs.realpathSync(cwd));
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+        throw new Error(`refusing to replace ${dest}: it is the current directory or one of its parents`);
+    }
+    if (!exists) return;
+    if (!fs.statSync(resolved).isDirectory()) {
+        throw new Error(`refusing to replace ${dest}: it exists and is not a directory`);
+    }
+    if (fs.readdirSync(resolved).length > 0 && !fs.existsSync(path.join(resolved, marker))) {
+        throw new Error(`refusing to replace ${dest}: it exists and is not a pulled skill (no ${marker}); remove it or choose another destination`);
+    }
+}

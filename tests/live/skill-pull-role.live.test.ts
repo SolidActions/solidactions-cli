@@ -83,6 +83,7 @@ describe.skipIf(!LIVE)('skill pull --role (live)', () => {
         const dest = path.join(base, 'out');
         fs.mkdirSync(dest);
         fs.writeFileSync(path.join(dest, 'stale.md'), 'stale');
+        fs.writeFileSync(path.join(dest, SKILL_SIDECAR), '{}'); // marks dest as a previously pulled skill
 
         const res = await runPull(() => skillPullWithConfig(roleSkill, dest, { role, inCrew: crew }, config));
         expect(res.exit, res.stderr).toBe(0);
@@ -109,6 +110,15 @@ describe.skipIf(!LIVE)('skill pull --role (live)', () => {
         expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toContain('shared body marker');
         expect(fs.readFileSync(path.join(dest, 'references/shared.md'), 'utf8')).toBe('shared notes content');
         expect(JSON.parse(fs.readFileSync(path.join(dest, SKILL_SIDECAR), 'utf8')).role).toBeNull();
+    });
+
+    it('refuses to replace a non-empty folder that is not a pulled skill', async () => {
+        const dest = mkTmp();
+        fs.writeFileSync(path.join(dest, 'important.txt'), 'keep');
+        const res = await runPull(() => skillPullWithConfig(roleSkill, dest, { role, inCrew: crew }, config));
+        expect(res.exit).toBe(1);
+        expect(res.stderr).toContain('not a pulled skill');
+        expect(fs.readdirSync(dest)).toEqual(['important.txt']);
     });
 
     it('pulling a role-scoped skill without --role hints at --role and creates nothing', async () => {
