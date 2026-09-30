@@ -519,11 +519,6 @@ export async function skillPushWithConfig(
         process.exit(1);
     }
 
-    if (options.publish && options.role) {
-        process.stderr.write(chalk.red('error: --publish is not supported with --role yet; publish the role-scoped skill via the MCP take_snapshot tool.\n'));
-        process.exit(1);
-    }
-
     const topLevelSkillMd = path.join(absDir, 'SKILL.md');
 
     // -------------------------------------------------------------------------
@@ -565,7 +560,7 @@ export async function skillPushWithConfig(
                     publishOutcome = await publishSkillByDocId(config, createdDocId);
                 }
             } else {
-                publishOutcome = await publishSkillByName(config, pushResult.name);
+                publishOutcome = await publishSkillByName(config, pushResult.name, { role: options.role });
             }
         }
 
@@ -577,7 +572,7 @@ export async function skillPushWithConfig(
 
         printPushResult(pushResult, options);
         if (publishOutcome) {
-            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true });
+            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true, role: options.role });
         }
         const warning = stagedPushWarning(pushResult, !!options.role);
         if (warning) {

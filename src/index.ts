@@ -1020,6 +1020,8 @@ skill
     .command('publish')
     .description('Publish (snapshot) a skill so its latest pushed revision goes live for agents')
     .argument('<name>', 'Skill name/identifier (e.g. "my-skill" or "shared/my-skill")')
+    .option('--role <name>', 'Publish a role-scoped skill of this role instead of a shared-library skill')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output result as JSON')
     .action(async (name, options) => {
         await skillPublish(name, options);

@@ -1589,20 +1589,6 @@ describe('skillPushWithConfig — staged-not-published warning (single-skill)', 
 });
 
 describe('skillPushWithConfig — --publish (single-skill)', () => {
-    it('rejects --publish combined with --role BEFORE any HTTP request', async () => {
-        const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
-        const restoreExit = patchProcessExit();
-        const { lines, restore } = captureStderr();
-        try {
-            let code: number | undefined;
-            try { await skillPushWithConfig(dir, { role: 'builder', publish: true }, stubConfig()); }
-            catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
-            expect(code).toBe(1);
-            expect(lastCapture).toBeNull();
-            expect(lines.join('')).toContain('--publish is not supported with --role');
-        } finally { restore(); restoreExit(); cleanup(); }
-    });
-
     it('after a create push, snapshots by skill_doc_id and prints published (no warning)', async () => {
         responseQueue = [
             makeMcpSuccess({ skill_doc_id: 200, reference_doc_ids: {}, snapshot_hint: 'no snapshot yet' }),

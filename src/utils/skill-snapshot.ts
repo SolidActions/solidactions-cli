@@ -36,10 +36,21 @@ export async function publishSkillByDocId(config: Config, docId: number | string
  * read response, NOT the take_snapshot error code (the server maps both
  * "nothing to snapshot" and "live-mode" to the same not_snapshotable code).
  */
-export async function publishSkillByName(config: Config, name: string): Promise<PublishOutcome> {
+export async function publishSkillByName(
+    config: Config,
+    name: string,
+    opts: { role?: string; inCrew?: string } = {},
+): Promise<PublishOutcome> {
     let read: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
-        read = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
+        if (opts.role) {
+            // Role-scoped skill: addressed by role + name (in_crew disambiguates the role).
+            const args: Record<string, unknown> = { action: 'read_skill', role: opts.role, name };
+            if (opts.inCrew) args.in_crew = opts.inCrew;
+            read = await callCrewsTool(config, 'roles', args);
+        } else {
+            read = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
+        }
     } catch (e: any) {
         return { status: 'error', code: 'mcp_request_failed', message: e.message };
     }
@@ -64,7 +75,7 @@ export async function publishSkillByName(config: Config, name: string): Promise<
  * `skill push --publish` case (push succeeded, publish failed). `opts.json`
  * prints the raw outcome as JSON instead of human text.
  */
-export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: { pushed?: boolean; json?: boolean } = {}): void {
+export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: { pushed?: boolean; json?: boolean; role?: string } = {}): void {
     if (opts.json) {
         console.log(JSON.stringify(outcome));
         process.exit(outcome.status === 'error' ? 1 : 0);
@@ -83,7 +94,7 @@ export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: 
             const prefix = opts.pushed ? 'pushed, but publish failed — ' : '';
             process.stderr.write(chalk.red(`${prefix}${outcome.code}: ${outcome.message}\n`));
             if (opts.pushed) {
-                process.stderr.write(chalk.yellow(`  The skill was pushed. Retry: solidactions skill publish ${name}\n`));
+                process.stderr.write(chalk.yellow(`  The skill was pushed. Retry: solidactions skill publish ${name}${opts.role ? ` --role ${opts.role}` : ''}\n`));
             }
             process.exit(1);
         }
