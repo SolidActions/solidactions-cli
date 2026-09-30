@@ -158,10 +158,10 @@ describe('publishSkillByName', () => {
         const outcome = await publishSkillByName(stubConfig(), 'my-skill');
         expect(outcome).toEqual({ status: 'published', snapshotId: 900 });
         expect(allCaptures.length).toBe(2);
-        expect(allCaptures[0].body.params.name).toBe('crews_skills');
+        expect(allCaptures[0].body.params.name).toBe('crews_skills_read');
         expect(allCaptures[0].body.params.arguments).toEqual({ action: 'read', identifier: 'my-skill' });
-        expect(allCaptures[1].body.params.name).toBe('crews_versions');
-        expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 118 });
+        expect(allCaptures[1].body.params.name).toBe('crews_history_manage');
+        expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_doc_snapshot', doc_id: 118 });
     });
 
     it('returns already_published (no snapshot call) when has_unpublished_revisions is false', async () => {
@@ -200,8 +200,8 @@ describe('publishSkillByDocId', () => {
         const outcome = await publishSkillByDocId(stubConfig(), 200);
         expect(outcome).toEqual({ status: 'published', snapshotId: 777 });
         expect(allCaptures.length).toBe(1);
-        expect(allCaptures[0].body.params.name).toBe('crews_versions');
-        expect(allCaptures[0].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 200 });
+        expect(allCaptures[0].body.params.name).toBe('crews_history_manage');
+        expect(allCaptures[0].body.params.arguments).toEqual({ action: 'take_doc_snapshot', doc_id: 200 });
     });
 });
 

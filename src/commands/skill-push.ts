@@ -32,7 +32,39 @@ export interface SkillPushOptions {
  * keys that collide with these would silently corrupt the request once spread
  * top-level into the call arguments.
  */
-export const RESERVED_PARAM_KEYS = ['action', 'identifier', 'role', 'name', 'description', 'body', 'references', 'base_version_id'];
+export const RESERVED_PARAM_KEYS = ['action', 'identifier', 'role', 'name', 'description', 'body', 'references', 'base_version_id', 'in_crew', 'workspace', 'version_id'];
+
+/**
+ * Frontmatter keys the current MCP catalog accepts as top-level create/edit params
+ * (crews_skills_manage / crews_roles_manage). The server rejects any other param
+ * with `unknown_params`, so everything else is folded into `metadata`.
+ */
+const SKILL_FRONTMATTER_PARAMS = ['catalog_advertised', 'metadata', 'license', 'compatibility', 'allowed-tools', 'storage', 'version_mode'];
+export const ROLE_FRONTMATTER_PARAMS = [
+    'inherits_from', 'always_load_docs', 'always_load_memory', 'always_load_skills', 'available_skills',
+    'catalog_advertised', 'metadata', 'version_mode',
+];
+
+/**
+ * Split frontmatter-derived properties into schema params (sent top-level) and the
+ * rest, which is merged under `metadata` (inert client key/value strings).
+ */
+export function shapeFrontmatterParams(properties: Record<string, unknown>, allowed: readonly string[]): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const extra: Record<string, string> = {};
+    for (const [key, value] of Object.entries(properties)) {
+        if (allowed.includes(key)) {
+            out[key] = value;
+        } else if (value !== undefined) {
+            extra[key] = typeof value === 'string' ? value : JSON.stringify(value);
+        }
+    }
+    if (Object.keys(extra).length > 0) {
+        const existing = out.metadata && typeof out.metadata === 'object' ? (out.metadata as Record<string, unknown>) : {};
+        out.metadata = { ...extra, ...existing };
+    }
+    return out;
+}
 
 /**
  * Throws if any frontmatter-derived property key collides with a reserved
@@ -261,6 +293,7 @@ export async function pushParsedSkill(
     assertNoReservedFrontmatterKeys(properties);
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
+    const frontmatterParams = shapeFrontmatterParams(properties, SKILL_FRONTMATTER_PARAMS);
 
     // --dry-run: pre-flight a read to detect existence; make NO create/edit calls.
     if (options.dryRun) {
@@ -295,8 +328,8 @@ export async function pushParsedSkill(
 
     // Spread frontmatter extras FIRST so the fixed protocol keys always win.
     const createArgs: Record<string, unknown> = isRole
-        ? { ...properties, action: 'create_skill', role: options.role, name, description, body, references }
-        : { ...properties, action: 'create', name, description, body, references };
+        ? { ...frontmatterParams, action: 'create_skill', role: options.role, name, description, body, references }
+        : { ...frontmatterParams, action: 'create', name, description, body, references };
 
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
@@ -309,8 +342,8 @@ export async function pushParsedSkill(
     if (!result.ok && result.data?.code === 'name_collision') {
         const guardBaseVersion = sidecarRevision != null && !options.force;
         const editArgs: Record<string, unknown> = isRole
-            ? { ...properties, action: 'edit_skill', role: options.role, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
-            : { ...properties, action: 'edit', identifier: name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) };
+            ? { ...frontmatterParams, action: 'edit_skill', role: options.role, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
+            : { ...frontmatterParams, action: 'edit', identifier: name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) };
 
         try {
             result = await callCrewsTool(config, tool, editArgs);
@@ -393,7 +426,7 @@ export function stagedPushWarning(result: PushResult, isRole: boolean): string |
     }
 
     const publishLine = isRole
-        ? `  Publish this role-scoped skill via the MCP crews_versions take_snapshot tool.\n`
+        ? `  Publish this role-scoped skill via the MCP crews_history_manage take_doc_snapshot tool.\n`
         : `  Run: solidactions skill publish ${name}\n`;
     const headline = status === 'updated'
         ? `⚠ Staged, not published. This revision won't run for agents until you publish it.\n`

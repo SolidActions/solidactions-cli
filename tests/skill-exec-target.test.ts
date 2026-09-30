@@ -196,11 +196,11 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                         }));
                     };
 
-                    if (toolName === 'crews_skills' && action === 'read') {
+                    if (toolName === 'crews_skills_read' && action === 'read') {
                         respondText(args.identifier === 'bad-tool' ? BAD_BUNDLE : BUNDLE);
                         return;
                     }
-                    if ((toolName === 'crews_skills' || toolName === 'crews_roles') && action === 'read_reference_file') {
+                    if ((toolName === 'crews_skills_read' || toolName === 'crews_roles_read') && action === 'read_reference_file') {
                         const refPath = args.path as string;
                         if (refPath === 'assets/role-blob.bin') {
                             respondText({
@@ -228,12 +228,12 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                         });
                         return;
                     }
-                    if (toolName === 'crews_skills' && action === 'sandbox_exec') {
+                    if (toolName === 'crews_sandbox' && action === 'skill_exec') {
                         execSkillCalls.push(args);
                         respondText({ stdout: 'sandbox ran', exit_code: 0, status: 'ok' });
                         return;
                     }
-                    if (toolName === 'crews_roles' && action === 'list') {
+                    if (toolName === 'crews_roles_read' && action === 'list') {
                         respondText({
                             roles: [
                                 { identifier: 'writer', in_crew: 'acme' },
@@ -243,7 +243,7 @@ describe('solidactions skill exec — integration (--target sandbox|host)', () =
                         });
                         return;
                     }
-                    if (toolName === 'crews_roles' && action === 'read_skill') {
+                    if (toolName === 'crews_roles_read' && action === 'read_skill') {
                         const roleReference = { ...BUNDLE.reference };
                         delete roleReference['assets/blob.bin'];
                         roleReference['assets/role-blob.bin'] = { binary: true, mime: 'application/octet-stream', size: 5, blob_sha: 'roleblob1' };

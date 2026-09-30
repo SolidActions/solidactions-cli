@@ -3,7 +3,7 @@
  *
  * Composes two existing MCP actions: crews_skills.read resolves a skill name to
  * its doc_id and reports whether the current revision is unpublished, and
- * crews_versions.take_snapshot promotes that revision to all agents.
+ * crews_history_manage.take_doc_snapshot promotes that revision to all agents.
  */
 
 import chalk from 'chalk';
@@ -16,11 +16,11 @@ export type PublishOutcome =
     | { status: 'live_mode' }
     | { status: 'error'; code: string; message: string };
 
-/** Snapshot a skill by its doc_id (crews_versions.take_snapshot). */
+/** Snapshot a skill by its doc_id (crews_history_manage.take_doc_snapshot). */
 export async function publishSkillByDocId(config: Config, docId: number | string): Promise<PublishOutcome> {
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
-        result = await callCrewsTool(config, 'crews_versions', { action: 'take_snapshot', doc_id: docId });
+        result = await callCrewsTool(config, 'crews_history_manage', { action: 'take_doc_snapshot', doc_id: docId });
     } catch (e: any) {
         return { status: 'error', code: 'mcp_request_failed', message: e.message };
     }

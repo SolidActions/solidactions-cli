@@ -13,13 +13,16 @@ describe.skipIf(!LIVE)('mcp transport (live)', () => {
     it('round-trips a ~200KB multibyte body byte-identical', async () => {
         const name = `cli-live-utf8-${Date.now()}`;
         const body = ('— ✓ 漢字 🚀 ').repeat(12000);
-        const created = await callCrewsTool(config, 'skills', {
-            action: 'create', name, description: 'utf8 live test', body,
-        });
-        expect(created.ok).toBe(true);
-        const read = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
-        expect(read.ok).toBe(true);
-        expect(read.data.body).toBe(body);
-        await callCrewsTool(config, 'skills', { action: 'delete', identifier: name });
+        try {
+            const created = await callCrewsTool(config, 'skills', {
+                action: 'create', name, description: 'utf8 live test', body,
+            });
+            expect(created.ok, JSON.stringify(created.data)).toBe(true);
+            const read = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
+            expect(read.ok, JSON.stringify(read.data)).toBe(true);
+            expect(read.data.body).toBe(body);
+        } finally {
+            await callCrewsTool(config, 'skills', { action: 'delete', identifier: name }).catch(() => undefined);
+        }
     });
 });

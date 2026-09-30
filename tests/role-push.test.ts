@@ -197,7 +197,7 @@ describe('role push — create success', () => {
 
             // JSON-RPC shape: name must be 'roles', action must be 'create'
             const body = lastCapture!.body;
-            expect(body.params.name).toBe('crews_roles');
+            expect(body.params.name).toBe('crews_roles_manage');
             expect(body.params.arguments.action).toBe('create');
             expect(body.params.arguments.name).toBe('my-role');
             expect(body.params.arguments.description).toBe('A test role definition');
@@ -325,14 +325,14 @@ describe('role push — collision → edit (upsert)', () => {
             expect(allCaptures.length).toBe(2);
 
             // First call: create
-            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles_manage');
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
             // inherits_from (frontmatter extra) sent top-level on create too
             expect(allCaptures[0].body.params.arguments.inherits_from).toBe('some-parent');
 
             // Second call: edit
             const editArgs = allCaptures[1].body.params.arguments;
-            expect(allCaptures[1].body.params.name).toBe('crews_roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles_manage');
             expect(editArgs.action).toBe('edit');
             // roles edit uses 'name', NOT 'identifier'
             expect(editArgs.name).toBe('existing-role');
@@ -394,7 +394,7 @@ describe('role push --dry-run — role does not exist', () => {
 
             // Pre-flight uses action:read with name (NOT identifier)
             const preflightArgs = allCaptures[0].body.params.arguments;
-            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles_read');
             expect(preflightArgs.action).toBe('read');
             expect(preflightArgs.name).toBe('my-role');
             // Must NOT use 'identifier' param

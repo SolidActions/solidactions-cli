@@ -20,7 +20,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
-import { parseSkillFile, assertNoReservedFrontmatterKeys } from './skill-push';
+import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, ROLE_FRONTMATTER_PARAMS } from './skill-push';
 
 export interface RolePushOptions {
     json?: boolean;
@@ -70,6 +70,7 @@ export async function rolePushWithConfig(
         process.stderr.write(chalk.red(`error: ${e.message}\n`));
         process.exit(1);
     }
+    const frontmatterParams = shapeFrontmatterParams(properties, ROLE_FRONTMATTER_PARAMS);
 
     // --dry-run: pre-flight a read to detect existence; NO create or edit.
     // Roles use {action:'read', name} (NOT identifier).
@@ -113,7 +114,7 @@ export async function rolePushWithConfig(
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
         result = await callCrewsTool(config, 'roles', {
-            ...properties,
+            ...frontmatterParams,
             action: 'create',
             name,
             description,
@@ -129,7 +130,7 @@ export async function rolePushWithConfig(
     if (!result.ok && result.data?.code === 'name_collision') {
         try {
             result = await callCrewsTool(config, 'roles', {
-                ...properties,
+                ...frontmatterParams,
                 action: 'edit',
                 name,
                 description,

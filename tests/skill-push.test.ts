@@ -396,7 +396,7 @@ describe('skillPushWithConfig — shared library (no --role)', () => {
             const body = lastCapture!.body;
             expect(body.jsonrpc).toBe('2.0');
             expect(body.method).toBe('tools/call');
-            expect(body.params.name).toBe('crews_skills');
+            expect(body.params.name).toBe('crews_skills_manage');
             expect(body.params.arguments.action).toBe('create');
             expect(body.params.arguments.name).toBe('My Cool Skill');
             expect(body.params.arguments.description).toBe('Does cool things');
@@ -520,7 +520,7 @@ describe('skillPushWithConfig — with --role', () => {
             expect(lastCapture).not.toBeNull();
 
             const body = lastCapture!.body;
-            expect(body.params.name).toBe('crews_roles');
+            expect(body.params.name).toBe('crews_roles_manage');
             expect(body.params.arguments.action).toBe('create_skill');
             expect(body.params.arguments.role).toBe('senior-engineer');
             expect(body.params.arguments.name).toBe('Role Skill');
@@ -657,7 +657,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
             expect(allCaptures[0].body.params.arguments.action).toBe('create');
-            expect(allCaptures[1].body.params.name).toBe('crews_skills');
+            expect(allCaptures[1].body.params.name).toBe('crews_skills_manage');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit');
             expect(allCaptures[1].body.params.arguments.identifier).toBe('Existing Skill');
             expect(allCaptures[1].body.params.arguments.catalog_advertised).toBe(true);
@@ -685,7 +685,7 @@ describe('skillPushWithConfig — idempotent upsert', () => {
             catch (e) { if (e instanceof ProcessExitError) caughtExit = e; else throw e; }
             expect(caughtExit?.code).toBe(0);
             expect(allCaptures.length).toBe(2);
-            expect(allCaptures[1].body.params.name).toBe('crews_roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles_manage');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
             expect(allCaptures[1].body.params.arguments.role).toBe('builder');
             expect(allCaptures[1].body.params.arguments.name).toBe('Role Skill');
@@ -877,7 +877,7 @@ describe('pushParsedSkill — core payload-based upsert', () => {
             // Verify HTTP request shape
             expect(allCaptures.length).toBe(1);
             const args = allCaptures[0].body.params.arguments;
-            expect(allCaptures[0].body.params.name).toBe('crews_skills');
+            expect(allCaptures[0].body.params.name).toBe('crews_skills_manage');
             expect(args.action).toBe('create');
             expect(args.name).toBe('Core Skill');
             expect(args.description).toBe('A payload-based skill');
@@ -913,7 +913,7 @@ describe('pushParsedSkill — core payload-based upsert', () => {
 
             // Second request: edit with correct args
             const editArgs = allCaptures[1].body.params.arguments;
-            expect(allCaptures[1].body.params.name).toBe('crews_skills');
+            expect(allCaptures[1].body.params.name).toBe('crews_skills_manage');
             expect(editArgs.action).toBe('edit');
             expect(editArgs.identifier).toBe('Core Skill');
             expect(editArgs.description).toBe('A payload-based skill');
@@ -940,12 +940,12 @@ describe('pushParsedSkill — core payload-based upsert', () => {
 
             expect(allCaptures.length).toBe(2);
             // First: roles.create_skill
-            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles_manage');
             expect(allCaptures[0].body.params.arguments.action).toBe('create_skill');
             expect(allCaptures[0].body.params.arguments.role).toBe('senior-dev');
 
             // Second: roles.edit_skill
-            expect(allCaptures[1].body.params.name).toBe('crews_roles');
+            expect(allCaptures[1].body.params.name).toBe('crews_roles_manage');
             expect(allCaptures[1].body.params.arguments.action).toBe('edit_skill');
             expect(allCaptures[1].body.params.arguments.role).toBe('senior-dev');
             expect(allCaptures[1].body.params.arguments.name).toBe('Core Skill');
@@ -1384,7 +1384,7 @@ describe('skill push --dry-run', () => {
             // Pre-flight must target the roles tool's read_skill with role+name, NOT skills read {identifier}
             expect(allCaptures.length).toBe(1);
             const args = allCaptures[0].body.params.arguments;
-            expect(allCaptures[0].body.params.name).toBe('crews_roles');
+            expect(allCaptures[0].body.params.name).toBe('crews_roles_read');
             expect(args.action).toBe('read_skill');
             expect(args.role).toBe('senior-engineer');
             expect(args.name).toBe('role-scoped-skill');
@@ -1582,7 +1582,7 @@ describe('skillPushWithConfig — staged-not-published warning (single-skill)', 
         const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
         try {
             const { err } = await run(dir, { role: 'builder' });
-            expect(err).toContain('crews_versions take_snapshot');
+            expect(err).toContain('crews_history_manage take_doc_snapshot');
             expect(err).not.toContain('skill publish');
         } finally { cleanup(); }
     });
@@ -1618,8 +1618,8 @@ describe('skillPushWithConfig — --publish (single-skill)', () => {
             catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
             expect(code).toBe(0);
             expect(allCaptures.length).toBe(2);
-            expect(allCaptures[1].body.params.name).toBe('crews_versions');
-            expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 200 });
+            expect(allCaptures[1].body.params.name).toBe('crews_history_manage');
+            expect(allCaptures[1].body.params.arguments).toEqual({ action: 'take_doc_snapshot', doc_id: 200 });
             expect(logs.join('')).toContain("published 'my-skill'");
             expect(errLines.join('')).not.toContain('Not yet published');
         } finally { console.log = origLog; restoreErr(); restoreExit(); cleanup(); }
@@ -1642,7 +1642,7 @@ describe('skillPushWithConfig — --publish (single-skill)', () => {
             expect(code).toBe(0);
             expect(allCaptures.length).toBe(4); // create(collision) → edit → read → take_snapshot
             expect(allCaptures[2].body.params.arguments).toEqual({ action: 'read', identifier: 'my-skill' });
-            expect(allCaptures[3].body.params.arguments).toEqual({ action: 'take_snapshot', doc_id: 201 });
+            expect(allCaptures[3].body.params.arguments).toEqual({ action: 'take_doc_snapshot', doc_id: 201 });
             expect(logs.join('')).toContain("published 'my-skill'");
         } finally { console.log = origLog; restoreExit(); cleanup(); }
     });
@@ -1710,7 +1710,7 @@ describe('skillPushWithConfig — --publish (single-skill)', () => {
             catch (e) { if (e instanceof ProcessExitError) code = e.code; else throw e; }
             expect(code).toBe(0);
             expect(allCaptures.length).toBe(1); // dry-run read pre-flight only, no take_snapshot
-            expect(allCaptures.every((c) => c.body.params.arguments.action !== 'take_snapshot')).toBe(true);
+            expect(allCaptures.every((c) => c.body.params.arguments.action !== 'take_doc_snapshot')).toBe(true);
         } finally { console.log = origLog; restoreExit(); cleanup(); }
     });
 });

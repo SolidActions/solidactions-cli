@@ -123,15 +123,73 @@ async function callMcpTool(config: Config, endpointPath: string, toolName: strin
 
 const UNIFIED_MCP_PATH = '/mcp';
 
-// Server consolidated per-domain MCP servers into one endpoint with namespaced tools.
-const CREWS_TOOL_NAMES: Record<string, string> = { skills: 'crews_skills', roles: 'crews_roles' };
+export type CrewsGroup = 'skills' | 'roles';
+
+interface CrewsRoute {
+    tool: string;
+    /** Public action name when it differs from the CLI's action. */
+    action?: string;
+    /** CLI param name -> public param name, where the catalog renamed a field. */
+    rename?: Record<string, string>;
+}
+
+// Current catalog (solidactions-app ToolCatalog.php): the public tool depends on the action.
+// Only actions the CLI actually sends are routed; anything else throws in resolveCrewsCall.
+const CREWS_ROUTES: Record<CrewsGroup, Record<string, CrewsRoute>> = {
+    skills: {
+        list: { tool: 'crews_skills_read' },
+        read: { tool: 'crews_skills_read' },
+        read_reference_file: { tool: 'crews_skills_read' },
+        create: { tool: 'crews_skills_manage' },
+        edit: { tool: 'crews_skills_manage' },
+        delete: { tool: 'crews_delete', action: 'delete_skill' },
+        sandbox_exec: { tool: 'crews_sandbox', action: 'skill_exec', rename: { environment: 'skill_exec_environment' } },
+    },
+    roles: {
+        list: { tool: 'crews_roles_read' },
+        read: { tool: 'crews_roles_read' },
+        read_skill: { tool: 'crews_roles_read' },
+        read_reference_file: { tool: 'crews_roles_read' },
+        create: { tool: 'crews_roles_manage' },
+        edit: { tool: 'crews_roles_manage' },
+        create_skill: { tool: 'crews_roles_manage' },
+        edit_skill: { tool: 'crews_roles_manage' },
+        sandbox_exec: { tool: 'crews_sandbox', action: 'role_exec', rename: { environment: 'role_exec_environment' } },
+    },
+};
 
 /**
- * Call a single MCP tool on the unified /mcp endpoint, mapping legacy crews
- * tool names ('skills'/'roles') to their namespaced equivalents.
+ * Map a CLI-level crews call (group + action) to the public MCP tool, action and
+ * param names of the current catalog. Throws for an action the CLI has no route for.
+ */
+export function resolveCrewsCall(group: CrewsGroup, args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } {
+    const action = String(args.action ?? '');
+    const route = CREWS_ROUTES[group][action];
+    if (!route) throw new Error(`unsupported crews action: ${group}.${action}`);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+        if (v === undefined) continue;
+        out[route.rename?.[k] ?? k] = v;
+    }
+    if (route.action) out.action = route.action;
+    return { tool: route.tool, args: out };
+}
+
+function isCrewsGroup(name: string): name is CrewsGroup {
+    return name === 'skills' || name === 'roles';
+}
+
+/**
+ * Call a crews MCP tool on the unified /mcp endpoint. 'skills' / 'roles' are CLI
+ * groups resolved per action via resolveCrewsCall; any other name (e.g.
+ * 'crews_history_manage') is passed through unchanged.
  */
 export async function callCrewsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    return callMcpTool(config, UNIFIED_MCP_PATH, CREWS_TOOL_NAMES[toolName] ?? toolName, args);
+    if (isCrewsGroup(toolName)) {
+        const r = resolveCrewsCall(toolName, args);
+        return callMcpTool(config, UNIFIED_MCP_PATH, r.tool, r.args);
+    }
+    return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
 }
 
 /**
@@ -153,6 +211,7 @@ export interface McpContentResult {
  * (callCrewsTool) would throw on those.
  */
 export async function callCrewsToolContent(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpContentResult> {
-    const raw = await postMcpTool(config, UNIFIED_MCP_PATH, CREWS_TOOL_NAMES[toolName] ?? toolName, args);
+    const r = isCrewsGroup(toolName) ? resolveCrewsCall(toolName, args) : { tool: toolName, args };
+    const raw = await postMcpTool(config, UNIFIED_MCP_PATH, r.tool, r.args);
     return { ok: !raw.isError, content: raw.content };
 }
