@@ -305,7 +305,7 @@ describe('docPushWithConfig — chunking', () => {
             for (const cap of allCaptures) {
                 expect(cap.path).toBe('/mcp');
                 expect(cap.body.method).toBe('tools/call');
-                expect(cap.body.params.name).toBe('docs_vault');
+                expect(cap.body.params.name).toBe('docs_manage');
                 expect(cap.body.params.arguments.action).toBe('bulk_create');
             }
         } finally {
@@ -1146,7 +1146,7 @@ describe('docPushWithConfig — untracked docs inherit the manifest folder_path'
 });
 
 // ---------------------------------------------------------------------------
-// Tests: drift guard — tracked docs (manifest-backed) use docs_edit write
+// Tests: drift guard — tracked docs (manifest-backed) use docs_manage write
 // ---------------------------------------------------------------------------
 
 describe('docPushWithConfig — drift guard (tracked docs)', () => {
@@ -1154,7 +1154,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
 
-    it('tracked file uses docs_edit write with base_revision from the manifest; untracked file still uses bulk_create', async () => {
+    it('tracked file uses docs_manage write with base_revision from the manifest; untracked file still uses bulk_create', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'a.md': '# A\n\nTracked content.',
             'b.md': '# B\n\nUntracked content.',
@@ -1179,7 +1179,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(1);
             expect(editCalls[0].body.params.arguments.action).toBe('write');
             expect(editCalls[0].body.params.arguments.id).toBe(1);
@@ -1187,7 +1187,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
             expect(editCalls[0].body.params.arguments.body).toBe('# A\n\nTracked content.');
 
             const bulkCalls = allCaptures.filter(
-                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+                (c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'bulk_create',
             );
             expect(bulkCalls.length).toBe(1);
             const items = bulkCalls[0].body.params.arguments.items;
@@ -1247,7 +1247,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
         }
     });
 
-    it('--force omits base_revision entirely from the docs_edit write call', async () => {
+    it('--force omits base_revision entirely from the docs_manage write call', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'a.md': '# A',
             [DOCS_MANIFEST]: manifestFile({
@@ -1267,7 +1267,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
                 if (!(e instanceof ProcessExitError)) throw e;
             }
 
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(1);
             expect(editCalls[0].body.params.arguments).not.toHaveProperty('base_revision');
         } finally {
@@ -1307,7 +1307,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
         }
     });
 
-    it('--dry-run never calls docs_edit for tracked files; only bulk_create (dry_run: true) runs for untracked, tracked file reported as planned, exits 0, manifest untouched', async () => {
+    it('--dry-run never calls docs_manage write for tracked files; only bulk_create (dry_run: true) runs for untracked, tracked file reported as planned, exits 0, manifest untouched', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'a.md': '# A\n\nTracked content.',
             'b.md': '# B\n\nUntracked content.',
@@ -1340,13 +1340,13 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            // No docs_edit call was ever made for the tracked file.
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            // No docs_manage write call was ever made for the tracked file.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(0);
 
             // Only the untracked file went through bulk_create, with dry_run threaded.
             const bulkCalls = allCaptures.filter(
-                (c) => c.body.params.name === 'docs_vault' && c.body.params.arguments.action === 'bulk_create',
+                (c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'bulk_create',
             );
             expect(bulkCalls.length).toBe(1);
             expect(bulkCalls[0].body.params.arguments.dry_run).toBe(true);
@@ -1375,7 +1375,7 @@ describe('docPushWithConfig — drift guard (tracked docs)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tracked doc deleted remotely (docs_edit write / media POST -> doc_not_found)
+// Tracked doc deleted remotely (docs_manage write / media POST -> doc_not_found)
 // ---------------------------------------------------------------------------
 
 describe('docPushWithConfig — tracked doc deleted remotely', () => {
@@ -1383,7 +1383,7 @@ describe('docPushWithConfig — tracked doc deleted remotely', () => {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
 
-    it('a tracked markdown doc whose docs_edit write returns doc_not_found: clear per-file message, exit 0, other tracked files still pushed', async () => {
+    it('a tracked markdown doc whose docs_manage write returns doc_not_found: clear per-file message, exit 0, other tracked files still pushed', async () => {
         const { dir, cleanup } = makeTmpDocsDir({
             'gone.md': '# Gone, edited locally',
             'still-here.md': '# Still here, edited locally',
@@ -1425,7 +1425,7 @@ describe('docPushWithConfig — tracked doc deleted remotely', () => {
             expect(err.toLowerCase()).toContain('re-pull');
 
             // The other tracked file was still written despite the doc_not_found.
-            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_manage' && c.body?.params?.arguments?.action === 'write');
             expect(editCalls.length).toBe(2);
             expect(editCalls.some((c) => c.body.params.arguments.id === 2)).toBe(true);
 
@@ -1564,7 +1564,7 @@ describe('docPushWithConfig — incremental manifest refresh', () => {
             }),
         });
 
-        // First docs_edit call succeeds (bumping that doc's revision), the second
+        // First docs_manage write call succeeds (bumping that doc's revision), the second
         // fails with an MCP error — regardless of which tracked file (a or b) is
         // processed first, since directory read order isn't guaranteed.
         let callCount = 0;
@@ -1643,8 +1643,8 @@ describe('docPushWithConfig — unparseable manifest', () => {
             expect(caughtExit?.code).toBe(0);
             expect(stderrLines.join('')).toMatch(/could not be parsed/i);
 
-            // Everything went through bulk_create as untracked — no docs_edit call.
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            // Everything went through bulk_create as untracked — no docs_manage write call.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(0);
         } finally {
             restoreExit();
@@ -1664,7 +1664,7 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
         return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
     }
 
-    it('skips a tracked file whose content hash matches the manifest (zero docs_edit calls, reported as unchanged) while writing a changed one', async () => {
+    it('skips a tracked file whose content hash matches the manifest (zero docs_manage write calls, reported as unchanged) while writing a changed one', async () => {
         const unchangedContent = '# A\n\nUnchanged content.';
         const changedContent = '# B\n\nNew content, differs from manifest hash.';
         const { dir, cleanup } = makeTmpDocsDir({
@@ -1692,8 +1692,8 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            // Exactly one docs_edit call, for the changed file only.
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            // Exactly one docs_manage write call, for the changed file only.
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(1);
             expect(editCalls[0].body.params.arguments.id).toBe(2);
             expect(editCalls[0].body.params.arguments.body).toBe(changedContent);
@@ -1766,7 +1766,7 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(0);
 
             const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
@@ -1805,7 +1805,7 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(1);
             expect(editCalls[0].body.params.arguments.body).toBe(content);
 
@@ -1851,7 +1851,7 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
         }
     });
 
-    it('--dry-run distinguishes would-write from would-skip (unchanged) without any docs_edit calls', async () => {
+    it('--dry-run distinguishes would-write from would-skip (unchanged) without any docs_manage write calls', async () => {
         const unchangedContent = '# A\n\nUnchanged.';
         const changedContent = '# B\n\nChanged.';
         const { dir, cleanup } = makeTmpDocsDir({
@@ -1877,7 +1877,7 @@ describe('docPushWithConfig — content hash skip-unchanged', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body.params.name === 'docs_manage' && c.body.params.arguments.action === 'write');
             expect(editCalls.length).toBe(0);
 
             const jsonLine = logLines.find((l) => l.trim().startsWith('{'));
@@ -2207,7 +2207,7 @@ describe('docPushWithConfig — media pass (tracked binaries)', () => {
         }
     });
 
-    it('a media doc titled notes.md holding binary bytes is never sent through docs_edit; a media POST is made instead', async () => {
+    it('a media doc titled notes.md holding binary bytes is never sent through docs_manage write; a media POST is made instead', async () => {
         const oldBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
         const newBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0xfd]);
         const { dir, cleanup } = makeTmpDocsDir({
@@ -2233,7 +2233,7 @@ describe('docPushWithConfig — media pass (tracked binaries)', () => {
 
             expect(caughtExit?.code).toBe(0);
 
-            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_edit');
+            const editCalls = allCaptures.filter((c) => c.body?.params?.name === 'docs_manage' && c.body?.params?.arguments?.action === 'write');
             expect(editCalls.length).toBe(0);
 
             const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/5/media');

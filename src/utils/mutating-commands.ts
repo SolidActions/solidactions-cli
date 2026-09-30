@@ -9,7 +9,7 @@
  * and checking which HTTP verb it sends. Most commands call axios directly
  * (GET = read, POST/PUT/PATCH/DELETE = write). The MCP-backed commands
  * (crews/roles tools: skill push/publish/pull/list/view/delete, role push;
- * docs_vault tool: doc push/pull) are transported as a single JSON-RPC
+ * docs_read/docs_manage tools: doc push/pull) are transported as a single JSON-RPC
  * `tools/call` POST regardless of semantics (see `postMcpTool` in
  * src/utils/mcp.ts) — for those, the classification follows the MCP tool's
  * `action` argument instead of the outer HTTP verb ('list'/'read' = read,

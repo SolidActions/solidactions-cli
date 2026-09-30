@@ -238,11 +238,39 @@ export async function callCrewsTool(config: Config, toolName: string, args: Reco
     return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
 }
 
+// Current catalog (solidactions-app ToolCatalog.php): the public docs tool depends on the action.
+// Call sites send the public action names, so only the tool is routed (no action/param renames).
+// Only actions the CLI actually sends are routed; anything else throws in resolveDocsCall.
+const DOCS_ROUTES: Record<string, string> = {
+    list: 'docs_read',
+    bulk_read: 'docs_read',
+    read_doc: 'docs_read',
+    bulk_create: 'docs_manage',
+    write: 'docs_manage',
+};
+
 /**
- * Call a single MCP tool on the unified /mcp endpoint.
+ * Map a docs call (public action name) to the public MCP tool of the current
+ * catalog. Throws for an action the CLI has no route for; drops undefined values.
  */
-export async function callDocsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
+export function resolveDocsCall(args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } {
+    const action = String(args.action ?? '');
+    const tool = DOCS_ROUTES[action];
+    if (!tool) throw new Error(`unsupported docs action: ${action}`);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+        if (v === undefined) continue;
+        out[k] = v;
+    }
+    return { tool, args: out };
+}
+
+/**
+ * Call a docs MCP tool on the unified /mcp endpoint; the tool is resolved from the action.
+ */
+export async function callDocsTool(config: Config, args: Record<string, unknown>): Promise<McpToolResult> {
+    const r = resolveDocsCall(args);
+    return callMcpTool(config, UNIFIED_MCP_PATH, r.tool, r.args);
 }
 
 export interface McpContentResult {

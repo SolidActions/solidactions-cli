@@ -2,7 +2,7 @@
  * solidactions doc push <dir>
  *
  * Recursively uploads a local markdown tree into SA-Docs via the docs MCP
- * server's `docs_vault bulk_create` tool, mirroring folder structure.
+ * server's `docs_manage` tool's `bulk_create` action, mirroring folder structure.
  *
  * Prints a report distinguishing fully-published docs from "properties pending"
  * ones (docs whose frontmatter properties couldn't be validated yet).
@@ -263,7 +263,7 @@ export async function docPushWithConfig(
     // Partition into tracked (relative path present in the pull manifest) vs. untracked.
     // A media doc titled *.md (e.g. `notes.md`) is bytes, not markdown — it's owned by
     // the media pass below, not this markdown pass, or its bytes would be sent through
-    // docs_edit as a text body and corrupt the doc.
+    // docs_manage write as a text body and corrupt the doc.
     const trackedFiles: Array<{ absPath: string; relPath: string }> = [];
     const untrackedFiles: string[] = [];
     for (const f of allFiles) {
@@ -298,7 +298,7 @@ export async function docPushWithConfig(
             continue;
         }
 
-        // --dry-run must never live-write: preview the tracked doc instead of calling docs_edit.
+        // --dry-run must never live-write: preview the tracked doc instead of calling docs_manage write.
         if (options.dryRun) {
             trackedPlanned.push({ file: relPath, id: entry.id });
             continue;
@@ -311,7 +311,7 @@ export async function docPushWithConfig(
 
         let mcpResult: Awaited<ReturnType<typeof callDocsTool>>;
         try {
-            mcpResult = await callDocsTool(config, 'docs_edit', editArgs);
+            mcpResult = await callDocsTool(config, editArgs);
         } catch (e: any) {
             process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
@@ -408,7 +408,7 @@ export async function docPushWithConfig(
             process.exit(1);
         }
 
-        // The REST presenter names the revision `current_version_id`; MCP docs_edit
+        // The REST presenter names the revision `current_version_id`; MCP docs_manage write
         // names it `current_revision_id`. Reading the wrong one nulls the entry and
         // silently disarms the drift guard on every later push.
         entry.current_revision_id = doc?.current_version_id ?? entry.current_revision_id;
@@ -470,7 +470,7 @@ export async function docPushWithConfig(
 
         let mcpResult: Awaited<ReturnType<typeof callDocsTool>>;
         try {
-            mcpResult = await callDocsTool(config, 'docs_vault', callArgs);
+            mcpResult = await callDocsTool(config, callArgs);
         } catch (e: any) {
             process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
