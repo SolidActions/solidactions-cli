@@ -16,6 +16,14 @@ import { getApiHeaders } from './api';
 const pkg = require('../../package.json');
 const CLI_VERSION: string = pkg.version;
 
+/** A JSON-RPC `error` member in the server's response (protocol-level failure, not a tool isError). */
+export class McpRpcError extends Error {
+    constructor(public readonly code: number, message: string) {
+        super(message);
+        this.name = 'McpRpcError';
+    }
+}
+
 export interface McpToolResult {
     ok: boolean;
     data: any;
@@ -24,6 +32,37 @@ export interface McpToolResult {
 interface McpRawResult {
     isError: boolean;
     content: any[];
+}
+
+/** Total HTTP attempts for one call when the server answers 429 (the first try plus 2 retries). */
+const RATE_LIMIT_MAX_ATTEMPTS = 3;
+/** Wait used when a 429 carries no usable Retry-After. */
+const RATE_LIMIT_DEFAULT_WAIT_SEC = 5;
+/** No single wait exceeds this, whatever the server asks for. */
+const RATE_LIMIT_MAX_WAIT_SEC = 60;
+
+interface HttpAttempt {
+    status: number;
+    retryAfter: string | string[] | undefined;
+    raw: string;
+}
+
+/** Seconds to wait for a Retry-After value (integer seconds or HTTP-date, RFC 9110); default when missing/invalid; capped. */
+export function retryAfterSeconds(header: string | string[] | undefined): number {
+    const value = (Array.isArray(header) ? header[0] : header)?.trim();
+    let sec = RATE_LIMIT_DEFAULT_WAIT_SEC;
+    if (value) {
+        if (/^\d+$/.test(value)) {
+            sec = parseInt(value, 10);
+        } else if (/^[+-]?\d+(\.\d+)?$/.test(value)) {
+            // Signed or fractional numbers are not valid Retry-After; wait at least 1s (only a literal "0" waits 0).
+            sec = Math.max(1, Math.ceil(Number(value)));
+        } else {
+            const at = Date.parse(value);
+            if (!Number.isNaN(at)) sec = Math.max(1, Math.ceil((at - Date.now()) / 1000));
+        }
+    }
+    return Math.min(sec, RATE_LIMIT_MAX_WAIT_SEC);
 }
 
 /** Internal: POST one tools/call and return the raw result envelope (isError + content blocks). */
@@ -45,7 +84,7 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
     const isHttps = parsed.protocol === 'https:';
     const transport = isHttps ? https : http;
 
-    const responseData = await new Promise<string>((resolve, reject) => {
+    const attempt = () => new Promise<HttpAttempt>((resolve, reject) => {
         const options: http.RequestOptions = {
             hostname: parsed.hostname,
             port: parsed.port || (isHttps ? 443 : 80),
@@ -55,16 +94,16 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         };
 
         const req = transport.request(options, (res) => {
-            let raw = '';
-            res.on('data', (chunk) => { raw += chunk; });
+            // Collect bytes and decode once: appending Buffer chunks to a string decodes
+            // each chunk separately and corrupts multibyte UTF-8 split across chunks.
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => { chunks.push(chunk); });
             res.on('end', () => {
-                if (res.statusCode === 404) {
-                    reject(new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${raw}`));
-                } else if (res.statusCode && res.statusCode >= 400) {
-                    reject(new Error(`MCP request failed with HTTP ${res.statusCode}: ${raw}`));
-                } else {
-                    resolve(raw);
-                }
+                resolve({
+                    status: res.statusCode ?? 0,
+                    retryAfter: res.headers['retry-after'],
+                    raw: Buffer.concat(chunks).toString('utf8'),
+                });
             });
         });
 
@@ -73,11 +112,32 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         req.end();
     });
 
+    let last: HttpAttempt;
+    for (let n = 1; ; n++) {
+        last = await attempt();
+        if (last.status !== 429 || n >= RATE_LIMIT_MAX_ATTEMPTS) break;
+        const waitSec = retryAfterSeconds(last.retryAfter);
+        process.stderr.write(`solidactions: rate limited by server (429); retrying in ${waitSec}s (attempt ${n + 1}/${RATE_LIMIT_MAX_ATTEMPTS})\n`);
+        await new Promise<void>((resolve) => setTimeout(resolve, waitSec * 1000));
+    }
+
+    if (last.status === 404) {
+        throw new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${last.raw}`);
+    }
+    if (last.status >= 400) {
+        throw new Error(`MCP request failed with HTTP ${last.status}: ${last.raw}`);
+    }
+    const responseData = last.raw;
+
     let parsed2: any;
     try {
         parsed2 = JSON.parse(responseData);
     } catch {
         throw new Error(`MCP server returned non-JSON response: ${responseData}`);
+    }
+
+    if (parsed2?.error) {
+        throw new McpRpcError(parsed2.error.code ?? -1, `MCP ${toolName}: ${parsed2.error.message ?? JSON.stringify(parsed2.error)}`);
     }
 
     const result = parsed2?.result;
@@ -91,7 +151,10 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
  */
 async function callMcpTool(config: Config, endpointPath: string, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const raw = await postMcpTool(config, endpointPath, toolName, args);
-    const textContent: string = raw.content?.[0]?.text ?? '{}';
+    if (!raw.content || raw.content.length === 0) {
+        return { ok: false, data: { code: 'empty_result', message: `MCP ${toolName} returned no content` } };
+    }
+    const textContent: string = raw.content[0]?.text ?? '{}';
 
     let toolData: any;
     try {
@@ -105,15 +168,74 @@ async function callMcpTool(config: Config, endpointPath: string, toolName: strin
 
 const UNIFIED_MCP_PATH = '/mcp';
 
-// Server consolidated per-domain MCP servers into one endpoint with namespaced tools.
-const CREWS_TOOL_NAMES: Record<string, string> = { skills: 'crews_skills', roles: 'crews_roles' };
+export type CrewsGroup = 'skills' | 'roles';
+
+interface CrewsRoute {
+    tool: string;
+    /** Public action name when it differs from the CLI's action. */
+    action?: string;
+    /** CLI param name -> public param name, where the catalog renamed a field. */
+    rename?: Record<string, string>;
+}
+
+// Current catalog (solidactions-app ToolCatalog.php): the public tool depends on the action.
+// Only actions the CLI actually sends are routed; anything else throws in resolveCrewsCall.
+const CREWS_ROUTES: Record<CrewsGroup, Record<string, CrewsRoute>> = {
+    skills: {
+        list: { tool: 'crews_skills_read' },
+        read: { tool: 'crews_skills_read' },
+        read_reference_file: { tool: 'crews_skills_read' },
+        create: { tool: 'crews_skills_manage' },
+        edit: { tool: 'crews_skills_manage' },
+        delete: { tool: 'crews_delete', action: 'delete_skill' },
+        sandbox_exec: { tool: 'crews_sandbox', action: 'skill_exec', rename: { environment: 'skill_exec_environment' } },
+    },
+    roles: {
+        list: { tool: 'crews_roles_read' },
+        read: { tool: 'crews_roles_read' },
+        list_skills: { tool: 'crews_roles_read' },
+        read_skill: { tool: 'crews_roles_read' },
+        read_reference_file: { tool: 'crews_roles_read' },
+        create: { tool: 'crews_roles_manage' },
+        edit: { tool: 'crews_roles_manage' },
+        create_skill: { tool: 'crews_roles_manage' },
+        edit_skill: { tool: 'crews_roles_manage' },
+        sandbox_exec: { tool: 'crews_sandbox', action: 'role_exec', rename: { environment: 'role_exec_environment' } },
+    },
+};
 
 /**
- * Call a single MCP tool on the unified /mcp endpoint, mapping legacy crews
- * tool names ('skills'/'roles') to their namespaced equivalents.
+ * Map a CLI-level crews call (group + action) to the public MCP tool, action and
+ * param names of the current catalog. Throws for an action the CLI has no route for.
+ */
+export function resolveCrewsCall(group: CrewsGroup, args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } {
+    const action = String(args.action ?? '');
+    const route = CREWS_ROUTES[group][action];
+    if (!route) throw new Error(`unsupported crews action: ${group}.${action}`);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+        if (v === undefined) continue;
+        out[route.rename?.[k] ?? k] = v;
+    }
+    if (route.action) out.action = route.action;
+    return { tool: route.tool, args: out };
+}
+
+function isCrewsGroup(name: string): name is CrewsGroup {
+    return name === 'skills' || name === 'roles';
+}
+
+/**
+ * Call a crews MCP tool on the unified /mcp endpoint. 'skills' / 'roles' are CLI
+ * groups resolved per action via resolveCrewsCall; any other name (e.g.
+ * 'crews_history_manage') is passed through unchanged.
  */
 export async function callCrewsTool(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    return callMcpTool(config, UNIFIED_MCP_PATH, CREWS_TOOL_NAMES[toolName] ?? toolName, args);
+    if (isCrewsGroup(toolName)) {
+        const r = resolveCrewsCall(toolName, args);
+        return callMcpTool(config, UNIFIED_MCP_PATH, r.tool, r.args);
+    }
+    return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
 }
 
 /**
@@ -135,6 +257,7 @@ export interface McpContentResult {
  * (callCrewsTool) would throw on those.
  */
 export async function callCrewsToolContent(config: Config, toolName: string, args: Record<string, unknown>): Promise<McpContentResult> {
-    const raw = await postMcpTool(config, UNIFIED_MCP_PATH, CREWS_TOOL_NAMES[toolName] ?? toolName, args);
+    const r = isCrewsGroup(toolName) ? resolveCrewsCall(toolName, args) : { tool: toolName, args };
+    const raw = await postMcpTool(config, UNIFIED_MCP_PATH, r.tool, r.args);
     return { ok: !raw.isError, content: raw.content };
 }

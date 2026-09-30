@@ -43,6 +43,7 @@ import { skillDelete } from './commands/skill-delete';
 import { skillDev } from './commands/skill-dev';
 import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
+import { rolePull } from './commands/role-pull';
 import { docPush } from './commands/doc-push';
 import { docPull } from './commands/doc-pull';
 import { docUpload } from './commands/doc-upload';
@@ -1008,6 +1009,7 @@ skill
     .description('Push a local skill folder into the library (create, or update if it already exists)')
     .argument('<dir>', 'Path to the skill directory (must contain SKILL.md)')
     .option('--role <name>', 'Scope the skill to a role instead of the shared library')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output result as JSON')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--publish', 'Publish (snapshot) the skill after pushing, making it live for agents')
@@ -1020,6 +1022,8 @@ skill
     .command('publish')
     .description('Publish (snapshot) a skill so its latest pushed revision goes live for agents')
     .argument('<name>', 'Skill name/identifier (e.g. "my-skill" or "shared/my-skill")')
+    .option('--role <name>', 'Publish a role-scoped skill of this role instead of a shared-library skill')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output result as JSON')
     .action(async (name, options) => {
         await skillPublish(name, options);
@@ -1030,6 +1034,8 @@ skill
     .description('Fetch a skill from the library to a local folder for editing (inverse of push)')
     .argument('<name>', 'Skill name or identifier')
     .argument('[dest]', 'Destination directory (defaults to ./<name>/)')
+    .option('--role <role>', 'Pull a role-scoped skill of this role instead of a shared-library skill')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output raw read result as JSON (no file writes)')
     .action(async (name, dest, options) => {
         await skillPull(name, dest, options);
@@ -1109,10 +1115,29 @@ const role = program.command('role').description('Manage roles (crews SOP surfac
 role
     .command('push <dir>')
     .description('Push a role definition (create or update)')
+    .option('--in-crew <crew>', 'Crew that contains the role (required to create a role; disambiguates when the name exists in several crews)')
+    .option('--replace-links', 'Replace always_load_skills / available_skills even when they differ from what role pull recorded (the server may hold links you cannot see)')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await rolePush(dir, options);
+    });
+
+role
+    .command('pull')
+    .description(
+        'Fetch a role and its role-scoped skills to a local folder (inverse of push)\n\n' +
+        'Pulls the role\'s PUBLISHED version: a versioned role must have a snapshot (or use version_mode: live).\n' +
+        'Inherited properties are merged by the server (RoleActivator) and are pulled as the effective value.\n' +
+        'For a role with inherits_from, pushing the pulled folder back would store the inherited values on the child (a warning is printed).\n' +
+        'Writes SKILL.md, .solidactions-role.json and skills/<skill>/ in one atomic replace of the folder.',
+    )
+    .argument('<name>', 'Role name')
+    .argument('[dir]', 'Destination directory (defaults to ./<name>/)')
+    .option('--in-crew <crew>', 'Crew that contains the role (disambiguates when the name exists in several crews)')
+    .option('--no-skills', 'Pull the role only, without its role-scoped skills')
+    .action(async (name, dir, options) => {
+        await rolePull(name, dir, options);
     });
 
 // =============================================================================

@@ -125,3 +125,33 @@ export async function crewIdForPath(config: Config, crewPath: string): Promise<s
     console.error(chalk.red(`Could not resolve crew "${crewPath}" to a crew id (matched ${byPath.length} by path, ${byName.length} by name).`));
     process.exit(1);
 }
+
+/**
+ * Map crew-scoping server error codes to an actionable CLI message, or null when
+ * the code is not crew-related. `crew_required`: a role create with no crew.
+ * `ambiguous_role`: the role name exists in several crews. The live server answers a
+ * create that omits in_crew entirely with `invalid_parameter` ("Required for create:
+ * in_crew") and reserves `crew_required` for an empty/null in_crew, so both map to
+ * the same hint.
+ */
+export function crewErrorHint(code: unknown, roleName?: string, message?: unknown): string | null {
+    const missingInCrew = code === 'invalid_parameter' && typeof message === 'string' && /required for create:\s*in_crew/i.test(message);
+    if (code === 'crew_required' || missingInCrew) {
+        return 'this role must live in a crew: pass --in-crew CREW';
+    }
+    if (code === 'ambiguous_role') {
+        return `role${roleName ? ` '${roleName}'` : ''} exists in multiple crews: pass --in-crew CREW to choose one`;
+    }
+    return null;
+}
+
+/**
+ * Canonical spelling of a crew path for comparison: split on '/', trim each segment, drop empty
+ * segments, rejoin. Mirrors how the server resolves crew paths (it trims segments and ignores
+ * empty ones), so 'acme/', ' acme ' and 'acme' are the same crew. Blank or non-string => null.
+ */
+export function normalizeCrewPath(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const path = value.split('/').map((seg) => seg.trim()).filter((seg) => seg !== '').join('/');
+    return path === '' ? null : path;
+}

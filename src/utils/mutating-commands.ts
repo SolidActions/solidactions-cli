@@ -146,6 +146,7 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'ai init',
     'ai examples',
     'skill pull',
+    'role pull',
     'skill list',
     'skill view',
     // Fetches crew variables (read) and runs the working copy locally, like

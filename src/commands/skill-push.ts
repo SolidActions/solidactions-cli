@@ -17,10 +17,13 @@ import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { publishSkillByName, publishSkillByDocId, emitPublishOutcome, PublishOutcome } from '../utils/skill-snapshot';
-import { SKILL_SIDECAR } from './skill-pull';
+import { SKILL_SIDECAR, ROLE_SIDECAR } from './skill-pull';
+import { crewErrorHint } from '../utils/crew';
 
 export interface SkillPushOptions {
     role?: string;
+    /** Crew containing the role (requires role). Sent as in_crew on role-scoped skill calls. */
+    inCrew?: string;
     json?: boolean;
     dryRun?: boolean;
     publish?: boolean;
@@ -32,7 +35,59 @@ export interface SkillPushOptions {
  * keys that collide with these would silently corrupt the request once spread
  * top-level into the call arguments.
  */
-export const RESERVED_PARAM_KEYS = ['action', 'identifier', 'role', 'name', 'description', 'body', 'references', 'base_version_id'];
+export const RESERVED_PARAM_KEYS = ['action', 'identifier', 'role', 'name', 'description', 'body', 'references', 'base_version_id', 'in_crew', 'workspace', 'version_id'];
+
+/**
+ * Frontmatter keys the current MCP catalog accepts as top-level create/edit params
+ * (crews_skills_manage / crews_roles_manage). The server rejects any other param
+ * with `unknown_params`, so everything else is folded into `metadata`.
+ */
+const SKILL_FRONTMATTER_PARAMS = ['catalog_advertised', 'metadata', 'license', 'compatibility', 'allowed-tools', 'storage', 'version_mode'];
+export const ROLE_FRONTMATTER_PARAMS = [
+    'inherits_from', 'always_load_docs', 'always_load_memory', 'always_load_skills', 'available_skills',
+    'catalog_advertised', 'metadata', 'version_mode',
+];
+
+/**
+ * Keys `shapeFrontmatterParams` will fold into `metadata` (not in the schema, value defined).
+ */
+export function foldedFrontmatterKeys(properties: Record<string, unknown>, allowed: readonly string[]): string[] {
+    return Object.entries(properties)
+        .filter(([key, value]) => !allowed.includes(key) && value !== undefined)
+        .map(([key]) => key);
+}
+
+/**
+ * Write the one-line stderr note about folded frontmatter keys (nothing when none were folded).
+ * Stderr keeps --json stdout clean.
+ */
+export function noteFoldedFrontmatterKeys(properties: Record<string, unknown>, allowed: readonly string[]): void {
+    const folded = foldedFrontmatterKeys(properties, allowed);
+    if (folded.length > 0) {
+        process.stderr.write(`note: frontmatter keys not in the schema were stored under metadata: ${folded.join(', ')}\n`);
+    }
+}
+
+/**
+ * Split frontmatter-derived properties into schema params (sent top-level) and the
+ * rest, which is merged under `metadata` (inert client key/value strings).
+ */
+export function shapeFrontmatterParams(properties: Record<string, unknown>, allowed: readonly string[]): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const extra: Record<string, string> = {};
+    for (const [key, value] of Object.entries(properties)) {
+        if (allowed.includes(key)) {
+            out[key] = value;
+        } else if (value !== undefined) {
+            extra[key] = typeof value === 'string' ? value : JSON.stringify(value);
+        }
+    }
+    if (Object.keys(extra).length > 0) {
+        const existing = out.metadata && typeof out.metadata === 'object' ? (out.metadata as Record<string, unknown>) : {};
+        out.metadata = { ...extra, ...existing };
+    }
+    return out;
+}
 
 /**
  * Throws if any frontmatter-derived property key collides with a reserved
@@ -113,7 +168,8 @@ export function parseSkillFile(content: string): {
  * their relative path (e.g. "references/member-roles.md") — matching how
  * SKILL.md cites them, so bundled reference docs land complete (#247).
  *
- * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR) and
+ * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR), `role pull`'s
+ * (ROLE_SIDECAR) and
  * `skill dev`'s local runtime-state dir (.sa-state/) — neither is skill
  * content, and uploading them would leak local revision bookkeeping / state
  * into the remote library and agent sandboxes.
@@ -135,6 +191,7 @@ export function readReferences(dir: string): Record<string, string> {
             const key = path.relative(dir, abs).split(path.sep).join('/');
             if (key === 'SKILL.md') continue; // exclude only the top-level skill file
             if (key === SKILL_SIDECAR) continue; // exclude the skill pull provenance sidecar
+            if (key === ROLE_SIDECAR) continue; // exclude the role pull provenance sidecar
 
             references[key] = fs.readFileSync(abs, 'utf8');
         }
@@ -261,6 +318,16 @@ export async function pushParsedSkill(
     assertNoReservedFrontmatterKeys(properties);
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
+    const frontmatterParams = shapeFrontmatterParams(properties, SKILL_FRONTMATTER_PARAMS);
+    noteFoldedFrontmatterKeys(properties, SKILL_FRONTMATTER_PARAMS);
+    // in_crew comes only from --in-crew (never frontmatter); sent only with --role and only when given.
+    const crewArgs: Record<string, unknown> = isRole && options.inCrew ? { in_crew: options.inCrew } : {};
+    // Tool error -> Error, with crew-scoping codes (ambiguous_role) mapped to an actionable --in-crew hint.
+    const toolError = (data: any): Error => {
+        const code = data?.code ?? 'unknown_error';
+        const hint = isRole ? crewErrorHint(code, options.role, data?.message) : null;
+        return new Error(hint ?? `${code}: ${data?.message ?? 'MCP returned an error with no message'}`);
+    };
 
     // --dry-run: pre-flight a read to detect existence; make NO create/edit calls.
     if (options.dryRun) {
@@ -269,7 +336,7 @@ export async function pushParsedSkill(
         // `skill_not_found` when absent. (read does NOT accept `identifier` on the
         // roles tool, so the action/args must branch on isRole.)
         const readArgs: Record<string, unknown> = isRole
-            ? { action: 'read_skill', role: options.role, name }
+            ? { action: 'read_skill', role: options.role, name, ...crewArgs }
             : { action: 'read', identifier: name };
 
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
@@ -285,8 +352,7 @@ export async function pushParsedSkill(
                 return { status: 'would-create', name, data: {} };
             }
             // Any other error is unexpected — surface it
-            const errMsg = readResult.data?.message ?? 'MCP returned an error with no message';
-            throw new Error(`${code ?? 'unknown_error'}: ${errMsg}`);
+            throw toolError(readResult.data);
         }
 
         // Read succeeded → skill exists → would update
@@ -295,8 +361,8 @@ export async function pushParsedSkill(
 
     // Spread frontmatter extras FIRST so the fixed protocol keys always win.
     const createArgs: Record<string, unknown> = isRole
-        ? { ...properties, action: 'create_skill', role: options.role, name, description, body, references }
-        : { ...properties, action: 'create', name, description, body, references };
+        ? { ...frontmatterParams, action: 'create_skill', role: options.role, ...crewArgs, name, description, body, references }
+        : { ...frontmatterParams, action: 'create', name, description, body, references };
 
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
     try {
@@ -309,8 +375,8 @@ export async function pushParsedSkill(
     if (!result.ok && result.data?.code === 'name_collision') {
         const guardBaseVersion = sidecarRevision != null && !options.force;
         const editArgs: Record<string, unknown> = isRole
-            ? { ...properties, action: 'edit_skill', role: options.role, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
-            : { ...properties, action: 'edit', identifier: name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) };
+            ? { ...frontmatterParams, action: 'edit_skill', role: options.role, ...crewArgs, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
+            : { ...frontmatterParams, action: 'edit', identifier: name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) };
 
         try {
             result = await callCrewsTool(config, tool, editArgs);
@@ -327,18 +393,14 @@ export async function pushParsedSkill(
                     `remote skill changed since your pull (their revision ${currentRevisionId}, your base ${sidecarRevision}) — re-pull to merge, or pass --force to overwrite`,
                 );
             }
-            const errMsg = errData?.message ?? 'MCP returned an error with no message';
-            throw new Error(`${errCode}: ${errMsg}`);
+            throw toolError(errData);
         }
 
         return { status: 'updated', name, data: result.data ?? {} };
     }
 
     if (!result.ok) {
-        const errData = result.data;
-        const errCode = errData?.code ?? 'unknown_error';
-        const errMsg = errData?.message ?? 'MCP returned an error with no message';
-        throw new Error(`${errCode}: ${errMsg}`);
+        throw toolError(result.data);
     }
 
     return { status: 'created', name, data: result.data ?? {} };
@@ -378,7 +440,7 @@ function printPushResult(result: PushResult, options: SkillPushOptions): void {
  * truthy snapshot_hint (null when the skill is version_mode=live).
  * Dry-run statuses never warn.
  */
-export function stagedPushWarning(result: PushResult, isRole: boolean): string | null {
+export function stagedPushWarning(result: PushResult, isRole: boolean, role?: string, inCrew?: string): string | null {
     const { status, name, data } = result;
     if (status === 'created') {
         if (!data.snapshot_hint) {
@@ -393,7 +455,7 @@ export function stagedPushWarning(result: PushResult, isRole: boolean): string |
     }
 
     const publishLine = isRole
-        ? `  Publish this role-scoped skill via the MCP crews_versions take_snapshot tool.\n`
+        ? `  Run: solidactions skill publish ${name} --role ${role ?? '<role>'}${inCrew ? ` --in-crew ${inCrew}` : ''}\n`
         : `  Run: solidactions skill publish ${name}\n`;
     const headline = status === 'updated'
         ? `⚠ Staged, not published. This revision won't run for agents until you publish it.\n`
@@ -447,7 +509,7 @@ async function refreshSidecarRevision(
     if (headRevisionId === null) {
         const isRole = !!options.role;
         const readArgs: Record<string, unknown> = isRole
-            ? { action: 'read_skill', role: options.role, name: pushResult.name }
+            ? { action: 'read_skill', role: options.role, name: pushResult.name, ...(options.inCrew ? { in_crew: options.inCrew } : {}) }
             : { action: 'read', identifier: pushResult.name };
         try {
             const readResult = await callCrewsTool(config, isRole ? 'roles' : 'skills', readArgs);
@@ -479,6 +541,11 @@ export async function skillPushWithConfig(
     options: SkillPushOptions,
     config: Config,
 ): Promise<void> {
+    if (options.inCrew && !options.role) {
+        process.stderr.write(chalk.red('error: --in-crew requires --role.\n'));
+        process.exit(1);
+    }
+
     const absDir = path.resolve(dir);
 
     if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
@@ -486,8 +553,8 @@ export async function skillPushWithConfig(
         process.exit(1);
     }
 
-    if (options.publish && options.role) {
-        process.stderr.write(chalk.red('error: --publish is not supported with --role yet; publish the role-scoped skill via the MCP take_snapshot tool.\n'));
+    if (fs.existsSync(path.join(absDir, ROLE_SIDECAR))) {
+        process.stderr.write(chalk.red(`error: ${dir} is a pulled role folder; use \`solidactions role push\`\n`));
         process.exit(1);
     }
 
@@ -532,7 +599,7 @@ export async function skillPushWithConfig(
                     publishOutcome = await publishSkillByDocId(config, createdDocId);
                 }
             } else {
-                publishOutcome = await publishSkillByName(config, pushResult.name);
+                publishOutcome = await publishSkillByName(config, pushResult.name, { role: options.role, inCrew: options.inCrew });
             }
         }
 
@@ -544,9 +611,9 @@ export async function skillPushWithConfig(
 
         printPushResult(pushResult, options);
         if (publishOutcome) {
-            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true });
+            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true, role: options.role, inCrew: options.inCrew });
         }
-        const warning = stagedPushWarning(pushResult, !!options.role);
+        const warning = stagedPushWarning(pushResult, !!options.role, options.role, options.inCrew);
         if (warning) {
             process.stderr.write(chalk.yellow(warning));
         }

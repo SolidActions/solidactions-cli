@@ -165,7 +165,7 @@ describe('skillListWithConfig', () => {
 
             // Request was sent
             expect(lastCapture).not.toBeNull();
-            expect(lastCapture!.body.params.name).toBe('crews_skills');
+            expect(lastCapture!.body.params.name).toBe('crews_skills_read');
             expect(lastCapture!.body.params.arguments.action).toBe('list');
 
             // Both skill names appear in output

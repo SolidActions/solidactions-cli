@@ -159,8 +159,8 @@ describe('skillDeleteWithConfig', () => {
             expect(caughtExit?.code).toBe(0);
 
             expect(lastCapture).not.toBeNull();
-            expect(lastCapture!.body.params.name).toBe('crews_skills');
-            expect(lastCapture!.body.params.arguments.action).toBe('delete');
+            expect(lastCapture!.body.params.name).toBe('crews_delete');
+            expect(lastCapture!.body.params.arguments.action).toBe('delete_skill');
             expect(lastCapture!.body.params.arguments.identifier).toBe('my-skill');
         } finally {
             restoreExit();
