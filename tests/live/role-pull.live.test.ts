@@ -15,6 +15,8 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
     const crew = `cli-rpull-crew-${stamp}`;
     const role = `cli-rpull-role-${stamp}`;
     const unpublishedRole = `cli-rpull-unpub-${stamp}`;
+    const parentRole = `cli-rpull-parent-${stamp}`;
+    const childRole = `cli-rpull-child-${stamp}`;
     const roleSkill = `rpull-skill-${stamp}`;
     const tmpDirs: string[] = [];
     const cleanup = createCleanup(config);
@@ -58,6 +60,8 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         cleanup.crew(crew);
         cleanup.role(role, crew);
         cleanup.role(unpublishedRole, crew);
+        cleanup.role(childRole, crew);
+        cleanup.role(parentRole, crew);
         const c = await callCrewsTool(config, 'crews_manage', { action: 'create', name: crew, description: 'cli live test crew', body: '# Crew\nlive' });
         expect(c.ok, JSON.stringify(c.data)).toBe(true);
 
@@ -75,6 +79,14 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         // A versioned role that was never published.
         const u = await callCrewsTool(config, 'roles', { action: 'create', name: unpublishedRole, description: 'never published', body: '# Unpub\nx', in_crew: crew });
         expect(u.ok, JSON.stringify(u.data)).toBe(true);
+
+        // A parent role and a child that inherits from it, both published.
+        const p = await callCrewsTool(config, 'roles', { action: 'create', name: parentRole, description: 'parent role', body: '# Parent\np', in_crew: crew, always_load_docs: [] });
+        expect(p.ok, JSON.stringify(p.data)).toBe(true);
+        await snapshot(docIdOf(p.data));
+        const ch = await callCrewsTool(config, 'roles', { action: 'create', name: childRole, description: 'child role', body: '# Child\nc', in_crew: crew, inherits_from: parentRole });
+        expect(ch.ok, JSON.stringify(ch.data)).toBe(true);
+        await snapshot(docIdOf(ch.data));
     });
 
     afterAll(async () => {
@@ -160,5 +172,21 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         expect(pull.stderr).toMatch(/refusing to replace/);
         expect(fs.readFileSync(path.join(dest, 'precious.txt'), 'utf8')).toBe('keep me');
         expect(fs.existsSync(path.join(dest, 'SKILL.md'))).toBe(false);
+    });
+
+    it('warns on stderr, and still exits 0, when the pulled role inherits from a parent', () => {
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', childRole, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        expect(pull.stderr).toContain(`warn: role ${childRole} inherits from ${parentRole}`);
+        expect(pull.stderr).toMatch(/role push will store them/);
+        expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toContain(`inherits_from: ${parentRole}`);
+    });
+
+    it('does not warn for a role without a parent', () => {
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', role, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        expect(pull.stderr).not.toMatch(/inherits from/);
     });
 });

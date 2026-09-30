@@ -1128,6 +1128,7 @@ role
         'Fetch a role and its role-scoped skills to a local folder (inverse of push)\n\n' +
         'Pulls the role\'s PUBLISHED version: a versioned role must have a snapshot (or use version_mode: live).\n' +
         'Inherited properties are merged by the server (RoleActivator) and are pulled as the effective value.\n' +
+        'For a role with inherits_from, pushing the pulled folder back would store the inherited values on the child (a warning is printed).\n' +
         'Writes SKILL.md, .solidactions-role.json and skills/<skill>/ in one atomic replace of the folder.',
     )
     .argument('<name>', 'Role name')

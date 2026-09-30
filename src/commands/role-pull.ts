@@ -15,6 +15,8 @@
  *
  * Inherited properties are merged by the server (RoleActivator) and are pulled as the
  * effective value: the folder holds what the role resolves to, not only what it sets itself.
+ * A role with inherits_from therefore gets a warning: role push of the folder would store
+ * the inherited values on the child.
  */
 
 import path from 'path';
@@ -148,6 +150,16 @@ export async function pullRoleWithConfig(
     }, null, 2) + '\n';
 
     writeDirAtomic(path.resolve(dest), files);
+
+    // The server has no unmerged read, so `properties` is the effective (parent-merged) value.
+    // Pushing it back would store the parent's entries on this role: make that visible.
+    const parent = properties.inherits_from;
+    if (typeof parent === 'string' && parent !== '') {
+        process.stderr.write(chalk.yellow(
+            `warn: role ${roleName} inherits from ${parent}; the pulled properties include inherited values, ` +
+            `and pushing this folder back with role push will store them on ${roleName}.\n`,
+        ));
+    }
 }
 
 function fail(message: string): never {
