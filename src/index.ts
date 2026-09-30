@@ -1032,6 +1032,8 @@ skill
     .description('Fetch a skill from the library to a local folder for editing (inverse of push)')
     .argument('<name>', 'Skill name or identifier')
     .argument('[dest]', 'Destination directory (defaults to ./<name>/)')
+    .option('--role <role>', 'Pull a role-scoped skill of this role instead of a shared-library skill')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output raw read result as JSON (no file writes)')
     .action(async (name, dest, options) => {
         await skillPull(name, dest, options);

@@ -3,40 +3,169 @@
  *
  * Fetches a skill from the crews library and reconstructs a local skill folder
  * (the inverse of `skill push`): writes <dest>/SKILL.md + any bundled reference
- * files under <dest>/. Default dest = ./<name>/.
+ * files under <dest>/. Default dest = ./<name>/. Shared-library skills by
+ * default; --role [--in-crew] pulls a role-scoped skill.
+ *
+ * The destination is replaced as a unit (writeDirAtomic): after a pull it holds
+ * exactly the fetched files — old complete copy or new complete copy, never a
+ * mix, and no stale files.
  *
  * --json mode: prints the raw read result from the server and exits WITHOUT
  * writing any files. This is useful for scripting/inspection. The default
  * (no --json) writes the folder.
  */
 
-import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
-import { reconstructSkillMd } from '../utils/skill-bundle';
+import { reconstructSkillMd, fetchBinaryReference } from '../utils/skill-bundle';
+import { writeDirAtomic } from '../utils/atomic-dir';
 
 export interface SkillPullOptions {
     json?: boolean;
+    role?: string;
+    inCrew?: string;
 }
 
 /** Filename of the provenance sidecar written alongside a pulled skill. */
 export const SKILL_SIDECAR = '.solidactions-skill.json';
 
+/** A user-facing pull failure (message is printed as-is after `error: `). */
+class SkillPullError extends Error {}
+
+type ReadOpts = { role?: string; inCrew?: string };
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Same rule as writeDirAtomic, so unsafe reference keys can be skipped with a warning instead of aborting the pull. */
+function isUnsafeKey(key: string): boolean {
+    return path.isAbsolute(key) || key.split(/[\\/]/).includes('..');
+}
+
+/** Call skills.read (shared) or roles.read_skill (--role) and return the raw payload. */
+async function readSkillData(config: Config, name: string, opts: ReadOpts): Promise<any> {
+    const isRole = Boolean(opts.role);
+    let result: Awaited<ReturnType<typeof callCrewsTool>>;
+    try {
+        result = isRole
+            ? await callCrewsTool(config, 'roles', {
+                action: 'read_skill',
+                role: opts.role,
+                name,
+                in_crew: opts.inCrew,
+            })
+            : await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
+    } catch (e: any) {
+        throw new SkillPullError(e.message);
+    }
+
+    if (!result.ok) {
+        const code = result.data?.code ?? 'unknown_error';
+        const message = result.data?.message ?? 'MCP returned an error with no message';
+        if (!isRole && code === 'skill_not_found') {
+            throw new SkillPullError(
+                `${code}: ${message}\n` +
+                `'${name}' is not in the shared library; if it belongs to a role, pass --role ROLE [--in-crew CREW]`,
+            );
+        }
+        throw new SkillPullError(`${code}: ${message}`);
+    }
+    return result.data;
+}
+
 /**
- * Core implementation — accepts an injected config so tests can point at a
+ * Read, validate and return the full file map for a skill (SKILL.md, references,
+ * provenance sidecar) WITHOUT writing anything. Keys are relative paths.
+ * Throws SkillPullError-style Errors on server errors or a malformed response.
+ */
+export async function fetchSkillFiles(
+    config: Config,
+    name: string,
+    opts: { role?: string; inCrew?: string } = {},
+): Promise<Record<string, string | Buffer>> {
+    const data = await readSkillData(config, name, opts);
+    return buildSkillFiles(config, name, opts, data);
+}
+
+async function buildSkillFiles(
+    config: Config,
+    name: string,
+    opts: ReadOpts,
+    data: any,
+): Promise<Record<string, string | Buffer>> {
+    // Shape guard — before anything is written or fetched further.
+    if (!isPlainObject(data) || typeof data.body !== 'string' || !isPlainObject(data.properties)) {
+        const keys = isPlainObject(data) ? Object.keys(data) : [];
+        throw new SkillPullError(`unexpected response shape from server (keys received: ${keys.length ? keys.join(', ') : '(none)'})`);
+    }
+    if (data.reference !== undefined && data.reference !== null && !isPlainObject(data.reference)) {
+        throw new SkillPullError(`unexpected response shape from server: 'reference' is not an object (keys received: ${Object.keys(data).join(', ')})`);
+    }
+
+    const isRole = Boolean(opts.role);
+    const group = isRole ? 'roles' : 'skills';
+    const locator: Record<string, unknown> = isRole
+        ? { role: opts.role, name, in_crew: opts.inCrew }
+        : { identifier: name };
+
+    const files: Record<string, string | Buffer> = {};
+
+    for (const [key, value] of Object.entries((data.reference ?? {}) as Record<string, unknown>)) {
+        if (isUnsafeKey(key)) {
+            process.stderr.write(chalk.yellow(`warn: skipping unsafe reference key: ${key}\n`));
+            continue;
+        }
+        if (typeof value === 'string') {
+            files[key] = value;
+        } else if (isPlainObject(value) && value.binary === true) {
+            files[key] = await fetchBinaryReference(config, group, locator, key, {
+                size: value.size as number,
+                blobSha: value.blob_sha as string,
+            });
+        } else {
+            throw new SkillPullError(`unexpected response shape from server: reference '${key}' is neither text nor a binary descriptor`);
+        }
+    }
+
+    // Build the frontmatter from `properties`, OMITTING `type` (the server sets it;
+    // stripping mirrors parseSkillFile on push so push -> pull -> push is idempotent).
+    files['SKILL.md'] = reconstructSkillMd(data.properties, data.body);
+
+    // Provenance sidecar so downstream commands (e.g. `skill push`) can detect drift.
+    const sidecar: Record<string, unknown> = {
+        identifier: data.identifier,
+        doc_id: typeof data.doc_id === 'string' ? parseInt(data.doc_id, 10) : data.doc_id,
+        head_revision_id: typeof data.head_revision_id === 'string' ? parseInt(data.head_revision_id, 10) : (data.head_revision_id ?? null),
+        role: opts.role ?? null,
+    };
+    if (isRole) sidecar.in_crew = opts.inCrew ?? null;
+    files[SKILL_SIDECAR] = JSON.stringify(sidecar, null, 2) + '\n';
+
+    return files;
+}
+
+/** Fetch a skill and replace `dest` with it as a unit. Throws on failure; nothing is written on error. */
+export async function pullSkillWithConfig(
+    name: string,
+    dest: string,
+    config: Config,
+    opts: { role?: string; inCrew?: string } = {},
+): Promise<void> {
+    writeDirAtomic(path.resolve(dest), await fetchSkillFiles(config, name, opts));
+}
+
+function fail(message: string): never {
+    process.stderr.write(chalk.red(`error: ${message}\n`));
+    process.exit(1);
+}
+
+/**
+ * Core CLI implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
- *
- * Steps:
- *  1. Call skills.read to fetch the skill from the library.
- *  2. If --json: print the raw result, exit 0 (no file writes).
- *  3. Otherwise: reconstruct SKILL.md from the returned `properties` (which
- *     contains name, description, and any extra props), OMITTING `type` (the
- *     server sets it; stripping mirrors what parseSkillFile does on push so a
- *     push→pull→push round-trip is idempotent). Write <dest>/SKILL.md, then
- *     write each reference file under <dest>/ with a path-traversal guard.
  */
 export async function skillPullWithConfig(
     name: string,
@@ -44,97 +173,41 @@ export async function skillPullWithConfig(
     options: SkillPullOptions,
     config: Config,
 ): Promise<void> {
-    // Call the crews MCP server for a skills.read
-    let result: Awaited<ReturnType<typeof callCrewsTool>>;
+    if (options.inCrew && !options.role) fail('--in-crew requires --role.');
+    if (dest === undefined && (name.includes('/') || name.includes('\\') || name.split(/[\\/]/).includes('..'))) {
+        fail(`'${name}' cannot be used as a default destination folder; pass an explicit [dest] directory`);
+    }
+
+    const readOpts: ReadOpts = { role: options.role, inCrew: options.inCrew };
+
+    let data: any;
     try {
-        result = await callCrewsTool(config, 'skills', { action: 'read', identifier: name });
+        data = await readSkillData(config, name, readOpts);
     } catch (e: any) {
-        process.stderr.write(chalk.red(`error: ${e.message}\n`));
-        process.exit(1);
+        fail(e.message);
     }
-
-    if (!result.ok) {
-        const code = result.data?.code ?? 'unknown_error';
-        const message = result.data?.message ?? 'MCP returned an error with no message';
-        process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
-        process.exit(1);
-    }
-
-    const data = result.data as {
-        identifier: string;
-        doc_id: number | string;
-        head_revision_id?: number | string;
-        properties: Record<string, unknown>;
-        body: string;
-        reference: Record<string, string>;
-    };
 
     // --json mode: print raw result and exit WITHOUT writing files.
-    // This is intentionally non-destructive: inspect the raw server payload
-    // without side-effects. File reconstruction is the default (no --json) mode.
     if (options.json) {
         console.log(JSON.stringify(data));
         process.exit(0);
     }
 
-    // Resolve the output directory (default: ./<name>/)
-    const out = dest ?? './' + name;
-    const absOut = path.resolve(out);
-
-    // Build the frontmatter object from `properties`, OMITTING `type`.
-    // The server stores a `type` field but it is stripped on push (parseSkillFile
-    // does `const { type: _type, ...properties } = rest`). We mirror that here
-    // so that pull → push is idempotent.
-    const skillMdContent = reconstructSkillMd(data.properties, data.body);
-
-    // Create the output directory (and parents) if needed
-    fs.mkdirSync(absOut, { recursive: true });
-
-    // Write SKILL.md
-    fs.writeFileSync(path.join(absOut, 'SKILL.md'), skillMdContent, 'utf8');
-
-    // Write reference files, guarding against path traversal
-    const reference = data.reference ?? {};
-    const absOutNorm = path.resolve(absOut) + path.sep;
-    let writtenCount = 0;
-    let skippedCount = 0;
-
-    for (const [key, content] of Object.entries(reference)) {
-        // Guard 1: reject absolute paths
-        if (path.isAbsolute(key)) {
-            process.stderr.write(
-                chalk.yellow(`warn: skipping unsafe reference key (absolute path): ${key}\n`),
-            );
-            skippedCount++;
-            continue;
-        }
-
-        // Guard 2: reject path traversal (any key that resolves outside absOut)
-        const target = path.resolve(absOut, key);
-        if (!target.startsWith(absOutNorm)) {
-            process.stderr.write(
-                chalk.yellow(`warn: skipping unsafe reference key (traversal): ${key}\n`),
-            );
-            skippedCount++;
-            continue;
-        }
-
-        // Safe: create parent dirs and write the file
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.writeFileSync(target, content, 'utf8');
-        writtenCount++;
+    let files: Record<string, string | Buffer>;
+    try {
+        files = await buildSkillFiles(config, name, readOpts, data);
+    } catch (e: any) {
+        fail(e.message);
     }
 
-    // Write the provenance sidecar so downstream commands (e.g. `skill push`)
-    // can detect drift against the revision this pull was taken from.
-    const sidecar = {
-        identifier: data.identifier,
-        doc_id: typeof data.doc_id === 'string' ? parseInt(data.doc_id, 10) : data.doc_id,
-        head_revision_id: typeof data.head_revision_id === 'string' ? parseInt(data.head_revision_id, 10) : (data.head_revision_id ?? null),
-        role: null as string | null,
-    };
-    fs.writeFileSync(path.join(absOut, SKILL_SIDECAR), JSON.stringify(sidecar, null, 2) + '\n', 'utf8');
+    const out = dest ?? './' + name;
+    try {
+        writeDirAtomic(path.resolve(out), files);
+    } catch (e: any) {
+        fail(`failed to write ${out}: ${e.message}`);
+    }
 
+    const writtenCount = Object.keys(files).filter((k) => k !== 'SKILL.md' && k !== SKILL_SIDECAR).length;
     const refSummary = writtenCount === 1 ? '1 reference' : `${writtenCount} references`;
     console.log(chalk.green(`pulled skill '${name}' → ${out} (${refSummary})`));
     process.exit(0);
