@@ -190,6 +190,7 @@ const CREWS_ROUTES: Record<CrewsGroup, Record<string, CrewsRoute>> = {
     roles: {
         list: { tool: 'crews_roles_read' },
         read: { tool: 'crews_roles_read' },
+        list_skills: { tool: 'crews_roles_read' },
         read_skill: { tool: 'crews_roles_read' },
         read_reference_file: { tool: 'crews_roles_read' },
         create: { tool: 'crews_roles_manage' },

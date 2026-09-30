@@ -43,6 +43,7 @@ import { skillDelete } from './commands/skill-delete';
 import { skillDev } from './commands/skill-dev';
 import { skillExec } from './commands/skill-exec';
 import { rolePush } from './commands/role-push';
+import { rolePull } from './commands/role-pull';
 import { docPush } from './commands/doc-push';
 import { docPull } from './commands/doc-pull';
 import { docUpload } from './commands/doc-upload';
@@ -1119,6 +1120,22 @@ role
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
         await rolePush(dir, options);
+    });
+
+role
+    .command('pull')
+    .description(
+        'Fetch a role and its role-scoped skills to a local folder (inverse of push)\n\n' +
+        'Pulls the role\'s PUBLISHED version: a versioned role must have a snapshot (or use version_mode: live).\n' +
+        'Inherited properties are merged by the server (RoleActivator) and are pulled as the effective value.\n' +
+        'Writes SKILL.md, .solidactions-role.json and skills/<skill>/ in one atomic replace of the folder.',
+    )
+    .argument('<name>', 'Role name')
+    .argument('[dir]', 'Destination directory (defaults to ./<name>/)')
+    .option('--in-crew <crew>', 'Crew that contains the role (disambiguates when the name exists in several crews)')
+    .option('--no-skills', 'Pull the role only, without its role-scoped skills')
+    .action(async (name, dir, options) => {
+        await rolePull(name, dir, options);
     });
 
 // =============================================================================
