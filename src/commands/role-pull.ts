@@ -27,7 +27,7 @@ import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { writeDirAtomic, assertReplaceableDir } from '../utils/atomic-dir';
 import { ROLE_FRONTMATTER_PARAMS } from './skill-push';
-import { fetchSkillFiles } from './skill-pull';
+import { fetchSkillFiles, ROLE_SIDECAR } from './skill-pull';
 
 export interface RolePullOptions {
     /** Crew path containing the role; disambiguates a role name that exists in several crews. */
@@ -36,8 +36,7 @@ export interface RolePullOptions {
     withSkills?: boolean;
 }
 
-/** Filename of the provenance sidecar written into a pulled role folder (and the replace marker). */
-export const ROLE_SIDECAR = '.solidactions-role.json';
+export { ROLE_SIDECAR };
 
 /** A user-facing pull failure (message is printed as-is after `error: `). */
 class RolePullError extends Error {}
@@ -89,7 +88,7 @@ export async function pullRoleWithConfig(
     const withSkills = opts.withSkills ?? true;
 
     // Replacing a folder is destructive: refuse before any network call or write.
-    assertReplaceableDir(dest, ROLE_SIDECAR);
+    assertReplaceableDir(dest, ROLE_SIDECAR, undefined, 'role');
 
     const crewArgs: Record<string, unknown> = inCrew ? { in_crew: inCrew } : {};
     const read = await callCrewsTool(config, 'roles', { action: 'read', name, ...crewArgs });

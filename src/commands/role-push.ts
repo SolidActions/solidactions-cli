@@ -21,7 +21,7 @@ import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { crewErrorHint } from '../utils/crew';
-import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, ROLE_FRONTMATTER_PARAMS } from './skill-push';
+import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, noteFoldedFrontmatterKeys, ROLE_FRONTMATTER_PARAMS } from './skill-push';
 
 export interface RolePushOptions {
     json?: boolean;
@@ -87,6 +87,7 @@ export async function rolePushWithConfig(
         process.exit(1);
     }
     const frontmatterParams = shapeFrontmatterParams(properties, ROLE_FRONTMATTER_PARAMS);
+    noteFoldedFrontmatterKeys(properties, ROLE_FRONTMATTER_PARAMS);
     // in_crew comes only from --in-crew (never frontmatter); sent only when given.
     const crewArgs: Record<string, unknown> = options.inCrew ? { in_crew: options.inCrew } : {};
 

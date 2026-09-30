@@ -470,6 +470,8 @@ variables; `dev` defaults to `dev`.
 
 For `skill dev` / `skill exec`, pass the command as separate words after `--` (e.g. `-- python script.py --flag`); to run a single preformed shell string, wrap it explicitly with `sh -c '...'`.
 
+**Frontmatter keys.** Frontmatter keys outside the server schema are stored under `metadata` (values that aren't strings are JSON-encoded), and push prints which keys were folded.
+
 ### role
 
 | Command | Key Flags | Description |
@@ -477,13 +479,15 @@ For `skill dev` / `skill exec`, pass the command as separate words after `--` (e
 | `role push <dir>` | `--in-crew <crew>`, `--dry-run`, `--json` | Push a role definition (create or update). `--in-crew` names the crew that holds the role; it is **required to create** a role, and disambiguates the name when it exists in several crews |
 | `role pull <name> [dir]` | `--in-crew <crew>`, `--no-skills` | Fetch a role and its role-scoped skills to a local folder (inverse of push); `dir` defaults to `./<name>/`. Writes `SKILL.md`, a `.solidactions-role.json` provenance sidecar and `skills/<skill>/` for each role-scoped skill. `--no-skills` pulls the role only. `--in-crew` disambiguates a role name that exists in several crews |
 
-**`skill pull` and `role pull` replace the destination atomically.** The new folder is built beside the destination and swapped in, so a failed pull leaves the previous copy untouched. A pull refuses to replace an existing non-empty folder unless it carries the marker file from an earlier pull — `.solidactions-skill.json` for `skill pull`, `.solidactions-role.json` for `role pull` — so a directory that is not a pulled skill or role is never overwritten (nor is the current directory or one of its parents, nor a plain file). The check runs before any network call or write; remove the folder or choose another destination to proceed.
+**`skill pull` and `role pull` replace the destination atomically.** A pull builds the new folder as `<dest>.tmp-*` beside the destination and then swaps it in, so a failed pull leaves the previous copy untouched. If the process is killed mid-swap, `<dest>.old-*` is the previous copy (rename it back to `<dest>`) and `<dest>.tmp-*` can be deleted. A pull refuses to replace an existing non-empty folder unless it carries the marker file from an earlier pull — `.solidactions-skill.json` for `skill pull`, `.solidactions-role.json` for `role pull` — so a directory that is not a pulled skill or role is never overwritten (nor is the current directory or one of its parents, nor a plain file). The check runs before any network call or write; remove the folder or choose another destination to proceed.
 
 **`role pull` pulls the role's published version, with effective values.** A versioned role must have a snapshot (or use `version_mode: live`). Properties the role inherits (`inherits_from`) are merged by the server and pulled as the *effective* value; for such a role, pushing the pulled folder back would store the inherited values on the child, so `role pull` prints a warning.
 
 **Creating a role requires `--in-crew`.** `role push <dir> --in-crew <crew>` creates the role in that crew if it does not exist and updates it if it does; the crew is never read from the folder's frontmatter.
 
 **Rate limits.** The server throttles the MCP endpoint that `skill` and `role` use to 60 calls per minute per token. On HTTP 429 the CLI waits the `Retry-After` interval (in seconds or an HTTP date, capped at 60s; 5s if the header is missing or invalid), prints `rate limited by server (429); retrying in <N>s` to stderr, and tries up to 3 times in total before failing with `MCP request failed with HTTP 429`.
+
+**Frontmatter keys.** Frontmatter keys outside the server schema are stored under `metadata` (values that aren't strings are JSON-encoded), and push prints which keys were folded.
 
 ### doc
 

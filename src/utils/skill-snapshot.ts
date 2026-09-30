@@ -75,7 +75,7 @@ export async function publishSkillByName(
  * `skill push --publish` case (push succeeded, publish failed). `opts.json`
  * prints the raw outcome as JSON instead of human text.
  */
-export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: { pushed?: boolean; json?: boolean; role?: string } = {}): void {
+export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: { pushed?: boolean; json?: boolean; role?: string; inCrew?: string } = {}): void {
     if (opts.json) {
         console.log(JSON.stringify(outcome));
         process.exit(outcome.status === 'error' ? 1 : 0);
@@ -94,7 +94,7 @@ export function emitPublishOutcome(name: string, outcome: PublishOutcome, opts: 
             const prefix = opts.pushed ? 'pushed, but publish failed — ' : '';
             process.stderr.write(chalk.red(`${prefix}${outcome.code}: ${outcome.message}\n`));
             if (opts.pushed) {
-                process.stderr.write(chalk.yellow(`  The skill was pushed. Retry: solidactions skill publish ${name}${opts.role ? ` --role ${opts.role}` : ''}\n`));
+                process.stderr.write(chalk.yellow(`  The skill was pushed. Retry: solidactions skill publish ${name}${opts.role ? ` --role ${opts.role}` : ''}${opts.role && opts.inCrew ? ` --in-crew ${opts.inCrew}` : ''}\n`));
             }
             process.exit(1);
         }

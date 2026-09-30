@@ -32,6 +32,9 @@ export interface SkillPullOptions {
 /** Filename of the provenance sidecar written alongside a pulled skill. */
 export const SKILL_SIDECAR = '.solidactions-skill.json';
 
+/** Filename of the provenance sidecar written into a pulled role folder (and the replace marker). Lives here so skill push can recognise a pulled role folder without importing role-pull (which imports skill-push). */
+export const ROLE_SIDECAR = '.solidactions-role.json';
+
 /** A user-facing pull failure (message is printed as-is after `error: `). */
 class SkillPullError extends Error {}
 

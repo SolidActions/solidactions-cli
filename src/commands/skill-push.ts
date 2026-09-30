@@ -17,7 +17,7 @@ import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { publishSkillByName, publishSkillByDocId, emitPublishOutcome, PublishOutcome } from '../utils/skill-snapshot';
-import { SKILL_SIDECAR } from './skill-pull';
+import { SKILL_SIDECAR, ROLE_SIDECAR } from './skill-pull';
 import { crewErrorHint } from '../utils/crew';
 
 export interface SkillPushOptions {
@@ -47,6 +47,26 @@ export const ROLE_FRONTMATTER_PARAMS = [
     'inherits_from', 'always_load_docs', 'always_load_memory', 'always_load_skills', 'available_skills',
     'catalog_advertised', 'metadata', 'version_mode',
 ];
+
+/**
+ * Keys `shapeFrontmatterParams` will fold into `metadata` (not in the schema, value defined).
+ */
+export function foldedFrontmatterKeys(properties: Record<string, unknown>, allowed: readonly string[]): string[] {
+    return Object.entries(properties)
+        .filter(([key, value]) => !allowed.includes(key) && value !== undefined)
+        .map(([key]) => key);
+}
+
+/**
+ * Write the one-line stderr note about folded frontmatter keys (nothing when none were folded).
+ * Stderr keeps --json stdout clean.
+ */
+export function noteFoldedFrontmatterKeys(properties: Record<string, unknown>, allowed: readonly string[]): void {
+    const folded = foldedFrontmatterKeys(properties, allowed);
+    if (folded.length > 0) {
+        process.stderr.write(`note: frontmatter keys not in the schema were stored under metadata: ${folded.join(', ')}\n`);
+    }
+}
 
 /**
  * Split frontmatter-derived properties into schema params (sent top-level) and the
@@ -148,7 +168,8 @@ export function parseSkillFile(content: string): {
  * their relative path (e.g. "references/member-roles.md") — matching how
  * SKILL.md cites them, so bundled reference docs land complete (#247).
  *
- * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR) and
+ * Also excludes `skill pull`'s provenance sidecar (SKILL_SIDECAR), `role pull`'s
+ * (ROLE_SIDECAR) and
  * `skill dev`'s local runtime-state dir (.sa-state/) — neither is skill
  * content, and uploading them would leak local revision bookkeeping / state
  * into the remote library and agent sandboxes.
@@ -170,6 +191,7 @@ export function readReferences(dir: string): Record<string, string> {
             const key = path.relative(dir, abs).split(path.sep).join('/');
             if (key === 'SKILL.md') continue; // exclude only the top-level skill file
             if (key === SKILL_SIDECAR) continue; // exclude the skill pull provenance sidecar
+            if (key === ROLE_SIDECAR) continue; // exclude the role pull provenance sidecar
 
             references[key] = fs.readFileSync(abs, 'utf8');
         }
@@ -297,6 +319,7 @@ export async function pushParsedSkill(
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
     const frontmatterParams = shapeFrontmatterParams(properties, SKILL_FRONTMATTER_PARAMS);
+    noteFoldedFrontmatterKeys(properties, SKILL_FRONTMATTER_PARAMS);
     // in_crew comes only from --in-crew (never frontmatter); sent only with --role and only when given.
     const crewArgs: Record<string, unknown> = isRole && options.inCrew ? { in_crew: options.inCrew } : {};
     // Tool error -> Error, with crew-scoping codes (ambiguous_role) mapped to an actionable --in-crew hint.
@@ -417,7 +440,7 @@ function printPushResult(result: PushResult, options: SkillPushOptions): void {
  * truthy snapshot_hint (null when the skill is version_mode=live).
  * Dry-run statuses never warn.
  */
-export function stagedPushWarning(result: PushResult, isRole: boolean): string | null {
+export function stagedPushWarning(result: PushResult, isRole: boolean, role?: string, inCrew?: string): string | null {
     const { status, name, data } = result;
     if (status === 'created') {
         if (!data.snapshot_hint) {
@@ -432,7 +455,7 @@ export function stagedPushWarning(result: PushResult, isRole: boolean): string |
     }
 
     const publishLine = isRole
-        ? `  Publish this role-scoped skill via the MCP crews_history_manage take_doc_snapshot tool.\n`
+        ? `  Run: solidactions skill publish ${name} --role ${role ?? '<role>'}${inCrew ? ` --in-crew ${inCrew}` : ''}\n`
         : `  Run: solidactions skill publish ${name}\n`;
     const headline = status === 'updated'
         ? `⚠ Staged, not published. This revision won't run for agents until you publish it.\n`
@@ -530,6 +553,11 @@ export async function skillPushWithConfig(
         process.exit(1);
     }
 
+    if (fs.existsSync(path.join(absDir, ROLE_SIDECAR))) {
+        process.stderr.write(chalk.red(`error: ${dir} is a pulled role folder; use \`solidactions role push\`\n`));
+        process.exit(1);
+    }
+
     const topLevelSkillMd = path.join(absDir, 'SKILL.md');
 
     // -------------------------------------------------------------------------
@@ -583,9 +611,9 @@ export async function skillPushWithConfig(
 
         printPushResult(pushResult, options);
         if (publishOutcome) {
-            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true, role: options.role });
+            emitPublishOutcome(pushResult.name, publishOutcome, { pushed: true, role: options.role, inCrew: options.inCrew });
         }
-        const warning = stagedPushWarning(pushResult, !!options.role);
+        const warning = stagedPushWarning(pushResult, !!options.role, options.role, options.inCrew);
         if (warning) {
             process.stderr.write(chalk.yellow(warning));
         }

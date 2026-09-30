@@ -138,6 +138,28 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toBe(md);
     });
 
+    it('skill push of a pulled role folder is refused and uploads nothing', () => {
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', role, dest, '--in-crew', crew]);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const push = runCli(['skill', 'push', dest]);
+        expect(push.status, push.stdout + push.stderr).toBe(1);
+        expect(push.stderr).toContain('is a pulled role folder; use `solidactions role push`');
+        expect(push.stdout).toBe('');
+    });
+
+    it('role push notes which frontmatter keys were folded into metadata, once, on stderr', () => {
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', role, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const mdPath = path.join(dest, 'SKILL.md');
+        fs.writeFileSync(mdPath, fs.readFileSync(mdPath, 'utf8').replace(/^---\n/, '---\ntypo_key: oops\nanother_key: 2\n'));
+        const push = runCli(['role', 'push', dest, '--in-crew', crew]);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        const notes = push.stderr.split('\n').filter((l) => l.startsWith('note: frontmatter keys'));
+        expect(notes).toEqual(['note: frontmatter keys not in the schema were stored under metadata: typo_key, another_key']);
+    });
+
     it('--no-skills pulls the role only', () => {
         const dest = path.join(mkTmp(), 'out');
         const pull = runCli(['role', 'pull', role, dest, '--in-crew', crew, '--no-skills']);

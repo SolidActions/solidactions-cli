@@ -1,6 +1,6 @@
 # Live crews suite
 
-These tests run against a real sa-dev `/mcp` endpoint. There are no mocks: they create crews, roles and skills on the dev stack and check what the CLI's crews commands (`skill push/publish/pull`, `role push/pull`) actually do, plus the transport (JSON-RPC errors, UTF-8 decoding, HTTP 429 retry). They are excluded from the normal `npm test` unit project and skip themselves unless the `SOLIDACTIONS_LIVE_*` variables are set.
+These tests run against a real sa-dev `/mcp` endpoint. There are no mocks: they create crews, roles and skills on the dev stack and check what the CLI's crews commands (`skill push/publish/pull`, `role push/pull`) actually do, plus the transport (JSON-RPC errors, UTF-8 decoding, HTTP 429 retry). `vitest run` collects them along with the unit tests, but they skip themselves unless the `SOLIDACTIONS_LIVE_*` variables are set. With those variables set they run for real, including the throttle waits described below.
 
 ## Run
 

@@ -8,6 +8,7 @@ import * as path from 'path';
  * then the temp dir is swapped in by rename.
  */
 export function writeDirAtomic(dest: string, files: Record<string, string | Buffer>): void {
+    dest = path.resolve(dest); // a trailing slash would otherwise put the temp dir inside dest
     for (const rel of Object.keys(files)) {
         if (path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) throw new Error(`unsafe path: ${rel}`);
     }
@@ -42,14 +43,14 @@ export function writeDirAtomic(dest: string, files: Record<string, string | Buff
  * `dest` is safe to swap out: it must not be the current directory or one of its
  * parents, must not be a file, and if it already holds anything it must contain
  * `marker` directly (proof that a previous pull created it). A missing or empty
- * dest is fine. `cwd` exists so tests can avoid process.chdir.
+ * dest is fine. `cwd` exists so tests can avoid process.chdir; `kind` names the noun in the refusal.
  */
-export function assertReplaceableDir(dest: string, marker: string, cwd: string = process.cwd()): void {
+export function assertReplaceableDir(dest: string, marker: string, cwd: string = process.cwd(), kind: string = 'skill'): void {
     const resolved = path.resolve(dest);
     const exists = fs.existsSync(resolved);
     const real = exists ? fs.realpathSync(resolved) : resolved;
     const rel = path.relative(real, fs.realpathSync(cwd));
-    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+    if (rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel))) {
         throw new Error(`refusing to replace ${dest}: it is the current directory or one of its parents`);
     }
     if (!exists) return;
@@ -57,6 +58,6 @@ export function assertReplaceableDir(dest: string, marker: string, cwd: string =
         throw new Error(`refusing to replace ${dest}: it exists and is not a directory`);
     }
     if (fs.readdirSync(resolved).length > 0 && !fs.existsSync(path.join(resolved, marker))) {
-        throw new Error(`refusing to replace ${dest}: it exists and is not a pulled skill (no ${marker}); remove it or choose another destination`);
+        throw new Error(`refusing to replace ${dest}: it exists and is not a pulled ${kind} (no ${marker}); remove it or choose another destination`);
     }
 }

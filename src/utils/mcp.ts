@@ -48,15 +48,18 @@ interface HttpAttempt {
 }
 
 /** Seconds to wait for a Retry-After value (integer seconds or HTTP-date, RFC 9110); default when missing/invalid; capped. */
-function retryAfterSeconds(header: string | string[] | undefined): number {
+export function retryAfterSeconds(header: string | string[] | undefined): number {
     const value = (Array.isArray(header) ? header[0] : header)?.trim();
     let sec = RATE_LIMIT_DEFAULT_WAIT_SEC;
     if (value) {
         if (/^\d+$/.test(value)) {
             sec = parseInt(value, 10);
+        } else if (/^[+-]?\d+(\.\d+)?$/.test(value)) {
+            // Signed or fractional numbers are not valid Retry-After; wait at least 1s (only a literal "0" waits 0).
+            sec = Math.max(1, Math.ceil(Number(value)));
         } else {
             const at = Date.parse(value);
-            if (!Number.isNaN(at)) sec = Math.max(0, Math.ceil((at - Date.now()) / 1000));
+            if (!Number.isNaN(at)) sec = Math.max(1, Math.ceil((at - Date.now()) / 1000));
         }
     }
     return Math.min(sec, RATE_LIMIT_MAX_WAIT_SEC);

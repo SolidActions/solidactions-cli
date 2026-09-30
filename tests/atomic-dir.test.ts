@@ -17,6 +17,20 @@ describe('writeDirAtomic', () => {
         expect(fs.readdirSync(base)).toEqual(['skill']);
     });
 
+    it('treats a dest with a trailing slash as the dest itself, leaving only it in the parent', () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-'));
+        const dest = path.join(base, 'skill');
+        fs.mkdirSync(dest);
+        fs.writeFileSync(path.join(dest, 'stale.md'), 'old');
+        writeDirAtomic(dest + path.sep, { 'SKILL.md': 'new' });
+        expect(fs.readdirSync(base)).toEqual(['skill']);
+        expect(fs.readdirSync(dest)).toEqual(['SKILL.md']);
+        // and for a dest that does not exist yet
+        const fresh = path.join(base, 'fresh');
+        writeDirAtomic(fresh + path.sep, { 'SKILL.md': 'x' });
+        expect(fs.readdirSync(base).sort()).toEqual(['fresh', 'skill']);
+    });
+
     it('leaves the old folder untouched when a path is unsafe', () => {
         const base = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-'));
         const dest = path.join(base, 'skill');
@@ -38,6 +52,13 @@ describe('assertReplaceableDir', () => {
         fs.writeFileSync(path.join(dest, 'important.txt'), 'keep');
         expect(() => assertReplaceableDir(dest, MARKER)).toThrow(/not a pulled skill \(no \.marker\.json\)/);
         expect(fs.readdirSync(dest)).toEqual(['important.txt']);
+    });
+
+    it('names the kind in the refusal (default skill, role when asked)', () => {
+        const dest = path.join(tmp(), 'proj');
+        fs.mkdirSync(dest);
+        fs.writeFileSync(path.join(dest, 'important.txt'), 'keep');
+        expect(() => assertReplaceableDir(dest, MARKER, undefined, 'role')).toThrow(/not a pulled role \(no \.marker\.json\)/);
     });
 
     it('accepts a dir that contains the marker', () => {
@@ -79,5 +100,21 @@ describe('assertReplaceableDir', () => {
         } finally {
             process.chdir(original);
         }
+    });
+
+    it('refuses dest as an ancestor of a cwd whose segment is named "..foo"', () => {
+        const base = tmp();
+        const dest = path.join(base, 'x');
+        const cwd = path.join(dest, '..foo');
+        fs.mkdirSync(cwd, { recursive: true });
+        fs.writeFileSync(path.join(dest, MARKER), '{}');
+        expect(() => assertReplaceableDir(dest, MARKER, cwd)).toThrow(/current directory or one of its parents/);
+        // a sibling of a "..foo" cwd is not an ancestor
+        const sibling = path.join(base, '..foo-sibling');
+        expect(() => assertReplaceableDir(sibling, MARKER, cwd)).not.toThrow();
+        // and a dest that is a "..foo" dir beside a normal cwd is fine
+        const dotted = path.join(base, '..foo');
+        fs.mkdirSync(dotted);
+        expect(() => assertReplaceableDir(dotted, MARKER, dest)).not.toThrow();
     });
 });

@@ -11,10 +11,10 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill, parseCommandFile } from '../src/commands/skill-push';
+import { parseSkillFile, readReferences, skillPushWithConfig, pushParsedSkill, parseCommandFile, foldedFrontmatterKeys } from '../src/commands/skill-push';
 import type { SkillPushOptions } from '../src/commands/skill-push';
 import type { Config } from '../src/utils/config';
-import { SKILL_SIDECAR } from '../src/commands/skill-pull';
+import { SKILL_SIDECAR, ROLE_SIDECAR } from '../src/commands/skill-pull';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server — records the last request and returns a canned response
@@ -244,7 +244,24 @@ describe('parseSkillFile', () => {
 // Unit tests: readReferences
 // ---------------------------------------------------------------------------
 
+describe('foldedFrontmatterKeys', () => {
+    it('lists keys outside the schema whose value is defined, in order', () => {
+        expect(foldedFrontmatterKeys({ metadata: {}, license: 'x', typo_key: 1, other: 'y', gone: undefined }, ['metadata', 'license'])).toEqual(['typo_key', 'other']);
+        expect(foldedFrontmatterKeys({ license: 'x' }, ['license'])).toEqual([]);
+    });
+});
+
 describe('readReferences', () => {
+    it('excludes the role pull sidecar and does not hide other files', () => {
+        const { dir, cleanup } = makeTmpSkillDir(
+            '---\nname: S\ndescription: D\n---\nbody',
+            { [ROLE_SIDECAR]: '{}', 'keep.md': 'k' },
+        );
+        try {
+            expect(readReferences(dir)).toEqual({ 'keep.md': 'k' });
+        } finally { cleanup(); }
+    });
+
     it('reads top-level files and excludes SKILL.md', () => {
         const { dir, cleanup } = makeTmpSkillDir(
             '---\nname: S\ndescription: D\n---\nbody',
@@ -1574,7 +1591,7 @@ describe('skillPushWithConfig — staged-not-published warning (single-skill)', 
         } finally { cleanup(); }
     });
 
-    it('warns with MCP-hint wording (not the publish command) on a --role push', async () => {
+    it('warns with the role-scoped publish command on a --role push', async () => {
         responseQueue = [
             makeMcpError('name_collision', 'exists'),
             makeMcpSuccess({ version_id: 5, has_unpublished_revisions: true }),
@@ -1582,8 +1599,8 @@ describe('skillPushWithConfig — staged-not-published warning (single-skill)', 
         const { dir, cleanup } = makeTmpSkillDir(['---', 'name: my-skill', 'description: d', '---', 'body'].join('\n'));
         try {
             const { err } = await run(dir, { role: 'builder' });
-            expect(err).toContain('crews_history_manage take_doc_snapshot');
-            expect(err).not.toContain('skill publish');
+            expect(err).toContain('solidactions skill publish my-skill --role builder');
+            expect(err).not.toContain('take_doc_snapshot');
         } finally { cleanup(); }
     });
 });
