@@ -176,6 +176,11 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         const fm = yaml.load(md.split('---\n')[1]) as Record<string, unknown>;
         expect(fm.always_load_skills).toEqual([`shared/${skillA}`]);
         expect(fm.available_skills).toEqual([`shared/${skillB}`]);
+        // The sidecar records the exported lists as the baseline role push compares against.
+        expect(JSON.parse(fs.readFileSync(path.join(dest, '.solidactions-role.json'), 'utf8')).links).toEqual({
+            always_load_skills: [`shared/${skillA}`],
+            available_skills: [`shared/${skillB}`],
+        });
 
         // The folder recreates the role, links included, under a new name.
         fs.writeFileSync(mdPath, md.replace(`name: ${linkRole}`, `name: ${cloneRole}`));
@@ -190,6 +195,139 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         expect(clone.ok, JSON.stringify(clone.data)).toBe(true);
         expect(clone.data.always_load_skills.map((b: any) => b.identifier)).toEqual([`shared/${skillA}`]);
         expect(clone.data.available_skills.map((e: any) => e.identifier)).toEqual([`shared/${skillB}`]);
+    });
+
+    /** Create shared skills (published) and a published role linking them; returns the role's doc id. */
+    const linkFixture = async (tag: string, skills: string[], links: { always: string[]; available?: string[] }) => {
+        const roleName = `cli-rpull-${tag}-${stamp}`;
+        for (const n of skills) cleanup.sharedSkill(n);
+        cleanup.role(roleName, crew);
+        for (const n of skills) {
+            const s = await callCrewsTool(config, 'skills', { action: 'create', name: n, description: `shared ${n}`, body: `# ${n}\nx` });
+            expect(s.ok, JSON.stringify(s.data)).toBe(true);
+            await snapshot(docIdOf(s.data));
+        }
+        const r = await callCrewsTool(config, 'roles', {
+            action: 'create', name: roleName, description: `role ${tag}`, body: '# Role\nold body', in_crew: crew,
+            always_load_skills: links.always.map((n) => `shared/${n}`),
+            ...(links.available ? { available_skills: links.available.map((n) => `shared/${n}`) } : {}),
+        });
+        expect(r.ok, JSON.stringify(r.data)).toBe(true);
+        const docId = docIdOf(r.data);
+        await snapshot(docId);
+        return { roleName, docId };
+    };
+
+    /** The published role's link identifiers and body, read by the owner. */
+    const readLinks = async (roleName: string) => {
+        const r = await callCrewsTool(config, 'roles', { action: 'read', name: roleName, in_crew: crew });
+        expect(r.ok, JSON.stringify(r.data)).toBe(true);
+        return {
+            always: (r.data.always_load_skills ?? []).map((b: any) => b.identifier),
+            available: (r.data.available_skills ?? []).map((e: any) => e.identifier).filter((id: string) => id.includes('/')),
+            body: r.data.body as string,
+        };
+    };
+
+    it('role push of an unchanged link list leaves the server links alone, including a link added after the pull', async () => {
+        const skillA = `rpull-keep-a-${stamp}`;
+        const skillX = `rpull-keep-x-${stamp}`;
+        const skillC = `rpull-keep-c-${stamp}`;
+        const { roleName, docId } = await linkFixture('keep', [skillA, skillX, skillC], { always: [skillA], available: [skillX] });
+
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', roleName, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const mdPath = path.join(dest, 'SKILL.md');
+        const md = fs.readFileSync(mdPath, 'utf8');
+        const fm = yaml.load(md.split('---\n')[1]) as Record<string, unknown>;
+        expect(fm.always_load_skills).toEqual([`shared/${skillA}`]);
+        expect(fm.available_skills).toEqual([`shared/${skillX}`]);
+
+        // A link the pulled folder does not know about (it stands in for one the caller cannot see).
+        const add = await callCrewsTool(config, 'roles', {
+            action: 'edit', name: roleName, in_crew: crew, always_load_skills: [`shared/${skillA}`, `shared/${skillC}`],
+        });
+        expect(add.ok, JSON.stringify(add.data)).toBe(true);
+
+        // Body-only edit of the pulled SKILL.md, pushed with the real CLI.
+        fs.writeFileSync(mdPath, md.replace('old body', 'new body'));
+        const push = runCli(['role', 'push', dest]);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        expect(push.stdout).toMatch(/updated role/);
+        await snapshot(docId);
+
+        const after = await readLinks(roleName);
+        expect(after.body).toContain('new body');
+        expect(after.always).toEqual([`shared/${skillA}`, `shared/${skillC}`]);
+        expect(after.available).toEqual([`shared/${skillX}`]);
+
+        // Dry-run applies the same logic and says which link fields it keeps.
+        const dry = runCli(['role', 'push', dest, '--dry-run']);
+        expect(dry.status, dry.stdout + dry.stderr).toBe(0);
+        expect(dry.stdout).toContain(`would update '${roleName}'`);
+        expect(dry.stdout).toMatch(/keeping always_load_skills, available_skills as-is/);
+    });
+
+    it('role push of a changed link list is refused without --replace-links (real and dry-run) and applied with it', async () => {
+        const skillA = `rpull-chg-a-${stamp}`;
+        const skillC = `rpull-chg-c-${stamp}`;
+        const { roleName, docId } = await linkFixture('chg', [skillA, skillC], { always: [skillA, skillC] });
+
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', roleName, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const mdPath = path.join(dest, 'SKILL.md');
+        const md = fs.readFileSync(mdPath, 'utf8');
+        expect(md).toContain(`- shared/${skillA}\n`);
+        const setList = (ids: string[]) => {
+            const fm = yaml.load(md.split('---\n')[1]) as Record<string, unknown>;
+            fm.always_load_skills = ids.map((n) => `shared/${n}`);
+            fs.writeFileSync(mdPath, `---\n${yaml.dump(fm, { lineWidth: -1 })}---\n${md.split('---\n').slice(2).join('---\n')}`);
+        };
+        const refused = (r: { status: number | null; stdout: string; stderr: string }) => {
+            expect(r.status, r.stdout + r.stderr).toBe(1);
+            expect(r.stderr).toMatch(/--replace-links/);
+            expect(r.stderr).toMatch(/always_load_skills differs from what was pulled/);
+        };
+
+        // A reorder is a change (exact, ordered comparison); so is dropping a link.
+        for (const ids of [[skillC, skillA], [skillC]]) {
+            setList(ids);
+            refused(runCli(['role', 'push', dest]));
+            refused(runCli(['role', 'push', dest, '--dry-run']));
+            refused(runCli(['role', 'push', dest, '--in-crew', crew]));
+        }
+        // Nothing was written: the role has no new revision to publish, and the links are unchanged.
+        const noop = await callCrewsTool(config, 'crews_history_manage', { action: 'take_doc_snapshot', doc_id: docId });
+        expect(noop.ok, JSON.stringify(noop.data)).toBe(false);
+        expect(noop.data?.code).toBe('not_snapshotable');
+        expect((await readLinks(roleName)).always).toEqual([`shared/${skillA}`, `shared/${skillC}`]);
+
+        const dry = runCli(['role', 'push', dest, '--dry-run', '--replace-links']);
+        expect(dry.status, dry.stdout + dry.stderr).toBe(0);
+        expect(dry.stdout).toContain(`would update '${roleName}'`);
+        const push = runCli(['role', 'push', dest, '--replace-links']);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        await snapshot(docId);
+        expect((await readLinks(roleName)).always).toEqual([`shared/${skillC}`]);
+    });
+
+    it('a role folder without the pull sidecar (hand-authored) sends its link lists as written', async () => {
+        const skillA = `rpull-nosc-a-${stamp}`;
+        const skillC = `rpull-nosc-c-${stamp}`;
+        const { roleName, docId } = await linkFixture('nosc', [skillA, skillC], { always: [skillA] });
+
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', roleName, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        fs.rmSync(path.join(dest, '.solidactions-role.json'));
+        const mdPath = path.join(dest, 'SKILL.md');
+        fs.writeFileSync(mdPath, fs.readFileSync(mdPath, 'utf8').replace(`shared/${skillA}`, `shared/${skillC}`));
+        const push = runCli(['role', 'push', dest]);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        await snapshot(docId);
+        expect((await readLinks(roleName)).always).toEqual([`shared/${skillC}`]);
     });
 
     it('skill push of a pulled role folder is refused and uploads nothing', () => {

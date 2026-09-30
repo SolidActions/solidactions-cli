@@ -172,9 +172,18 @@ export async function pullRoleWithConfig(
         }
     }
 
+    // Baseline of the link lists exactly as written to the frontmatter (an absent list is []).
+    // role push compares against it, so an unchanged list is left out of the edit and the server
+    // keeps every link, including ones this caller could not see.
+    const linkBaseline = (key: 'always_load_skills' | 'available_skills'): string[] =>
+        Array.isArray(usable[key]) ? (usable[key] as string[]) : [];
     files[ROLE_SIDECAR] = JSON.stringify({
         name: roleName,
         in_crew: inCrew ?? null,
+        links: {
+            always_load_skills: linkBaseline('always_load_skills'),
+            available_skills: linkBaseline('available_skills'),
+        },
         doc_id: typeof data.doc_id === 'string' ? parseInt(data.doc_id, 10) : (data.doc_id ?? null),
         head_revision_id: typeof data.head_revision_id === 'string' ? parseInt(data.head_revision_id, 10) : (data.head_revision_id ?? null),
         active_snapshot_revision_id: typeof data.active_snapshot_revision_id === 'string'

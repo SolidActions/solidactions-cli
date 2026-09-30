@@ -16,6 +16,12 @@
  * create, so ask for --in-crew; several -> ambiguous, ask for --in-crew.
  * With --in-crew: create -> on name_collision -> edit (dry-run pre-flights a read).
  * Roles use 'name' (NOT 'identifier') for read and edit.
+ *
+ * Skill links: `role pull` records the always_load_skills / available_skills it exported in the
+ * .solidactions-role.json sidecar. Editing the role the folder was pulled from omits a link list
+ * that still equals that baseline (the server keeps all links, including ones the caller cannot
+ * see) and refuses a changed list unless --replace-links. Creates and sidecar-less folders send
+ * the lists as written.
  */
 
 import fs from 'fs';
@@ -25,6 +31,7 @@ import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { crewErrorHint } from '../utils/crew';
+import { ROLE_SIDECAR } from './skill-pull';
 import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, noteFoldedFrontmatterKeys, ROLE_FRONTMATTER_PARAMS } from './skill-push';
 
 export interface RolePushOptions {
@@ -32,6 +39,82 @@ export interface RolePushOptions {
     dryRun?: boolean;
     /** Crew path containing the role. Required by the server when creating a role; disambiguates on edit/read. */
     inCrew?: string;
+    /** Replace the skill link lists even when they differ from what `role pull` recorded. */
+    replaceLinks?: boolean;
+}
+
+const LINK_FIELDS = ['always_load_skills', 'available_skills'] as const;
+
+/** What `role pull` recorded in .solidactions-role.json (only the parts push needs). */
+interface RoleSidecarInfo {
+    name: string;
+    inCrew: string | null;
+    links: Record<(typeof LINK_FIELDS)[number], string[]>;
+}
+
+/**
+ * Read the role pull sidecar. Absent, unreadable or nameless => null (treated as a hand-authored
+ * folder). A sidecar without `links` (written before links were recorded) has an empty baseline,
+ * which errs on the safe side: an unchanged (absent) list is omitted, a present list needs
+ * --replace-links.
+ */
+function readRoleSidecar(absDir: string): RoleSidecarInfo | null {
+    const file = path.join(absDir, ROLE_SIDECAR);
+    if (!fs.existsSync(file)) return null;
+    let raw: any;
+    try {
+        raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+        return null;
+    }
+    if (!raw || typeof raw !== 'object' || typeof raw.name !== 'string' || raw.name === '') return null;
+    const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    return {
+        name: raw.name,
+        inCrew: typeof raw.in_crew === 'string' && raw.in_crew !== '' ? raw.in_crew : null,
+        links: {
+            always_load_skills: asList(raw.links?.always_load_skills),
+            available_skills: asList(raw.links?.available_skills),
+        },
+    };
+}
+
+/**
+ * When editing the role this folder was pulled from, leave unchanged link lists out of the edit
+ * (the server then preserves every link, hidden ones included) and refuse a changed list unless
+ * --replace-links. Not the pulled role (no sidecar, other name, other crew) => params as-is.
+ * Equality is exact and ordered; absent equals []. Returns the params to send and the fields
+ * that were kept as-is (present in the frontmatter, left out of the call).
+ */
+function applyLinkBaseline(
+    params: Record<string, unknown>,
+    sidecar: RoleSidecarInfo | null,
+    name: string,
+    targetCrew: string | null,
+    replaceLinks: boolean,
+): { params: Record<string, unknown>; kept: string[] } {
+    if (!sidecar || sidecar.name !== name) return { params, kept: [] };
+    if (sidecar.inCrew !== null && sidecar.inCrew !== targetCrew) return { params, kept: [] };
+    const out = { ...params };
+    const kept: string[] = [];
+    for (const field of LINK_FIELDS) {
+        const base = sidecar.links[field];
+        const value = out[field] === undefined ? [] : out[field];
+        const same = Array.isArray(value) && value.length === base.length && value.every((v, i) => v === base[i]);
+        if (same) {
+            if (out[field] !== undefined) kept.push(field);
+            delete out[field];
+        } else if (!replaceLinks) {
+            process.stderr.write(chalk.red(
+                `error: ${field} differs from what was pulled. The server may hold skill links you can't see, ` +
+                `and replacing the list deletes them. Re-run with --replace-links to replace it anyway.\n`,
+            ));
+            process.exit(1);
+        } else if (out[field] === undefined) {
+            out[field] = []; // list removed from the frontmatter + --replace-links: clear it
+        }
+    }
+    return { params: out, kept };
 }
 
 /** Print a role-push tool error (mapping crew-scoping codes to a hint) and exit 1. */
@@ -146,15 +229,21 @@ export async function rolePushWithConfig(
 
     // --dry-run: NO create or edit. Resolved above (no --in-crew) => would update.
     // With --in-crew, pre-flight a read to detect existence. Roles use {action:'read', name} (NOT identifier).
-    if (options.dryRun) {
-        if (resolved) {
-            if (options.json) {
-                console.log(JSON.stringify({}));
-            } else {
-                console.log(chalk.cyan(`[dry-run] would update '${name}'`));
-            }
-            process.exit(0);
+    const sidecar = readRoleSidecar(absDir);
+    const replaceLinks = options.replaceLinks === true;
+    /** The would-update line, after the same link check the real edit runs (may exit 1). */
+    const reportWouldUpdate = (targetCrew: string | null): never => {
+        const { kept } = applyLinkBaseline(frontmatterParams, sidecar, name, targetCrew, replaceLinks);
+        if (options.json) {
+            console.log(JSON.stringify({}));
+        } else {
+            const note = kept.length > 0 ? ` (keeping ${kept.join(', ')} as-is on the server)` : '';
+            console.log(chalk.cyan(`[dry-run] would update '${name}'${note}`));
         }
+        process.exit(0);
+    };
+    if (options.dryRun) {
+        if (resolved?.kind === 'edit') reportWouldUpdate(resolved.inCrew);
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
         try {
             readResult = await callCrewsTool(config, 'roles', { action: 'read', name, ...crewArgs });
@@ -175,25 +264,13 @@ export async function rolePushWithConfig(
             }
             // A versioned role with no published snapshot answers read with no_snapshot:
             // the role exists (there is a doc), it just has nothing live yet -> would update.
-            if (code === 'no_snapshot') {
-                if (options.json) {
-                    console.log(JSON.stringify({}));
-                } else {
-                    console.log(chalk.cyan(`[dry-run] would update '${name}'`));
-                }
-                process.exit(0);
-            }
+            if (code === 'no_snapshot') reportWouldUpdate(options.inCrew ?? null);
             // Any other error is unexpected — surface it
             failWithToolError(readResult.data, name);
         }
 
         // Read succeeded → role exists → would update
-        if (options.json) {
-            console.log(JSON.stringify({}));
-        } else {
-            console.log(chalk.cyan(`[dry-run] would update '${name}'`));
-        }
-        process.exit(0);
+        reportWouldUpdate(options.inCrew ?? null);
     }
 
     // Upsert. Resolved to an existing role (no --in-crew): edit it in the crew the list gave.
@@ -223,10 +300,14 @@ export async function rolePushWithConfig(
         const editCrewArgs: Record<string, unknown> = resolved?.kind === 'edit'
             ? (resolved.inCrew ? { in_crew: resolved.inCrew } : {})
             : crewArgs;
+        const { params: editParams } = applyLinkBaseline(
+            frontmatterParams, sidecar, name,
+            resolved?.kind === 'edit' ? resolved.inCrew : (options.inCrew ?? null), replaceLinks,
+        );
         let edited: Awaited<ReturnType<typeof callCrewsTool>>;
         try {
             edited = await callCrewsTool(config, 'roles', {
-                ...frontmatterParams,
+                ...editParams,
                 ...editCrewArgs,
                 action: 'edit',
                 name,

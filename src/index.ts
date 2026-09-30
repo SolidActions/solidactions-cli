@@ -1116,6 +1116,7 @@ role
     .command('push <dir>')
     .description('Push a role definition (create or update)')
     .option('--in-crew <crew>', 'Crew that contains the role (required to create a role; disambiguates when the name exists in several crews)')
+    .option('--replace-links', 'Replace always_load_skills / available_skills even when they differ from what role pull recorded (the server may hold links you cannot see)')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
