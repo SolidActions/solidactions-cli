@@ -450,10 +450,11 @@ Manage agent skills on the crews SOP surface. `push` is an idempotent upsert (cr
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `skill push <dir>` | `--role <name>`, `--dry-run`, `--json`, `--force` | Push a skill folder, or a whole plugin dir — recursive: pushes every `skills/*/SKILL.md`, converts `commands/*.md` → skills, and ingests each skill's `references/`. `--role` scopes to a role instead of the shared library. Drift-guarded against the local `.solidactions-skill.json` sidecar revision; `--force` skips the guard |
+| `skill push <dir>` | `--role <name>`, `--in-crew <crew>`, `--dry-run`, `--publish`, `--json`, `--force` | Push a skill folder, or a whole plugin dir — recursive: pushes every `skills/*/SKILL.md`, converts `commands/*.md` → skills, and ingests each skill's `references/`. `--role` scopes to a role instead of the shared library; `--in-crew` names the crew that holds the role (with `--role`, to disambiguate a role name that exists in several crews). `--publish` snapshots the skill after pushing so it goes live for agents. Drift-guarded against the local `.solidactions-skill.json` sidecar revision; `--force` skips the guard |
+| `skill publish <name>` | `--role <name>`, `--in-crew <crew>`, `--json` | Publish (snapshot) a skill so its latest pushed revision goes live for agents. With `--role`, publishes that role's role-scoped skill instead of a shared-library skill; `--in-crew` disambiguates the role across crews |
 | `skill list` | `--json`, `--limit <n>` | List skills in the library |
 | `skill view <name>` | `--json` | Show one skill |
-| `skill pull <name> [dest]` | `--json` | Fetch a skill to a local folder for editing (inverse of push); writes a `.solidactions-skill.json` provenance sidecar used by `push`'s drift guard |
+| `skill pull <name> [dest]` | `--role <role>`, `--in-crew <crew>`, `--json` | Fetch a skill to a local folder for editing (inverse of push); `dest` defaults to `./<name>/`. `--role` pulls a role-scoped skill of that role instead of a shared-library skill; `--in-crew` disambiguates the role across crews. Writes a `.solidactions-skill.json` provenance sidecar used by `push`'s drift guard. `--json` prints the raw read result and writes no files |
 | `skill delete <name>` | `--json` | Delete a skill (Admin only) |
 | `skill exec <name> --target sandbox -- <cmd>` (`--target` required) | `--role <name>`, `--in-crew <crew>`, `--environment <env>` (default `production`) | Execute the server-stored skill in its server sandbox (post-push smoke; default env production) |
 | `skill exec <name> --target host -- <cmd>` (`--target` required) | `--role <name>`, `--in-crew <crew>`, `--crew <nameOrId>`, `--environment <env>` (default `production`), `--env-file <path>` | Execute the server-stored skill on THIS machine via a transparent revision-checked cache — no pull step; crew vars fetched from the platform (default env production; secrets need `env:reveal`) |
@@ -473,7 +474,16 @@ For `skill dev` / `skill exec`, pass the command as separate words after `--` (e
 
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
-| `role push <dir>` | `--dry-run`, `--json` | Push a role definition (create or update) |
+| `role push <dir>` | `--in-crew <crew>`, `--dry-run`, `--json` | Push a role definition (create or update). `--in-crew` names the crew that holds the role; it is **required to create** a role, and disambiguates the name when it exists in several crews |
+| `role pull <name> [dir]` | `--in-crew <crew>`, `--no-skills` | Fetch a role and its role-scoped skills to a local folder (inverse of push); `dir` defaults to `./<name>/`. Writes `SKILL.md`, a `.solidactions-role.json` provenance sidecar and `skills/<skill>/` for each role-scoped skill. `--no-skills` pulls the role only. `--in-crew` disambiguates a role name that exists in several crews |
+
+**`skill pull` and `role pull` replace the destination atomically.** The new folder is built beside the destination and swapped in, so a failed pull leaves the previous copy untouched. A pull refuses to replace an existing non-empty folder unless it carries the marker file from an earlier pull — `.solidactions-skill.json` for `skill pull`, `.solidactions-role.json` for `role pull` — so a directory that is not a pulled skill or role is never overwritten (nor is the current directory or one of its parents, nor a plain file). The check runs before any network call or write; remove the folder or choose another destination to proceed.
+
+**`role pull` pulls the role's published version, with effective values.** A versioned role must have a snapshot (or use `version_mode: live`). Properties the role inherits (`inherits_from`) are merged by the server and pulled as the *effective* value; for such a role, pushing the pulled folder back would store the inherited values on the child, so `role pull` prints a warning.
+
+**Creating a role requires `--in-crew`.** `role push <dir> --in-crew <crew>` creates the role in that crew if it does not exist and updates it if it does; the crew is never read from the folder's frontmatter.
+
+**Rate limits.** The server throttles the MCP endpoint that `skill` and `role` use to 60 calls per minute per token. On HTTP 429 the CLI waits the `Retry-After` interval (in seconds or an HTTP date, capped at 60s; 5s if the header is missing or invalid), prints `rate limited by server (429); retrying in <N>s` to stderr, and tries up to 3 times in total before failing with `MCP request failed with HTTP 429`.
 
 ### doc
 
