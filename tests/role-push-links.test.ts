@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { planLinkBaseline, readRoleSidecar, type RoleSidecarInfo } from '../src/commands/role-push';
 import { normalizeCrewPath } from '../src/utils/crew';
 
@@ -135,8 +135,14 @@ describe('planLinkBaseline', () => {
 });
 
 describe('readRoleSidecar (real files)', () => {
+    const tmpDirs: string[] = [];
+    afterEach(() => {
+        for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+        tmpDirs.length = 0;
+    });
     const withSidecar = (content: string | null) => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-role-sidecar-'));
+        tmpDirs.push(dir);
         if (content !== null) fs.writeFileSync(path.join(dir, '.solidactions-role.json'), content);
         return dir;
     };
