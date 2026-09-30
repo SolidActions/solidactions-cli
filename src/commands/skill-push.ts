@@ -18,9 +18,12 @@ import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { publishSkillByName, publishSkillByDocId, emitPublishOutcome, PublishOutcome } from '../utils/skill-snapshot';
 import { SKILL_SIDECAR } from './skill-pull';
+import { crewErrorHint } from '../utils/crew';
 
 export interface SkillPushOptions {
     role?: string;
+    /** Crew containing the role (requires role). Sent as in_crew on role-scoped skill calls. */
+    inCrew?: string;
     json?: boolean;
     dryRun?: boolean;
     publish?: boolean;
@@ -294,6 +297,14 @@ export async function pushParsedSkill(
     const isRole = !!options.role;
     const tool = isRole ? 'roles' : 'skills';
     const frontmatterParams = shapeFrontmatterParams(properties, SKILL_FRONTMATTER_PARAMS);
+    // in_crew comes only from --in-crew (never frontmatter); sent only with --role and only when given.
+    const crewArgs: Record<string, unknown> = isRole && options.inCrew ? { in_crew: options.inCrew } : {};
+    // Tool error -> Error, with crew-scoping codes (ambiguous_role) mapped to an actionable --in-crew hint.
+    const toolError = (data: any): Error => {
+        const code = data?.code ?? 'unknown_error';
+        const hint = isRole ? crewErrorHint(code, options.role, data?.message) : null;
+        return new Error(hint ?? `${code}: ${data?.message ?? 'MCP returned an error with no message'}`);
+    };
 
     // --dry-run: pre-flight a read to detect existence; make NO create/edit calls.
     if (options.dryRun) {
@@ -302,7 +313,7 @@ export async function pushParsedSkill(
         // `skill_not_found` when absent. (read does NOT accept `identifier` on the
         // roles tool, so the action/args must branch on isRole.)
         const readArgs: Record<string, unknown> = isRole
-            ? { action: 'read_skill', role: options.role, name }
+            ? { action: 'read_skill', role: options.role, name, ...crewArgs }
             : { action: 'read', identifier: name };
 
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
@@ -318,8 +329,7 @@ export async function pushParsedSkill(
                 return { status: 'would-create', name, data: {} };
             }
             // Any other error is unexpected — surface it
-            const errMsg = readResult.data?.message ?? 'MCP returned an error with no message';
-            throw new Error(`${code ?? 'unknown_error'}: ${errMsg}`);
+            throw toolError(readResult.data);
         }
 
         // Read succeeded → skill exists → would update
@@ -328,7 +338,7 @@ export async function pushParsedSkill(
 
     // Spread frontmatter extras FIRST so the fixed protocol keys always win.
     const createArgs: Record<string, unknown> = isRole
-        ? { ...frontmatterParams, action: 'create_skill', role: options.role, name, description, body, references }
+        ? { ...frontmatterParams, action: 'create_skill', role: options.role, ...crewArgs, name, description, body, references }
         : { ...frontmatterParams, action: 'create', name, description, body, references };
 
     let result: Awaited<ReturnType<typeof callCrewsTool>>;
@@ -342,7 +352,7 @@ export async function pushParsedSkill(
     if (!result.ok && result.data?.code === 'name_collision') {
         const guardBaseVersion = sidecarRevision != null && !options.force;
         const editArgs: Record<string, unknown> = isRole
-            ? { ...frontmatterParams, action: 'edit_skill', role: options.role, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
+            ? { ...frontmatterParams, action: 'edit_skill', role: options.role, ...crewArgs, name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) }
             : { ...frontmatterParams, action: 'edit', identifier: name, description, body, references, ...(guardBaseVersion ? { base_version_id: sidecarRevision } : {}) };
 
         try {
@@ -360,18 +370,14 @@ export async function pushParsedSkill(
                     `remote skill changed since your pull (their revision ${currentRevisionId}, your base ${sidecarRevision}) — re-pull to merge, or pass --force to overwrite`,
                 );
             }
-            const errMsg = errData?.message ?? 'MCP returned an error with no message';
-            throw new Error(`${errCode}: ${errMsg}`);
+            throw toolError(errData);
         }
 
         return { status: 'updated', name, data: result.data ?? {} };
     }
 
     if (!result.ok) {
-        const errData = result.data;
-        const errCode = errData?.code ?? 'unknown_error';
-        const errMsg = errData?.message ?? 'MCP returned an error with no message';
-        throw new Error(`${errCode}: ${errMsg}`);
+        throw toolError(result.data);
     }
 
     return { status: 'created', name, data: result.data ?? {} };
@@ -480,7 +486,7 @@ async function refreshSidecarRevision(
     if (headRevisionId === null) {
         const isRole = !!options.role;
         const readArgs: Record<string, unknown> = isRole
-            ? { action: 'read_skill', role: options.role, name: pushResult.name }
+            ? { action: 'read_skill', role: options.role, name: pushResult.name, ...(options.inCrew ? { in_crew: options.inCrew } : {}) }
             : { action: 'read', identifier: pushResult.name };
         try {
             const readResult = await callCrewsTool(config, isRole ? 'roles' : 'skills', readArgs);
@@ -512,6 +518,11 @@ export async function skillPushWithConfig(
     options: SkillPushOptions,
     config: Config,
 ): Promise<void> {
+    if (options.inCrew && !options.role) {
+        process.stderr.write(chalk.red('error: --in-crew requires --role.\n'));
+        process.exit(1);
+    }
+
     const absDir = path.resolve(dir);
 
     if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
@@ -560,7 +571,7 @@ export async function skillPushWithConfig(
                     publishOutcome = await publishSkillByDocId(config, createdDocId);
                 }
             } else {
-                publishOutcome = await publishSkillByName(config, pushResult.name, { role: options.role });
+                publishOutcome = await publishSkillByName(config, pushResult.name, { role: options.role, inCrew: options.inCrew });
             }
         }
 

@@ -20,11 +20,27 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
+import { crewErrorHint } from '../utils/crew';
 import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, ROLE_FRONTMATTER_PARAMS } from './skill-push';
 
 export interface RolePushOptions {
     json?: boolean;
     dryRun?: boolean;
+    /** Crew path containing the role. Required by the server when creating a role; disambiguates on edit/read. */
+    inCrew?: string;
+}
+
+/** Print a role-push tool error (mapping crew-scoping codes to a hint) and exit 1. */
+function failWithToolError(data: any, roleName: string): never {
+    const code = data?.code ?? 'unknown_error';
+    const hint = crewErrorHint(code, roleName, data?.message);
+    if (hint) {
+        process.stderr.write(chalk.red(`error: ${hint}\n`));
+    } else {
+        const errMsg = data?.message ?? 'MCP returned an error with no message';
+        process.stderr.write(chalk.red(`error: ${code}: ${errMsg}\n`));
+    }
+    process.exit(1);
 }
 
 /**
@@ -71,13 +87,15 @@ export async function rolePushWithConfig(
         process.exit(1);
     }
     const frontmatterParams = shapeFrontmatterParams(properties, ROLE_FRONTMATTER_PARAMS);
+    // in_crew comes only from --in-crew (never frontmatter); sent only when given.
+    const crewArgs: Record<string, unknown> = options.inCrew ? { in_crew: options.inCrew } : {};
 
     // --dry-run: pre-flight a read to detect existence; NO create or edit.
     // Roles use {action:'read', name} (NOT identifier).
     if (options.dryRun) {
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
         try {
-            readResult = await callCrewsTool(config, 'roles', { action: 'read', name });
+            readResult = await callCrewsTool(config, 'roles', { action: 'read', name, ...crewArgs });
         } catch (e: any) {
             process.stderr.write(chalk.red(`error: ${e.message}\n`));
             process.exit(1);
@@ -93,10 +111,18 @@ export async function rolePushWithConfig(
                 }
                 process.exit(0);
             }
+            // A versioned role with no published snapshot answers read with no_snapshot:
+            // the role exists (there is a doc), it just has nothing live yet -> would update.
+            if (code === 'no_snapshot') {
+                if (options.json) {
+                    console.log(JSON.stringify({}));
+                } else {
+                    console.log(chalk.cyan(`[dry-run] would update '${name}'`));
+                }
+                process.exit(0);
+            }
             // Any other error is unexpected — surface it
-            const errMsg = readResult.data?.message ?? 'MCP returned an error with no message';
-            process.stderr.write(chalk.red(`error: ${code ?? 'unknown_error'}: ${errMsg}\n`));
-            process.exit(1);
+            failWithToolError(readResult.data, name);
         }
 
         // Read succeeded → role exists → would update
@@ -115,6 +141,7 @@ export async function rolePushWithConfig(
     try {
         result = await callCrewsTool(config, 'roles', {
             ...frontmatterParams,
+            ...crewArgs,
             action: 'create',
             name,
             description,
@@ -131,6 +158,7 @@ export async function rolePushWithConfig(
         try {
             result = await callCrewsTool(config, 'roles', {
                 ...frontmatterParams,
+                ...crewArgs,
                 action: 'edit',
                 name,
                 description,
@@ -142,10 +170,7 @@ export async function rolePushWithConfig(
         }
 
         if (!result.ok) {
-            const errCode = result.data?.code ?? 'unknown_error';
-            const errMsg = result.data?.message ?? 'MCP returned an error with no message';
-            process.stderr.write(chalk.red(`error: ${errCode}: ${errMsg}\n`));
-            process.exit(1);
+            failWithToolError(result.data, name);
         }
 
         if (options.json) {
@@ -157,10 +182,7 @@ export async function rolePushWithConfig(
     }
 
     if (!result.ok) {
-        const errCode = result.data?.code ?? 'unknown_error';
-        const errMsg = result.data?.message ?? 'MCP returned an error with no message';
-        process.stderr.write(chalk.red(`error: ${errCode}: ${errMsg}\n`));
-        process.exit(1);
+        failWithToolError(result.data, name);
     }
 
     if (options.json) {

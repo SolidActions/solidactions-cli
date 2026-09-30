@@ -1008,6 +1008,7 @@ skill
     .description('Push a local skill folder into the library (create, or update if it already exists)')
     .argument('<dir>', 'Path to the skill directory (must contain SKILL.md)')
     .option('--role <name>', 'Scope the skill to a role instead of the shared library')
+    .option('--in-crew <crew>', 'Crew containing the role (with --role; disambiguates roles in multiple crews)')
     .option('--json', 'Output result as JSON')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--publish', 'Publish (snapshot) the skill after pushing, making it live for agents')
@@ -1113,6 +1114,7 @@ const role = program.command('role').description('Manage roles (crews SOP surfac
 role
     .command('push <dir>')
     .description('Push a role definition (create or update)')
+    .option('--in-crew <crew>', 'Crew that contains the role (required to create a role; disambiguates when the name exists in several crews)')
     .option('--dry-run', 'Preview create vs update without writing')
     .option('--json', 'Output result as JSON')
     .action(async (dir, options) => {
