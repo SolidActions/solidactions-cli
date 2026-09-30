@@ -34,6 +34,34 @@ interface McpRawResult {
     content: any[];
 }
 
+/** Total HTTP attempts for one call when the server answers 429 (the first try plus 2 retries). */
+const RATE_LIMIT_MAX_ATTEMPTS = 3;
+/** Wait used when a 429 carries no usable Retry-After. */
+const RATE_LIMIT_DEFAULT_WAIT_SEC = 5;
+/** No single wait exceeds this, whatever the server asks for. */
+const RATE_LIMIT_MAX_WAIT_SEC = 60;
+
+interface HttpAttempt {
+    status: number;
+    retryAfter: string | string[] | undefined;
+    raw: string;
+}
+
+/** Seconds to wait for a Retry-After value (integer seconds or HTTP-date, RFC 9110); default when missing/invalid; capped. */
+function retryAfterSeconds(header: string | string[] | undefined): number {
+    const value = (Array.isArray(header) ? header[0] : header)?.trim();
+    let sec = RATE_LIMIT_DEFAULT_WAIT_SEC;
+    if (value) {
+        if (/^\d+$/.test(value)) {
+            sec = parseInt(value, 10);
+        } else {
+            const at = Date.parse(value);
+            if (!Number.isNaN(at)) sec = Math.max(0, Math.ceil((at - Date.now()) / 1000));
+        }
+    }
+    return Math.min(sec, RATE_LIMIT_MAX_WAIT_SEC);
+}
+
 /** Internal: POST one tools/call and return the raw result envelope (isError + content blocks). */
 async function postMcpTool(config: Config, endpointPath: string, toolName: string, args: Record<string, unknown>): Promise<McpRawResult> {
     const baseHeaders = getApiHeaders(config, 'application/json');
@@ -53,7 +81,7 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
     const isHttps = parsed.protocol === 'https:';
     const transport = isHttps ? https : http;
 
-    const responseData = await new Promise<string>((resolve, reject) => {
+    const attempt = () => new Promise<HttpAttempt>((resolve, reject) => {
         const options: http.RequestOptions = {
             hostname: parsed.hostname,
             port: parsed.port || (isHttps ? 443 : 80),
@@ -68,14 +96,11 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
             const chunks: Buffer[] = [];
             res.on('data', (chunk: Buffer) => { chunks.push(chunk); });
             res.on('end', () => {
-                const raw = Buffer.concat(chunks).toString('utf8');
-                if (res.statusCode === 404) {
-                    reject(new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${raw}`));
-                } else if (res.statusCode && res.statusCode >= 400) {
-                    reject(new Error(`MCP request failed with HTTP ${res.statusCode}: ${raw}`));
-                } else {
-                    resolve(raw);
-                }
+                resolve({
+                    status: res.statusCode ?? 0,
+                    retryAfter: res.headers['retry-after'],
+                    raw: Buffer.concat(chunks).toString('utf8'),
+                });
             });
         });
 
@@ -83,6 +108,23 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         req.write(body);
         req.end();
     });
+
+    let last: HttpAttempt;
+    for (let n = 1; ; n++) {
+        last = await attempt();
+        if (last.status !== 429 || n >= RATE_LIMIT_MAX_ATTEMPTS) break;
+        const waitSec = retryAfterSeconds(last.retryAfter);
+        process.stderr.write(`solidactions: rate limited by server (429); retrying in ${waitSec}s (attempt ${n + 1}/${RATE_LIMIT_MAX_ATTEMPTS})\n`);
+        await new Promise<void>((resolve) => setTimeout(resolve, waitSec * 1000));
+    }
+
+    if (last.status === 404) {
+        throw new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${last.raw}`);
+    }
+    if (last.status >= 400) {
+        throw new Error(`MCP request failed with HTTP ${last.status}: ${last.raw}`);
+    }
+    const responseData = last.raw;
 
     let parsed2: any;
     try {

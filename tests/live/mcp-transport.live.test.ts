@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
+import { createCleanup } from './cleanup';
 
 describe.skipIf(!LIVE)('mcp transport (live)', () => {
     const config = liveConfig()!;
@@ -13,6 +14,8 @@ describe.skipIf(!LIVE)('mcp transport (live)', () => {
     it('round-trips a ~200KB multibyte body byte-identical', async () => {
         const name = `cli-live-utf8-${Date.now()}`;
         const body = ('— ✓ 漢字 🚀 ').repeat(12000);
+        const cleanup = createCleanup(config);
+        cleanup.sharedSkill(name);
         try {
             const created = await callCrewsTool(config, 'skills', {
                 action: 'create', name, description: 'utf8 live test', body,
@@ -22,7 +25,7 @@ describe.skipIf(!LIVE)('mcp transport (live)', () => {
             expect(read.ok, JSON.stringify(read.data)).toBe(true);
             expect(read.data.body).toBe(body);
         } finally {
-            await callCrewsTool(config, 'skills', { action: 'delete', identifier: name }).catch(() => undefined);
+            await cleanup.run();
         }
     });
 });

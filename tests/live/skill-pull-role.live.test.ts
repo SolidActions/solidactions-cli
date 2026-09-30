@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
+import { createCleanup } from './cleanup';
 import { skillPullWithConfig, fetchSkillFiles, SKILL_SIDECAR } from '../../src/commands/skill-pull';
 
 class ProcessExitError extends Error {
@@ -42,6 +43,7 @@ describe.skipIf(!LIVE)('skill pull --role (live)', () => {
     const roleSkill = `pull-role-skill-${stamp}`;
     const sharedSkill = `pull-shared-skill-${stamp}`;
     const tmpDirs: string[] = [];
+    const cleanup = createCleanup(config);
 
     const mkTmp = () => {
         const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-pull-live-'));
@@ -50,6 +52,9 @@ describe.skipIf(!LIVE)('skill pull --role (live)', () => {
     };
 
     beforeAll(async () => {
+        cleanup.crew(crew);
+        cleanup.role(role, crew);
+        cleanup.sharedSkill(sharedSkill);
         const c = await callCrewsTool(config, 'crews_manage', { action: 'create', name: crew, description: 'cli live test crew', body: '# Crew\nlive' });
         expect(c.ok, JSON.stringify(c.data)).toBe(true);
         const r = await callCrewsTool(config, 'roles', { action: 'create', name: role, description: 'cli live role', body: '# Role\nlive', in_crew: crew, version_mode: 'live' });
@@ -67,14 +72,7 @@ describe.skipIf(!LIVE)('skill pull --role (live)', () => {
     });
 
     afterAll(async () => {
-        const cleanups: Array<[string, Record<string, unknown>]> = [
-            ['crews_delete', { action: 'delete_skill', identifier: sharedSkill }],
-            ['crews_delete', { action: 'delete_role', name: role, in_crew: crew }],
-            ['crews_delete', { action: 'delete_crew', name: crew }],
-        ];
-        for (const [tool, args] of cleanups) {
-            try { await callCrewsTool(config, tool, args); } catch { /* best-effort */ }
-        }
+        await cleanup.run();
         for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
     });
 

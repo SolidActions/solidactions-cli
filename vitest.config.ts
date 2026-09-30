@@ -25,6 +25,10 @@ export default defineConfig({
                     name: 'live',
                     include: ['tests/live/**/*.test.ts'],
                     fileParallelism: false,
+                    // Live calls can hit the server's 60/min throttle; the transport then waits out
+                    // Retry-After (<=60s, up to 2 waits), so budget well past the unit default.
+                    testTimeout: 240_000,
+                    hookTimeout: 240_000,
                 },
             },
         ],

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
+import { createCleanup } from './cleanup';
 
 describe.skipIf(!LIVE)('crews routing (live)', () => {
     const config = liveConfig()!;
@@ -8,8 +9,12 @@ describe.skipIf(!LIVE)('crews routing (live)', () => {
     const crew = `cli-live-crew-${stamp}`;
     const role = `cli-live-role-${stamp}`;
     const sharedSkill = `cli-live-shared-${stamp}`;
+    const cleanup = createCleanup(config);
 
     beforeAll(async () => {
+        cleanup.crew(crew);
+        cleanup.role(role, crew);
+        cleanup.sharedSkill(sharedSkill);
         const c = await callCrewsTool(config, 'crews_manage', { action: 'create', name: crew, description: 'cli live test crew', body: '# Crew\nlive' });
         expect(c.ok, JSON.stringify(c.data)).toBe(true);
         const r = await callCrewsTool(config, 'roles', { action: 'create', name: role, description: 'cli live role', body: '# Role\nlive', in_crew: crew, version_mode: 'live' });
@@ -19,15 +24,7 @@ describe.skipIf(!LIVE)('crews routing (live)', () => {
     });
 
     afterAll(async () => {
-        // Best-effort cleanup of everything this suite created on the dev stack.
-        const cleanups: Array<[string, Record<string, unknown>]> = [
-            ['crews_delete', { action: 'delete_skill', identifier: sharedSkill }],
-            ['crews_delete', { action: 'delete_role', name: role, in_crew: crew }],
-            ['crews_delete', { action: 'delete_crew', name: crew }],
-        ];
-        for (const [tool, args] of cleanups) {
-            try { await callCrewsTool(config, tool, args); } catch { /* best-effort */ }
-        }
+        await cleanup.run();
     });
 
     it('lists roles', async () => {

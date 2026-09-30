@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
+import { createCleanup } from './cleanup';
 import { publishSkillByName } from '../../src/utils/skill-snapshot';
 
 describe.skipIf(!LIVE)('skill publish --role (live)', () => {
@@ -9,8 +10,11 @@ describe.skipIf(!LIVE)('skill publish --role (live)', () => {
     const crew = `cli-pub-crew-${stamp}`;
     const role = `cli-pub-role-${stamp}`;
     const skill = 'live-skill';
+    const cleanup = createCleanup(config);
 
     beforeAll(async () => {
+        cleanup.crew(crew);
+        cleanup.role(role, crew);
         const c = await callCrewsTool(config, 'crews_manage', { action: 'create', name: crew, description: 'cli live test crew', body: '# Crew\nlive' });
         expect(c.ok, JSON.stringify(c.data)).toBe(true);
         // Versioned role (no version_mode: 'live') so a snapshot is meaningful.
@@ -21,13 +25,7 @@ describe.skipIf(!LIVE)('skill publish --role (live)', () => {
     });
 
     afterAll(async () => {
-        const cleanups: Array<[string, Record<string, unknown>]> = [
-            ['crews_delete', { action: 'delete_role', name: role, in_crew: crew }],
-            ['crews_delete', { action: 'delete_crew', name: crew }],
-        ];
-        for (const [tool, args] of cleanups) {
-            try { await callCrewsTool(config, tool, args); } catch { /* best-effort */ }
-        }
+        await cleanup.run();
     });
 
     it('publishes an edited role-scoped skill', async () => {

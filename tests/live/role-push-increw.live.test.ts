@@ -5,6 +5,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
+import { createCleanup } from './cleanup';
 
 const CLI = path.resolve(__dirname, '../../dist/index.js');
 
@@ -17,6 +18,7 @@ describe.skipIf(!LIVE)('role push / skill push --in-crew (live, real CLI)', () =
     const orphanRole = `cli-push-orphan-${stamp}`;
     const roleSkill = `push-role-skill-${stamp}`;
     const tmpDirs: string[] = [];
+    const cleanup = createCleanup(config);
 
     const mkTmp = () => {
         const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-push-live-'));
@@ -52,27 +54,16 @@ describe.skipIf(!LIVE)('role push / skill push --in-crew (live, real CLI)', () =
 
     beforeAll(async () => {
         expect(fs.existsSync(CLI), 'run `npm run build` first').toBe(true);
+        cleanup.crew(crew);
+        cleanup.role(role, crew);
+        cleanup.role(versionedRole, crew);
+        cleanup.role(orphanRole);
         const c = await callCrewsTool(config, 'crews_manage', { action: 'create', name: crew, description: 'cli live test crew', body: '# Crew\nlive' });
         expect(c.ok, JSON.stringify(c.data)).toBe(true);
     });
 
     afterAll(async () => {
-        const cleanups: Array<[string, Record<string, unknown>]> = [
-            ['crews_delete', { action: 'delete_role', name: role, in_crew: crew }],
-            ['crews_delete', { action: 'delete_role', name: versionedRole, in_crew: crew }],
-            ['crews_delete', { action: 'delete_role', name: orphanRole }],
-            ['crews_delete', { action: 'delete_crew', name: crew }],
-        ];
-        for (const [tool, args] of cleanups) {
-            try {
-                const r = await callCrewsTool(config, tool, args);
-                if (!r.ok && r.data?.code !== 'role_not_found') {
-                    console.warn(`cleanup ${tool} ${JSON.stringify(args)} returned ok:false: ${JSON.stringify(r.data)}`);
-                }
-            } catch (e: any) {
-                console.warn(`cleanup ${tool} threw: ${e.message}`);
-            }
-        }
+        await cleanup.run();
         for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
     });
 
