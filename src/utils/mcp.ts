@@ -16,6 +16,14 @@ import { getApiHeaders } from './api';
 const pkg = require('../../package.json');
 const CLI_VERSION: string = pkg.version;
 
+/** A JSON-RPC `error` member in the server's response (protocol-level failure, not a tool isError). */
+export class McpRpcError extends Error {
+    constructor(public readonly code: number, message: string) {
+        super(message);
+        this.name = 'McpRpcError';
+    }
+}
+
 export interface McpToolResult {
     ok: boolean;
     data: any;
@@ -55,9 +63,12 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         };
 
         const req = transport.request(options, (res) => {
-            let raw = '';
-            res.on('data', (chunk) => { raw += chunk; });
+            // Collect bytes and decode once: appending Buffer chunks to a string decodes
+            // each chunk separately and corrupts multibyte UTF-8 split across chunks.
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => { chunks.push(chunk); });
             res.on('end', () => {
+                const raw = Buffer.concat(chunks).toString('utf8');
                 if (res.statusCode === 404) {
                     reject(new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${raw}`));
                 } else if (res.statusCode && res.statusCode >= 400) {
@@ -80,6 +91,10 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         throw new Error(`MCP server returned non-JSON response: ${responseData}`);
     }
 
+    if (parsed2?.error) {
+        throw new McpRpcError(parsed2.error.code ?? -1, `MCP ${toolName}: ${parsed2.error.message ?? JSON.stringify(parsed2.error)}`);
+    }
+
     const result = parsed2?.result;
     return { isError: result?.isError === true, content: result?.content ?? [] };
 }
@@ -91,7 +106,10 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
  */
 async function callMcpTool(config: Config, endpointPath: string, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const raw = await postMcpTool(config, endpointPath, toolName, args);
-    const textContent: string = raw.content?.[0]?.text ?? '{}';
+    if (!raw.content || raw.content.length === 0) {
+        return { ok: false, data: { code: 'empty_result', message: `MCP ${toolName} returned no content` } };
+    }
+    const textContent: string = raw.content[0]?.text ?? '{}';
 
     let toolData: any;
     try {
