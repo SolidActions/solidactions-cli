@@ -30,7 +30,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
-import { crewErrorHint } from '../utils/crew';
+import { crewErrorHint, normalizeCrewPath } from '../utils/crew';
 import { ROLE_SIDECAR } from './skill-pull';
 import { parseSkillFile, assertNoReservedFrontmatterKeys, shapeFrontmatterParams, noteFoldedFrontmatterKeys, ROLE_FRONTMATTER_PARAMS } from './skill-push';
 
@@ -46,10 +46,25 @@ export interface RolePushOptions {
 const LINK_FIELDS = ['always_load_skills', 'available_skills'] as const;
 
 /** What `role pull` recorded in .solidactions-role.json (only the parts push needs). */
-interface RoleSidecarInfo {
+export interface RoleSidecarInfo {
     name: string;
+    /** Normalised crew path recorded at pull time (null = pulled without --in-crew). */
     inCrew: string | null;
+    /** The pulled role's doc id, when the read payload had one. */
+    docId: number | null;
     links: Record<(typeof LINK_FIELDS)[number], string[]>;
+}
+
+/** A doc id from JSON (number or numeric string); anything else => null. */
+function asDocId(v: unknown): number | null {
+    const n = typeof v === 'string' && /^\d+$/.test(v) ? parseInt(v, 10) : v;
+    return typeof n === 'number' && Number.isInteger(n) ? n : null;
+}
+
+/** The role an edit is about to change: its crew as spelled anywhere, and its doc id when known. */
+export interface EditTarget {
+    crew: string | null;
+    docId?: number | null;
 }
 
 /**
@@ -58,7 +73,7 @@ interface RoleSidecarInfo {
  * which errs on the safe side: an unchanged (absent) list is omitted, a present list needs
  * --replace-links.
  */
-function readRoleSidecar(absDir: string): RoleSidecarInfo | null {
+export function readRoleSidecar(absDir: string): RoleSidecarInfo | null {
     const file = path.join(absDir, ROLE_SIDECAR);
     if (!fs.existsSync(file)) return null;
     let raw: any;
@@ -71,7 +86,8 @@ function readRoleSidecar(absDir: string): RoleSidecarInfo | null {
     const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
     return {
         name: raw.name,
-        inCrew: typeof raw.in_crew === 'string' && raw.in_crew !== '' ? raw.in_crew : null,
+        inCrew: normalizeCrewPath(raw.in_crew),
+        docId: asDocId(raw.doc_id),
         links: {
             always_load_skills: asList(raw.links?.always_load_skills),
             available_skills: asList(raw.links?.available_skills),
@@ -82,39 +98,63 @@ function readRoleSidecar(absDir: string): RoleSidecarInfo | null {
 /**
  * When editing the role this folder was pulled from, leave unchanged link lists out of the edit
  * (the server then preserves every link, hidden ones included) and refuse a changed list unless
- * --replace-links. Not the pulled role (no sidecar, other name, other crew) => params as-is.
+ * --replace-links. Not the pulled role => params as-is. "Pulled role" means the sidecar name equals
+ * the frontmatter name and, when both sides know the role's doc id, the doc ids are equal;
+ * otherwise (either id unknown) the sidecar's crew, if it recorded one, must equal the target crew
+ * after normalisation (trimmed segments, empty ones dropped).
  * Equality is exact and ordered; absent equals []. Returns the params to send and the fields
  * that were kept as-is (present in the frontmatter, left out of the call).
  */
-function applyLinkBaseline(
+export function planLinkBaseline(
     params: Record<string, unknown>,
     sidecar: RoleSidecarInfo | null,
     name: string,
-    targetCrew: string | null,
+    target: EditTarget,
     replaceLinks: boolean,
-): { params: Record<string, unknown>; kept: string[] } {
-    if (!sidecar || sidecar.name !== name) return { params, kept: [] };
-    if (sidecar.inCrew !== null && sidecar.inCrew !== targetCrew) return { params, kept: [] };
+): { params: Record<string, unknown>; kept: string[]; refused: string | null } {
+    if (!sidecar || sidecar.name !== name) return { params, kept: [], refused: null };
+    if (sidecar.docId !== null && target.docId != null) {
+        if (sidecar.docId !== target.docId) return { params, kept: [], refused: null };
+    } else if (sidecar.inCrew !== null && sidecar.inCrew !== normalizeCrewPath(target.crew)) {
+        return { params, kept: [], refused: null };
+    }
     const out = { ...params };
     const kept: string[] = [];
     for (const field of LINK_FIELDS) {
         const base = sidecar.links[field];
+        // Absent equals []; a blank value (`always_load_skills:` => null) is not a list, so it counts as changed.
         const value = out[field] === undefined ? [] : out[field];
         const same = Array.isArray(value) && value.length === base.length && value.every((v, i) => v === base[i]);
         if (same) {
             if (out[field] !== undefined) kept.push(field);
             delete out[field];
         } else if (!replaceLinks) {
-            process.stderr.write(chalk.red(
-                `error: ${field} differs from what was pulled. The server may hold skill links you can't see, ` +
-                `and replacing the list deletes them. Re-run with --replace-links to replace it anyway.\n`,
-            ));
-            process.exit(1);
-        } else if (out[field] === undefined) {
-            out[field] = []; // list removed from the frontmatter + --replace-links: clear it
+            return {
+                params, kept: [],
+                refused: `${field} differs from what was pulled. The server may hold skill links you can't see, ` +
+                    `and replacing the list deletes them. Re-run with --replace-links to replace it anyway.`,
+            };
+        } else if (out[field] === undefined || out[field] === null) {
+            out[field] = []; // list removed or left blank in the frontmatter + --replace-links: clear it
         }
     }
-    return { params: out, kept };
+    return { params: out, kept, refused: null };
+}
+
+/** planLinkBaseline, exiting 1 with the refusal on stderr. */
+function applyLinkBaseline(
+    params: Record<string, unknown>,
+    sidecar: RoleSidecarInfo | null,
+    name: string,
+    target: EditTarget,
+    replaceLinks: boolean,
+): { params: Record<string, unknown>; kept: string[] } {
+    const plan = planLinkBaseline(params, sidecar, name, target, replaceLinks);
+    if (plan.refused !== null) {
+        process.stderr.write(chalk.red(`error: ${plan.refused}\n`));
+        process.exit(1);
+    }
+    return plan;
 }
 
 /** Print a role-push tool error (mapping crew-scoping codes to a hint) and exit 1. */
@@ -132,7 +172,7 @@ function failWithToolError(data: any, roleName: string): never {
 
 /** How a push without --in-crew resolved against the existing roles. */
 type Resolved =
-    | { kind: 'edit'; inCrew: string | null }
+    | { kind: 'edit'; inCrew: string | null; docId: number | null }
     | { kind: 'missing' }
     | { kind: 'ambiguous'; crews: Array<string | null> };
 
@@ -153,10 +193,10 @@ async function resolveExistingRole(config: Config, name: string): Promise<Resolv
         process.stderr.write(chalk.red(`error: could not list roles to find '${name}': ${list.data?.code ?? 'unknown_error'}: ${list.data?.message ?? 'MCP returned an error with no message'}\n`));
         process.exit(1);
     }
-    const roles: Array<{ identifier?: string; name?: string; in_crew?: string | null }> = Array.isArray(list.data?.roles) ? list.data.roles : [];
+    const roles: Array<{ identifier?: string; name?: string; in_crew?: string | null; doc_id?: unknown }> = Array.isArray(list.data?.roles) ? list.data.roles : [];
     const matches = roles.filter((r) => (r.identifier ?? r.name) === name);
     if (matches.length === 0) return { kind: 'missing' };
-    if (matches.length === 1) return { kind: 'edit', inCrew: matches[0].in_crew ?? null };
+    if (matches.length === 1) return { kind: 'edit', inCrew: matches[0].in_crew ?? null, docId: asDocId(matches[0].doc_id) };
     return { kind: 'ambiguous', crews: matches.map((m) => m.in_crew ?? null) };
 }
 
@@ -232,8 +272,8 @@ export async function rolePushWithConfig(
     const sidecar = readRoleSidecar(absDir);
     const replaceLinks = options.replaceLinks === true;
     /** The would-update line, after the same link check the real edit runs (may exit 1). */
-    const reportWouldUpdate = (targetCrew: string | null): never => {
-        const { kept } = applyLinkBaseline(frontmatterParams, sidecar, name, targetCrew, replaceLinks);
+    const reportWouldUpdate = (target: EditTarget): never => {
+        const { kept } = applyLinkBaseline(frontmatterParams, sidecar, name, target, replaceLinks);
         if (options.json) {
             console.log(JSON.stringify({}));
         } else {
@@ -243,7 +283,7 @@ export async function rolePushWithConfig(
         process.exit(0);
     };
     if (options.dryRun) {
-        if (resolved?.kind === 'edit') reportWouldUpdate(resolved.inCrew);
+        if (resolved?.kind === 'edit') reportWouldUpdate({ crew: resolved.inCrew, docId: resolved.docId });
         let readResult: Awaited<ReturnType<typeof callCrewsTool>>;
         try {
             readResult = await callCrewsTool(config, 'roles', { action: 'read', name, ...crewArgs });
@@ -264,13 +304,13 @@ export async function rolePushWithConfig(
             }
             // A versioned role with no published snapshot answers read with no_snapshot:
             // the role exists (there is a doc), it just has nothing live yet -> would update.
-            if (code === 'no_snapshot') reportWouldUpdate(options.inCrew ?? null);
+            if (code === 'no_snapshot') reportWouldUpdate({ crew: options.inCrew ?? null });
             // Any other error is unexpected — surface it
             failWithToolError(readResult.data, name);
         }
 
         // Read succeeded → role exists → would update
-        reportWouldUpdate(options.inCrew ?? null);
+        reportWouldUpdate({ crew: options.inCrew ?? null });
     }
 
     // Upsert. Resolved to an existing role (no --in-crew): edit it in the crew the list gave.
@@ -302,7 +342,7 @@ export async function rolePushWithConfig(
             : crewArgs;
         const { params: editParams } = applyLinkBaseline(
             frontmatterParams, sidecar, name,
-            resolved?.kind === 'edit' ? resolved.inCrew : (options.inCrew ?? null), replaceLinks,
+            resolved?.kind === 'edit' ? { crew: resolved.inCrew, docId: resolved.docId } : { crew: options.inCrew ?? null }, replaceLinks,
         );
         let edited: Awaited<ReturnType<typeof callCrewsTool>>;
         try {

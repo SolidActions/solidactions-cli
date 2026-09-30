@@ -144,3 +144,14 @@ export function crewErrorHint(code: unknown, roleName?: string, message?: unknow
     }
     return null;
 }
+
+/**
+ * Canonical spelling of a crew path for comparison: split on '/', trim each segment, drop empty
+ * segments, rejoin. Mirrors how the server resolves crew paths (it trims segments and ignores
+ * empty ones), so 'acme/', ' acme ' and 'acme' are the same crew. Blank or non-string => null.
+ */
+export function normalizeCrewPath(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const path = value.split('/').map((seg) => seg.trim()).filter((seg) => seg !== '').join('/');
+    return path === '' ? null : path;
+}

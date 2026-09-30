@@ -313,6 +313,35 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         expect((await readLinks(roleName)).always).toEqual([`shared/${skillC}`]);
     });
 
+    it('the link baseline still applies when the crew was spelled differently at pull time (trailing slash)', async () => {
+        const skillA = `rpull-spell-a-${stamp}`;
+        const skillC = `rpull-spell-c-${stamp}`;
+        const { roleName, docId } = await linkFixture('spell', [skillA, skillC], { always: [skillA] });
+
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', roleName, dest, '--in-crew', `${crew}/`, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const sidecar = JSON.parse(fs.readFileSync(path.join(dest, '.solidactions-role.json'), 'utf8'));
+        expect(sidecar.in_crew).toBe(crew); // recorded normalised
+
+        // Push without --in-crew resolves the crew from the server's list (canonical spelling).
+        const mdPath = path.join(dest, 'SKILL.md');
+        const md = fs.readFileSync(mdPath, 'utf8');
+        fs.writeFileSync(mdPath, md.replace(`shared/${skillA}`, `shared/${skillC}`));
+        const refused = runCli(['role', 'push', dest]);
+        expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+        expect(refused.stderr).toMatch(/--replace-links/);
+
+        // Unchanged list + body edit: pushed, and the list is left as-is.
+        fs.writeFileSync(mdPath, md.replace('old body', 'spelled body'));
+        const push = runCli(['role', 'push', dest]);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        await snapshot(docId);
+        const after = await readLinks(roleName);
+        expect(after.body).toContain('spelled body');
+        expect(after.always).toEqual([`shared/${skillA}`]);
+    });
+
     it('a role folder without the pull sidecar (hand-authored) sends its link lists as written', async () => {
         const skillA = `rpull-nosc-a-${stamp}`;
         const skillC = `rpull-nosc-c-${stamp}`;

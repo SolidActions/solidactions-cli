@@ -33,6 +33,7 @@ import chalk from 'chalk';
 import { Config } from '../utils/config';
 import { requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
+import { normalizeCrewPath } from '../utils/crew';
 import { writeDirAtomic, assertReplaceableDir } from '../utils/atomic-dir';
 import { ROLE_FRONTMATTER_PARAMS } from './skill-push';
 import { fetchSkillFiles, ROLE_SIDECAR } from './skill-pull';
@@ -179,7 +180,7 @@ export async function pullRoleWithConfig(
         Array.isArray(usable[key]) ? (usable[key] as string[]) : [];
     files[ROLE_SIDECAR] = JSON.stringify({
         name: roleName,
-        in_crew: inCrew ?? null,
+        in_crew: normalizeCrewPath(inCrew),
         links: {
             always_load_skills: linkBaseline('always_load_skills'),
             available_skills: linkBaseline('available_skills'),
