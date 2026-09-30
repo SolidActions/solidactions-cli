@@ -284,11 +284,11 @@ describe('docPullWithConfig — folder tree', () => {
             expect(raw.endsWith('\n')).toBe(true);
             expect(raw).toContain('\n  ');
 
-            // All requests hit /mcp with docs_vault
+            // All requests hit /mcp with docs_read
             expect(allCaptures.length).toBe(3);
             for (const cap of allCaptures) {
                 expect(cap.path).toBe('/mcp');
-                expect(cap.body.params.name).toBe('docs_vault');
+                expect(cap.body.params.name).toBe('docs_read');
             }
         } finally {
             restoreExit();
@@ -419,7 +419,7 @@ describe('docPullWithConfig — single-doc fallback', () => {
                 return makeMcpError('folder_path_not_found', 'No folder at that path');
             },
             (body: any) => {
-                expect(body.params.arguments.action).toBe('read');
+                expect(body.params.arguments.action).toBe('read_doc');
                 expect(body.params.arguments.path).toEqual({ folder_path: 'notes', title: 'solo' });
                 return makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3, folder_path: 'notes' });
             },

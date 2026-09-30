@@ -2,8 +2,8 @@
  * solidactions doc pull <folder> [dest]
  *
  * Downloads a Docs folder tree from SA-Docs into a local markdown tree (the
- * inverse of `doc push`): BFS-walks the folder via `docs_vault list`,
- * bulk-fetches doc bodies via `docs_vault bulk_read`, and writes each doc as
+ * inverse of `doc push`): BFS-walks the folder via `docs_read` `list`,
+ * bulk-fetches doc bodies via `docs_read` `bulk_read`, and writes each doc as
  * <dest>/<relative-folder>/<sanitized-title>.md plus a revision manifest
  * (<dest>/.solidactions-docs.json) recording id/title/current_revision_id
  * per file for later diffing.
@@ -179,7 +179,7 @@ function lastSegment(folderPath: string): string {
 }
 
 /**
- * BFS-walk `folderPath` via `docs_vault list`, collecting every doc row with
+ * BFS-walk `folderPath` via `docs_read` `list`, collecting every doc row with
  * its relative folder path. Returns null (with the list error message
  * already known to the caller) if the root list call fails.
  */
@@ -190,7 +190,7 @@ async function listTree(config: Config, folderPath: string): Promise<{ ok: true;
 
     while (queue.length > 0) {
         const { folder_path, relative } = queue.shift()!;
-        const result = await callDocsTool(config, 'docs_vault', { action: 'list', folder_path });
+        const result = await callDocsTool(config, { action: 'list', folder_path });
 
         if (!result.ok) {
             // A subfolder returned by the server itself failed to list is surfaced the
@@ -231,7 +231,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
     const warnings: string[] = [];
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
         const chunk = rows.slice(i, i + CHUNK_SIZE);
-        const result = await callDocsTool(config, 'docs_vault', {
+        const result = await callDocsTool(config, {
             action: 'bulk_read',
             items: chunk.map((r) => ({ id: r.id })),
         });
@@ -480,8 +480,8 @@ export async function docPullWithConfig(
         usedSingleDocFallback = true;
         const dir = path.dirname(folderPath);
         const title = path.basename(folderPath);
-        const readArgs: Record<string, unknown> = { action: 'read', path: dir === '.' ? { title } : { folder_path: dir, title } };
-        const readResult = await callDocsTool(config, 'docs_vault', readArgs);
+        const readArgs: Record<string, unknown> = { action: 'read_doc', path: dir === '.' ? { title } : { folder_path: dir, title } };
+        const readResult = await callDocsTool(config, readArgs);
 
         if (!readResult.ok) {
             const readCode = readResult.data?.code ?? 'unknown_error';
