@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
+import yaml from 'js-yaml';
 import { liveConfig, LIVE } from './live-env';
 import { callCrewsTool } from '../../src/utils/mcp';
 import { createCleanup } from './cleanup';
@@ -104,6 +105,9 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         expect(md).toContain(`name: ${role}`);
         expect(md).not.toMatch(/^in_crew:/m);
         expect(md).not.toMatch(/^type:/m);
+        // The role's own skill is auto-discovered by the server (a bare name in its available_skills index), not a link.
+        expect(md).not.toMatch(/^available_skills:/m);
+        expect(md).not.toMatch(/^always_load_skills:/m);
         expect(fs.existsSync(path.join(dest, 'skills', roleSkill, 'SKILL.md'))).toBe(true);
         expect(fs.readFileSync(path.join(dest, 'skills', roleSkill, 'references/notes.md'), 'utf8')).toBe('skill notes content');
         const sidecar = JSON.parse(fs.readFileSync(path.join(dest, '.solidactions-role.json'), 'utf8'));
@@ -136,6 +140,56 @@ describe.skipIf(!LIVE)('role pull (live, real CLI)', () => {
         const again = runCli(['role', 'pull', role, dest, '--in-crew', crew]);
         expect(again.status, again.stdout + again.stderr).toBe(0);
         expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toBe(md);
+    });
+
+    it('pulls always_load_skills and available_skills as identifiers, and role push of the folder recreates the links', async () => {
+        const skillA = `rpull-shared-a-${stamp}`;
+        const skillB = `rpull-shared-b-${stamp}`;
+        const linkRole = `cli-rpull-links-${stamp}`;
+        const cloneRole = `cli-rpull-clone-${stamp}`;
+        cleanup.sharedSkill(skillA);
+        cleanup.sharedSkill(skillB);
+        cleanup.role(linkRole, crew);
+        cleanup.role(cloneRole, crew);
+
+        for (const [n, marker] of [[skillA, 'preloaded marker'], [skillB, 'menu marker']]) {
+            const s = await callCrewsTool(config, 'skills', { action: 'create', name: n, description: `shared ${n}`, body: `# ${n}\n${marker}` });
+            expect(s.ok, JSON.stringify(s.data)).toBe(true);
+            await snapshot(docIdOf(s.data));
+        }
+        const r = await callCrewsTool(config, 'roles', {
+            action: 'create', name: linkRole, description: 'role with skill links', body: '# Links\nbody', in_crew: crew,
+            always_load_skills: [`shared/${skillA}`], available_skills: [`shared/${skillB}`],
+        });
+        expect(r.ok, JSON.stringify(r.data)).toBe(true);
+        await snapshot(docIdOf(r.data));
+
+        const src = await callCrewsTool(config, 'roles', { action: 'read', name: linkRole, in_crew: crew });
+        expect(src.ok, JSON.stringify(src.data)).toBe(true);
+        console.log(`live read shapes: always_load_skills[0] keys=${Object.keys(src.data.always_load_skills[0] ?? {}).join(',')}; available_skills[0] keys=${Object.keys(src.data.available_skills[0] ?? {}).join(',')}; redacted_keys=${JSON.stringify(src.data.redacted_keys)}`);
+
+        const dest = path.join(mkTmp(), 'out');
+        const pull = runCli(['role', 'pull', linkRole, dest, '--in-crew', crew, '--no-skills']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        const mdPath = path.join(dest, 'SKILL.md');
+        const md = fs.readFileSync(mdPath, 'utf8');
+        const fm = yaml.load(md.split('---\n')[1]) as Record<string, unknown>;
+        expect(fm.always_load_skills).toEqual([`shared/${skillA}`]);
+        expect(fm.available_skills).toEqual([`shared/${skillB}`]);
+
+        // The folder recreates the role, links included, under a new name.
+        fs.writeFileSync(mdPath, md.replace(`name: ${linkRole}`, `name: ${cloneRole}`));
+        const push = runCli(['role', 'push', dest, '--in-crew', crew]);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        expect(push.stdout).toMatch(/created role/);
+        const cloneDoc = parseInt(/\(doc (\d+)\)/.exec(push.stdout)?.[1] ?? '', 10);
+        expect(Number.isInteger(cloneDoc), push.stdout).toBe(true);
+        await snapshot(cloneDoc);
+
+        const clone = await callCrewsTool(config, 'roles', { action: 'read', name: cloneRole, in_crew: crew });
+        expect(clone.ok, JSON.stringify(clone.data)).toBe(true);
+        expect(clone.data.always_load_skills.map((b: any) => b.identifier)).toEqual([`shared/${skillA}`]);
+        expect(clone.data.available_skills.map((e: any) => e.identifier)).toEqual([`shared/${skillB}`]);
     });
 
     it('skill push of a pulled role folder is refused and uploads nothing', () => {

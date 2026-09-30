@@ -177,7 +177,7 @@ describe('role push — create success', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await rolePushWithConfig(dir, {}, stubConfig());
+                await rolePushWithConfig(dir, { inCrew: 'test-crew' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -239,7 +239,7 @@ describe('role push — create success', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await rolePushWithConfig(dir, {}, stubConfig());
+                await rolePushWithConfig(dir, { inCrew: 'test-crew' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -313,7 +313,7 @@ describe('role push — collision → edit (upsert)', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await rolePushWithConfig(dir, {}, stubConfig());
+                await rolePushWithConfig(dir, { inCrew: 'test-crew' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -380,7 +380,7 @@ describe('role push --dry-run — role does not exist', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await rolePushWithConfig(dir, { dryRun: true }, stubConfig());
+                await rolePushWithConfig(dir, { dryRun: true, inCrew: 'test-crew' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;
@@ -447,7 +447,7 @@ describe('role push --dry-run — role exists', () => {
         try {
             let caughtExit: ProcessExitError | null = null;
             try {
-                await rolePushWithConfig(dir, { dryRun: true }, stubConfig());
+                await rolePushWithConfig(dir, { dryRun: true, inCrew: 'test-crew' }, stubConfig());
             } catch (e) {
                 if (e instanceof ProcessExitError) caughtExit = e;
                 else throw e;

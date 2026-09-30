@@ -13,10 +13,18 @@
  * Everything is fetched first and then written with ONE writeDirAtomic, so a failed
  * fetch writes nothing and a successful pull replaces the folder as a unit.
  *
- * Inherited properties are merged by the server (RoleActivator) and are pulled as the
- * effective value: the folder holds what the role resolves to, not only what it sets itself.
- * A role with inherits_from therefore gets a warning: role push of the folder would store
- * the inherited values on the child.
+ * The role's skill preload configuration is not a property: the server stores
+ * always_load_skills / available_skills as role_skill_links rows and returns them top-level
+ * in `read`. They are exported into the always_load_skills / available_skills frontmatter
+ * fields (identifiers such as "shared/triage", in the server's order), which role push sends
+ * back top-level. Skills that sit in the role's own skills/ folder are auto-discovered by the
+ * server and appear in its available_skills index under a bare name; those are not links, so
+ * bare names are left out of available_skills (they travel in skills/ instead).
+ *
+ * Inherited properties and skill links are merged by the server (RoleActivator) and are pulled
+ * as the effective value: the folder holds what the role resolves to, not only what it sets
+ * itself. A role with inherits_from therefore gets a warning: role push of the folder would
+ * store the inherited values on the child.
  */
 
 import path from 'path';
@@ -50,6 +58,26 @@ function assertSafeSegment(skill: unknown): asserts skill is string {
     if (typeof skill !== 'string' || skill === '' || skill === '.' || skill === '..' || /[\\/]/.test(skill)) {
         throw new RolePullError(`server returned an unsafe skill name: ${JSON.stringify(skill)}`);
     }
+}
+
+/**
+ * Pull the skill identifiers out of a `read` payload's always_load_skills (resolved bundles) or
+ * available_skills (description entries): both carry the link's `identifier`, in server order.
+ * A missing field means none; a malformed one is an error rather than a silent loss.
+ */
+function skillIdentifiers(data: Record<string, unknown>, key: 'always_load_skills' | 'available_skills'): string[] {
+    const raw = data[key];
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw new RolePullError(`unexpected response shape from server: ${key} is not a list`);
+    const out: string[] = [];
+    for (const entry of raw) {
+        const id = isPlainObject(entry) ? entry.identifier : undefined;
+        if (typeof id !== 'string' || id === '') {
+            throw new RolePullError(`unexpected response shape from server: a ${key} entry has no identifier`);
+        }
+        if (!out.includes(id)) out.push(id);
+    }
+    return out;
 }
 
 function mapReadError(code: string, message: string, name: string, inCrew?: string): string {
@@ -109,6 +137,12 @@ export async function pullRoleWithConfig(
     // Values the server redacted are not the real values; pushing them back would corrupt the role.
     const redacted = Array.isArray(data.redacted_keys) ? (data.redacted_keys as unknown[]).filter((k): k is string => typeof k === 'string') : [];
     const usable: Record<string, unknown> = { ...properties, name: roleName };
+    // Skill links are top-level in the payload (not properties). available_skills also lists the
+    // role's auto-discovered local skills under bare names, which are not links: keep 'x/y' only.
+    const alwaysLoadSkills = skillIdentifiers(data, 'always_load_skills');
+    const availableSkills = skillIdentifiers(data, 'available_skills').filter((id) => id.includes('/'));
+    if (alwaysLoadSkills.length > 0) usable.always_load_skills = alwaysLoadSkills;
+    if (availableSkills.length > 0) usable.available_skills = availableSkills;
     for (const key of redacted) {
         if (key in usable && key !== 'name' && key !== 'description') {
             delete usable[key];
@@ -155,7 +189,7 @@ export async function pullRoleWithConfig(
     const parent = properties.inherits_from;
     if (typeof parent === 'string' && parent !== '') {
         process.stderr.write(chalk.yellow(
-            `warn: role ${roleName} inherits from ${parent}; the pulled properties include inherited values, ` +
+            `warn: role ${roleName} inherits from ${parent}; the pulled properties and skill links include inherited values, ` +
             `and pushing this folder back with role push will store them on ${roleName}.\n`,
         ));
     }

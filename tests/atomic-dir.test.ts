@@ -40,6 +40,25 @@ describe('writeDirAtomic', () => {
         expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toBe('old');
         expect(fs.readdirSync(base)).toEqual(['skill']);
     });
+
+    it('removes the staged temp dir and leaves dest untouched when moving the old dest aside fails', () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-'));
+        const dest = path.join(base, 'skill');
+        fs.mkdirSync(dest);
+        fs.writeFileSync(path.join(dest, 'SKILL.md'), 'old');
+        // A real failure: the exact `.old-<stamp>` path is already a non-empty dir, so renaming dest onto it fails (ENOTEMPTY/EEXIST).
+        const stamp = 'blocked';
+        const blocker = `${dest}.old-${stamp}`;
+        fs.mkdirSync(blocker);
+        fs.writeFileSync(path.join(blocker, 'in-the-way.txt'), 'x');
+
+        expect(() => writeDirAtomic(dest, { 'SKILL.md': 'new' }, { stamp })).toThrow(/ENOTEMPTY|EEXIST/);
+
+        expect(fs.readdirSync(base).sort()).toEqual(['skill', 'skill.old-blocked']); // no .tmp-* left behind
+        expect(fs.readdirSync(dest)).toEqual(['SKILL.md']);
+        expect(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8')).toBe('old');
+        expect(fs.readFileSync(path.join(blocker, 'in-the-way.txt'), 'utf8')).toBe('x');
+    });
 });
 
 describe('assertReplaceableDir', () => {
