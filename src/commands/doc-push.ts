@@ -431,16 +431,29 @@ export async function docPushWithConfig(
     // A single file is pushed as if its directory held only that file.
     const absDir = singleFile ? path.dirname(absPath) : absPath;
 
-    const allFiles = singleFile ? [absPath] : walkDocFiles(absDir);
-    assertBodiesWithinCap(allFiles, absDir);
-    assertCanvasFilesParse(allFiles, absDir);
-    if (!singleFile) {
-        assertUniqueTitles(allFiles, absDir);
-    }
-
     // A missing/unparseable manifest means nothing is tracked — everything is untracked,
     // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
     const manifest = readManifest(absDir, { warnOnParseError: true });
+
+    const allFiles = singleFile ? [absPath] : walkDocFiles(absDir);
+    // Files the manifest marks `media: true` are owned by the media pass below, not
+    // the doc-body pass: skip them in the filename-based preflight (the 1 MiB body
+    // cap, the canvas JSON check, the duplicate-title check — a tracked media file
+    // creates no new doc title). Media keeps its own size handling (the server's
+    // media cap); real doc-body files keep all three checks.
+    const mediaRelPaths = new Set(
+        Object.entries(manifest?.docs ?? {})
+            .filter(([, entry]) => entry.media)
+            .map(([relPath]) => relPath),
+    );
+    const docBodyFiles = allFiles.filter(
+        (file) => !mediaRelPaths.has(path.relative(absDir, file).split(path.sep).join('/')),
+    );
+    assertBodiesWithinCap(docBodyFiles, absDir);
+    assertCanvasFilesParse(docBodyFiles, absDir);
+    if (!singleFile) {
+        assertUniqueTitles(docBodyFiles, absDir);
+    }
     const trackedMediaEntries = singleFile
         ? Object.entries(manifest?.docs ?? {}).filter(
             ([relPath, e]) => e.media && relPath === path.relative(absDir, absPath).split(path.sep).join('/'),

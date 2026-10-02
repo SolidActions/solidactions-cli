@@ -2819,6 +2819,99 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: tracked media skips the filename-based doc-body preflight (R3-I1)
+// ---------------------------------------------------------------------------
+
+describe('doc push — tracked media skips doc-body preflight (R3-I1)', () => {
+    function manifestFile(docs: DocsManifest['docs']): string {
+        return JSON.stringify({ folder_path: '/some/folder', docs }, null, 2);
+    }
+
+    const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
+
+    it('unchanged tracked media named board.canvas: exit 0, no JSON Canvas error, no request', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'board.canvas': { id: 5, title: 'board.canvas', current_revision_id: 3, media: true, body_sha256: sha256Hex(PNG_BYTES) },
+            }),
+        });
+        writeBinaryFile(dir, 'board.canvas', PNG_BYTES);
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).not.toContain('not a valid JSON Canvas file');
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('changed tracked media named board.canvas: no canvas error, media replace request reaches the stub, exit 0', async () => {
+        const oldBytes = PNG_BYTES;
+        const newBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0xfd, 0xfc]);
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'board.canvas': { id: 5, title: 'board.canvas', current_revision_id: 3, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+        writeBinaryFile(dir, 'board.canvas', newBytes);
+        queueMedia(200, { doc: { id: 5, current_version_id: 4 } });
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).not.toContain('not a valid JSON Canvas file');
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/5/media');
+            expect(mediaCalls.length).toBe(1);
+            expect(allCaptures.length).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('changed tracked media notes.md over 1 MiB: not refused by the body cap, media request reaches the stub, exit 0', async () => {
+        const oldBytes = Buffer.from('old notes bytes');
+        const newBytes = Buffer.alloc(1_200_000, 'a');
+        const { dir, cleanup } = makeTmpDocsDir({
+            [DOCS_MANIFEST]: manifestFile({
+                'notes.md': { id: 6, title: 'notes.md', current_revision_id: 3, media: true, body_sha256: sha256Hex(oldBytes) },
+            }),
+        });
+        writeBinaryFile(dir, 'notes.md', newBytes);
+        queueMedia(200, { doc: { id: 6, current_version_id: 4 } });
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).not.toContain('1 MiB');
+            const mediaCalls = allCaptures.filter((c) => c.path === '/api/v1/docs/6/media');
+            expect(mediaCalls.length).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('tracked media board.canvas does not collide with an untracked board.canvas.json of the same title', async () => {
+        const canvasBody = '{"nodes":[],"edges":[]}';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'board.canvas.json': canvasBody,
+            [DOCS_MANIFEST]: manifestFile({
+                'board.canvas': { id: 5, title: 'board.canvas', current_revision_id: 3, media: true, body_sha256: sha256Hex(PNG_BYTES) },
+            }),
+        });
+        writeBinaryFile(dir, 'board.canvas', PNG_BYTES);
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).not.toContain('would both create');
+            expect(allCaptures.length).toBe(1);
+            const items = allCaptures[0].body.params.arguments.items;
+            expect(items).toEqual([{ title: 'board', body: canvasBody, type: 'canvas' }]);
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Tests: single file and --replace (cli#154)
 // ---------------------------------------------------------------------------
 
