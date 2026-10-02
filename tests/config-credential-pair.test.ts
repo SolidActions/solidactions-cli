@@ -6,7 +6,7 @@
  * records every request's URL and Authorization header. The real built CLI
  * (`dist/index.js`) runs with a temp HOME and a temp cwd. No mock/spy/stub
  * libraries. Never prints an API key: assertions check for the key's absence
- * and for the redacted bearer the server sees.
+ * and for the real `Bearer <key>` value the server sees.
  */
 import * as childProcess from 'child_process';
 import * as fs from 'fs';

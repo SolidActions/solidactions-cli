@@ -1,3 +1,4 @@
+import childProcess from 'child_process';
 import fs from 'fs';
 import { createHash } from 'crypto';
 import http from 'http';
@@ -9,6 +10,49 @@ import axios from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { assertCountableTableLimit, normalizeDatabaseForPush, databasePushWithConfig } from '../src/commands/database-push';
+import { writeGlobal } from './helpers';
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+interface CliResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Run the built CLI in a child process with a temp HOME: real stdout,
+ * stderr and exit status. The stub server lives in this process.
+ * Async spawn (never spawnSync) so the in-process server stays responsive.
+ */
+async function runPushCli(args: string[], home: string, cwd: string): Promise<CliResult> {
+    return new Promise<CliResult>((resolve, reject) => {
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+        delete childEnv.SOLIDACTIONS_HOST;
+        delete childEnv.SOLIDACTIONS_API_KEY;
+        delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
+            cwd,
+            env: childEnv,
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+        }, 60_000);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ code, stdout, stderr });
+        });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
 
 const roots: string[] = [];
 afterEach(() => {
@@ -187,11 +231,16 @@ describe('database push workflow', () => {
                 resolve();
             });
         });
+        const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-push-cli-'));
+        const home = path.join(homeRoot, 'home');
+        fs.mkdirSync(home, { recursive: true });
+        writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'control-api-key', workspaceId: 'w1' });
         try {
-            const output: string[] = [];
             // Real transport (default axios post/upload) against the local
-            // server above; only stdout is collected. No vi.fn doubles.
-            await databasePushWithConfig('analytics', source, { yes: true }, { host: `http://127.0.0.1:${port}`, apiKey: 'control-api-key', workspaceId: 'w1' }, { stdout: (line) => output.push(line) });
+            // server above, through the real built binary: real stdout,
+            // stderr and exit status. No vi.fn doubles, no output sink.
+            const result = await runPushCli(['database', 'push', 'analytics', source, '--yes'], home, homeRoot);
+            expect(result.code).toBe(0);
             expect(controlBodies.map((body) => body.operation)).toEqual(['show', 'bulk_load_prepare', 'bulk_load_promote', 'bulk_load_status']);
             expect(controlBodies[1]).toMatchObject({ bulk_mode: 'replace', allow_empty: false });
             expect(controlBodies[2]).toMatchObject({ upload_http_status: 200 });
@@ -200,13 +249,16 @@ describe('database push workflow', () => {
             expect(uploads[0].contentLength).toBe(String((controlBodies[1] as { input_bytes: number }).input_bytes));
             expect(uploads[0].bytes.length).toBe((controlBodies[1] as { input_bytes: number }).input_bytes);
             expect(uploads[0].bytes.subarray(0, 16).toString('utf8')).toBe('SQLite format 3\0');
-            expect(output.join('\n')).not.toContain(uploadToken).not.toContain(uploadMarker);
-            expect(output.join('\n').toLowerCase()).toContain('reacquire');
-            expect(output.join('\n')).toContain('countable rows');
-            expect(output.join('\n')).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
-            const warning = output.find((line) => line.startsWith('WARNING:'))!;
-            expect(warning).toContain(`database "analytics" in workspace w1 on http://127.0.0.1:${port}.`);
+            expect(result.stdout + result.stderr).not.toContain(uploadToken).not.toContain(uploadMarker);
+            expect(result.stdout.toLowerCase()).toContain('reacquire');
+            expect(result.stdout).toContain('countable rows');
+            expect(result.stdout).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
+            expect(result.stdout).toContain(`WARNING: This destructively replaces database "analytics" in workspace w1 on http://127.0.0.1:${port}.`);
+            expect(result.stderr).toContain('Workspace:');
+            expect(result.stderr).toContain('w1');
+            expect(result.stderr).toContain(`on http://127.0.0.1:${port}`);
         } finally {
+            fs.rmSync(homeRoot, { recursive: true, force: true });
             await new Promise<void>((resolve, reject) => {
                 server.close((error) => (error ? reject(error) : resolve()));
             });

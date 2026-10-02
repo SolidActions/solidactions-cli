@@ -296,6 +296,35 @@ interface PlannedDoc {
 export interface SingleDocReserved {
     usedNames: Map<string, Set<string>>;
     pathById: Map<number, string>;
+    /** Previous manifest title per doc id; an unchanged title keeps its collision path (R2-I2). */
+    titleById: Map<number, string>;
+}
+
+/**
+ * Allocate the first free `<base>[ -N]<ext>` name not present in `used`,
+ * recording the winner in `used`.
+ */
+function allocateName(used: Set<string>, base: string, ext: string): string {
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(`${candidate}${ext}`)) {
+        candidate = `${base}-${suffix}`;
+        suffix++;
+    }
+    const fileName = `${candidate}${ext}`;
+    used.add(fileName);
+    return fileName;
+}
+
+/**
+ * Whether `file` is the allocator's own output for `base` + `ext`: exactly
+ * `<base><ext>` or `<base>-N<ext>` with an integer N >= 2.
+ */
+function isCollisionVariant(file: string, base: string, ext: string): boolean {
+    if (file === `${base}${ext}`) return true;
+    if (!file.startsWith(`${base}-`) || !file.endsWith(ext)) return false;
+    const middle = file.slice(base.length + 1, file.length - ext.length);
+    return middle !== '' && Number.isInteger(Number(middle)) && Number(middle) >= 2;
 }
 
 /**
@@ -309,8 +338,10 @@ export interface SingleDocReserved {
  * with the file names the previous manifest assigns, and `pathById` frees
  * each pulled doc's own tracked name back to it, so a stable title
  * reallocates its own path (reuse in effect) while every other tracked
- * name still forces a suffix. Folder pulls pass nothing and behave
- * exactly as before.
+ * name still forces a suffix. When the tracked title is unchanged and the
+ * tracked path is a collision variant of that title in the same folder,
+ * the doc keeps that exact path (R2-I2); a renamed/stale path still
+ * reallocates. Folder pulls pass nothing and behave exactly as before.
  */
 async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
@@ -360,16 +391,31 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
             }
         }
 
-        let candidate = base;
-        let suffix = 2;
-        while (used.has(`${candidate}${ext}`)) {
-            candidate = `${base}-${suffix}`;
-            suffix++;
+        // Unchanged title keeps its existing collision-assigned path (R2-I2):
+        // the tracked path must be in this same folder and be the base name
+        // or a `-N` collision variant of it. A stale/renamed path (e.g. the
+        // `renamed.md` merge fixture) falls through to reallocation below.
+        const ownTitle = reserved?.titleById.get(doc.id);
+        let fileName: string;
+        let relPath: string;
+        if (ownRelPath !== undefined && ownTitle !== undefined && ownTitle === doc.title) {
+            const slash = ownRelPath.lastIndexOf('/');
+            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+            const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
+            if (ownDir === dirRel && isCollisionVariant(ownFile, base, ext)) {
+                fileName = ownFile;
+                relPath = ownRelPath;
+                used.add(ownFile);
+            } else {
+                const allocated = allocateName(used, base, ext);
+                fileName = allocated;
+                relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
+            }
+        } else {
+            const allocated = allocateName(used, base, ext);
+            fileName = allocated;
+            relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
         }
-        used.add(`${candidate}${ext}`);
-
-        const fileName = `${candidate}${ext}`;
-        const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
         let bodySha256: string | null;
         let mediaBytes: Buffer | null = null;
@@ -575,8 +621,10 @@ async function report(
     if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
         const usedNames = new Map<string, Set<string>>();
         const pathById = new Map<number, string>();
+        const titleById = new Map<number, string>();
         for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
             pathById.set(entry.id, relPath);
+            titleById.set(entry.id, entry.title);
             const slash = relPath.lastIndexOf('/');
             const dir = slash === -1 ? '' : relPath.slice(0, slash);
             const file = slash === -1 ? relPath : relPath.slice(slash + 1);
@@ -587,7 +635,7 @@ async function report(
             }
             names.add(file);
         }
-        reserved = { usedNames, pathById };
+        reserved = { usedNames, pathById, titleById };
     }
     const { planned, warnings } = await planDocs(fetched, config, reserved);
 
