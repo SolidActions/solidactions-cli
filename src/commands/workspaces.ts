@@ -1,11 +1,12 @@
 import chalk from 'chalk';
-import { requireConfig, requireResolvedConfig } from '../utils/api';
+import { requireResolvedConfig } from '../utils/api';
 import { writeWorkspaceToFile } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
 import { fetchWorkspaces, formatWorkspaceWithOrg, groupWorkspacesByOrg, resolveWorkspaceInput, WorkspaceLookupRecord } from '../utils/workspace-lookup';
 
 export async function workspacesList() {
-    const config = requireConfig();
+    const resolved = requireResolvedConfig();
+    const config = resolved.config;
 
     // Grouping keys are tenant ids (app#1214), so the org header and the
     // same-name disambiguation both come from per-row tenant data, never
@@ -35,6 +36,15 @@ export async function workspacesList() {
             console.log(`    ${chalk.white(ws.name)} ${chalk.gray(`(${ws.role})`)}${slug}${current}`);
             console.log(chalk.gray(`      ID: ${ws.id}`));
         }
+    }
+
+    // cli#113: a pin the list doesn't contain gets no "← current" — say so instead of looking normal.
+    if (config.workspaceId && !workspaces.some((ws) => ws.id === config.workspaceId)) {
+        const label = config.workspace ? `${config.workspace} (${config.workspaceId})` : config.workspaceId;
+        const from = resolved.sources.workspaceId === 'env' ? '$SOLIDACTIONS_WORKSPACE_ID' : resolved.sources.workspaceId;
+        console.log('');
+        console.log(chalk.yellow(`warn: the active workspace ${label} (from ${from}) is not in this list — it may belong to another host, or you may no longer have access.`));
+        console.log(chalk.yellow('Pick one from the list with `solidactions workspace set <slug> --local` (or --global).'));
     }
     console.log('');
 }

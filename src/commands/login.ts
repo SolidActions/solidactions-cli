@@ -553,17 +553,17 @@ export function whoami() {
         return chalk.gray(`(from ${src})`);
     };
 
-    const workspaceLabel = config.workspace
-        ? `${config.workspace}${config.workspaceId ? ` (${config.workspaceId})` : ''}`
-        : config.workspaceId
+    const workspaceName = config.workspace ?? config.workspaceId;
+    const workspaceLabel = !config.workspaceId && !config.workspace
+        ? ''
+        : !config.workspace
             ? `${config.workspaceId} (slug unknown — run 'workspace set <slug>' to populate)`
-            : '';
-
-    const isFileSource = (src: ConfigSource): boolean => src !== null && src !== 'env' && src !== 'cli';
-    const workspaceInheritedFromOtherFile = isFileSource(sources.workspaceId) && sources.workspaceId !== sources.apiKey;
+            : config.workspaceOrg
+                ? `${workspaceName} — organization ${config.workspaceOrg}${config.workspaceId ? ` (${config.workspaceId})` : ''}`
+                : `${workspaceName}${config.workspaceId ? ` (${config.workspaceId})` : ''}`;
 
     console.log(chalk.blue('Current configuration:'));
     console.log(`  Host:        ${config.host.padEnd(50)} ${fmt(sources.host)}`);
     console.log(`  API Key:     ${maskedKey.padEnd(50)} ${fmt(sources.apiKey)}`);
-    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}${workspaceInheritedFromOtherFile ? chalk.yellow(' (inherited from a different config file)') : ''}`);
+    console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}`);
 }
