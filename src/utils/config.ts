@@ -71,7 +71,7 @@ export function credentialConflictMessage(conflict: CredentialConflict): string 
     const keyHome = conflict.keyHost ?? 'no host (that config sets none)';
     const fixes = conflict.hostSource === 'env'
         ? ['unset SOLIDACTIONS_HOST', 'or set SOLIDACTIONS_API_KEY to a key for that host as well']
-        : [`run \`solidactions login --local\` in this folder to store a key for ${conflict.host}`, `or remove "host" from ${hostFrom}`];
+        : [`run \`solidactions login --local --host ${conflict.host}\` in this folder to store a key for ${conflict.host}`, `or remove "host" from ${hostFrom}`];
     if (conflict.keyHost === undefined) {
         fixes.push(`or add "host" to ${keyFrom}`);
     }

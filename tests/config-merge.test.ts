@@ -249,7 +249,7 @@ describe('credential pair: a key is only sent to its own host (cli#124)', () => 
         expect(msg).toContain(LOCAL_PATH);
         expect(msg).toContain('https://app.solidactions.com');
         expect(msg).toContain(GLOBAL_PATH);
-        expect(msg).toContain('solidactions login --local');
+        expect(msg).toContain('solidactions login --local --host https://dev.example');
         expect(msg).not.toContain('global-key');
     });
 });

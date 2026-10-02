@@ -163,7 +163,7 @@ program
     .option('--stdin', 'Read the API key from stdin (for non-interactive automation)')
     .option('--device', 'Authenticate via browser using OAuth device authorization')
     .addOption(new Option('--dev', 'Use local development server (http://localhost:8000)').hideHelp())
-    .addOption(new Option('--host <url>', 'Custom API host URL').hideHelp())
+    .option('--host <url>', 'Server to log in to (default: SolidActions Cloud, https://app.solidactions.com)')
     .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID. A sole workspace is auto-selected; use --workspace to choose among multiple workspaces.')
     .option('--local', 'Save config to ./.solidactions/config.json in the current folder')
     .option('--global', 'Save config to ~/.solidactions/config.json (default if prompted)')

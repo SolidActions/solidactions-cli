@@ -58,7 +58,13 @@ interface CliResult {
     status: number | null;
 }
 
-function runCli(args: string[], home: string, cwd: string, extraEnv: Record<string, string> = {}): Promise<CliResult> {
+function runCli(
+    args: string[],
+    home: string,
+    cwd: string,
+    extraEnv: Record<string, string> = {},
+    input?: string,
+): Promise<CliResult> {
     return new Promise((resolve, reject) => {
         const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
         delete childEnv.SOLIDACTIONS_HOST;
@@ -72,6 +78,9 @@ function runCli(args: string[], home: string, cwd: string, extraEnv: Record<stri
         });
         let stdout = '';
         let stderr = '';
+        if (input !== undefined) {
+            child.stdin.end(input);
+        }
 
         child.stdout.on('data', (chunk) => {
             stdout += chunk;
@@ -98,6 +107,7 @@ function runCli(args: string[], home: string, cwd: string, extraEnv: Record<stri
 
 const GLOBAL_KEY = 'sk_global_secret';
 const ENV_KEY = 'sk_env_secret';
+const FOLDER_KEY = 'sk_folder_secret';
 
 function workspacesPayload(): object {
     return {
@@ -156,6 +166,42 @@ describe('credential pair end to end (cli#124)', () => {
         expect(wrong.requests).toHaveLength(0);
         expect(result.stdout).not.toContain(GLOBAL_KEY);
         expect(result.stderr).not.toContain(GLOBAL_KEY);
+    });
+
+    it('the refusal suggests a login naming the folder host, and running it sends the key only there (cli#124, PM ruling 21)', async () => {
+        const globalFile = writeGlobal(home, { host: good.url, apiKey: GLOBAL_KEY, workspaceId: 'ws-1' });
+        const localFile = writeLocal(cwd, { host: wrong.url });
+        wrong.handler = (url) => {
+            if (url === '/api/v1/workspaces') return { status: 200, body: workspacesPayload() };
+            return { status: 200, body: { data: [] } };
+        };
+
+        const refusal = await runCli(['whoami'], home, cwd);
+
+        expect(refusal.status).toBe(1);
+        const suggested = refusal.stderr.match(/`(solidactions login [^`]*)`/);
+        expect(suggested?.[1]).toBe(`solidactions login --local --host ${wrong.url}`);
+
+        const suggestedArgs = suggested![1].split(' ').slice(1);
+        const login = await runCli([...suggestedArgs, '--stdin'], home, cwd, {}, `${FOLDER_KEY}\n`);
+
+        expect(login.status).toBe(0);
+        expect(good.requests).toHaveLength(0);
+        expect(wrong.requests.length).toBeGreaterThan(0);
+        expect(wrong.requests.every((r) => r.authorization === `Bearer ${FOLDER_KEY}`)).toBe(true);
+        const local = JSON.parse(fs.readFileSync(localFile, 'utf-8'));
+        expect(local.host).toBe(wrong.url);
+        expect(local.apiKey).toBe(FOLDER_KEY);
+        expect(JSON.parse(fs.readFileSync(globalFile, 'utf-8'))).toEqual({ host: good.url, apiKey: GLOBAL_KEY, workspaceId: 'ws-1' });
+        expect(login.stdout).not.toContain(FOLDER_KEY);
+        expect(login.stderr).not.toContain(FOLDER_KEY);
+
+        const after = await runCli(['connection', 'list'], home, cwd);
+
+        expect(after.status).toBe(0);
+        expect(good.requests).toHaveLength(0);
+        const apiCall = wrong.requests.find((r) => r.url === '/api/v1/connections');
+        expect(apiCall?.authorization).toBe(`Bearer ${FOLDER_KEY}`);
     });
 
     it('whoami refuses on stderr without printing the key', async () => {
