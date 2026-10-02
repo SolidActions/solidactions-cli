@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
 
 interface OAuthConnection {
@@ -60,9 +60,9 @@ export async function connectionList(): Promise<void> {
         console.log(chalk.gray(`${connections.length} connection(s)`));
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(`Authentication failed against ${config.host}. Run "solidactions login --global" to re-configure.`));
         } else if (error.response) {
-            console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
         } else {
             console.error(chalk.red('Connection failed:'), error.message);
         }

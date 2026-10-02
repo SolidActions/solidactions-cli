@@ -347,6 +347,20 @@ export function authFailureMessage(config: Config, sources: ResolvedConfig['sour
     return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
 }
 
+/**
+ * One line for a failed API response: the server's `message` when it sent one, else the
+ * status alone. Never the raw body — a debug-mode server returns the whole stack trace
+ * there (cli#114), and a proxy may return an HTML page.
+ */
+export function formatApiFailure(status: number, data: unknown): string {
+    const message = data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as Record<string, unknown>).message
+        : undefined;
+    return typeof message === 'string' && message.trim() !== ''
+        ? `Failed: ${status} ${message.trim()}`
+        : `Failed: ${status}`;
+}
+
 export async function ensureWorkspaceSelected(
     config: Config,
     dependencies: WorkspaceSelectionDependencies = {},

@@ -17,6 +17,7 @@ const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 let server: http.Server;
 let port: number;
 let responseBody: object = { data: [] };
+let responseStatus = 200;
 let capturedRequest: {
     method: string | undefined;
     url: string | undefined;
@@ -30,7 +31,7 @@ beforeAll(async () => {
             url: request.url,
             headers: request.headers,
         };
-        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.writeHead(responseStatus, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify(responseBody));
     });
 
@@ -66,6 +67,7 @@ describe('connectionList', () => {
         });
         capturedRequest = null;
         responseBody = { data: [] };
+        responseStatus = 200;
     });
 
     afterEach(() => {
@@ -133,6 +135,30 @@ describe('connectionList', () => {
         expect(result.status).toBe(0);
         expect(result.stderr).toBe('');
         expect(result.stdout.trim()).toBe('No connections found.');
+    });
+
+    it('renders a 403 as one line with the server message, never the raw body (cli#114)', async () => {
+        responseStatus = 403;
+        responseBody = {
+            message: 'This action is unauthorized.',
+            exception: 'Symfony\\Component\\HttpKernel\\Exception\\AccessDeniedHttpException',
+            file: '/var/www/html/vendor/laravel/framework/src/Illuminate/Foundation/Exceptions/Handler.php',
+            line: 772,
+            trace: Array.from({ length: 50 }, (_, i) => ({ file: `/vendor/f${i}.php`, line: i })),
+        };
+        const result = await runCli(['connection', 'list'], home, cwd);
+        expect(result.status).toBe(1);
+        expect(result.stderr.trim()).toBe('Failed: 403 This action is unauthorized.');
+        expect(result.stderr).not.toContain('vendor');
+        expect(result.stdout).not.toContain('Connections:');
+    });
+
+    it('names the host on a 401 (PM ruling 7)', async () => {
+        responseStatus = 401;
+        responseBody = { message: 'Unauthenticated.' };
+        const result = await runCli(['connection', 'list'], home, cwd);
+        expect(result.status).toBe(1);
+        expect(result.stderr.trim()).toBe(`Authentication failed against http://127.0.0.1:${port}. Run "solidactions login --global" to re-configure.`);
     });
 });
 
