@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeConfigs } from '../src/utils/config';
+import { credentialConflictMessage, DEFAULT_HOST, mergeConfigs } from '../src/utils/config';
 
 const LOCAL_PATH = '/tmp/local/.solidactions/config.json';
 const GLOBAL_PATH = '/home/u/.solidactions/config.json';
@@ -117,5 +117,139 @@ describe('mergeConfigs', () => {
             expect(result!.config.workspaceId).toBe('env-uuid');
             expect(result!.config.workspaceOrg).toBeUndefined();
         });
+    });
+});
+
+describe('credential pair: a key is only sent to its own host (cli#124)', () => {
+    const G = { host: 'https://app.solidactions.com', apiKey: 'global-key' };
+
+    it('local host-only with a DIFFERENT host than global refuses and withholds the key', () => {
+        const r = mergeConfigs({}, { host: 'https://dev.example' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict).toEqual({
+            host: 'https://dev.example', hostSource: LOCAL_PATH,
+            keyHost: 'https://app.solidactions.com', keySource: GLOBAL_PATH,
+        });
+    });
+
+    it('env SOLIDACTIONS_HOST alone with a different host than the file refuses', () => {
+        const r = mergeConfigs({ host: 'https://dev.example' }, null, null, G, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict?.hostSource).toBe('env');
+        expect(r.credentialConflict?.keySource).toBe(GLOBAL_PATH);
+    });
+
+    it('a host above a key layer that has no host of its own refuses (keyHost undefined)', () => {
+        const r = mergeConfigs({ host: 'https://dev.example' }, null, null, { apiKey: 'k' }, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict?.keyHost).toBeUndefined();
+    });
+
+    it('local host-only EQUAL to the global host (case and trailing slash ignored) keeps working', () => {
+        const r = mergeConfigs({}, { host: 'HTTPS://app.solidactions.com/' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.apiKey).toBe('global-key');
+    });
+
+    it('a workspace-pin-only local file keeps the global credentials', () => {
+        const r = mergeConfigs({}, { workspace: 'w', workspaceId: 'w-id' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.host).toBe(G.host);
+        expect(r.config.apiKey).toBe('global-key');
+    });
+
+    it('env SOLIDACTIONS_API_KEY alone uses the host configured below it', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, null, null, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.apiKey).toBe('env-key');
+        expect(r.config.host).toBe(G.host);
+    });
+
+    it('env host + env key is one layer', () => {
+        const r = mergeConfigs({ host: 'https://dev.example', apiKey: 'env-key' }, null, null, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.apiKey).toBe('env-key');
+    });
+
+    it('a local file with its own host and key is one layer', () => {
+        const r = mergeConfigs({}, { host: 'https://dev.example', apiKey: 'local-key' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.apiKey).toBe('local-key');
+    });
+
+    it('env host over a local file with its own different host+key refuses', () => {
+        const r = mergeConfigs({ host: 'https://other.example' }, { host: 'https://dev.example', apiKey: 'local-key' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict?.keySource).toBe(LOCAL_PATH);
+        expect(r.credentialConflict?.keyHost).toBe('https://dev.example');
+    });
+
+    it('env key alone + a local host that DIFFERS from the global host refuses (PM ruling 1)', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://dev.example' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict).toEqual({
+            host: 'https://dev.example', hostSource: LOCAL_PATH,
+            keyHost: undefined, keySource: 'env',
+            otherHost: 'https://app.solidactions.com', otherHostSource: GLOBAL_PATH,
+        });
+    });
+
+    it('env key alone + a local host+key that differs from the global host refuses (PM ruling 1)', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://dev.example', apiKey: 'local-key' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict?.keySource).toBe('env');
+    });
+
+    it('env key alone + a local host EQUAL to the global host keeps working', () => {
+        const same = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://app.solidactions.com/' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(same.credentialConflict).toBeUndefined();
+        expect(same.config.apiKey).toBe('env-key');
+    });
+
+    it('env key alone + a LOCAL-ONLY host (no global host) refuses (PM ruling 10)', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://dev.example' }, LOCAL_PATH, null, GLOBAL_PATH)!;
+        expect(r.config.apiKey).toBe('');
+        expect(r.credentialConflict).toEqual({
+            host: 'https://dev.example', hostSource: LOCAL_PATH,
+            keyHost: undefined, keySource: 'env',
+        });
+        const noGlobalHost = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://dev.example' }, LOCAL_PATH, { workspaceId: 'w' }, GLOBAL_PATH)!;
+        expect(noGlobalHost.config.apiKey).toBe('');
+    });
+
+    it('env key alone + only a global host keeps working (PM ruling 10)', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, { workspaceId: 'w' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.host).toBe('https://app.solidactions.com');
+        expect(r.config.apiKey).toBe('env-key');
+    });
+
+    it('env key alone with no host anywhere goes to the default host (PM ruling 10)', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, null, null, null, GLOBAL_PATH)!;
+        expect(r.credentialConflict).toBeUndefined();
+        expect(r.config.host).toBe(DEFAULT_HOST);
+        expect(r.sources.host).toBe('default');
+        expect(r.config.apiKey).toBe('env-key');
+    });
+
+    it('the env-key refusal tells the user to set SOLIDACTIONS_HOST and names both file hosts', () => {
+        const r = mergeConfigs({ apiKey: 'env-key' }, { host: 'https://dev.example' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        const msg = credentialConflictMessage(r.credentialConflict!);
+        expect(msg).toContain('$SOLIDACTIONS_API_KEY');
+        expect(msg).toContain('SOLIDACTIONS_HOST');
+        expect(msg).toContain('https://dev.example');
+        expect(msg).toContain('https://app.solidactions.com');
+        expect(msg).not.toContain('env-key');
+    });
+
+    it('credentialConflictMessage names both sides and a fix, and never the key', () => {
+        const r = mergeConfigs({}, { host: 'https://dev.example' }, LOCAL_PATH, G, GLOBAL_PATH)!;
+        const msg = credentialConflictMessage(r.credentialConflict!);
+        expect(msg).toContain('https://dev.example');
+        expect(msg).toContain(LOCAL_PATH);
+        expect(msg).toContain('https://app.solidactions.com');
+        expect(msg).toContain(GLOBAL_PATH);
+        expect(msg).toContain('solidactions login --local --host https://dev.example');
+        expect(msg).not.toContain('global-key');
     });
 });

@@ -90,11 +90,12 @@ export const program = new Command();
 
 if (process.env.SOLIDACTIONS_DEBUG === '1') {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { resolveConfig } = require('./utils/config');
+    const { resolveConfig, credentialConflictMessage } = require('./utils/config');
     const resolved = resolveConfig();
     if (resolved) {
         const fmt = (src: any) => {
             if (src === 'env') return '(from $SOLIDACTIONS_* env var)';
+            if (src === 'default') return '(default)';
             if (src === null) return '(unset)';
             return `(from ${src})`;
         };
@@ -103,6 +104,9 @@ if (process.env.SOLIDACTIONS_DEBUG === '1') {
         process.stderr.write(`  apiKey:      <redacted> ${fmt(resolved.sources.apiKey)}\n`);
         process.stderr.write(`  workspaceId: ${resolved.config.workspaceId ?? ''} ${fmt(resolved.sources.workspaceId)}\n`);
         process.stderr.write(`  activePath:  ${resolved.activePath}\n`);
+        if (resolved.credentialConflict) {
+            process.stderr.write(`  credentials: REFUSED — ${credentialConflictMessage(resolved.credentialConflict).split('\n')[0]}\n`);
+        }
     } else {
         process.stderr.write('[SOLIDACTIONS_DEBUG] no config resolvable\n');
     }
@@ -1148,16 +1152,17 @@ const doc = program.command('doc').description('Manage docs in SA-Docs');
 
 doc
     .command('push')
-    .description('Recursively upload a local markdown tree into SA-Docs')
-    .argument('<dir>', 'Path to the directory containing markdown files')
-    .option('--on-conflict <mode>', 'Conflict resolution: skip|overwrite|rename (default: skip)', 'skip')
-    .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs')
+    .description('Upload docs from local files into SA-Docs: .md as markdown, .html as a visual doc, .canvas.json / .canvas as a canvas')
+    .argument('<path>', 'A directory of .md / .html / .canvas.json / .canvas files (walked recursively), or one such file')
+    .option('--on-conflict <mode>', 'Conflict resolution: skip|overwrite|rename (default: skip)')
+    .option('--type <slug>', 'Doc-type slug to apply to all uploaded docs (.html and canvas files keep visual / canvas)')
     .option('--folder <base>', 'Nest the whole upload under this base folder path in SA-Docs')
+    .option('--replace <doc-id>', 'Replace the body of an existing doc (numeric id) with a single file of the same kind')
     .option('--dry-run', 'Preview what would be created without writing')
     .option('--force', 'Overwrite tracked docs (from a prior doc pull) without a base-revision drift guard')
     .option('--json', 'Output result as JSON')
-    .action(async (dir, options) => {
-        await docPush(dir, { onConflict: options.onConflict, type: options.type, folder: options.folder, dryRun: options.dryRun, force: options.force, json: options.json });
+    .action(async (target, options) => {
+        await docPush(target, { onConflict: options.onConflict, type: options.type, folder: options.folder, replace: options.replace, dryRun: options.dryRun, force: options.force, json: options.json });
     });
 
 doc

@@ -320,12 +320,12 @@ function assertLocalConfigParses(configPath: string): void {
  *      anchored to the entry's project and there is nothing to mismatch.
  *
  * `SOLIDACTIONS_HOST` / `SOLIDACTIONS_API_KEY` env overrides bypass the guard
- * ONLY when BOTH are set. `resolveConfig()` picks host and apiKey INDEPENDENTLY
- * (env > local > global), so with just one var set the OTHER field still falls
+ * ONLY when BOTH are set. With just one var set the OTHER field still falls
  * through to the global config — i.e. a partial override would send a run to
  * the production host, or to production credentials, exactly the way #30
- * describes. A partial override therefore refuses like any other unanchored
- * run, naming the field that would fall through.
+ * describes — and a partial env override now also meets the cli#124
+ * credential-pair refusal. A partial override therefore refuses like any other
+ * unanchored run, naming the field that would fall through.
  */
 export function assertProjectLocalConfig(entryPath: string, env: string): void {
     const envHost = !!process.env.SOLIDACTIONS_HOST;

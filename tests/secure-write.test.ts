@@ -6,11 +6,12 @@
  * would also produce 0600 and every assertion here would be vacuous.
  */
 
+import * as childProcess from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { writeSecretFileSync, writeViaTempFileSync } from '../src/utils/secure-write';
+import { secretTempPath, writeSecretFileSync, writeViaTempFileSync } from '../src/utils/secure-write';
 
 const posixOnly = process.platform === 'win32' ? it.skip : it;
 
@@ -148,5 +149,114 @@ describe('writeViaTempFileSync', () => {
         expect(() => writeViaTempFileSync(dest, tempPath, 'SECRET=1\n')).toThrow();
 
         expect(fs.readdirSync(root)).toEqual(['subdir']);
+    });
+});
+
+describe('EBUSY fallback for a bind-mounted target (cli#129)', () => {
+    const busy = (): never => {
+        throw Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' });
+    };
+
+    posixOnly('writes in place, owner-only, keeping the inode, and removes its temp file', () => {
+        const dest = path.join(root, '.env');
+        fs.writeFileSync(dest, 'OLD=1\nOLDER=2\n', { mode: 0o644 });
+        fs.chmodSync(dest, 0o644);
+        const inode = fs.statSync(dest).ino;
+        const tempPath = path.join(root, '.env.ours.tmp');
+
+        writeViaTempFileSync(dest, tempPath, 'SECRET=1\n', busy);
+
+        expect(fs.readFileSync(dest, 'utf8')).toBe('SECRET=1\n');
+        expect(mode(dest)).toBe(0o600);
+        expect(fs.statSync(dest).ino).toBe(inode);
+        expect(fs.existsSync(tempPath)).toBe(false);
+    });
+
+    posixOnly('a rename error other than EBUSY still throws and never touches the target', () => {
+        const dest = path.join(root, '.env');
+        fs.writeFileSync(dest, 'OLD=1\n', { mode: 0o644 });
+        const tempPath = path.join(root, '.env.ours.tmp');
+        const exdev = (): never => { throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' }); };
+
+        expect(() => writeViaTempFileSync(dest, tempPath, 'SECRET=1\n', exdev))
+            .toThrow(expect.objectContaining({ code: 'EXDEV' }));
+
+        expect(fs.readFileSync(dest, 'utf8')).toBe('OLD=1\n');
+        expect(fs.existsSync(tempPath)).toBe(false);
+    });
+
+    posixOnly('never writes through a symlink target (PM ruling 5)', () => {
+        const real = path.join(root, 'real.env');
+        fs.writeFileSync(real, 'OLD=1\n', { mode: 0o644 });
+        const link = path.join(root, '.env');
+        fs.symlinkSync(real, link);
+        const tempPath = path.join(root, '.env.ours.tmp');
+
+        expect(() => writeViaTempFileSync(link, tempPath, 'SECRET=1\n', busy))
+            .toThrow(expect.objectContaining({ code: 'ELOOP' }));
+
+        expect(fs.readFileSync(real, 'utf8')).toBe('OLD=1\n');
+        expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(fs.existsSync(tempPath)).toBe(false);
+    });
+
+    it('temp names are `<basename>.<pid>.<hex>.tmp`, keeping the target basename as a prefix', () => {
+        expect(path.basename(secretTempPath('/x/.env'))).toMatch(/^\.env\.\d+\.[0-9a-f]{8}\.tmp$/);
+        expect(path.basename(secretTempPath('/x/secrets.env'))).toMatch(/^secrets\.env\.\d+\.[0-9a-f]{8}\.tmp$/);
+        expect(path.dirname(secretTempPath('/x/.env'))).toBe('/x');
+    });
+
+    // Real file-level bind mount in a throwaway user+mount namespace: rename(2) onto the
+    // mount point fails EBUSY, so only this test exercises the production fallback path.
+    const canBindMount = ((): boolean => {
+        if (process.platform !== 'linux') return false;
+        let probeRoot: string | null = null;
+        try {
+            probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-bind-probe-'));
+            const a = path.join(probeRoot, 'a');
+            const b = path.join(probeRoot, 'b');
+            fs.writeFileSync(a, 'x');
+            fs.writeFileSync(b, 'y');
+            const probe = childProcess.spawnSync('unshare', ['-rm', 'sh', '-c', 'mount --bind "$1" "$2"', 'probe', a, b], { timeout: 15_000 });
+            return probe.status === 0;
+        } catch {
+            return false;
+        } finally {
+            if (probeRoot !== null) fs.rmSync(probeRoot, { recursive: true, force: true });
+        }
+    })();
+
+    it.skipIf(!canBindMount)('writes owner-only through a real bind mount without renaming (cli#129)', () => {
+        const source = path.join(root, 'source.env');
+        fs.writeFileSync(source, 'OLD=1\n', { mode: 0o644 });
+        const dest = path.join(root, '.env');
+        fs.writeFileSync(dest, 'anything\n');
+        const modulePath = path.resolve(__dirname, '../dist/utils/secure-write.js');
+        const child = childProcess.spawnSync(
+            'unshare',
+            ['-rm', 'sh', '-c', 'mount --bind "$SW_SOURCE" "$SW_TARGET" && node -e "$SW_SCRIPT"'],
+            {
+                env: {
+                    ...process.env,
+                    SW_SOURCE: source,
+                    SW_TARGET: dest,
+                    SW_SCRIPT: [
+                        "const fs = require('fs');",
+                        `const { writeSecretFileSync } = require(${JSON.stringify(modulePath)});`,
+                        'const target = process.env.SW_TARGET;',
+                        "writeSecretFileSync(target, 'SECRET=1\\n');",
+                        "process.stdout.write((fs.statSync(target).mode & 0o777).toString(8) + '\\n');",
+                        "process.stdout.write(fs.readFileSync(target, 'utf8'));",
+                    ].join('\n'),
+                },
+                timeout: 30_000,
+                encoding: 'utf8',
+            },
+        );
+        expect(child.status).toBe(0);
+        expect(child.stdout).toContain('600\n');
+        expect(child.stdout).toContain('SECRET=1\n');
+        expect(fs.readFileSync(source, 'utf8')).toBe('SECRET=1\n');
+        expect(fs.readdirSync(root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
     });
 });

@@ -1,5 +1,7 @@
+import childProcess from 'child_process';
 import fs from 'fs';
 import { createHash } from 'crypto';
+import http from 'http';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -8,6 +10,49 @@ import axios from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { assertCountableTableLimit, normalizeDatabaseForPush, databasePushWithConfig } from '../src/commands/database-push';
+import { writeGlobal } from './helpers';
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+interface CliResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Run the built CLI in a child process with a temp HOME: real stdout,
+ * stderr and exit status. The stub server lives in this process.
+ * Async spawn (never spawnSync) so the in-process server stays responsive.
+ */
+async function runPushCli(args: string[], home: string, cwd: string): Promise<CliResult> {
+    return new Promise<CliResult>((resolve, reject) => {
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+        delete childEnv.SOLIDACTIONS_HOST;
+        delete childEnv.SOLIDACTIONS_API_KEY;
+        delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
+            cwd,
+            env: childEnv,
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+        }, 60_000);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ code, stdout, stderr });
+        });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
 
 const roots: string[] = [];
 afterEach(() => {
@@ -146,31 +191,78 @@ const SHOW_ROW = { data: { database: { name: 'analytics', kind: 'libsql', status
 describe('database push workflow', () => {
     it('prepares, uploads exact bytes with a candidate bearer, promotes, and polls without logging credentials', async () => {
         const source = await fixture();
-        const posts: Array<Record<string, unknown>> = [];
-        const upload = vi.fn(async (_url, body, options) => {
-            expect(options.headers.Authorization).toBe('Bearer candidate-secret');
-            // posts[0] is the analytical-name guard's `show` (#1700 Plan D
-            // Task 5); posts[1] is the `bulk_load_prepare` body.
-            expect(options.headers['Content-Length']).toBe(String(posts[1].input_bytes));
-            expect(body).toBeDefined();
-            return { status: 200, data: { secret: 'must-not-log' } };
+        const operationId = '11111111-1111-4111-8111-111111111111';
+        const uploadToken = 'upload-token-k7';
+        const uploadMarker = 'upload-reply-marker-k7';
+        const controlBodies: Array<Record<string, unknown>> = [];
+        const uploads: Array<{ authorization: string | undefined; contentLength: string | undefined; bytes: Buffer }> = [];
+        let port = 0;
+        const server = http.createServer((req, res) => {
+            const chunks: Buffer[] = [];
+            req.on('data', (chunk) => { chunks.push(chunk); });
+            req.on('end', () => {
+                if (req.url === '/upload' && req.method === 'POST') {
+                    uploads.push({
+                        authorization: req.headers.authorization,
+                        contentLength: Array.isArray(req.headers['content-length']) ? req.headers['content-length'][0] : req.headers['content-length'],
+                        bytes: Buffer.concat(chunks),
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ marker: uploadMarker }));
+                    return;
+                }
+                const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+                controlBodies.push(body);
+                // Bodies are the inner payloads: real axios unwraps response.data,
+                // which the old vi.fn doubles had hand-wrapped as { data, status }.
+                const showRow = SHOW_ROW as { data: { database: object } };
+                let reply: unknown;
+                if (body.operation === 'show') reply = showRow.data;
+                else if (body.operation === 'bulk_load_prepare') reply = { operation: { id: operationId, phase: 'uploading' }, upload: { url: `http://127.0.0.1:${port}/upload`, token: uploadToken, expires_at: '2099-01-01T00:00:00Z' } };
+                else if (body.operation === 'bulk_load_promote') reply = { operation: { id: body.operation_id, phase: 'validating' } };
+                else reply = { operation: { id: body.operation_id, phase: 'promoted', rows_loaded: 1, measured_bytes: 16384, cleanup_state: 'complete', failure_code: null } };
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(reply));
+            });
         });
-        const post = vi.fn(async (_url, body: Record<string, unknown>) => {
-            posts.push(body);
-            if (body.operation === 'show') return SHOW_ROW;
-            if (body.operation === 'bulk_load_prepare') return { data: { operation: { id: '11111111-1111-4111-8111-111111111111', phase: 'uploading' }, upload: { url: 'https://candidate.test/v1/upload', token: 'candidate-secret', expires_at: '2099-01-01T00:00:00Z' } }, status: 202 };
-            if (body.operation === 'bulk_load_promote') return { data: { operation: { id: body.operation_id, phase: 'validating' } }, status: 202 };
-            return { data: { operation: { id: body.operation_id, phase: 'promoted', rows_loaded: 1, measured_bytes: 16384, cleanup_state: 'complete', failure_code: null } }, status: 200 };
+        await new Promise<void>((resolve) => {
+            server.listen(0, '127.0.0.1', () => {
+                port = (server.address() as { port: number }).port;
+                resolve();
+            });
         });
-        const output: string[] = [];
-        await databasePushWithConfig('analytics', source, { yes: true }, { host: 'https://app.test', apiKey: 'control-secret', workspaceId: 'w1' }, { post, upload, stdout: (line) => output.push(line), sleep: async () => undefined });
-        expect(posts.map((body) => body.operation)).toEqual(['show', 'bulk_load_prepare', 'bulk_load_promote', 'bulk_load_status']);
-        expect(posts[1]).toMatchObject({ bulk_mode: 'replace', allow_empty: false });
-        expect(posts[2]).toMatchObject({ upload_http_status: 200 });
-        expect(output.join('\n')).not.toContain('candidate-secret').not.toContain('must-not-log');
-        expect(output.join('\n').toLowerCase()).toContain('reacquire');
-        expect(output.join('\n')).toContain('countable rows');
-        expect(output.join('\n')).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
+        const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-push-cli-'));
+        const home = path.join(homeRoot, 'home');
+        fs.mkdirSync(home, { recursive: true });
+        writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'control-api-key', workspaceId: 'w1' });
+        try {
+            // Real transport (default axios post/upload) against the local
+            // server above, through the real built binary: real stdout,
+            // stderr and exit status. No vi.fn doubles, no output sink.
+            const result = await runPushCli(['database', 'push', 'analytics', source, '--yes'], home, homeRoot);
+            expect(result.code).toBe(0);
+            expect(controlBodies.map((body) => body.operation)).toEqual(['show', 'bulk_load_prepare', 'bulk_load_promote', 'bulk_load_status']);
+            expect(controlBodies[1]).toMatchObject({ bulk_mode: 'replace', allow_empty: false });
+            expect(controlBodies[2]).toMatchObject({ upload_http_status: 200 });
+            expect(uploads).toHaveLength(1);
+            expect(uploads[0].authorization).toBe(`Bearer ${uploadToken}`);
+            expect(uploads[0].contentLength).toBe(String((controlBodies[1] as { input_bytes: number }).input_bytes));
+            expect(uploads[0].bytes.length).toBe((controlBodies[1] as { input_bytes: number }).input_bytes);
+            expect(uploads[0].bytes.subarray(0, 16).toString('utf8')).toBe('SQLite format 3\0');
+            expect(result.stdout + result.stderr).not.toContain(uploadToken).not.toContain(uploadMarker);
+            expect(result.stdout.toLowerCase()).toContain('reacquire');
+            expect(result.stdout).toContain('countable rows');
+            expect(result.stdout).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
+            expect(result.stdout).toContain(`WARNING: This destructively replaces database "analytics" in workspace w1 on http://127.0.0.1:${port}.`);
+            expect(result.stderr).toContain('Workspace:');
+            expect(result.stderr).toContain('w1');
+            expect(result.stderr).toContain(`on http://127.0.0.1:${port}`);
+        } finally {
+            fs.rmSync(homeRoot, { recursive: true, force: true });
+            await new Promise<void>((resolve, reject) => {
+                server.close((error) => (error ? reject(error) : resolve()));
+            });
+        }
     });
 
     it('uses POST for the default Turso /v1/upload transport', async () => {

@@ -180,7 +180,7 @@ describe('project state mutations', () => {
         expect(result.status).toBe(0);
         // project disable is a mutating command — requireConfigWithWorkspace() always
         // announces the resolved workspace on stderr, first, even on success (#1437).
-        expect(result.stderr).toBe('Workspace: workspace-state-1 (workspace-state-1)\n');
+        expect(result.stderr).toBe(`Workspace: workspace-state-1 (workspace-state-1) on http://127.0.0.1:${port}\n`);
         expect(requests).toEqual([expect.objectContaining({
             method: 'PUT',
             url: '/api/v1/projects/billing-dev/enabled',
@@ -247,7 +247,7 @@ describe('workflow state mutations', () => {
         expect(result.status).toBe(0);
         // workflow enable is a mutating command — requireConfigWithWorkspace() always
         // announces the resolved workspace on stderr, first, even on success (#1437).
-        expect(result.stderr).toBe('Workspace: workspace-state-1 (workspace-state-1)\n');
+        expect(result.stderr).toBe(`Workspace: workspace-state-1 (workspace-state-1) on http://127.0.0.1:${port}\n`);
         expect(requests).toEqual([expect.objectContaining({
             method: 'PUT',
             url: '/api/v1/projects/billing-dev/workflows/daily-report/enabled',

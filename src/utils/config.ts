@@ -24,6 +24,61 @@ export interface ResolvedConfig {
         workspaceId: ConfigSource;
     };
     activePath: string; // path write-mutating commands should target
+    credentialConflict?: CredentialConflict;
+}
+
+/**
+ * A resolved host that the resolved API key does not belong to (cli#124): the host came
+ * from a layer ABOVE the layer that supplied the key, and differs from the key's own host.
+ */
+export interface CredentialConflict {
+    host: string;
+    hostSource: ConfigSource;
+    keyHost: string | undefined;
+    keySource: ConfigSource;
+    /** Env-key case only: a file host that disagrees with the resolved host. */
+    otherHost?: string;
+    otherHostSource?: ConfigSource;
+}
+
+/** The host an env key goes to when no layer names one (PM ruling 10); the same default `login` uses. */
+export const DEFAULT_HOST = 'https://app.solidactions.com';
+
+/** Hosts compare equal ignoring surrounding space, trailing slashes and case. */
+export function normalizeHost(host: string): string {
+    return host.trim().replace(/\/+$/, '').toLowerCase();
+}
+
+function describeSource(source: ConfigSource, envVar: string): string {
+    return source === 'env' ? `$${envVar}` : String(source);
+}
+
+/** The refusal shown when a key would be sent to a host it was not configured with. Never includes the key. */
+export function credentialConflictMessage(conflict: CredentialConflict): string {
+    if (conflict.keySource === 'env') {
+        // An env key with no SOLIDACTIONS_HOST may only go to the global config's host or the
+        // default host — never to a host a folder's config names (PM rulings 1 and 10).
+        const globalNote = conflict.otherHost !== undefined
+            ? ` (the global config names ${conflict.otherHost})`
+            : '';
+        return [
+            `Refusing to send the API key from $SOLIDACTIONS_API_KEY to ${conflict.host} (host from ${describeSource(conflict.hostSource, 'SOLIDACTIONS_HOST')}): without SOLIDACTIONS_HOST, a key from the environment only goes to the host in the global config or the default host ${DEFAULT_HOST}${globalNote}.`,
+            'Fix: set SOLIDACTIONS_HOST to the host that key belongs to.',
+        ].join('\n');
+    }
+    const hostFrom = describeSource(conflict.hostSource, 'SOLIDACTIONS_HOST');
+    const keyFrom = describeSource(conflict.keySource, 'SOLIDACTIONS_API_KEY');
+    const keyHome = conflict.keyHost ?? 'no host (that config sets none)';
+    const fixes = conflict.hostSource === 'env'
+        ? ['unset SOLIDACTIONS_HOST', 'or set SOLIDACTIONS_API_KEY to a key for that host as well']
+        : [`run \`solidactions login --local --host ${conflict.host}\` in this folder to store a key for ${conflict.host}`, `or remove "host" from ${hostFrom}`];
+    if (conflict.keyHost === undefined) {
+        fixes.push(`or add "host" to ${keyFrom}`);
+    }
+    return [
+        `Refusing to send the API key from ${keyFrom} to ${conflict.host} (host from ${hostFrom}): that key is configured for ${keyHome}.`,
+        `Fix: ${fixes.join(', ')}.`,
+    ].join('\n');
 }
 
 const LOCAL_DIR_NAME = '.solidactions';
@@ -148,6 +203,13 @@ function readEnvOverrides(): Partial<Config> {
  * layer that defines it: env > local > global. Returns null only when no source
  * contributes a host or apiKey (i.e. nothing usable).
  *
+ * Credential-pair rule (cli#124): host and apiKey travel together. A host set in a
+ * layer ABOVE the layer that supplied the key must equal the key's own host, or the
+ * merge reports a `credentialConflict` and withholds the key (`apiKey: ''`) — a key
+ * is only ever sent to the host configured with it. An env key without
+ * SOLIDACTIONS_HOST may go only to the global config's host, or to DEFAULT_HOST when
+ * no file names a host; it never goes to a folder config's host.
+ *
  * Invariant the caller must uphold: if `local` is non-null, `localPath` must
  * also be non-null. (`local` is the parsed contents of a file at `localPath`;
  * the path is required for source attribution.) `global` may be null even when
@@ -160,7 +222,7 @@ export function mergeConfigs(
     localPath: string | null,
     global: Partial<Config> | null,
     globalPath: string,
-): { config: Config; sources: ResolvedConfig['sources'] } | null {
+): { config: Config; sources: ResolvedConfig['sources']; credentialConflict?: CredentialConflict } | null {
     const pick = <K extends keyof Config>(
         key: K,
     ): { value: Config[K] | undefined; source: ConfigSource } => {
@@ -202,10 +264,53 @@ export function mergeConfigs(
         return null;
     }
 
+    // cli#124: host and apiKey are picked per field above, so a host set in a HIGHER layer
+    // than the key's layer would carry that key to a host it was never configured for.
+    // The key may only travel with the host of its own layer, or of a layer below it.
+    const layers: Array<{ cfg: Partial<Config>; source: ConfigSource }> = [{ cfg: env, source: 'env' }];
+    if (local) layers.push({ cfg: local, source: localPath! });
+    if (global) layers.push({ cfg: global, source: globalPath });
+    const keyIndex = layers.findIndex((l) => l.cfg.apiKey !== undefined);
+    const hostIndex = layers.findIndex((l) => l.cfg.host !== undefined);
+    let credentialConflict: CredentialConflict | undefined;
+    if (keyIndex !== -1 && hostIndex !== -1 && hostIndex < keyIndex) {
+        const keyHost = layers.slice(keyIndex).find((l) => l.cfg.host !== undefined)?.cfg.host;
+        const resolvedHost = layers[hostIndex].cfg.host as string;
+        if (keyHost === undefined || normalizeHost(keyHost) !== normalizeHost(resolvedHost)) {
+            credentialConflict = {
+                host: resolvedHost,
+                hostSource: layers[hostIndex].source,
+                keyHost,
+                keySource: layers[keyIndex].source,
+            };
+        }
+    }
+    // PM rulings 1 and 10 (build card task-buildclitrust-bc78): a key from env with no
+    // SOLIDACTIONS_HOST has no host of its own, so the check above never fires for it. It may
+    // go only to the GLOBAL config's host or the default host — never to a host a folder's
+    // config names (a cloned repo's .solidactions/config.json must not receive an exported
+    // key), unless that host is the same as the global one.
+    let defaultHost = false;
+    if (keyIndex === 0 && env.host === undefined) {
+        const localHost = local?.host;
+        const globalHost = global?.host;
+        if (localHost !== undefined && (globalHost === undefined || normalizeHost(localHost) !== normalizeHost(globalHost))) {
+            credentialConflict = {
+                host: localHost,
+                hostSource: localPath!,
+                keyHost: undefined,
+                keySource: 'env',
+                ...(globalHost !== undefined ? { otherHost: globalHost, otherHostSource: globalPath } : {}),
+            };
+        } else if (localHost === undefined && globalHost === undefined) {
+            defaultHost = true;
+        }
+    }
+
     return {
         config: {
-            host: (host.value ?? '') as string,
-            apiKey: (apiKey.value ?? '') as string,
+            host: (defaultHost ? DEFAULT_HOST : host.value ?? '') as string,
+            apiKey: (credentialConflict ? '' : apiKey.value ?? '') as string,
             workspace: workspace.value as string | undefined,
             workspaceId: workspaceId.value as string | undefined,
             workspaceOrg: workspaceId.org,
@@ -213,11 +318,12 @@ export function mergeConfigs(
             scopedWorkspaceIds: scopedWorkspaceIds.value as string[] | undefined,
         },
         sources: {
-            host: host.source,
+            host: defaultHost ? 'default' : host.source,
             apiKey: apiKey.source,
             workspace: workspace.source,
             workspaceId: workspaceId.source,
         },
+        ...(credentialConflict ? { credentialConflict } : {}),
     };
 }
 
@@ -251,5 +357,6 @@ export function resolveConfig(cwd: string = process.cwd()): ResolvedConfig | nul
         config: merged.config,
         sources: merged.sources,
         activePath: localPath ?? globalPath,
+        credentialConflict: merged.credentialConflict,
     };
 }

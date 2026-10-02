@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { renderTable } from '../utils/table';
 
 interface EnvListOptions {
@@ -40,13 +40,13 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
                 ? projectName
                 : `${projectName}-${environment}`;
 
-            if (!options.json) {
-                console.log(chalk.blue(`Variables for project "${projectName}" (${environment}):`));
-            }
-
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: getApiHeaders(config),
             });
+
+            if (!options.json) {
+                console.log(chalk.blue(`Variables for project "${projectName}" (${environment}):`));
+            }
 
             const mappings = response.data || [];
 
@@ -119,13 +119,13 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
             console.log(chalk.gray(`${mappings.length} variable(s)`));
         } else {
             // List global variables with per-environment values
-            if (!options.json) {
-                console.log(chalk.blue('Global variables:'));
-            }
-
             const response = await axios.get(`${config.host}/api/v1/variables`, {
                 headers: getApiHeaders(config),
             });
+
+            if (!options.json) {
+                console.log(chalk.blue('Global variables:'));
+            }
 
             const variables = response.data?.data || [];
 
@@ -237,7 +237,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(`Authentication failed against ${config.host}. Run "solidactions login --global" to re-configure.`));
             } else if (error.response.status === 404) {
                 if (projectName) {
                     const envsList = await describeProjectEnvironments(config, projectName);
@@ -246,7 +246,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
                     console.error(chalk.red('Resource not found.'));
                 }
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

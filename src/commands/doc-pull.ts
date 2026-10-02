@@ -292,16 +292,66 @@ interface PlannedDoc {
     bodySha256: string | null;
 }
 
+/** Previously-manifested paths for the single-doc fallback allocator (cli#153 C1). */
+export interface SingleDocReserved {
+    usedNames: Map<string, Set<string>>;
+    pathById: Map<number, string>;
+    /** Previous manifest title per doc id; an unchanged title keeps its collision path (R2-I2). */
+    titleById: Map<number, string>;
+}
+
+/**
+ * Allocate the first free `<base>[ -N]<ext>` name not present in `used`,
+ * recording the winner in `used`.
+ */
+function allocateName(used: Set<string>, base: string, ext: string): string {
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(`${candidate}${ext}`)) {
+        candidate = `${base}-${suffix}`;
+        suffix++;
+    }
+    const fileName = `${candidate}${ext}`;
+    used.add(fileName);
+    return fileName;
+}
+
+/**
+ * Whether `file` is the allocator's own output for `base` + `ext`: exactly
+ * `<base><ext>` or `<base>-N<ext>` with an integer N >= 2.
+ */
+function isCollisionVariant(file: string, base: string, ext: string): boolean {
+    if (file === `${base}${ext}`) return true;
+    if (!file.startsWith(`${base}-`) || !file.endsWith(ext)) return false;
+    const middle = file.slice(base.length + 1, file.length - ext.length);
+    return middle !== '' && Number.isInteger(Number(middle)) && Number(middle) >= 2;
+}
+
 /**
  * Resolve every fetched doc into a `PlannedDoc` — final relative path and
  * content hash — confirming/downloading media as needed. This is the only
  * place that talks to the media confirm/download endpoints; it performs no
  * filesystem writes.
+ *
+ * The optional `reserved` parameter serves the single-doc fallback pull
+ * (cli#153 C1): `usedNames` seeds the `-2`/`-3` allocator per directory
+ * with the file names the previous manifest assigns, and `pathById` frees
+ * each pulled doc's own tracked name back to it, so a stable title
+ * reallocates its own path (reuse in effect) while every other tracked
+ * name still forces a suffix. When the tracked title is unchanged and the
+ * tracked path is a collision variant of that title in the same folder,
+ * the doc keeps that exact path (R2-I2); a renamed/stale path still
+ * reallocates. Folder pulls pass nothing and behave exactly as before.
  */
-async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
+    if (reserved) {
+        for (const [dir, names] of reserved.usedNames) {
+            usedNamesByDir.set(dir, new Set(names));
+        }
+    }
 
     for (const doc of docs) {
         const dirRel = doc.relative;
@@ -310,6 +360,18 @@ async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: 
         if (!used) {
             used = new Set();
             usedNamesByDir.set(dirRel, used);
+        }
+
+        // The pulled doc keeps its own tracked name: free it in its own
+        // directory so allocation below can hand it back. Names other ids
+        // own stay reserved.
+        const ownRelPath = reserved?.pathById.get(doc.id);
+        if (ownRelPath !== undefined) {
+            const slash = ownRelPath.lastIndexOf('/');
+            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+            if (ownDir === dirRel) {
+                used.delete(slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1));
+            }
         }
 
         const media = isMediaCandidate(doc) ? await resolveMedia(config, doc) : { isMedia: false as const };
@@ -329,16 +391,31 @@ async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: 
             }
         }
 
-        let candidate = base;
-        let suffix = 2;
-        while (used.has(`${candidate}${ext}`)) {
-            candidate = `${base}-${suffix}`;
-            suffix++;
+        // Unchanged title keeps its existing collision-assigned path (R2-I2):
+        // the tracked path must be in this same folder and be the base name
+        // or a `-N` collision variant of it. A stale/renamed path (e.g. the
+        // `renamed.md` merge fixture) falls through to reallocation below.
+        const ownTitle = reserved?.titleById.get(doc.id);
+        let fileName: string;
+        let relPath: string;
+        if (ownRelPath !== undefined && ownTitle !== undefined && ownTitle === doc.title) {
+            const slash = ownRelPath.lastIndexOf('/');
+            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+            const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
+            if (ownDir === dirRel && isCollisionVariant(ownFile, base, ext)) {
+                fileName = ownFile;
+                relPath = ownRelPath;
+                used.add(ownFile);
+            } else {
+                const allocated = allocateName(used, base, ext);
+                fileName = allocated;
+                relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
+            }
+        } else {
+            const allocated = allocateName(used, base, ext);
+            fileName = allocated;
+            relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
         }
-        used.add(`${candidate}${ext}`);
-
-        const fileName = `${candidate}${ext}`;
-        const relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
 
         let bodySha256: string | null;
         let mediaBytes: Buffer | null = null;
@@ -411,6 +488,22 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
 }
 
 /**
+ * Manifest-clobber protection, against the RESOLVED folder: the argument itself for a folder
+ * pull, the doc's own folder for a single-doc pull (cli#153). Runs once the server has said
+ * which one the argument is, and before anything is written. --overwrite bypasses it.
+ */
+function refuseManifestClobber(previousManifest: DocsManifest | null, resolvedFolder: string, argument: string, destination: string, options: DocPullOptions): void {
+    if (previousManifest === null || previousManifest.folder_path === resolvedFolder || options.overwrite) {
+        return;
+    }
+    process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
+    process.stderr.write(chalk.red(`Pulling "${argument}" here would replace its manifest, and local edits to the\n`));
+    process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
+    process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
+    process.exit(1);
+}
+
+/**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
  */
@@ -456,25 +549,16 @@ export async function docPullWithConfig(
         }
     }
 
-    // Manifest-clobber protection: a manifest tracking a DIFFERENT folder than the one
-    // being pulled must never be silently replaced — every file it tracks would become
-    // untracked, and detectLocalModifications only protects tracked files. This must run
-    // before any network I/O (listTree/planDocs) and before detectLocalModifications, since
-    // a mismatched manifest can't meaningfully speak for the folder being pulled anyway.
-    // --overwrite already means "discard local-edit protection", so it bypasses this too.
-    if (previousManifest !== null && previousManifest.folder_path !== folderPath && !options.overwrite) {
-        process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
-        process.stderr.write(chalk.red(`Pulling "${folderPath}" here would replace its manifest, and local edits to the\n`));
-        process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
-        process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
-        process.exit(1);
-    }
-
+    // Manifest-clobber protection runs later, once the server has said whether the
+    // argument is a folder or a doc: refuseManifestClobber compares against the
+    // RESOLVED folder (the argument for a folder pull, the doc's own folder for a
+    // single-doc pull), still before anything is written.
     let rows: DocRow[];
 
     const listResult = await listTree(config, folderPath);
     if (listResult.ok) {
         rows = listResult.rows;
+        refuseManifestClobber(previousManifest, folderPath, folderPath, destination, options);
     } else if (listResult.isRoot && listResult.code === 'folder_path_not_found') {
         // Single-doc fallback: the target might be a doc path, not a folder.
         usedSingleDocFallback = true;
@@ -501,7 +585,12 @@ export async function docPullWithConfig(
             properties: data.properties ?? {},
         }];
 
-        await report(destination, folderPath, fetched, options, config, [], previousManifest, usedSingleDocFallback);
+        // The doc's real folder, not the argument (cli#153): a later `doc push` creates
+        // untracked files under the manifest's folder_path.
+        const docFolder = typeof data.folder_path === 'string' ? data.folder_path : (dir === '.' ? '' : dir);
+        refuseManifestClobber(previousManifest, docFolder, folderPath, destination, options);
+
+        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -524,7 +613,31 @@ async function report(
     previousManifest: DocsManifest | null,
     usedSingleDocFallback: boolean,
 ): Promise<void> {
-    const { planned, warnings } = await planDocs(fetched, config);
+    // Single-doc fallback merging into a manifest that tracks the same folder
+    // must not steal a filename another tracked doc owns (cli#153 C1): the
+    // pulled doc reuses its own tracked path, and the allocator avoids every
+    // path the manifest assigns to other ids. Folder pulls pass nothing.
+    let reserved: SingleDocReserved | undefined;
+    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
+        const usedNames = new Map<string, Set<string>>();
+        const pathById = new Map<number, string>();
+        const titleById = new Map<number, string>();
+        for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
+            pathById.set(entry.id, relPath);
+            titleById.set(entry.id, entry.title);
+            const slash = relPath.lastIndexOf('/');
+            const dir = slash === -1 ? '' : relPath.slice(0, slash);
+            const file = slash === -1 ? relPath : relPath.slice(slash + 1);
+            let names = usedNames.get(dir);
+            if (!names) {
+                names = new Set();
+                usedNames.set(dir, names);
+            }
+            names.add(file);
+        }
+        reserved = { usedNames, pathById, titleById };
+    }
+    const { planned, warnings } = await planDocs(fetched, config, reserved);
 
     // Unpushed-local-changes protection: now that the server walk is known, refuse only
     // for a file whose doc still exists remotely — i.e. its relative path is part of this
@@ -565,7 +678,15 @@ async function report(
         }
     }
 
-    const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
+    let docs = manifestDocs;
+    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
+        // A single-doc pull speaks for one doc only: keep every other tracked entry (cli#153),
+        // dropping any stale key that pointed at this same doc id.
+        const pulledIds = new Set(Object.values(manifestDocs).map((entry) => entry.id));
+        docs = Object.fromEntries(Object.entries(previousManifest.docs).filter(([, entry]) => !pulledIds.has(entry.id)));
+        Object.assign(docs, manifestDocs);
+    }
+    const manifest: DocsManifest = { folder_path: folderPath, docs };
     writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {

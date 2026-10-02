@@ -8,7 +8,12 @@
  * (makeTmpEnv()).
  */
 
-import { describe, expect, it } from 'vitest';
+import * as childProcess from 'child_process';
+import * as fs from 'fs';
+import * as http from 'http';
+import * as os from 'os';
+import * as path from 'path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
     applyWorkspaceGuard,
     buildWorkspaceConfirmPrompt,
@@ -17,7 +22,89 @@ import {
 } from '../src/utils/api';
 import { getGlobalConfigPath, type Config, type ResolvedConfig } from '../src/utils/config';
 import { readLastUsedWorkspace, writeLastUsedWorkspace } from '../src/utils/workspace-guard';
-import { makeTmpEnv } from './helpers';
+import { makeTmpEnv, writeGlobal } from './helpers';
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+/** Real in-process HTTP server for spawned mutating-command runs (env reset). */
+let guardStubServer: http.Server;
+let guardStubPort: number;
+
+beforeAll(async () => {
+    guardStubServer = http.createServer((request, response) => {
+        let rawBody = '';
+        request.on('data', (chunk) => { rawBody += chunk; });
+        request.on('end', () => {
+            if (request.method === 'GET' && request.url?.endsWith('/variable-mappings')) {
+                response.writeHead(200, { 'Content-Type': 'application/json' });
+                response.end(JSON.stringify([{ id: 17, env_name: 'GMAIL_TOKEN', source_type: 'local' }]));
+                return;
+            }
+            if (request.method === 'POST' && request.url?.endsWith('/variable-mappings/17/reset')) {
+                response.writeHead(200, { 'Content-Type': 'application/json' });
+                response.end(JSON.stringify({
+                    message: 'Variable mapping reset successfully.',
+                    mapping: { id: 17, env_name: 'GMAIL_TOKEN', source_type: 'oauth_connection' },
+                }));
+                return;
+            }
+            response.writeHead(404, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify({ message: `Unhandled ${request.method} ${request.url}` }));
+        });
+    });
+    await new Promise<void>((resolve) => {
+        guardStubServer.listen(0, '127.0.0.1', () => {
+            guardStubPort = (guardStubServer.address() as { port: number }).port;
+            resolve();
+        });
+    });
+});
+
+afterAll(() => {
+    return new Promise<void>((resolve, reject) => {
+        guardStubServer.close((error) => (error ? reject(error) : resolve()));
+    });
+});
+
+interface GuardCliResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Run a mutating command through the real built binary: real stdout,
+ * stderr and exit status against the file's in-process stub server.
+ * Async spawn (never spawnSync): the stub server lives in this process.
+ */
+async function runGuardCli(args: string[], home: string, cwd: string): Promise<GuardCliResult> {
+    return new Promise<GuardCliResult>((resolve, reject) => {
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+        delete childEnv.SOLIDACTIONS_HOST;
+        delete childEnv.SOLIDACTIONS_API_KEY;
+        delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
+            cwd,
+            env: childEnv,
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+        }, 30_000);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ code, stdout, stderr });
+        });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
 
 const LOCAL_PATH = '/work/project/.solidactions/config.json';
 
@@ -290,41 +377,50 @@ describe('applyWorkspaceGuard', () => {
 
     describe('banner', () => {
         it('mutating command prints the Workspace: line with org when workspaceOrg is set', async () => {
-            const env = makeTmpEnv();
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-guard-banner-'));
+            const home = path.join(root, 'home');
+            const cwd = path.join(root, 'work');
+            fs.mkdirSync(home, { recursive: true });
+            fs.mkdirSync(cwd, { recursive: true });
+            writeGlobal(home, {
+                host: `http://127.0.0.1:${guardStubPort}`,
+                apiKey: 'test-key',
+                workspace: 'new-ws',
+                workspaceId: 'ws-new',
+                workspaceOrg: 'Acme',
+            });
             try {
-                const { io, announces } = makeIo(env.home);
-                const config = makeConfig({ workspaceOrg: 'Acme' });
-                await applyWorkspaceGuard(
-                    config,
-                    sources(getGlobalConfigPath()),
-                    { mutating: true, explicitOverride: false },
-                    io,
-                );
-                expect(announces).toHaveLength(1);
-                expect(announces[0]).toContain('Workspace:');
-                expect(announces[0]).toContain('new-ws — organization Acme');
-                expect(announces[0]).toContain('ws-new');
+                const result = await runGuardCli(['env', 'reset', 'mail-worker', 'GMAIL_TOKEN'], home, cwd);
+                expect(result.code).toBe(0);
+                expect(result.stderr).toContain('Workspace:');
+                expect(result.stderr).toContain('new-ws — organization Acme');
+                expect(result.stderr).toContain('ws-new');
+                expect(result.stderr).toContain(` on http://127.0.0.1:${guardStubPort}`);
             } finally {
-                env.cleanup();
+                fs.rmSync(root, { recursive: true, force: true });
             }
         });
 
         it('mutating command prints the Workspace: line without org when workspaceOrg is unset', async () => {
-            const env = makeTmpEnv();
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-guard-banner-'));
+            const home = path.join(root, 'home');
+            const cwd = path.join(root, 'work');
+            fs.mkdirSync(home, { recursive: true });
+            fs.mkdirSync(cwd, { recursive: true });
+            writeGlobal(home, {
+                host: `http://127.0.0.1:${guardStubPort}`,
+                apiKey: 'test-key',
+                workspace: 'new-ws',
+                workspaceId: 'ws-new',
+            });
             try {
-                const { io, announces } = makeIo(env.home);
-                const config = makeConfig();
-                await applyWorkspaceGuard(
-                    config,
-                    sources(getGlobalConfigPath()),
-                    { mutating: true, explicitOverride: false },
-                    io,
-                );
-                expect(announces).toHaveLength(1);
-                expect(announces[0]).toContain('Workspace: new-ws (ws-new)');
-                expect(announces[0]).not.toContain('organization');
+                const result = await runGuardCli(['env', 'reset', 'mail-worker', 'GMAIL_TOKEN'], home, cwd);
+                expect(result.code).toBe(0);
+                expect(result.stderr).toContain('Workspace: new-ws (ws-new)');
+                expect(result.stderr).not.toContain('organization');
+                expect(result.stderr).toContain(` on http://127.0.0.1:${guardStubPort}`);
             } finally {
-                env.cleanup();
+                fs.rmSync(root, { recursive: true, force: true });
             }
         });
 

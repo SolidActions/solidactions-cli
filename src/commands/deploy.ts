@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import axios from 'axios';
+import axios, { type AxiosResponse } from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
@@ -9,7 +9,7 @@ import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
-import { buildProjectSlug } from '../utils/slug';
+import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
 import {
@@ -477,6 +477,23 @@ export async function handlePlanLimitReached(
     }
 }
 
+/**
+ * GET a project by the name as typed, then — on a 404 only — by its canonical slug when
+ * that differs (cli#102). The server stores `Issue970-QX` as `issue970-qx`; without the
+ * retry a redeploy 404s, tries to create, and collides with the slug that already exists.
+ * The typed spelling goes first so a legacy slug the slugifier would rewrite still resolves.
+ */
+export async function getProjectBySlugOrCanonical(config: Config, typed: string, canonical: string): Promise<AxiosResponse> {
+    try {
+        return await axios.get(`${config.host}/api/v1/projects/${typed}`, { headers: getApiHeaders(config) });
+    } catch (error: any) {
+        if (error.response?.status !== 404 || canonical === '' || canonical === typed) {
+            throw error;
+        }
+        return axios.get(`${config.host}/api/v1/projects/${canonical}`, { headers: getApiHeaders(config) });
+    }
+}
+
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -520,9 +537,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     let productionSlug: string | null = null;
 
     try {
-        const prodResponse = await axios.get(`${config.host}/api/v1/projects/${projectName}`, {
-            headers: getApiHeaders(config),
-        });
+        const prodResponse = await getProjectBySlugOrCanonical(config, projectName, slugifyName(projectName) === '' ? '' : buildProjectSlug(projectName, 'production'));
         productionExists = true;
         productionSlug = prodResponse.data.slug || prodResponse.data.name;
     } catch (error: any) {
@@ -605,9 +620,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 ? projectName
                 : `${projectName}-${environment}`;
 
-            const checkResponse = await axios.get(`${config.host}/api/v1/projects/${lookupSlug}`, {
-                headers: getApiHeaders(config),
-            });
+            const checkResponse = await getProjectBySlugOrCanonical(config, lookupSlug, slugifyName(projectName) === '' ? '' : buildProjectSlug(projectName, environment));
             projectSlug = checkResponse.data.slug || checkResponse.data.name;
         }
     } catch (error: any) {

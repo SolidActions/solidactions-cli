@@ -5,6 +5,7 @@ import prompts from 'prompts';
 import {
     Config,
     ConfigSource,
+    credentialConflictMessage,
     resolveConfig,
     writeConfigFile,
     removeConfigFile,
@@ -100,17 +101,6 @@ export async function resolveLoginApiKey(
     }
 
     return trimmed;
-}
-
-export function getConfig(): Config | null {
-    const resolved = resolveConfig();
-    return resolved ? resolved.config : null;
-}
-
-export function saveConfig(config: Config): void {
-    const resolved = resolveConfig();
-    const targetPath = resolved ? resolved.activePath : getGlobalConfigPath();
-    writeConfigFile(targetPath, config);
 }
 
 export function clearConfig(): void {
@@ -539,6 +529,11 @@ export function logout(options: { local?: boolean; global?: boolean } = {}) {
 
 export function whoami() {
     const resolved = resolveConfig();
+    if (resolved?.credentialConflict) {
+        // stderr, like requireResolvedConfig (PM ruling 7).
+        console.error(chalk.red(credentialConflictMessage(resolved.credentialConflict)));
+        process.exit(1);
+    }
     if (!resolved || !resolved.config.apiKey) {
         console.log(chalk.yellow('Not initialized.'));
         console.log(chalk.gray('Run "solidactions login --global" to configure.'));
@@ -553,6 +548,7 @@ export function whoami() {
     const fmt = (src: ConfigSource): string => {
         if (src === 'env') return chalk.gray('(from $SOLIDACTIONS_* env var)');
         if (src === 'cli') return chalk.gray('(from -w flag)');
+        if (src === 'default') return chalk.gray('(default)');
         if (src === null) return chalk.gray('(unset)');
         return chalk.gray(`(from ${src})`);
     };

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { getStatusColor } from '../utils/run-status';
 import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
 import { formatDetailedRevision, formatRevisionCell } from '../utils/source-provenance';
 
@@ -368,22 +369,4 @@ function formatDuration(ms: number | null): string {
 function truncate(str: string, max: number): string {
     if (str.length <= max) return str;
     return str.substring(0, max - 3) + '...';
-}
-
-function getStatusColor(status: string): (text: string) => string {
-    switch (status?.toLowerCase()) {
-        case 'completed':
-        case 'success':
-            return chalk.green;
-        case 'running':
-            return chalk.blue;
-        case 'pending':
-        case 'queued':
-            return chalk.yellow;
-        case 'failed':
-        case 'error':
-            return chalk.red;
-        default:
-            return chalk.gray;
-    }
 }

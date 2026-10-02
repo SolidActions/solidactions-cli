@@ -88,6 +88,10 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
         await ensureGitignoreCovers(process.cwd(), !!options.gitignore);
     }
 
-    console.log(chalk.green(`Workspace set to: ${formatWorkspaceWithOrg(workspace)} (${workspace.id})`));
+    // Lead with org AND slug: "Main" can be three different workspaces (cli#112).
+    const label = workspace.slug
+        ? `${formatWorkspaceWithOrg(workspace)}, slug ${workspace.slug}`
+        : formatWorkspaceWithOrg(workspace);
+    console.log(chalk.green(`Workspace set to: ${label} (${workspace.id})`));
     console.log(chalk.gray(`Saved to ${targetPath}`));
 }

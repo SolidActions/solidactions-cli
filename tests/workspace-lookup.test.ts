@@ -4,6 +4,7 @@ import {
     classifyWorkspaceInput,
     describeWorkspaceMatchFailure,
     fetchWorkspaces,
+    suggestWorkspaces,
     WorkspaceLookupRecord,
 } from '../src/utils/workspace-lookup';
 
@@ -347,5 +348,40 @@ describe('fetchWorkspaces', () => {
             { id: 'ws-1', name: 'First', slug: 'first' },
             { id: 'ws-2', name: 'Second', slug: 'second', org_name: 'Preset Org', role: 'owner' },
         ]);
+    });
+});
+
+describe('not-found suggestions (cli#112)', () => {
+    const ws: WorkspaceLookupRecord[] = [
+        { id: 'a', slug: 'acme-north-ws', name: 'Main', org_name: 'Acme' },
+        { id: 'b', slug: 'acme-south-ws', name: 'Main', org_name: 'Acme' },
+        { id: 'c', slug: 'zeta-ws', name: 'Zeta Main', org_name: 'Zeta Corp' },
+    ];
+
+    it('a partial slug suggests the workspaces containing it, and never matches', () => {
+        const result = classifyWorkspaceInput('acme-south', ws);
+        expect(result.kind).toBe('not-found');
+        expect(result.kind === 'not-found' && result.suggestions?.map((w) => w.id)).toEqual(['b']);
+    });
+
+    it('matching is case-insensitive', () => {
+        expect(suggestWorkspaces('ACME', ws).map((w) => w.id)).toEqual(['a', 'b']);
+    });
+
+    it('a miss with nothing similar carries no suggestions key', () => {
+        expect(classifyWorkspaceInput('qqq', ws)).toEqual({ kind: 'not-found', input: 'qqq' });
+    });
+
+    it('suggestions are capped', () => {
+        const many = Array.from({ length: 9 }, (_, i) => ({ id: `x${i}`, slug: `team-${i}`, name: `Team ${i}` }));
+        expect(suggestWorkspaces('team', many)).toHaveLength(5);
+    });
+
+    it('the failure message lists the suggestions with their org after the existing text', () => {
+        const msg = describeWorkspaceMatchFailure(classifyWorkspaceInput('acme-south', ws));
+        expect(msg).toBe(
+            'Workspace "acme-south" not found. Run `solidactions workspace list` to list available workspaces.\n'
+            + 'Did you mean: acme-south-ws (Acme)?',
+        );
     });
 });

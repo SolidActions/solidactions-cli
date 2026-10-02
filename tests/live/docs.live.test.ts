@@ -164,13 +164,60 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         expect(read(after, 'a.md').toString('utf8')).toBe('from copy B\n');
     });
 
+    it('doc push creates visual docs and canvases; --replace swaps a body with a kind check', async () => {
+        const dir = mkTmp();
+        const pageFile = path.join(dir, 'page.html');
+        const boardFile = path.join(dir, 'board.canvas.json');
+        const pageV1 = '<!doctype html><html><body><h1>cli-trust</h1></body></html>';
+        const boardBody = '{"nodes":[{"id":"n1","type":"text","text":"hello","x":0,"y":0,"width":200,"height":80}],"edges":[]}';
+        fs.writeFileSync(pageFile, pageV1, 'utf8');
+        fs.writeFileSync(boardFile, boardBody, 'utf8');
+
+        const push = runCli(['doc', 'push', dir, '--folder', `${root}/visual`, '--json']);
+        expect(push.status, push.stdout + push.stderr).toBe(0);
+        const created = json(push).results.filter((r: any) => r.status === 'created');
+        expect(created.length).toBe(2);
+
+        const readPage = await callDocsTool(config, { action: 'read_doc', path: { folder_path: `${root}/visual`, title: 'page' } });
+        expect(readPage.ok, JSON.stringify(readPage.data)).toBe(true);
+        expect(readPage.data.body).toBe(pageV1);
+        expect(readPage.data.doc_type.slug).toBe('visual');
+        const readBoard = await callDocsTool(config, { action: 'read_doc', path: { folder_path: `${root}/visual`, title: 'board' } });
+        expect(readBoard.ok, JSON.stringify(readBoard.data)).toBe(true);
+        expect(readBoard.data.doc_type.slug).toBe('canvas');
+        const pageId = readPage.data.id;
+
+        const pageV2 = '<!doctype html><html><body><h1>cli-trust v2</h1></body></html>';
+        fs.writeFileSync(pageFile, pageV2, 'utf8');
+        const replaced = runCli(['doc', 'push', pageFile, '--replace', String(pageId), '--json']);
+        expect(replaced.status, replaced.stdout + replaced.stderr).toBe(0);
+        expect(json(replaced).replaced.current_revision_id).toBeDefined();
+        const reread = await callDocsTool(config, { action: 'read_doc', path: { folder_path: `${root}/visual`, title: 'page' } });
+        expect(reread.ok, JSON.stringify(reread.data)).toBe(true);
+        expect(reread.data.body).toBe(pageV2);
+
+        const notesFile = path.join(mkTmp(), 'notes.md');
+        fs.writeFileSync(notesFile, '# not a page\n', 'utf8');
+        const mismatch = runCli(['doc', 'push', notesFile, '--replace', String(pageId)]);
+        expect(mismatch.status).toBe(1);
+        const still = await callDocsTool(config, { action: 'read_doc', path: { folder_path: `${root}/visual`, title: 'page' } });
+        expect(still.ok, JSON.stringify(still.data)).toBe(true);
+        expect(still.data.body).toBe(pageV2);
+
+        const again = runCli(['doc', 'push', dir, '--folder', `${root}/visual`]);
+        expect(again.status, again.stdout + again.stderr).toBe(0);
+        expect(again.stderr).toContain('page.html: skipped');
+        console.log(`skip hint form: ${/--replace \d+/.test(again.stderr) ? 'id from the server row' : '<doc-id> fallback'}`);
+        expect(/--replace (\d+|<doc-id>)/.test(again.stderr)).toBe(true);
+    });
+
     it('doc pull <folder>/<doc> reads a single doc (read_doc by folder_path + title)', () => {
         const dest = path.join(mkTmp(), 'single');
         const pull = runCli(['doc', 'pull', `${root}/a`, dest, '--json']);
         expect(pull.status, pull.stdout + pull.stderr).toBe(0);
         const out = json(pull);
         expect(out.files.map((f: any) => f.path)).toEqual(['a.md']);
-        expect(out.manifest.folder_path).toBe(`${root}/a`);
+        expect(out.manifest.folder_path).toBe(root);
         expect(read(dest, 'a.md').toString('utf8')).toBe('from copy B\n');
 
         // A doc that lives in a sub-folder resolves the same way.
@@ -178,6 +225,7 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         const nested = runCli(['doc', 'pull', `${root}/sub/b`, dest2]);
         expect(nested.status, nested.stdout + nested.stderr).toBe(0);
         expect(read(dest2, 'b.md').toString('utf8')).toBe(`${bodyB}\nsecond edit\n`);
+        expect(JSON.parse(fs.readFileSync(path.join(dest2, '.solidactions-docs.json'), 'utf8')).folder_path).toBe(`${root}/sub`);
 
         // A path that is neither a folder nor a doc fails cleanly.
         const missing = runCli(['doc', 'pull', `${root}/no-such-doc`, path.join(mkTmp(), 'none')]);
