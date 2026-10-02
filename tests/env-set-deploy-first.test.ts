@@ -1,7 +1,55 @@
+import * as childProcess from 'child_process';
 import * as http from 'http';
+import * as path from 'path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { envSet } from '../src/commands/env-set';
 import { makeTmpEnv, writeGlobal } from './helpers';
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+interface CliResult {
+    stdout: string;
+    stderr: string;
+    status: number | null;
+}
+
+/**
+ * Run the real built binary against this file's in-process stub server:
+ * real stdout, stderr and exit status with a temp HOME. Async spawn (never
+ * spawnSync): the stub server lives in this process.
+ */
+function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
+    return new Promise((resolve, reject) => {
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+        delete childEnv.SOLIDACTIONS_HOST;
+        delete childEnv.SOLIDACTIONS_API_KEY;
+        delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+
+        const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd, env: childEnv });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk;
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk;
+        });
+
+        const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+        }, 15_000);
+
+        child.on('close', (status) => {
+            clearTimeout(timer);
+            resolve({ stdout, stderr, status });
+        });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
 
 class ProcessExitError extends Error {
     constructor(public readonly code: number | undefined) {
@@ -101,10 +149,26 @@ describe('env set missing environment deploy-first hint', () => {
         );
     });
 
+    // FR2-I1: this case changed in this wave, so it spawns the built binary
+    // (real stdout/stderr/exit status) instead of replacing process.exit and
+    // console.error. The two older cases above are unchanged since the merge
+    // base and keep the in-process harness under the recorded exception.
     it('prints the server message (never a missing-environment hint) when discovery returns null', async () => {
-        const output = await failedEnvSet('missing-project', { yes: true, env: 'production' });
+        const env = makeTmpEnv();
+        try {
+            writeGlobal(env.home, {
+                host: `http://127.0.0.1:${port}`,
+                apiKey: 'test-key',
+                workspaceId: 'ws-1',
+            });
 
-        expect(output).toContain('Failed: 404 Project not found.');
-        expect(output).not.toMatch(/has no .* environment/);
+            const result = await runCli(['env', 'set', 'missing-project', 'API_KEY', 'secret', '-e', 'production', '--yes'], env.home, env.cwd);
+
+            expect(result.status).toBe(1);
+            expect(result.stderr).toContain('Failed: 404 Project not found.');
+            expect(result.stderr).not.toMatch(/has no .* environment/);
+        } finally {
+            env.cleanup();
+        }
     });
 });

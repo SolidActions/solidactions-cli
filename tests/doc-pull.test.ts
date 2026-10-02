@@ -2973,4 +2973,97 @@ describe('doc pull writes the right extension (cli#157)', () => {
             cleanup();
         }
     });
+
+    /** Pre-seed a destination whose manifest tracks media doc 7 at old.png. */
+    function seedMediaRenameDir(dir: string, oldBytes: Buffer): void {
+        const dest = path.join(dir, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'old.png'), oldBytes);
+        const manifest: DocsManifest = {
+            folder_path: 'docs',
+            docs: {
+                'old.png': { id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) },
+            },
+        };
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    }
+
+    const MEDIA_BLOB_PROPS = { blob_sha: 'abc', mime: 'image/png', size: 4 };
+
+    it('rename, failed media download (folder pull): keeps old.png bytes and tracks the old path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const oldBytes = Buffer.from([7, 7, 7, 7]);
+            seedMediaRenameDir(tmpDest, oldBytes);
+            responseQueue = [
+                makeMcpSuccess({
+                    folders: [],
+                    docs: [{ id: 7, title: 'new.png', properties: MEDIA_BLOB_PROPS }],
+                }),
+                makeMcpSuccess({
+                    results: [{
+                        index: 0, status: 'found', id: 7, title: 'new.png', current_revision_id: 11,
+                        properties: MEDIA_BLOB_PROPS, body: '',
+                    }],
+                }),
+            ];
+            mediaResponseQueue = [
+                { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+            ];
+            blobResponseQueue = [{ status: 503, bytes: Buffer.alloc(0) }];
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain('failed to download media');
+
+            // The only good copy survives: old bytes unchanged, no replacement written.
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'old.png'))).toEqual(oldBytes);
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'new.png'))).toBe(false);
+
+            // Tracking stays recoverable: the old path with its old hash, no unwritten new path.
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['old.png']);
+            expect(manifest.docs['old.png']).toEqual({ id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, failed media download (single-doc pull): keeps old.png bytes and tracks the old path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const oldBytes = Buffer.from([7, 7, 7, 7]);
+            seedMediaRenameDir(tmpDest, oldBytes);
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 7, title: 'new.png', folder_path: 'docs', body: '',
+                        current_revision_id: 11, properties: MEDIA_BLOB_PROPS, doc_type: null,
+                    });
+                },
+            ];
+            mediaResponseQueue = [
+                { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+            ];
+            blobResponseQueue = [{ status: 503, bytes: Buffer.alloc(0) }];
+
+            const result = await runPullCli(['docs/old', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain('failed to download media');
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'old.png'))).toEqual(oldBytes);
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'new.png'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['old.png']);
+            expect(manifest.docs['old.png']).toEqual({ id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) });
+        } finally {
+            cleanup();
+        }
+    });
 });

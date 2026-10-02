@@ -197,7 +197,9 @@ export async function crewEnvPush(crewArg: string, filePath: string = '.env', op
                 { headers: getApiHeaders(config, 'application/json') },
             );
         } catch (error: any) {
-            if (error.response?.status === 422) {
+            if (error.response?.status === 401) {
+                console.error(chalk.red(authFailedLine(config.host)));
+            } else if (error.response?.status === 422) {
                 console.error(chalk.red(`Failed to push "${entry.key}":`), formatValidationError(error.response.data));
             } else {
                 console.error(chalk.red(`Failed to push "${entry.key}":`), error.response?.data?.message || error.message);

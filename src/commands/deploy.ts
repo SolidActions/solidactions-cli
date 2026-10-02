@@ -473,7 +473,11 @@ export async function handlePlanLimitReached(
     try {
         return await createEnvironmentProject(config, projectName, 'production');
     } catch (prodError: any) {
-        console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
+        if (prodError.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else {
+            console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
+        }
         process.exit(1);
     }
 }
@@ -640,11 +644,17 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     environment = 'production';
                     envLabel = '';
                     console.log(chalk.blue(`Deploying to project "${projectName}" (production) instead.`));
+                } else if (createError.response?.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
+                    process.exit(1);
                 } else {
                     console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
                     process.exit(1);
                 }
             }
+        } else if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+            process.exit(1);
         } else {
             console.error(chalk.red('Failed to check project:'), error.response?.data?.message || error.message);
             process.exit(1);
@@ -661,7 +671,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         try {
             await pushYamlDeclarations(config, projectSlug, yamlConfig);
         } catch (error: any) {
-            console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+            if (error.response?.status === 401) {
+                console.error(chalk.red(authFailedLine(config.host)));
+            } else {
+                console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+            }
             process.exit(1);
         }
         console.log(chalk.green(`✓ Config synced for ${projectSlug}${envLabel}`));
@@ -815,7 +829,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             try {
                                 await pushYamlDeclarations(config, projectSlug, yamlConfig);
                             } catch (error: any) {
-                                console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                                if (error.response?.status === 401) {
+                                    console.error(chalk.red(authFailedLine(config.host)));
+                                } else {
+                                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                                }
                                 cleanupArchive();
                                 process.exit(1);
                             }
@@ -868,6 +886,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             if (error.response) {
                 if (error.response.status === 404) {
                     console.error("Project not found.");
+                } else if (error.response.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else {
                     console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }

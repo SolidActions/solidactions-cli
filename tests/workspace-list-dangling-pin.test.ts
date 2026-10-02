@@ -132,7 +132,7 @@ describe('solidactions workspace list with a pin the list does not contain', () 
 
     it('still warns about the pin when the list is empty, without pointing at the list', async () => {
         currentPayload = { workspaces: {} };
-        writeGlobal(env.home, { ...baseConfig(), workspace: 'gone-ws', workspaceId: 'ws-9' });
+        const globalPath = writeGlobal(env.home, { ...baseConfig(), workspace: 'gone-ws', workspaceId: 'ws-9' });
 
         const result = await runCli(['workspace', 'list'], env.home, env.cwd);
 
@@ -142,8 +142,11 @@ describe('solidactions workspace list with a pin the list does not contain', () 
         expect(warning).toContain('gone-ws');
         expect(warning).toContain('ws-9');
         expect(warning).toContain('another host');
+        expect(warning).toContain('workspaceId');
+        expect(warning).toContain(globalPath);
         expect(warning).toContain('workspace set');
         expect(warning).not.toContain('Pick one from the list');
+        expect(warning).not.toContain('--local');
     });
 
     it('warns nothing on an empty list when nothing is pinned', async () => {

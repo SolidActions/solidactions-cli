@@ -832,11 +832,24 @@ async function report(
     // for another doc (e.g. a new markdown doc that now takes `page.md`).
     // Edited twins were either refused above or, with --overwrite, are kept
     // untracked with a warning.
+    // A twin whose replacement was NOT written (a failed media download plans
+    // a new path but writes nothing) keeps its old file and its old manifest
+    // entry — deleting it would destroy the only good copy.
+    const writtenPaths = new Set(files.map((file) => file.path));
     for (const m of renameMoves) {
         if (m.modified) {
             if (options.overwrite) {
                 process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} is now ${m.newRel}; ${m.oldRel} is untracked\n`));
             }
+            continue;
+        }
+        if (!writtenPaths.has(m.newRel)) {
+            delete manifestDocs[m.newRel];
+            const oldEntry = previousManifest?.docs[m.oldRel];
+            if (oldEntry !== undefined) {
+                manifestDocs[m.oldRel] = oldEntry;
+            }
+            process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} download failed; still tracked as ${m.oldRel}\n`));
             continue;
         }
         const absOld = path.resolve(destination, ...m.oldRel.split('/'));
