@@ -19,17 +19,18 @@ const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 let server: http.Server;
 let port: number;
 let runBody: object = { status: 'completed' };
+let triggerPaths: string[] = [];
 
 beforeAll(async () => {
     server = http.createServer((request, response) => {
-        let body: object;
         if (request.method === 'POST') {
-            body = { deferred: true, run: { id: 77 } };
+            triggerPaths.push(request.url ?? '');
+            response.writeHead(202, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify({ deferred: true, run: { id: 77 } }));
         } else {
-            body = runBody;
+            response.writeHead(200, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify(runBody));
         }
-        response.writeHead(200, { 'Content-Type': 'application/json' });
-        response.end(JSON.stringify(body));
     });
 
     await new Promise<void>((resolve) => {
@@ -106,6 +107,7 @@ describe('run start --wait terminal statuses (cli#99)', () => {
             workspaceId: 'workspace-1',
         });
         runBody = { status: 'completed' };
+        triggerPaths = [];
     });
 
     afterEach(() => {
@@ -138,5 +140,7 @@ describe('run start --wait terminal statuses (cli#99)', () => {
 
         expect(result.status).toBe(0);
         expect(result.stdout).toContain('Workflow completed successfully!');
+        expect(triggerPaths).toHaveLength(1);
+        expect(triggerPaths[0]).toBe('/api/v1/projects/my-app/workflows/hello/trigger');
     });
 });

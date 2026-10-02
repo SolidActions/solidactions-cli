@@ -6,6 +6,7 @@
  * tests/doc-push.test.ts.
  */
 
+import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
@@ -16,6 +17,7 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/doc-pull';
 import type { DocsManifest } from '../src/commands/doc-pull';
 import type { Config } from '../src/utils/config';
+import { writeGlobal } from './helpers';
 
 /** sha256 hex digest, for asserting manifest body_sha256 values in tests. */
 function sha256Hex(data: string | Buffer): string {
@@ -194,6 +196,57 @@ async function runExpectingExit(fn: () => Promise<void>): Promise<number | undef
 function makeTmpDir(): { dir: string; cleanup: () => void } {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-docs-pull-test-'));
     return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+interface CliResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Run a pull through the real built CLI: real stdout, stderr and exit
+ * status against the file's in-process stub MCP server. The temp HOME
+ * points at the stub server; no credentialed env reaches the child.
+ * Async spawn (never spawnSync): the stub server lives in this process.
+ */
+async function runPullCli(args: string[]): Promise<CliResult> {
+    const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-docs-pull-cli-'));
+    const home = path.join(homeRoot, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    writeGlobal(home, { host: `http://127.0.0.1:${stubPort}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
+    try {
+        return await new Promise<CliResult>((resolve, reject) => {
+            const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+            delete childEnv.SOLIDACTIONS_HOST;
+            delete childEnv.SOLIDACTIONS_API_KEY;
+            delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+            const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'pull', ...args], {
+                cwd: homeRoot,
+                env: childEnv,
+            });
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', (chunk) => { stdout += chunk; });
+            child.stderr.on('data', (chunk) => { stderr += chunk; });
+            const timer = setTimeout(() => {
+                child.kill();
+                reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+            }, 30_000);
+            child.on('close', (code) => {
+                clearTimeout(timer);
+                resolve({ code, stdout, stderr });
+            });
+            child.on('error', (error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
+    } finally {
+        fs.rmSync(homeRoot, { recursive: true, force: true });
+    }
 }
 
 function readManifest(dest: string): DocsManifest {
@@ -532,16 +585,12 @@ describe('docPullWithConfig — single-doc fallback', () => {
 
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, {}, stubConfig()));
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes/solo', dest]);
+            expect(result.code).toBe(0);
             expect(readManifest(dest).folder_path).toBe('notes');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -568,16 +617,12 @@ describe('docPullWithConfig — single-doc fallback', () => {
             docs: { 'solo.md': { id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') } },
         });
         fs.writeFileSync(path.join(dest, 'solo.md'), 'x', 'utf8');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes/solo', dest, '--yes']);
+            expect(result.code).toBe(0);
             expect(readManifest(dest).folder_path).toBe('notes');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -599,19 +644,15 @@ describe('docPullWithConfig — single-doc fallback', () => {
         });
         fs.writeFileSync(path.join(dest, 'other.md'), 'o', 'utf8');
         fs.writeFileSync(path.join(dest, 'solo.md'), 'old', 'utf8');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes/solo', dest, '--yes']);
+            expect(result.code).toBe(0);
             const manifest = readManifest(dest);
             expect(manifest.docs['other.md']).toEqual({ id: 9, title: 'other', current_revision_id: 1, media: false, body_sha256: sha256Hex('o') });
             expect(manifest.docs['solo.md'].current_revision_id).toBe(3);
             expect(fs.readFileSync(path.join(dest, 'other.md'), 'utf8')).toBe('o');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -631,18 +672,14 @@ describe('docPullWithConfig — single-doc fallback', () => {
             },
         });
         fs.writeFileSync(path.join(dest, 'renamed.md'), 'old', 'utf8');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes/solo', dest, '--yes']);
+            expect(result.code).toBe(0);
             const manifest = readManifest(dest);
             expect(manifest.docs['solo.md'].id).toBe(5);
             expect(manifest.docs).not.toHaveProperty('renamed.md');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -662,15 +699,11 @@ describe('docPullWithConfig — single-doc fallback', () => {
             docs: { 'solo.md': { id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') } },
         });
         fs.writeFileSync(path.join(dest, 'solo.md'), 'x', 'utf8');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes', dest, { yes: true }, stubConfig()));
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes', dest, '--yes']);
+            expect(result.code).toBe(0);
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -686,18 +719,98 @@ describe('docPullWithConfig — single-doc fallback', () => {
         writeSingleDocManifest(dest, { folder_path: 'elsewhere', docs: {} });
         fs.writeFileSync(path.join(dest, 'keep.md'), 'keep', 'utf8');
         const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
-        const restoreExit = patchProcessExit();
-        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
 
         try {
-            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
-            expect(code).toBe(1);
-            expect(stderrLines.join('')).toContain('already tracks "elsewhere"');
+            const result = await runPullCli(['notes/solo', dest, '--yes']);
+            expect(result.code).toBe(1);
+            expect(result.stderr).toContain('already tracks "elsewhere"');
             expect(fs.existsSync(path.join(dest, 'solo.md'))).toBe(false);
             expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
-            restoreExit();
-            restoreStderr();
+            cleanup();
+        }
+    });
+
+    // Single-doc filename collisions (cli#153 C1): the allocator must avoid
+    // every path the previous manifest assigns to other ids, so a
+    // same-sanitized-name pull can never overwrite and untrack another doc.
+    function writeCollisionManifest(dest: string, docs: DocsManifest['docs']): void {
+        writeSingleDocManifest(dest, { folder_path: 'notes', docs });
+    }
+
+    function queueSingleDocList404ThenRead(readBody: object): void {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess(readBody),
+        ];
+    }
+
+    it('a colliding single-doc pull keeps the other tracked doc: file and manifest entry survive', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeCollisionManifest(dest, {
+            'note_one.md': { id: 1, title: 'note:one', current_revision_id: 1, media: false, body_sha256: sha256Hex('first doc') },
+            'note_one-2.md': { id: 2, title: 'note?one', current_revision_id: 1, media: false, body_sha256: sha256Hex('second old') },
+        });
+        fs.writeFileSync(path.join(dest, 'note_one.md'), 'first doc', 'utf8');
+        fs.writeFileSync(path.join(dest, 'note_one-2.md'), 'second old', 'utf8');
+        queueSingleDocList404ThenRead({ id: 2, title: 'note?one', body: 'second new', current_revision_id: 2, folder_path: 'notes' });
+
+        try {
+            const result = await runPullCli(['notes/note?one', dest, '--yes']);
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'note_one.md'), 'utf8')).toBe('first doc');
+            expect(fs.readFileSync(path.join(dest, 'note_one-2.md'), 'utf8')).toBe('second new');
+            const manifest = readManifest(dest);
+            expect(manifest.docs['note_one.md'].id).toBe(1);
+            expect(manifest.docs['note_one-2.md']).toEqual({ id: 2, title: 'note?one', current_revision_id: 2, media: false, body_sha256: sha256Hex('second new') });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('pulling the other colliding doc updates it in place, keeping both entries', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeCollisionManifest(dest, {
+            'note_one.md': { id: 1, title: 'note:one', current_revision_id: 1, media: false, body_sha256: sha256Hex('first doc') },
+            'note_one-2.md': { id: 2, title: 'note?one', current_revision_id: 1, media: false, body_sha256: sha256Hex('second old') },
+        });
+        fs.writeFileSync(path.join(dest, 'note_one.md'), 'first doc', 'utf8');
+        fs.writeFileSync(path.join(dest, 'note_one-2.md'), 'second old', 'utf8');
+        queueSingleDocList404ThenRead({ id: 1, title: 'note:one', body: 'first new', current_revision_id: 2, folder_path: 'notes' });
+
+        try {
+            const result = await runPullCli(['notes/note:one', dest, '--yes']);
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'note_one.md'), 'utf8')).toBe('first new');
+            expect(fs.readFileSync(path.join(dest, 'note_one-2.md'), 'utf8')).toBe('second old');
+            const manifest = readManifest(dest);
+            expect(manifest.docs['note_one.md'].current_revision_id).toBe(2);
+            expect(manifest.docs['note_one-2.md'].id).toBe(2);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a NEW colliding doc lands on a suffixed name, leaving the tracked file alone', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeCollisionManifest(dest, {
+            'note_one.md': { id: 1, title: 'note:one', current_revision_id: 1, media: false, body_sha256: sha256Hex('first doc') },
+        });
+        fs.writeFileSync(path.join(dest, 'note_one.md'), 'first doc', 'utf8');
+        queueSingleDocList404ThenRead({ id: 3, title: 'note*one', body: 'third new', current_revision_id: 1, folder_path: 'notes' });
+
+        try {
+            const result = await runPullCli(['notes/note*one', dest, '--yes']);
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'note_one.md'), 'utf8')).toBe('first doc');
+            expect(fs.readFileSync(path.join(dest, 'note_one-2.md'), 'utf8')).toBe('third new');
+            const manifest = readManifest(dest);
+            expect(manifest.docs['note_one.md'].id).toBe(1);
+            expect(manifest.docs['note_one-2.md'].id).toBe(3);
+        } finally {
             cleanup();
         }
     });
@@ -1095,26 +1208,18 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
             makeMcpSuccess({ folders: [], docs: [{ id: 3, title: 'b-doc', properties: {} }] }),
         ];
 
-        const restoreExit = patchProcessExit();
-        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
-
         try {
-            const code = await runExpectingExit(() =>
-                docPullWithConfig('marketing/b', dest, { yes: true }, stubConfig()),
-            );
-            expect(code).toBe(1);
+            const result = await runPullCli(['marketing/b', dest, '--yes']);
+            expect(result.code).toBe(1);
 
-            const err = stderrLines.join('');
-            expect(err).toContain('marketing/a');
-            expect(err).toContain('marketing/b');
-            expect(err).toContain('--overwrite');
+            expect(result.stderr).toContain('marketing/a');
+            expect(result.stderr).toContain('marketing/b');
+            expect(result.stderr).toContain('--overwrite');
 
             expect(allCaptures.length).toBe(1);
             // The manifest on disk is byte-for-byte unchanged.
             expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
-            restoreExit();
-            restoreStderr();
             cleanup();
         }
     });
@@ -1241,26 +1346,18 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
             makeMcpSuccess({ id: 7, title: 'notes', body: 'n', current_revision_id: 1, folder_path: 'marketing' }),
         ];
 
-        const restoreExit = patchProcessExit();
-        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
-
         try {
-            const code = await runExpectingExit(() =>
-                docPullWithConfig('marketing/notes', dest, { yes: true }, stubConfig()),
-            );
-            expect(code).toBe(1);
+            const result = await runPullCli(['marketing/notes', dest, '--yes']);
+            expect(result.code).toBe(1);
 
-            const err = stderrLines.join('');
-            expect(err).toContain('marketing/a');
-            expect(err).toContain('marketing/notes');
+            expect(result.stderr).toContain('marketing/a');
+            expect(result.stderr).toContain('marketing/notes');
 
             expect(allCaptures.length).toBe(2);
             expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
             const finalManifest = readManifest(dest);
             expect(Object.keys(finalManifest.docs).length).toBe(2);
         } finally {
-            restoreExit();
-            restoreStderr();
             cleanup();
         }
     });

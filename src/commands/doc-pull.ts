@@ -292,16 +292,35 @@ interface PlannedDoc {
     bodySha256: string | null;
 }
 
+/** Previously-manifested paths for the single-doc fallback allocator (cli#153 C1). */
+export interface SingleDocReserved {
+    usedNames: Map<string, Set<string>>;
+    pathById: Map<number, string>;
+}
+
 /**
  * Resolve every fetched doc into a `PlannedDoc` — final relative path and
  * content hash — confirming/downloading media as needed. This is the only
  * place that talks to the media confirm/download endpoints; it performs no
  * filesystem writes.
+ *
+ * The optional `reserved` parameter serves the single-doc fallback pull
+ * (cli#153 C1): `usedNames` seeds the `-2`/`-3` allocator per directory
+ * with the file names the previous manifest assigns, and `pathById` frees
+ * each pulled doc's own tracked name back to it, so a stable title
+ * reallocates its own path (reuse in effect) while every other tracked
+ * name still forces a suffix. Folder pulls pass nothing and behave
+ * exactly as before.
  */
-async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
+    if (reserved) {
+        for (const [dir, names] of reserved.usedNames) {
+            usedNamesByDir.set(dir, new Set(names));
+        }
+    }
 
     for (const doc of docs) {
         const dirRel = doc.relative;
@@ -310,6 +329,18 @@ async function planDocs(docs: FetchedDoc[], config: Config): Promise<{ planned: 
         if (!used) {
             used = new Set();
             usedNamesByDir.set(dirRel, used);
+        }
+
+        // The pulled doc keeps its own tracked name: free it in its own
+        // directory so allocation below can hand it back. Names other ids
+        // own stay reserved.
+        const ownRelPath = reserved?.pathById.get(doc.id);
+        if (ownRelPath !== undefined) {
+            const slash = ownRelPath.lastIndexOf('/');
+            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+            if (ownDir === dirRel) {
+                used.delete(slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1));
+            }
         }
 
         const media = isMediaCandidate(doc) ? await resolveMedia(config, doc) : { isMedia: false as const };
@@ -536,7 +567,29 @@ async function report(
     previousManifest: DocsManifest | null,
     usedSingleDocFallback: boolean,
 ): Promise<void> {
-    const { planned, warnings } = await planDocs(fetched, config);
+    // Single-doc fallback merging into a manifest that tracks the same folder
+    // must not steal a filename another tracked doc owns (cli#153 C1): the
+    // pulled doc reuses its own tracked path, and the allocator avoids every
+    // path the manifest assigns to other ids. Folder pulls pass nothing.
+    let reserved: SingleDocReserved | undefined;
+    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
+        const usedNames = new Map<string, Set<string>>();
+        const pathById = new Map<number, string>();
+        for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
+            pathById.set(entry.id, relPath);
+            const slash = relPath.lastIndexOf('/');
+            const dir = slash === -1 ? '' : relPath.slice(0, slash);
+            const file = slash === -1 ? relPath : relPath.slice(slash + 1);
+            let names = usedNames.get(dir);
+            if (!names) {
+                names = new Set();
+                usedNames.set(dir, names);
+            }
+            names.add(file);
+        }
+        reserved = { usedNames, pathById };
+    }
+    const { planned, warnings } = await planDocs(fetched, config, reserved);
 
     // Unpushed-local-changes protection: now that the server walk is known, refuse only
     // for a file whose doc still exists remotely — i.e. its relative path is part of this

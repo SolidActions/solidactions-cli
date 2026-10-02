@@ -51,6 +51,12 @@ export function docFileKind(fileName: string): { suffix: string; type?: 'visual'
     return DOC_FILE_KINDS.find((kind) => fileName.endsWith(kind.suffix) && fileName.length > kind.suffix.length) ?? null;
 }
 
+/** Shell-quote a suggested path only when it needs it (cli#154 I4). */
+export function quoteShellPath(suggested: string): string {
+    if (/^[A-Za-z0-9_./-]+$/.test(suggested)) return suggested;
+    return `'${suggested.replace(/'/g, `'\\''`)}'`;
+}
+
 /** The server's body cap (docs.blob_size_cap_bytes): refuse locally rather than send a doomed request (PM ruling 3). */
 export const MAX_DOC_BODY_BYTES = 1_048_576;
 
@@ -766,9 +772,13 @@ export async function docPushWithConfig(
     // pull-side mapping that would track it is cli#157).
     for (const row of allResultRows) {
         if (row.status !== 'skipped' || docFileKind(path.basename(row.file))?.type === undefined) continue;
+        // row.file is relative to the pushed directory; suggest the path the user
+        // typed (cli#154 I4): the directory argument joined for a directory push,
+        // the file argument itself for a single-file push.
+        const suggested = singleFile ? dir : path.join(dir, row.file);
         process.stderr.write(chalk.yellow(
             `${row.file}: skipped — a doc with this title already exists. To update it, push again with --on-conflict overwrite, `
-            + `or run \`solidactions doc push ${row.file} --replace ${row.id ?? '<doc-id>'}\`\n`,
+            + `or run \`solidactions doc push ${quoteShellPath(suggested)} --replace ${row.id ?? '<doc-id>'}\`\n`,
         ));
     }
 

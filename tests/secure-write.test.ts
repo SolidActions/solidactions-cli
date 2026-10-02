@@ -210,11 +210,19 @@ describe('EBUSY fallback for a bind-mounted target (cli#129)', () => {
     // mount point fails EBUSY, so only this test exercises the production fallback path.
     const canBindMount = ((): boolean => {
         if (process.platform !== 'linux') return false;
+        let probeRoot: string | null = null;
         try {
-            const probe = childProcess.spawnSync('unshare', ['-rm', 'true'], { timeout: 15_000 });
+            probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-bind-probe-'));
+            const a = path.join(probeRoot, 'a');
+            const b = path.join(probeRoot, 'b');
+            fs.writeFileSync(a, 'x');
+            fs.writeFileSync(b, 'y');
+            const probe = childProcess.spawnSync('unshare', ['-rm', 'sh', '-c', 'mount --bind "$1" "$2"', 'probe', a, b], { timeout: 15_000 });
             return probe.status === 0;
         } catch {
             return false;
+        } finally {
+            if (probeRoot !== null) fs.rmSync(probeRoot, { recursive: true, force: true });
         }
     })();
 

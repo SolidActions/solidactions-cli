@@ -6,6 +6,7 @@
  * skill-push.test.ts.
  */
 
+import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
@@ -16,6 +17,7 @@ import type { DocPushOptions } from '../src/commands/doc-push';
 import type { Config } from '../src/utils/config';
 import { DOCS_MANIFEST, sha256Hex } from '../src/commands/doc-pull';
 import type { DocsManifest } from '../src/commands/doc-pull';
+import { writeGlobal } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Stub MCP server
@@ -2531,31 +2533,73 @@ describe('docPushWithConfig — server-side bulk_create errors', () => {
 });
 
 // ---------------------------------------------------------------------------
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
+
+interface CliResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+function pushArgs(options: DocPushOptions): string[] {
+    const args: string[] = [];
+    if (options.onConflict !== undefined) args.push('--on-conflict', options.onConflict);
+    if (options.type !== undefined) args.push('--type', options.type);
+    if (options.folder !== undefined) args.push('--folder', options.folder);
+    if (options.replace !== undefined) args.push('--replace', options.replace);
+    if (options.dryRun) args.push('--dry-run');
+    if (options.force) args.push('--force');
+    if (options.json) args.push('--json');
+    return args;
+}
+
+/**
+ * Run a push through the real built CLI: real stdout, stderr and exit
+ * status against the file's in-process stub MCP server. The temp HOME
+ * points at the stub server; no credentialed env reaches the child.
+ * Async spawn (never spawnSync): the stub server lives in this process.
+ */
+async function runPush(target: string, options: DocPushOptions): Promise<CliResult> {
+    const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-docs-push-cli-'));
+    const home = path.join(homeRoot, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    writeGlobal(home, { host: `http://127.0.0.1:${stubPort}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
+    try {
+        return await new Promise<CliResult>((resolve, reject) => {
+            const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+            delete childEnv.SOLIDACTIONS_HOST;
+            delete childEnv.SOLIDACTIONS_API_KEY;
+            delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+            const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'push', target, ...pushArgs(options)], {
+                cwd: homeRoot,
+                env: childEnv,
+            });
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', (chunk) => { stdout += chunk; });
+            child.stderr.on('data', (chunk) => { stderr += chunk; });
+            const timer = setTimeout(() => {
+                child.kill();
+                reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+            }, 30_000);
+            child.on('close', (code) => {
+                clearTimeout(timer);
+                resolve({ code, stdout, stderr });
+            });
+            child.on('error', (error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
+    } finally {
+        fs.rmSync(homeRoot, { recursive: true, force: true });
+    }
+}
+
 // Tests: visual docs and canvases (cli#154)
 // ---------------------------------------------------------------------------
 
 describe('docPushWithConfig — file kinds (cli#154)', () => {
-    /** Run a push, catching process.exit; returns the exit code and both streams. */
-    async function runPush(dir: string, options: DocPushOptions): Promise<{ code: number | undefined; stdout: string[]; stderr: string[] }> {
-        const restoreExit = patchProcessExit();
-        const { lines: outLines, restore: restoreStdout } = captureStdout();
-        const { lines: errLines, restore: restoreStderr } = captureStderr();
-        try {
-            let code: number | undefined;
-            try {
-                await docPushWithConfig(dir, options, stubConfig());
-            } catch (e) {
-                if (e instanceof ProcessExitError) code = e.code;
-                else throw e;
-            }
-            return { code, stdout: outLines, stderr: errLines };
-        } finally {
-            restoreExit();
-            restoreStdout();
-            restoreStderr();
-        }
-    }
-
     it('docFileKind classifies every suffix, longest match first', () => {
         expect(docFileKind('a.md')).toEqual({ suffix: '.md' });
         expect(docFileKind('a.html')).toEqual({ suffix: '.html', type: 'visual' });
@@ -2590,7 +2634,7 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
                 { title: 'page', body: '<h1>hi</h1>', type: 'visual' },
                 { title: 'sketch', body: canvasBody, type: 'canvas' },
             ]);
-            const err = result.stderr.join('\n');
+            const err = result.stderr;
             expect(err).toContain('pic.png');
             expect(err).toContain('not pushed');
             for (const f of ['notes.md', 'page.html', 'board.canvas.json', 'sketch.canvas']) {
@@ -2631,7 +2675,7 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             const result = await runPush(dir, {});
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(0);
-            const err = result.stderr.join('\n');
+            const err = result.stderr;
             expect(err).toContain(name);
             expect(err).toContain('not a valid JSON Canvas file');
         } finally {
@@ -2646,7 +2690,7 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             const result = await runPush(dir, {});
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(0);
-            const err = result.stderr.join('\n');
+            const err = result.stderr;
             expect(err).toContain('big.html');
             expect(err).toContain(String(big.length));
             expect(err).toContain('1 MiB');
@@ -2672,7 +2716,7 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             const result = await runPush(duped.dir, {});
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(0);
-            const err = result.stderr.join('\n');
+            const err = result.stderr;
             expect(err).toContain('board.canvas');
             expect(err).toContain('board.canvas.json');
             expect(err).toContain('"board"');
@@ -2715,17 +2759,30 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             summary: { skipped: 1 },
         });
 
-        const visual = makeTmpDocsDir({ 'page.html': '<h1>hi</h1>' });
+        const visual = makeTmpDocsDir({ 'sub/page.html': '<h1>hi</h1>' });
         try {
             responseQueue = [skipped('42')];
             const result = await runPush(visual.dir, {});
             expect(result.code).toBe(0);
-            const err = result.stderr.join('\n');
-            expect(err).toContain('page.html: skipped — a doc with this title already exists');
+            const err = result.stderr;
+            expect(err).toContain('sub/page.html: skipped — a doc with this title already exists');
             expect(err).toContain('--on-conflict overwrite');
-            expect(err).toContain('--replace 42');
+            expect(err).toContain(`doc push ${visual.dir}/sub/page.html --replace 42`);
         } finally {
             visual.cleanup();
+        }
+
+        const spacedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-docs spaced-'));
+        try {
+            const spaced = path.join(spacedRoot, 'docs');
+            fs.mkdirSync(path.join(spaced, 'sub'), { recursive: true });
+            fs.writeFileSync(path.join(spaced, 'sub', 'page.html'), '<h1>hi</h1>', 'utf8');
+            responseQueue = [skipped('42')];
+            const result = await runPush(spaced, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain(`doc push '${spaced}/sub/page.html' --replace 42`);
+        } finally {
+            fs.rmSync(spacedRoot, { recursive: true, force: true });
         }
 
         const markdown = makeTmpDocsDir({ 'notes.md': '# Notes\n' });
@@ -2733,7 +2790,7 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             responseQueue = [skipped('7')];
             const result = await runPush(markdown.dir, {});
             expect(result.code).toBe(0);
-            expect(result.stderr.join('\n')).not.toContain('skipped — a doc');
+            expect(result.stderr).not.toContain('skipped — a doc');
         } finally {
             markdown.cleanup();
         }
@@ -2743,9 +2800,20 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
             responseQueue = [skipped(undefined)];
             const result = await runPush(noId.dir, {});
             expect(result.code).toBe(0);
-            expect(result.stderr.join('\n')).toContain('--replace <doc-id>');
+            expect(result.stderr).toContain('--replace <doc-id>');
         } finally {
             noId.cleanup();
+        }
+
+        const single = makeTmpDocsDir({ 'page.html': '<h1>hi</h1>' });
+        try {
+            responseQueue = [skipped('42')];
+            const target = path.join(single.dir, 'page.html');
+            const result = await runPush(target, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain(`doc push ${target} --replace 42`);
+        } finally {
+            single.cleanup();
         }
     });
 });
@@ -2755,25 +2823,6 @@ describe('docPushWithConfig — file kinds (cli#154)', () => {
 // ---------------------------------------------------------------------------
 
 describe('docPushWithConfig — single file and --replace (cli#154)', () => {
-    async function runPush(dir: string, options: DocPushOptions): Promise<{ code: number | undefined; stdout: string[]; stderr: string[] }> {
-        const restoreExit = patchProcessExit();
-        const { lines: outLines, restore: restoreStdout } = captureStdout();
-        const { lines: errLines, restore: restoreStderr } = captureStderr();
-        try {
-            let code: number | undefined;
-            try {
-                await docPushWithConfig(dir, options, stubConfig());
-            } catch (e) {
-                if (e instanceof ProcessExitError) code = e.code;
-                else throw e;
-            }
-            return { code, stdout: outLines, stderr: errLines };
-        } finally {
-            restoreExit();
-            restoreStdout();
-            restoreStderr();
-        }
-    }
 
     function writeManifestFor(dir: string, docs: DocsManifest['docs']): void {
         const manifest: DocsManifest = { folder_path: '', docs };
@@ -2808,7 +2857,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const args = allCaptures[0].body.params.arguments;
             expect(args.action).toBe('bulk_create');
             expect(args.items).toEqual([{ title: 'page', body: PAGE_BODY, type: 'visual' }]);
-            expect(result.stderr.join('\n')).not.toContain('pic.png');
+            expect(result.stderr).not.toContain('pic.png');
         } finally {
             cleanup();
         }
@@ -2837,7 +2886,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const result = await runPush(path.join(dir, 'pic.png'), {});
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(0);
-            expect(result.stderr.join('\n')).toContain('is not a .md, .html, .canvas.json or .canvas file');
+            expect(result.stderr).toContain('is not a .md, .html, .canvas.json or .canvas file');
         } finally {
             cleanup();
         }
@@ -2851,7 +2900,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             expect(result.code).toBe(0);
             expect(allCaptures.length).toBe(2);
             expect(allCaptures.map((c) => c.body.params.arguments.action)).toEqual(['read_doc', 'write']);
-            expect(result.stdout.join('\n')).toContain('replaced doc 42 ("Pricing page") with page.html (revision 8)');
+            expect(result.stdout).toContain('replaced doc 42 ("Pricing page") with page.html (revision 8)');
         } finally {
             cleanup();
         }
@@ -2863,7 +2912,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
         try {
             const result = await runPush(path.join(dir, 'page.html'), { replace: '42', json: true });
             expect(result.code).toBe(0);
-            expect(JSON.parse(result.stdout.join('\n'))).toEqual({
+            expect(JSON.parse(result.stdout)).toEqual({
                 replaced: { id: 42, title: 'Pricing page', file: 'page.html', current_revision_id: 8 },
             });
         } finally {
@@ -2906,7 +2955,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const result = await runPush(path.join(dir, file), { replace: '42' });
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(1);
-            const err = result.stderr.join('\n');
+            const err = result.stderr;
             expect(err).toContain('Pricing page');
             for (const kind of kinds as string[]) expect(err).toContain(kind);
         } finally {
@@ -2928,7 +2977,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const result = await runPush(target, options as DocPushOptions);
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(0);
-            expect(result.stderr.join('\n')).toContain(snippet);
+            expect(result.stderr).toContain(snippet);
         } finally {
             cleanup();
         }
@@ -2952,7 +3001,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const result = await runPush(path.join(dir, 'page.html'), { replace: '42', dryRun: true });
             expect(result.code).toBe(0);
             expect(allCaptures.length).toBe(1);
-            expect(result.stdout.join('\n')).toContain('[dry-run preview] would replace doc 42 ("Pricing page") with page.html');
+            expect(result.stdout).toContain('[dry-run preview] would replace doc 42 ("Pricing page") with page.html');
         } finally {
             cleanup();
         }
@@ -2978,7 +3027,7 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
             const result = await runPush(path.join(dir, 'page.html'), { replace: '42' });
             expect(result.code).toBe(1);
             expect(allCaptures.length).toBe(1);
-            expect(result.stderr.join('\n')).toContain('error: doc_not_found:');
+            expect(result.stderr).toContain('error: doc_not_found:');
         } finally {
             cleanup();
         }
