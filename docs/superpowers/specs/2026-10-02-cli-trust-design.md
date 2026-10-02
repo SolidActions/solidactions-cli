@@ -63,7 +63,7 @@ The README's "Resolution order" section says each field resolves independently a
 
 ### Auto-select no longer copies credentials
 
-`ensureWorkspaceSelected` writes only the workspace pin (`workspace`, `workspaceId`, `workspaceOrg`) to the active config file, through the existing `writeWorkspaceToFile`, which keeps whatever else that file already held. It never writes `host`, `apiKey`, `scopeMode` or `scopedWorkspaceIds` there.
+`ensureWorkspaceSelected` writes only the workspace pin (`workspace`, `workspaceId`, `workspaceOrg`) to the active config file, through the existing `writeWorkspaceToFile`, which keeps whatever else that file already held. It never writes `host` or `apiKey` there. A scoped device token's `scopeMode` / `scopedWorkspaceIds` from the `/v1/workspaces` response are written only when the target file is the one that supplied the API key, because they describe that key (manager ruling during build, Task 2; the first draft said never, which broke the scoped-token persistence `tests/workspace-set-scope-refusal.test.ts` pins).
 
 ### Destructive commands name the host
 
