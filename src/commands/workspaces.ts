@@ -68,13 +68,14 @@ function warnDanglingPin(
             : workspaceIdSource;
     console.log('');
     console.log(chalk.yellow(`warn: the active workspace ${label} (from ${from}) is not in this list — it may belong to another host, or you may no longer have access.`));
-    if (emptyList) {
+    if (workspaceIdSource === 'env') {
+        // `workspace set` refuses while $SOLIDACTIONS_WORKSPACE_ID is set, list or no list.
+        console.log(chalk.yellow(`Unset $SOLIDACTIONS_WORKSPACE_ID, then select a workspace with \`solidactions workspace set <slug>\`${emptyList ? ' once `workspace list` shows one' : ''}.`));
+    } else if (emptyList) {
         // `workspace set` resolves an accessible workspace first, so it cannot
         // clear or change a pin when the list is empty: name the action that
         // applies to where this pin came from instead.
-        if (workspaceIdSource === 'env') {
-            console.log(chalk.yellow('Unset $SOLIDACTIONS_WORKSPACE_ID, then select a workspace with `solidactions workspace set <slug>` once `workspace list` shows one.'));
-        } else if (workspaceIdSource === 'cli') {
+        if (workspaceIdSource === 'cli') {
             console.log(chalk.yellow('Re-run without -w/--workspace-override, then select a workspace with `solidactions workspace set <slug>` once `workspace list` shows one.'));
         } else {
             console.log(chalk.yellow(`Remove the workspace pin (workspaceId and related keys) from ${from}, then select a workspace with \`solidactions workspace set <slug>\` once \`workspace list\` shows one.`));

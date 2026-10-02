@@ -49,12 +49,13 @@ interface CliResult {
     status: number | null;
 }
 
-function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
+function runCli(args: string[], home: string, cwd: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<CliResult> {
     return new Promise((resolve, reject) => {
         const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
         delete childEnv.SOLIDACTIONS_HOST;
         delete childEnv.SOLIDACTIONS_API_KEY;
         delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        Object.assign(childEnv, extraEnv);
 
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd, env: childEnv });
         let stdout = '';
@@ -107,6 +108,22 @@ describe('solidactions workspace list with a pin the list does not contain', () 
         expect(warning).toContain(globalPath);
         expect(warning).toContain('workspace set');
         expect(result.stdout.trimEnd().endsWith('(or --global).')).toBe(true);
+    });
+
+    it('a pin from $SOLIDACTIONS_WORKSPACE_ID says to unset it, not to run workspace set --local/--global (which rejects it)', async () => {
+        writeGlobal(env.home, baseConfig());
+
+        const result = await runCli(['workspace', 'list'], env.home, env.cwd, { SOLIDACTIONS_WORKSPACE_ID: 'ws-9' });
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('Main');
+        expect(result.stdout).not.toContain('← current');
+        const warning = result.stdout.slice(result.stdout.indexOf('warn:'));
+        expect(warning).toContain('ws-9');
+        expect(warning).toContain('(from $SOLIDACTIONS_WORKSPACE_ID)');
+        expect(warning).toContain('Unset $SOLIDACTIONS_WORKSPACE_ID');
+        expect(warning).not.toContain('--local');
+        expect(warning).not.toContain('--global');
     });
 
     it('marks the pinned workspace current and prints no warning when the pin is in the list', async () => {

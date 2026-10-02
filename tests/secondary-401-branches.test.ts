@@ -79,6 +79,11 @@ beforeAll(async () => {
             json(response, 401, { message: 'Unauthenticated.' });
             return;
         }
+        // doc upload --replace <path>: the by-path lookup rejects the key.
+        if (request.method === 'GET' && pathname === '/api/v1/docs/by-path') {
+            json(response, 401, { message: 'Unauthenticated.' });
+            return;
+        }
         json(response, 500, { message: `Unexpected ${request.method} ${pathname}` });
     });
     await new Promise<void>((resolve) => {
@@ -218,5 +223,20 @@ describe('early and secondary 401s name the host', () => {
 
         expect(result.status).toBe(1);
         expectAuthLineHostSafe(result.stderr);
+    });
+
+    it('doc upload --replace <path> names the host when the by-path lookup rejects the key', async () => {
+        // Userinfo in the configured host must never reach the 401 line.
+        // (The pre-existing successful workspace announcement still prints the
+        // raw host — FILE cli#163, not asserted here.)
+        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-doc-upload-401-'));
+        fs.writeFileSync(path.join(dir, 'hero.png'), Buffer.from([1, 2, 3, 4]));
+
+        const result = await runCli(['doc', 'upload', path.join(dir, 'hero.png'), '--replace', 'marketing/hero.png'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expectAuthLineHostSafe(result.stderr);
+        expect(result.stderr).not.toContain('could not resolve');
     });
 });

@@ -488,9 +488,10 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
 /**
  * Write every planned doc to disk under `destination` and build the
  * manifest docs map. The only step in the whole pull that creates
- * directories or writes/overwrites files — called only after any
- * unpushed-local-changes conflict has already refused, so it never clobbers
- * a file the caller decided to keep.
+ * directories or writes/overwrites files — called only after every refusal
+ * (unpushed local changes, rename conflicts, a target that is not a regular
+ * file) has had its chance, so it never stops half-way or clobbers a file
+ * the caller decided to keep.
  */
 function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
     const manifestDocs: DocsManifest['docs'] = {};
@@ -499,15 +500,7 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
     for (const p of planned) {
         const dirAbs = p.dirRel ? path.join(destination, ...p.dirRel.split('/')) : destination;
         fs.mkdirSync(dirAbs, { recursive: true });
-
-        // A destination path that already exists as a directory would make writeFileSync
-        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
-        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
         const targetAbs = path.join(dirAbs, p.fileName);
-        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
-            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
-            process.exit(1);
-        }
 
         if (p.isMedia) {
             if (p.mediaBytes) {
@@ -728,11 +721,14 @@ async function report(
     const { planned, warnings } = await planDocs(fetched, config, reserved);
 
     // Same doc id under a different path is a rename (PM ruling 2, cli#157):
-    // for every planned doc the previous manifest tracks under a DIFFERENT
-    // path `old` with a file still at `old`, an edited twin refuses (exit 1,
-    // before any write) unless --overwrite. Unmodified twins are removed
-    // after commitDocs below; --overwrite keeps edited ones untracked.
-    interface RenameMove { oldRel: string; newRel: string; id: number; modified: boolean }
+    // the previous manifest tracks a planned doc under a DIFFERENT path `old`
+    // with a file still at `old`. Every rename ends one of three ways:
+    //   (a) `old` is removed only after its replacement is written;
+    //   (b) `old` and its tracking are kept (the replacement is not written);
+    //   (c) the pull refuses here, before any write.
+    // Never: bytes lost, an untracked file overwritten without --overwrite,
+    // or one doc's tracking attached to another doc's bytes.
+    interface RenameMove { oldRel: string; newRel: string; id: number; title: string; modified: boolean; replacementWritten: boolean }
     const renameMoves: RenameMove[] = [];
     if (previousManifest) {
         const pathById = new Map<number, string>();
@@ -757,15 +753,23 @@ async function report(
             } catch {
                 currentHash = null;
             }
-            renameMoves.push({ oldRel: old, newRel: p.relPath, id: p.doc.id, modified: currentHash === null || currentHash !== entry.body_sha256 });
+            renameMoves.push({
+                oldRel: old,
+                newRel: p.relPath,
+                id: p.doc.id,
+                title: p.doc.title,
+                modified: currentHash === null || currentHash !== entry.body_sha256,
+                // A failed media download plans a new path but writes nothing there.
+                replacementWritten: !p.isMedia || p.mediaBytes !== null,
+            });
         }
+        const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
         // An edited rename source whose old path is itself a write target in the
         // new plan would be overwritten by commitDocs below — even with
         // --overwrite, which otherwise keeps edited twins. Refuse before ANY
         // write: overwriting unpublished edits while claiming to keep them is
         // data loss. This runs before the plain modified-rename refusal so the
         // collision (where --overwrite does not help) is reported accurately.
-        const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
         for (const m of renameMoves) {
             if (!m.modified) continue;
             const taker = plannedPaths.get(m.oldRel);
@@ -775,6 +779,26 @@ async function report(
             process.stderr.write(chalk.red(`Move or rename the edited ${m.oldRel} (or push it first) and pull again.\n`));
             process.exit(1);
         }
+        // A rename whose replacement will not be written keeps its old file and
+        // tracking (b) — which is only possible while no other doc in this pull
+        // claims the old path. Otherwise refuse (cli#157 issuecomment-5962867475):
+        // no relocation or re-allocation of names.
+        for (const m of renameMoves) {
+            if (m.replacementWritten) continue;
+            const taker = plannedPaths.get(m.oldRel);
+            if (!taker) continue;
+            process.stderr.write(chalk.red(`error: doc ${m.id} ("${m.title}") failed to download to ${m.newRel}, so ${m.oldRel} still holds its only local copy, but this pull would put doc ${taker.doc.id} ("${taker.doc.title}") at ${m.oldRel}.\n`));
+            process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
+            process.exit(1);
+        }
+        // An edited source whose replacement will not be written cannot move
+        // and must not lose its tracking: refuse, with or without --overwrite.
+        for (const m of renameMoves) {
+            if (m.replacementWritten || !m.modified) continue;
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, but its download failed.\n`));
+            process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
+            process.exit(1);
+        }
         const blocked = renameMoves.filter((m) => m.modified && !options.overwrite);
         if (blocked.length > 0) {
             for (const m of blocked) {
@@ -782,6 +806,26 @@ async function report(
                 process.stderr.write(chalk.red(`${m.oldRel} is now written as ${m.newRel} (doc ${m.id} ${reason}); rename ${m.oldRel} to ${m.newRel} and push it first, or pass --overwrite.\n`));
             }
             process.exit(1);
+        }
+        // A rename target holding an untracked local file (not in the previous
+        // manifest) would be overwritten: refuse unless --overwrite. A file
+        // already holding exactly the bytes this pull writes loses nothing.
+        if (!options.overwrite) {
+            for (const m of renameMoves) {
+                if (!m.replacementWritten || previousManifest.docs[m.newRel] !== undefined) continue;
+                const absNew = path.join(destination, ...m.newRel.split('/'));
+                let existing: Buffer;
+                try {
+                    if (!fs.statSync(absNew).isFile()) continue;
+                    existing = fs.readFileSync(absNew);
+                } catch {
+                    continue;
+                }
+                if (sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
+                process.stderr.write(chalk.red(`error: ${m.newRel} exists locally but is not tracked; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
+                process.stderr.write(chalk.red(`Move ${m.newRel} aside and pull again, or pass --overwrite to replace it.\n`));
+                process.exit(1);
+            }
         }
     }
     const handledOldPaths = new Set(renameMoves.map((m) => m.oldRel));
@@ -804,6 +848,17 @@ async function report(
                 process.stderr.write(chalk.red(`  ${file}\n`));
             }
             process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
+            process.exit(1);
+        }
+    }
+
+    // A destination path that already exists as a directory would make writeFileSync
+    // throw EISDIR mid-walk, after earlier docs were written and before the manifest
+    // is saved — a half-pulled tree with a stale sidecar. Refuse before any write.
+    for (const p of planned) {
+        const targetAbs = path.join(destination, ...p.relPath.split('/'));
+        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
+            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
             process.exit(1);
         }
     }
@@ -834,8 +889,8 @@ async function report(
     // untracked with a warning.
     // A twin whose replacement was NOT written (a failed media download plans
     // a new path but writes nothing) keeps its old file and its old manifest
-    // entry — deleting it would destroy the only good copy.
-    const writtenPaths = new Set(files.map((file) => file.path));
+    // entry — deleting it would destroy the only good copy. The refusals above
+    // guarantee no other doc in this pull claims that old path.
     for (const m of renameMoves) {
         if (m.modified) {
             if (options.overwrite) {
@@ -843,7 +898,7 @@ async function report(
             }
             continue;
         }
-        if (!writtenPaths.has(m.newRel)) {
+        if (!m.replacementWritten) {
             delete manifestDocs[m.newRel];
             const oldEntry = previousManifest?.docs[m.oldRel];
             if (oldEntry !== undefined) {

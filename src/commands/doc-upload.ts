@@ -49,7 +49,9 @@ async function resolveReplaceTarget(config: Config, replace: string): Promise<nu
     } catch (error: any) {
         const status = error.response?.status;
         const code = error.response?.data?.code;
-        if (status === 422 && code === 'folder_path_not_found') {
+        if (status === 401) {
+            console.error(chalk.red(`✗ ${authFailedLine(config.host)}`));
+        } else if (status === 422 && code === 'folder_path_not_found') {
             console.error(chalk.red(`✗ no folder "${folderPath}" in this workspace`));
         } else if (status === 404) {
             console.error(chalk.red(`✗ no doc titled "${title}"${folderPath ? ` in "${folderPath}"` : ' at the docs root'}`));
