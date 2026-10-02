@@ -5,10 +5,8 @@
  * they must pass `--host` — mis-pointing sessions at the wrong host.
  *
  * Both flags must keep WORKING (see tests/flag-consistency.test.ts and
- * tests/login-host-hint.test.ts for behavior coverage). `--dev` stays out of
- * `--help`; `--host` is listed again since cli#124 (PM ruling 21): the
- * credential-pair refusal tells the user to run `login --local --host <url>`,
- * so `login --help` must document it.
+ * tests/login-host-hint.test.ts for behavior coverage) but must stop
+ * appearing in `--help` output.
  *
  * Test-double policy: spawns the real built CLI binary (dist/index.js) and
  * asserts on rendered --help output — same approach as
@@ -29,14 +27,16 @@ function help(args: string[]): string {
     return result.stdout;
 }
 
-describe('login --help hides the internal-only --dev flag (#994) and lists --host (cli#124)', () => {
+describe('login --help hides internal-only --host/--dev flags (#994)', () => {
     it('CLI is built', () => {
         expect(fs.existsSync(CLI_BINARY)).toBe(true);
     });
 
-    it('advertises --host <url>, the documented way to log in to a folder\'s own server (cli#124, PM ruling 21)', () => {
+    it('does not advertise --host as an option', () => {
         const out = help(['login']);
-        expect(out).toContain('--host <url>');
+        // Word-boundary-safe: --host has no other flag it could be a prefix of
+        // in this command, but match precisely regardless.
+        expect(out).not.toMatch(/--host\b/);
     });
 
     it('does not advertise --dev as an option (distinct from the legitimate --device flag)', () => {
