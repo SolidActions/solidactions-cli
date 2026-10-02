@@ -29,7 +29,23 @@ export type WorkspaceMatchResult =
     | { kind: 'match'; workspace: WorkspaceLookupRecord }
     | { kind: 'ambiguous'; input: string; candidates: WorkspaceLookupRecord[] }
     | { kind: 'org-only'; input: string; orgWorkspaces: WorkspaceLookupRecord[] }
-    | { kind: 'not-found'; input: string };
+    | { kind: 'not-found'; input: string; suggestions?: WorkspaceLookupRecord[] };
+
+/**
+ * Workspaces whose slug or name contains the input (or is contained in it), case-insensitively —
+ * offered after a miss, never selected (cli#112). Reverse containment only counts for
+ * slugs/names of 3+ characters, so a one-letter workspace isn't suggested for every miss.
+ */
+export function suggestWorkspaces(input: string, workspaces: WorkspaceLookupRecord[], limit = 5): WorkspaceLookupRecord[] {
+    const needle = input.trim().toLowerCase();
+    if (needle === '') return [];
+    const similar = (value: string | undefined): boolean => {
+        if (!value) return false;
+        const hay = value.toLowerCase();
+        return hay.includes(needle) || (hay.length >= 3 && needle.includes(hay));
+    };
+    return workspaces.filter((w) => similar(w.slug) || similar(w.name)).slice(0, limit);
+}
 
 /**
  * Pure: given a list of workspaces and an input string, classify the match.
@@ -71,7 +87,8 @@ export function classifyWorkspaceInput(
         if (orgWorkspaces.length > 0) {
             return { kind: 'org-only', input, orgWorkspaces };
         }
-        return { kind: 'not-found', input };
+        const suggestions = suggestWorkspaces(input, workspaces);
+        return suggestions.length > 0 ? { kind: 'not-found', input, suggestions } : { kind: 'not-found', input };
     }
 
     // Union name matches with same-named-org workspaces (not just when
@@ -148,8 +165,15 @@ export function describeWorkspaceMatchFailure(result: WorkspaceMatchResult): str
             ];
             return lines.join('\n');
         }
-        case 'not-found':
-            return `Workspace "${result.input}" not found. Run \`solidactions workspace list\` to list available workspaces.`;
+        case 'not-found': {
+            const base = `Workspace "${result.input}" not found. Run \`solidactions workspace list\` to list available workspaces.`;
+            if (!result.suggestions?.length) return base;
+            const names = result.suggestions.map((w) => {
+                const org = w.org_name || w.tenant_name;
+                return `${w.slug ?? w.name}${org ? ` (${org})` : ''}`;
+            });
+            return `${base}\nDid you mean: ${names.join(', ')}?`;
+        }
         case 'match':
             return '';
     }
