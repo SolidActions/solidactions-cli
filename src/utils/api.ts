@@ -361,6 +361,22 @@ export function formatApiFailure(status: number, data: unknown): string {
         : `Failed: ${status}`;
 }
 
+/** The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo. */
+export function authFailedLine(host: string): string {
+    let shown = host;
+    try {
+        const url = new URL(host);
+        if (url.username || url.password) {
+            url.username = '';
+            url.password = '';
+            shown = url.toString().replace(/\/$/, '');
+        }
+    } catch {
+        // Not a URL: show it as configured.
+    }
+    return `Authentication failed against ${shown}. Run "solidactions login --global" to re-configure.`;
+}
+
 export async function ensureWorkspaceSelected(
     config: Config,
     dependencies: WorkspaceSelectionDependencies = {},

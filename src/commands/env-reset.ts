@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface EnvResetOptions {
     env?: string;
@@ -58,7 +58,7 @@ export async function envReset(projectName: string, key: string, options: EnvRes
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 const envsList = await describeProjectEnvironments(config, projectName);
                 console.error(chalk.red(
@@ -66,7 +66,7 @@ export async function envReset(projectName: string, key: string, options: EnvRes
                     `${envsList ? ` (exists in: ${envsList})` : ''}.`
                 ));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { describeTerminalRun } from '../utils/run-status';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
@@ -73,7 +73,7 @@ export async function run(projectName: string, workflowName: string, options: { 
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 const envsList = await describeProjectEnvironments(config, projectName);
                 if (envsList) {
@@ -86,7 +86,7 @@ export async function run(projectName: string, workflowName: string, options: { 
             } else if (error.response.status === 422) {
                 console.error(chalk.red('Validation error:'), error.response.data.message);
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

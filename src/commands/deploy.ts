@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
@@ -880,7 +880,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 if (error.response.status === 404) {
                     console.error("Project not found.");
                 } else {
-                    console.error(error.response.status, JSON.stringify(error.response.data, null, 2));
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(error.message);

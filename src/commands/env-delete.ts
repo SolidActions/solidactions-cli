@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -100,7 +100,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 if (isProjectMode) {
                     const envsList = await describeProjectEnvironments(config, projectName!);
@@ -109,7 +109,7 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
                     console.error(chalk.red(`Variable "${key}" not found.`));
                 }
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

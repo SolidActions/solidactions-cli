@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { projectSlugForView } from './project-view';
 
 export interface ScheduleStateOptions {
@@ -9,16 +9,16 @@ export interface ScheduleStateOptions {
 
 type ScheduleTarget = 'enable' | 'disable';
 
-function renderScheduleStateError(error: any, projectName: string, scheduleId: string): never {
+function renderScheduleStateError(error: any, projectName: string, scheduleId: string, host: string): never {
     if (error.response) {
         if (error.response.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(host)));
         } else if (error.response.status === 404) {
             console.error(chalk.red(error.response.data?.message ?? `Project "${projectName}" or schedule ${scheduleId} not found.`));
         } else if (error.response.status === 422) {
             console.error(chalk.red(error.response.data?.message ?? 'Validation error.'));
         } else {
-            console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data?.message ?? error.response.data);
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
         }
     } else {
         console.error(chalk.red('Connection failed:'), error.message);
@@ -54,7 +54,7 @@ async function setScheduleTarget(
         console.log(chalk.green(`Schedule ${scheduleId} ${enabled ? 'enabled' : 'disabled'}.`));
         console.log(chalk.gray('This is a sticky override and survives redeploy until changed or reset.'));
     } catch (error: any) {
-        renderScheduleStateError(error, projectName, scheduleId);
+        renderScheduleStateError(error, projectName, scheduleId, config.host);
     }
 }
 
@@ -90,6 +90,6 @@ export async function scheduleReset(
         );
         console.log(chalk.green(`Schedule ${scheduleId} reset. YAML controls this schedule again.`));
     } catch (error: any) {
-        renderScheduleStateError(error, projectName, scheduleId);
+        renderScheduleStateError(error, projectName, scheduleId, config.host);
     }
 }

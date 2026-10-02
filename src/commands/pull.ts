@@ -7,7 +7,7 @@ import { extract } from 'tar';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export async function pull(projectName: string, destPath?: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -76,7 +76,7 @@ export async function pull(projectName: string, destPath?: string, options: { ye
             if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else {
                 console.error(chalk.red(`Failed: ${error.response.status}`));
             }

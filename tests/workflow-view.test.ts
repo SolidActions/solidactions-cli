@@ -343,7 +343,7 @@ describe('workflow view failures', () => {
 
         expect(result.status).toBe(1);
         expect(result.stdout).toBe('');
-        expect(result.stderr).toContain('Authentication failed. Run "solidactions login --global" to re-configure.');
+        expect(result.stderr).toMatch(/Authentication failed against http:\/\/127\.0\.0\.1:\d+\. Run "solidactions login --global" to re-configure\./);
     });
 
     it('prints safe ambiguity candidates and tells the operator to retry with a slug', async () => {

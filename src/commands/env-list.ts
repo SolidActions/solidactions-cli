@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { renderTable } from '../utils/table';
 
 interface EnvListOptions {
@@ -237,13 +237,13 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red(`Authentication failed against ${config.host}. Run "solidactions login --global" to re-configure.`));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 if (projectName) {
                     const envsList = await describeProjectEnvironments(config, projectName);
                     console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
                 } else {
-                    console.error(chalk.red('Resource not found.'));
+                    console.error(chalk.red(formatApiFailure(404, error.response.data)));
                 }
             } else {
                 console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));

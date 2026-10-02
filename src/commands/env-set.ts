@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { describeProjectEnvironments, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, describeProjectEnvironments, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
@@ -170,7 +170,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else if (error.response.status === 404) {
                     const envsList = await describeProjectEnvironments(config, projectName);
                     console.error(chalk.red(
@@ -180,7 +180,7 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
-                    console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(chalk.red('Connection failed:'), error.message);
@@ -306,11 +306,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
-                    console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(chalk.red('Connection failed:'), error.message);

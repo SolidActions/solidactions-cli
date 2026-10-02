@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig, isReservedEnvName, RESERVED_ENV_PREFIX } from '../utils/env';
 
 interface EnvPushOptions {
@@ -112,7 +112,7 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         serverMappings = response.data || [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(config.host)));
             process.exit(1);
         } else if (error.response?.status === 404) {
             console.error(chalk.red(`Project "${projectSlug}" not found.`));

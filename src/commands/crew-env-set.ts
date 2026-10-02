@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { crewEnvError, isValidCrewEnv, resolveCrewId } from '../utils/crew';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
@@ -70,13 +70,13 @@ export async function crewEnvSet(crewArg: string, key: string, value: string, op
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(error.response.data?.message || `Crew "${crewArg}" not found.`));
             } else if (error.response.status === 422) {
                 console.error(chalk.red(formatValidationError(error.response.data)));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

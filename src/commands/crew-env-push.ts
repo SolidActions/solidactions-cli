@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { crewEnvError, isValidCrewEnv, resolveCrewId } from '../utils/crew';
 import { isReservedEnvName, parseEnvFile, RESERVED_ENV_PREFIX } from '../utils/env';
 import { buildVariableBody } from './crew-env-set';
@@ -108,7 +108,7 @@ export async function crewEnvPush(crewArg: string, filePath: string = '.env', op
         serverVariables = response.data?.data ?? [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(config.host)));
         } else if (error.response?.status === 404) {
             console.error(chalk.red(error.response.data?.message || `Crew "${crewArg}" not found.`));
         } else {

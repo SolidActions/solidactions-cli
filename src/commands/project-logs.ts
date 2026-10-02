@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 export function buildBuildLogUrl(host: string, projectName: string, environment?: string): string {
     if (environment) {
@@ -49,7 +49,7 @@ export async function logsBuild(projectName: string, environment?: string): Prom
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(error.response.data?.message ?? `Project "${projectName}" not found.`));
                 const envs: string[] | undefined = error.response.data?.available_environments;
@@ -57,7 +57,7 @@ export async function logsBuild(projectName: string, environment?: string): Prom
                     console.error(chalk.yellow(`Available environments: ${envs.join(', ')}. Pass -e <env> to select one.`));
                 }
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

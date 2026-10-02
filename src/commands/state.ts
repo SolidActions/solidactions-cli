@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug } from '../utils/slug';
 
@@ -86,13 +86,13 @@ function printInverseCommand(target: StateTarget, environment: StateEnvironment,
     console.log(chalk.gray(`Undo: ${command}`));
 }
 
-function errorMessage(error: any, target: StateTarget): string {
+function errorMessage(error: any, target: StateTarget, host: string): string {
     if (!error.response) {
         return `Connection failed: ${error.message}`;
     }
 
     if (error.response.status === 401) {
-        return 'Authentication failed. Run "solidactions login --global" to re-configure.';
+        return authFailedLine(host);
     }
 
     if (error.response.status === 422) {
@@ -144,7 +144,7 @@ export async function setStateWithConfig(
         }
         printInverseCommand(target, environment, enabled);
     } catch (error: any) {
-        console.error(chalk.red(errorMessage(error, target)));
+        console.error(chalk.red(errorMessage(error, target, config.host)));
         process.exit(1);
     }
 }

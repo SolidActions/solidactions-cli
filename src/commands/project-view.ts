@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
@@ -227,7 +227,7 @@ export async function projectViewWithConfig(
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(config.host)));
         } else if (error.response?.status === 404) {
             const family = await lookupProjectFamilyEnvironments(config, project);
             const envs = family?.environments ?? [];

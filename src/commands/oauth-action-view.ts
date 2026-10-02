@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 
 interface OAuthActionViewOptions {
     json?: boolean;
@@ -52,9 +52,9 @@ export async function oauthActionView(platform: string, actionId: string, option
         if (error.response?.status === 404) {
             console.error(chalk.red(`Action not found: ${platform}/${actionId}`));
         } else if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global".'));
+            console.error(chalk.red(authFailedLine(config.host)));
         } else if (error.response) {
-            console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
         } else {
             console.error(chalk.red('Connection failed:'), error.message);
         }

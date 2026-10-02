@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { projectSlugForView } from './project-view';
 
 export interface ScheduleSetOptions {
@@ -147,13 +147,13 @@ export async function scheduleSet(projectName: string, cron: string, options: Sc
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {
-                console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
+                console.error(chalk.red('Validation error:'), formatValidationError(error.response.data));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

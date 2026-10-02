@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { writeSecretFileSync } from '../utils/secure-write';
 
 interface EnvPullOptions {
@@ -357,7 +357,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectSlug}" not found.`));
                 if (environment !== 'production') {
@@ -374,7 +374,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                     : 'Permission denied.';
                 console.error(chalk.red(detail ? `${lead}\n\n${detail}` : lead));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else if (!axios.isAxiosError(error) && error.code) {
             // A filesystem failure writing the .env — not a connection problem.
