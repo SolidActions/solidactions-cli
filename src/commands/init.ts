@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import fsExtra from 'fs-extra';
 import { fetchRawFile } from '../utils/github';
 import { EXAMPLES_REF } from '../utils/examples-ref';
+import { slugifyName } from '../utils/slug';
 import { aiInit, resolveAiHelperTarget } from './ai-init';
 import type { AiHelperTarget } from '../utils/skills';
 
@@ -43,7 +44,9 @@ export async function init(directory: string | undefined, options: InitOptions =
         const installSkills = options.skills !== false;  // default true
 
         const targetDir = directory ? path.resolve(cwd, directory) : cwd;
-        const projectName = path.basename(targetDir);
+        // The canonical slug, not the folder's spelling: a mixed-case name is an invalid npm
+        // package name and redeploys under a different slug than the server stores (cli#102).
+        const projectName = slugifyName(path.basename(targetDir)) || 'solidactions-project';
 
         if (directory) {
             fsExtra.ensureDirSync(targetDir);
