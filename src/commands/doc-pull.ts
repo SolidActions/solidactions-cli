@@ -411,6 +411,22 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
 }
 
 /**
+ * Manifest-clobber protection, against the RESOLVED folder: the argument itself for a folder
+ * pull, the doc's own folder for a single-doc pull (cli#153). Runs once the server has said
+ * which one the argument is, and before anything is written. --overwrite bypasses it.
+ */
+function refuseManifestClobber(previousManifest: DocsManifest | null, resolvedFolder: string, argument: string, destination: string, options: DocPullOptions): void {
+    if (previousManifest === null || previousManifest.folder_path === resolvedFolder || options.overwrite) {
+        return;
+    }
+    process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
+    process.stderr.write(chalk.red(`Pulling "${argument}" here would replace its manifest, and local edits to the\n`));
+    process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
+    process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
+    process.exit(1);
+}
+
+/**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
  */
@@ -456,25 +472,16 @@ export async function docPullWithConfig(
         }
     }
 
-    // Manifest-clobber protection: a manifest tracking a DIFFERENT folder than the one
-    // being pulled must never be silently replaced — every file it tracks would become
-    // untracked, and detectLocalModifications only protects tracked files. This must run
-    // before any network I/O (listTree/planDocs) and before detectLocalModifications, since
-    // a mismatched manifest can't meaningfully speak for the folder being pulled anyway.
-    // --overwrite already means "discard local-edit protection", so it bypasses this too.
-    if (previousManifest !== null && previousManifest.folder_path !== folderPath && !options.overwrite) {
-        process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
-        process.stderr.write(chalk.red(`Pulling "${folderPath}" here would replace its manifest, and local edits to the\n`));
-        process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
-        process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
-        process.exit(1);
-    }
-
+    // Manifest-clobber protection runs later, once the server has said whether the
+    // argument is a folder or a doc: refuseManifestClobber compares against the
+    // RESOLVED folder (the argument for a folder pull, the doc's own folder for a
+    // single-doc pull), still before anything is written.
     let rows: DocRow[];
 
     const listResult = await listTree(config, folderPath);
     if (listResult.ok) {
         rows = listResult.rows;
+        refuseManifestClobber(previousManifest, folderPath, folderPath, destination, options);
     } else if (listResult.isRoot && listResult.code === 'folder_path_not_found') {
         // Single-doc fallback: the target might be a doc path, not a folder.
         usedSingleDocFallback = true;
@@ -501,7 +508,12 @@ export async function docPullWithConfig(
             properties: data.properties ?? {},
         }];
 
-        await report(destination, folderPath, fetched, options, config, [], previousManifest, usedSingleDocFallback);
+        // The doc's real folder, not the argument (cli#153): a later `doc push` creates
+        // untracked files under the manifest's folder_path.
+        const docFolder = typeof data.folder_path === 'string' ? data.folder_path : (dir === '.' ? '' : dir);
+        refuseManifestClobber(previousManifest, docFolder, folderPath, destination, options);
+
+        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
@@ -565,7 +577,15 @@ async function report(
         }
     }
 
-    const manifest: DocsManifest = { folder_path: folderPath, docs: manifestDocs };
+    let docs = manifestDocs;
+    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
+        // A single-doc pull speaks for one doc only: keep every other tracked entry (cli#153),
+        // dropping any stale key that pointed at this same doc id.
+        const pulledIds = new Set(Object.values(manifestDocs).map((entry) => entry.id));
+        docs = Object.fromEntries(Object.entries(previousManifest.docs).filter(([, entry]) => !pulledIds.has(entry.id)));
+        Object.assign(docs, manifestDocs);
+    }
+    const manifest: DocsManifest = { folder_path: folderPath, docs };
     writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {

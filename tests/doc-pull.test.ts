@@ -438,6 +438,7 @@ describe('docPullWithConfig — single-doc fallback', () => {
             const manifest = readManifest(dest);
             expect(Object.keys(manifest.docs).length).toBe(1);
             expect(manifest.docs['solo.md']).toEqual({ id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') });
+            expect(manifest.folder_path).toBe('notes');
 
             expect(allCaptures.length).toBe(2);
         } finally {
@@ -468,6 +469,7 @@ describe('docPullWithConfig — single-doc fallback', () => {
             const code = await runExpectingExit(() => docPullWithConfig('solo', dest, {}, stubConfig()));
             expect(code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'solo.md'), 'utf8')).toBe('x');
+            expect(readManifest(dest).folder_path).toBe('');
         } finally {
             restoreExit();
             restoreStdout();
@@ -515,6 +517,184 @@ describe('docPullWithConfig — single-doc fallback', () => {
             expect(code).not.toBe(0);
             expect(allCaptures.length).toBe(1);
             expect(stderrLines.join('')).toContain('permission_denied');
+        } finally {
+            restoreExit();
+            restoreStderr();
+            cleanup();
+        }
+    });
+
+    it('records path.posix.dirname of the argument when read_doc returns no folder_path', async () => {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3 }),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, {}, stubConfig()));
+            expect(code).toBe(0);
+            expect(readManifest(dest).folder_path).toBe('notes');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    function writeSingleDocManifest(dest: string, manifest: DocsManifest): void {
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+
+    function singleDocReadResponse(revision: number, body: string, folderPath = 'notes'): string {
+        return makeMcpSuccess({ id: 5, title: 'solo', body, current_revision_id: revision, folder_path: folderPath });
+    }
+
+    it('re-pull agrees with itself instead of refusing "already tracks"', async () => {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            singleDocReadResponse(3, 'x'),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeSingleDocManifest(dest, {
+            folder_path: 'notes',
+            docs: { 'solo.md': { id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') } },
+        });
+        fs.writeFileSync(path.join(dest, 'solo.md'), 'x', 'utf8');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
+            expect(code).toBe(0);
+            expect(readManifest(dest).folder_path).toBe('notes');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('merges into a manifest tracking the same folder, never untracking the rest', async () => {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            singleDocReadResponse(3, 'x'),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeSingleDocManifest(dest, {
+            folder_path: 'notes',
+            docs: {
+                'other.md': { id: 9, title: 'other', current_revision_id: 1, media: false, body_sha256: sha256Hex('o') },
+                'solo.md': { id: 5, title: 'solo', current_revision_id: 2, media: false, body_sha256: sha256Hex('old') },
+            },
+        });
+        fs.writeFileSync(path.join(dest, 'other.md'), 'o', 'utf8');
+        fs.writeFileSync(path.join(dest, 'solo.md'), 'old', 'utf8');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
+            expect(code).toBe(0);
+            const manifest = readManifest(dest);
+            expect(manifest.docs['other.md']).toEqual({ id: 9, title: 'other', current_revision_id: 1, media: false, body_sha256: sha256Hex('o') });
+            expect(manifest.docs['solo.md'].current_revision_id).toBe(3);
+            expect(fs.readFileSync(path.join(dest, 'other.md'), 'utf8')).toBe('o');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('merge drops a stale key for the same doc id', async () => {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            singleDocReadResponse(3, 'x'),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeSingleDocManifest(dest, {
+            folder_path: 'notes',
+            docs: {
+                'renamed.md': { id: 5, title: 'solo', current_revision_id: 2, media: false, body_sha256: sha256Hex('old') },
+            },
+        });
+        fs.writeFileSync(path.join(dest, 'renamed.md'), 'old', 'utf8');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
+            expect(code).toBe(0);
+            const manifest = readManifest(dest);
+            expect(manifest.docs['solo.md'].id).toBe(5);
+            expect(manifest.docs).not.toHaveProperty('renamed.md');
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('the parent folder may be pulled into a single-doc directory', async () => {
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 5, title: 'solo', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 5, title: 'solo', folder_path: 'notes', current_revision_id: 3, properties: {}, body: 'x' }],
+            }),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeSingleDocManifest(dest, {
+            folder_path: 'notes',
+            docs: { 'solo.md': { id: 5, title: 'solo', current_revision_id: 3, media: false, body_sha256: sha256Hex('x') } },
+        });
+        fs.writeFileSync(path.join(dest, 'solo.md'), 'x', 'utf8');
+        const restoreExit = patchProcessExit();
+        const { restore: restoreStdout } = captureStdout();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes', dest, { yes: true }, stubConfig()));
+            expect(code).toBe(0);
+        } finally {
+            restoreExit();
+            restoreStdout();
+            cleanup();
+        }
+    });
+
+    it('a different folder is still refused, writing nothing', async () => {
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            singleDocReadResponse(3, 'x'),
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        writeSingleDocManifest(dest, { folder_path: 'elsewhere', docs: {} });
+        fs.writeFileSync(path.join(dest, 'keep.md'), 'keep', 'utf8');
+        const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+        const restoreExit = patchProcessExit();
+        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
+
+        try {
+            const code = await runExpectingExit(() => docPullWithConfig('notes/solo', dest, { yes: true }, stubConfig()));
+            expect(code).toBe(1);
+            expect(stderrLines.join('')).toContain('already tracks "elsewhere"');
+            expect(fs.existsSync(path.join(dest, 'solo.md'))).toBe(false);
+            expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
             restoreExit();
             restoreStderr();
@@ -897,7 +1077,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
 // ---------------------------------------------------------------------------
 
 describe('docPullWithConfig — manifest tracks a different folder', () => {
-    it('dest manifest tracks a DIFFERENT folder: refuses before any network I/O, names both folders, and leaves the manifest untouched', async () => {
+    it('dest manifest tracks a DIFFERENT folder: refuses once the server answers, names both folders, and leaves the manifest untouched', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         const manifest: DocsManifest = {
@@ -908,6 +1088,12 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
         fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
         const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
+
+        // The clobber check runs against the resolved folder once the server answers,
+        // but still before anything is written.
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 3, title: 'b-doc', properties: {} }] }),
+        ];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -923,8 +1109,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
             expect(err).toContain('marketing/b');
             expect(err).toContain('--overwrite');
 
-            // Refuses before the server walk: zero MCP requests.
-            expect(allCaptures.length).toBe(0);
+            expect(allCaptures.length).toBe(1);
             // The manifest on disk is byte-for-byte unchanged.
             expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
         } finally {
@@ -1033,7 +1218,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         }
     });
 
-    it('single-doc fallback into a dir tracking a folder: refuses before network I/O, and the one-entry manifest is never written', async () => {
+    it('single-doc fallback into a dir tracking another folder: refuses once the server names the doc, and the one-entry manifest is never written', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         const manifest: DocsManifest = {
@@ -1049,8 +1234,12 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         fs.writeFileSync(path.join(dest, 'y.md'), 'Y', 'utf8');
         const manifestBefore = fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8');
 
-        // No responseQueue entries: the refusal must fire before the list call that
-        // would normally 404 and trigger the single-doc fallback.
+        // The clobber check runs once the server has said the argument is a doc in
+        // another folder — after the list 404 and the read — but before anything is written.
+        responseQueue = [
+            makeMcpError('folder_path_not_found', 'No folder at that path'),
+            makeMcpSuccess({ id: 7, title: 'notes', body: 'n', current_revision_id: 1, folder_path: 'marketing' }),
+        ];
 
         const restoreExit = patchProcessExit();
         const { lines: stderrLines, restore: restoreStderr } = captureStderr();
@@ -1065,7 +1254,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
             expect(err).toContain('marketing/a');
             expect(err).toContain('marketing/notes');
 
-            expect(allCaptures.length).toBe(0);
+            expect(allCaptures.length).toBe(2);
             expect(fs.readFileSync(path.join(dest, DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
             const finalManifest = readManifest(dest);
             expect(Object.keys(finalManifest.docs).length).toBe(2);

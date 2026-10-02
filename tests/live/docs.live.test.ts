@@ -170,7 +170,7 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         expect(pull.status, pull.stdout + pull.stderr).toBe(0);
         const out = json(pull);
         expect(out.files.map((f: any) => f.path)).toEqual(['a.md']);
-        expect(out.manifest.folder_path).toBe(`${root}/a`);
+        expect(out.manifest.folder_path).toBe(root);
         expect(read(dest, 'a.md').toString('utf8')).toBe('from copy B\n');
 
         // A doc that lives in a sub-folder resolves the same way.
@@ -178,6 +178,7 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         const nested = runCli(['doc', 'pull', `${root}/sub/b`, dest2]);
         expect(nested.status, nested.stdout + nested.stderr).toBe(0);
         expect(read(dest2, 'b.md').toString('utf8')).toBe(`${bodyB}\nsecond edit\n`);
+        expect(JSON.parse(fs.readFileSync(path.join(dest2, '.solidactions-docs.json'), 'utf8')).folder_path).toBe(`${root}/sub`);
 
         // A path that is neither a folder nor a doc fails cleanly.
         const missing = runCli(['doc', 'pull', `${root}/no-such-doc`, path.join(mkTmp(), 'none')]);
