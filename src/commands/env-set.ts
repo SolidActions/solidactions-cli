@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, describeProjectEnvironments, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
@@ -86,15 +87,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
 
         const environment = options.env || 'dev';
 
-        // Build project slug
-        const projectSlug = environment === 'production'
-            ? projectName
-            : `${projectName}-${environment}`;
-
         // Auto-detect secrets
         const isSecret = options.secret || /secret|key|token|password|credential/i.test(key);
 
         try {
+            const projectSlug = await resolveProjectSlug(config, projectName, environment);
             if (isOauthConnectionMode) {
                 await axios.post(
                     `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,

@@ -1,15 +1,13 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { describeTerminalRun } from '../utils/run-status';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
 
     console.log(chalk.blue(`Running workflow "${workflowName}" in project "${projectName}" (${environment})...`));
 
@@ -24,6 +22,7 @@ export async function run(projectName: string, workflowName: string, options: { 
     }
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.post(
             `${config.host}/api/v1/projects/${projectSlug}/workflows/${workflowName}/trigger`,
             { input: inputData },

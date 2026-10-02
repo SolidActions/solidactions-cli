@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { formatTable, formatJson, type WebhookRow } from '../utils/webhook-formatters';
 
 interface WebhookListOptions {
@@ -19,13 +20,13 @@ export async function webhookList(projectName: string, options: WebhookListOptio
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     if (format === 'table') {
         console.log(chalk.blue(`Webhooks for project "${projectName}"${environment !== 'production' ? ` (${environment})` : ''}:`));
     }
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const params: Record<string, any> = {};
         if (options.showSecrets) {
             params.show_secrets = 'true';

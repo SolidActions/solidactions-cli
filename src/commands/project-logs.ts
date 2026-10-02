@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 export function buildBuildLogUrl(host: string, projectName: string, environment?: string): string {
     if (environment) {
@@ -28,9 +29,11 @@ export async function logsBuild(projectName: string, environment?: string): Prom
 
     console.log(chalk.blue(`Fetching build logs for project "${projectName}"...`));
 
-    const { url, params } = buildBuildLogRequest(config.host, projectName, environment);
-
     try {
+        // Only the path without -e resolves here; the -e path already asks
+        // the server to resolve the name.
+        const name = environment === undefined ? await resolveProjectSlug(config, projectName) : projectName;
+        const { url, params } = buildBuildLogRequest(config.host, name, environment);
         const response = await axios.get(url, {
             headers: getApiHeaders(config),
             params,

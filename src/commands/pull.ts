@@ -8,6 +8,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 export async function pull(projectName: string, destPath?: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -36,7 +37,8 @@ export async function pull(projectName: string, destPath?: string, options: { ye
     console.log(chalk.blue(`Pulling project "${projectName}"...`));
 
     try {
-        const response = await axios.get(`${config.host}/api/v1/projects/${projectName}/source`, {
+        const projectSlug = await resolveProjectSlug(config, projectName);
+        const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/source`, {
             headers: { ...getApiHeaders(config), 'Accept': 'application/octet-stream' },
             responseType: 'arraybuffer',
         });

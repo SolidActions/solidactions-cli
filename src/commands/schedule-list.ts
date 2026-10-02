@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export interface ScheduleListItem {
     enabled: boolean;
@@ -24,18 +25,13 @@ export function formatScheduleState(schedule: ScheduleListItem): string {
 
 export async function scheduleList(projectName: string, options: { env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
-    let projectSlug: string;
-    try {
-        projectSlug = projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-        return;
-    }
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     console.log(chalk.blue(`Schedules for project "${projectName}":`));
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
             headers: getApiHeaders(config),
         });

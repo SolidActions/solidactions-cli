@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import axios, { type AxiosResponse } from 'axios';
+import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
@@ -10,6 +10,7 @@ import { formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../
 import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
+import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
 import {
@@ -477,23 +478,6 @@ export async function handlePlanLimitReached(
     }
 }
 
-/**
- * GET a project by the name as typed, then — on a 404 only — by its canonical slug when
- * that differs (cli#102). The server stores `Issue970-QX` as `issue970-qx`; without the
- * retry a redeploy 404s, tries to create, and collides with the slug that already exists.
- * The typed spelling goes first so a legacy slug the slugifier would rewrite still resolves.
- */
-export async function getProjectBySlugOrCanonical(config: Config, typed: string, canonical: string): Promise<AxiosResponse> {
-    try {
-        return await axios.get(`${config.host}/api/v1/projects/${typed}`, { headers: getApiHeaders(config) });
-    } catch (error: any) {
-        if (error.response?.status !== 404 || canonical === '' || canonical === typed) {
-            throw error;
-        }
-        return axios.get(`${config.host}/api/v1/projects/${canonical}`, { headers: getApiHeaders(config) });
-    }
-}
-
 export async function deploy(projectName: string, sourcePath?: string, options: DeployOptions = {}) {
     const config = await requireConfigWithWorkspace();
 
@@ -835,7 +819,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
                             const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
                             console.log('');
-                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}${envFlag}\` to retrieve the generated secret.`));
+                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                         }
 

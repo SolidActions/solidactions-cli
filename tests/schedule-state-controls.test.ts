@@ -70,8 +70,15 @@ describe('schedule target-state commands', () => {
         await scheduleEnable('billing', '42');
         await scheduleEnable('billing', '42');
 
-        expect(requests).toHaveLength(2);
-        for (const request of requests) {
+        // Each call resolves the slug first (cli#161), then PATCHes.
+        expect(requests).toHaveLength(4);
+        for (const request of [requests[0], requests[2]]) {
+            expect(request).toMatchObject({
+                method: 'GET',
+                url: '/api/v1/projects/billing',
+            });
+        }
+        for (const request of [requests[1], requests[3]]) {
             expect(request).toMatchObject({
                 method: 'PATCH',
                 url: '/api/v1/projects/billing/schedules/42',
@@ -91,8 +98,12 @@ describe('schedule target-state commands', () => {
 
         await scheduleDisable('billing', '42', { env: 'dev' });
 
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/billing-dev',
+        });
+        expect(requests[1]).toMatchObject({
             method: 'PATCH',
             url: '/api/v1/projects/billing-dev/schedules/42',
             body: JSON.stringify({ enabled: false }),
@@ -106,8 +117,12 @@ describe('schedule target-state commands', () => {
 
         await scheduleReset('billing', '42', { env: 'production' });
 
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/billing',
+        });
+        expect(requests[1]).toMatchObject({
             method: 'POST',
             url: '/api/v1/projects/billing/schedules/42/reset',
             body: JSON.stringify({}),
@@ -141,8 +156,12 @@ describe('schedule set paused wire contract', () => {
 
         await scheduleSet('billing', '* * * * *', { yes: true, paused: true, env: 'dev' });
 
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/billing-dev',
+        });
+        expect(requests[1]).toMatchObject({
             method: 'POST',
             url: '/api/v1/projects/billing-dev/schedules',
             body: JSON.stringify({ cron: '* * * * *', enabled: false }),
@@ -156,8 +175,12 @@ describe('schedule set paused wire contract', () => {
         responseBody = { schedule: { id: 42, enabled: false } };
         await scheduleSet('billing', '* * * * *', { yes: true });
 
-        expect(requests).toHaveLength(1);
-        expect(JSON.parse(requests[0].body)).toEqual({ cron: '* * * * *' });
-        expect(JSON.parse(requests[0].body)).not.toHaveProperty('enabled');
+        expect(requests).toHaveLength(2);
+        expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/billing',
+        });
+        expect(JSON.parse(requests[1].body)).toEqual({ cron: '* * * * *' });
+        expect(JSON.parse(requests[1].body)).not.toHaveProperty('enabled');
     });
 });

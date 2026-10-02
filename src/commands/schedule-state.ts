@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export interface ScheduleStateOptions {
     env?: string;
@@ -26,15 +27,6 @@ function renderScheduleStateError(error: any, projectName: string, scheduleId: s
     process.exit(1);
 }
 
-function resolveProjectSlug(projectName: string, options: ScheduleStateOptions): string {
-    try {
-        return projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-    }
-}
-
 async function setScheduleTarget(
     projectName: string,
     scheduleId: string,
@@ -42,10 +34,12 @@ async function setScheduleTarget(
     options: ScheduleStateOptions = {},
 ): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    const projectSlug = resolveProjectSlug(projectName, options);
     const enabled = target === 'enable';
 
+    if (!isUsableProjectRef(projectName, options.env)) return;
+
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         await axios.patch(
             `${config.host}/api/v1/projects/${encodeURIComponent(projectSlug)}/schedules/${encodeURIComponent(scheduleId)}`,
             { enabled },
@@ -80,9 +74,11 @@ export async function scheduleReset(
     options: ScheduleStateOptions = {},
 ): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    const projectSlug = resolveProjectSlug(projectName, options);
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         await axios.post(
             `${config.host}/api/v1/projects/${encodeURIComponent(projectSlug)}/schedules/${encodeURIComponent(scheduleId)}/reset`,
             {},

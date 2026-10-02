@@ -16,8 +16,16 @@ let responseBody: Record<string, unknown>;
 beforeAll(async () => {
     server = http.createServer((req, res) => {
         requests.push(req.url ?? '');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(responseBody));
+        // The slug-resolution lookup (a bare project path) 404s so the
+        // command falls back to its first candidate; the detail request
+        // carries the deployment include as before.
+        if ((req.url ?? '').includes('?include=deployment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(responseBody));
+        } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ message: 'Not found.' }));
+        }
     });
     await new Promise<void>((resolve) => {
         server.listen(0, '127.0.0.1', () => {
@@ -111,7 +119,7 @@ describe('project view request and rendering', () => {
         const lines: string[] = [];
         await projectViewWithConfig('billing', {}, config(), (line) => lines.push(line));
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
+        expect(requests).toEqual(['/api/v1/projects/billing-dev', '/api/v1/projects/billing-dev?include=deployment']);
         expect(lines.join('\n')).toContain('Status: deployed');
         expect(lines.join('\n')).toContain('abcdef123456');
         expect(lines.join('\n')).toContain('clean');
@@ -121,7 +129,7 @@ describe('project view request and rendering', () => {
     it('treats an exact-suffixed project as a family on the default-dev view surface', async () => {
         await projectViewWithConfig('billing-dev', {}, config(), () => undefined);
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev-dev?include=deployment']);
+        expect(requests).toEqual(['/api/v1/projects/billing-dev-dev', '/api/v1/projects/billing-dev-dev?include=deployment']);
     });
 
     it.each([
@@ -261,7 +269,7 @@ describe('project view --json', () => {
         const lines: string[] = [];
         await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
+        expect(requests).toEqual(['/api/v1/projects/billing-dev', '/api/v1/projects/billing-dev?include=deployment']);
         const output = JSON.parse(lines.join('\n'));
         expect(output).toEqual({
             slug: 'billing-dev',

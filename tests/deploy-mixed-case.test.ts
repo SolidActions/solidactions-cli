@@ -7,7 +7,7 @@
  */
 import * as http from 'http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { getProjectBySlugOrCanonical } from '../src/commands/deploy';
+import { getProjectBySlugOrCanonical } from '../src/utils/project-ref';
 
 let server: http.Server;
 let port: number;

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { renderTable } from '../utils/table';
 
 interface EnvListOptions {
@@ -36,9 +37,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     try {
         if (projectName) {
             // List project variable mappings
-            const projectSlug = environment === 'production'
-                ? projectName
-                : `${projectName}-${environment}`;
+            const projectSlug = await resolveProjectSlug(config, projectName, environment);
 
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: getApiHeaders(config),

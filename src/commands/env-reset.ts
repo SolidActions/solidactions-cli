@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 interface EnvResetOptions {
     env?: string;
@@ -25,11 +26,9 @@ function describeRestoredSource(mapping: any): string {
 export async function envReset(projectName: string, key: string, options: EnvResetOptions = {}): Promise<void> {
     const config = await requireConfigWithWorkspace();
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const listResponse = await axios.get(
             `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,
             { headers: getApiHeaders(config) }

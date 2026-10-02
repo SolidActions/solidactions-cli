@@ -11,6 +11,7 @@ import {
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
 import { activeCommandIsMutating } from './mutating-commands';
+import { matchProjectRungs } from './project-ref';
 import {
     decideWorkspaceGuard,
     isCwdInferredWorkspace,
@@ -240,7 +241,13 @@ export async function lookupProjectFamilyEnvironments(config: Config, projectNam
     try {
         const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
         const rows = res.data?.data ?? res.data ?? [];
-        const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
+        // The same rungs `run list` retries with (cli#161): an ambiguous
+        // case-insensitive match yields no hint rather than a guess.
+        const match = matchProjectRungs(rows, projectName);
+        if (match.ambiguous.length > 0) {
+            return null;
+        }
+        const hit = match.project;
         const environments: string[] | undefined = hit?.environments;
         if (!environments?.length) {
             return null;

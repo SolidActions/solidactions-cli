@@ -4,6 +4,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { writeSecretFileSync } from '../utils/secure-write';
 
 interface EnvPullOptions {
@@ -84,18 +85,15 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
 
     const environment = options.env || 'dev';
 
-    // Build the project slug for lookup
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
-
     // Determine output file
     const outputFile = options.output || (environment === 'production' ? '.env' : `.env.${environment}`);
     const outputPath = path.resolve(outputFile);
 
     console.log(chalk.blue(`Pulling variables from "${projectName}" (${environment})...`));
 
+    let projectSlug = '';
     try {
+        projectSlug = await resolveProjectSlug(config, projectName, environment);
         // First, check if there are any secrets
         const checkResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`, {
             headers: getApiHeaders(config),

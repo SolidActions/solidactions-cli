@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -11,12 +12,12 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
     const projectName = isProjectMode ? keyOrProject : undefined;
     const key = isProjectMode ? keyIfProject : keyOrProject;
     const environment = options.env ?? 'dev';
-    const projectSlug = projectName && environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     try {
         if (isProjectMode) {
             // Delete project variable
             console.log(chalk.blue(`Deleting variable "${key}" from project "${projectName}" (${environment})...`));
+            const projectSlug = await resolveProjectSlug(config, projectName!, environment);
 
             // First, get the variable to find its ID
             const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {

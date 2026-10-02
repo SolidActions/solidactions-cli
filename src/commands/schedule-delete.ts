@@ -2,22 +2,18 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export async function scheduleDelete(projectName: string, scheduleId: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
-    let projectSlug: string;
-    try {
-        projectSlug = projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-        return;
-    }
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     console.log(chalk.blue(`Deleting schedule ${scheduleId} from project "${projectName}"...`));
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         // First, get the schedule details for confirmation
         const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
             headers: getApiHeaders(config),

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 interface SecretRow {
     workflow_name?: string;
@@ -38,7 +39,6 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     if (format === 'text') {
         process.stderr.write(
@@ -47,6 +47,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
     }
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/webhooks`, {
             headers: getApiHeaders(config),
             params: { show_secrets: 'true' },

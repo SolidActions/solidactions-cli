@@ -4,6 +4,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig, isReservedEnvName, RESERVED_ENV_PREFIX } from '../utils/env';
 
 interface EnvPushOptions {
@@ -96,16 +97,13 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         process.exit(1);
     }
 
-    // Build project slug
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
-
     console.log(chalk.blue(`Pushing variables to "${projectName}" (${environment})...`));
 
     // Fetch current server state
     let serverMappings: any[] = [];
+    let projectSlug = '';
     try {
+        projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
             headers: getApiHeaders(config),
         });
