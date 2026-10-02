@@ -204,18 +204,23 @@ const CREWS_ROUTES: Record<CrewsGroup, Record<string, CrewsRoute>> = {
     },
 };
 
+/** Own-property lookup: a route table must never resolve an inherited Object.prototype member (cli#155). */
+function ownValue<T>(table: Record<string, T> | undefined, key: string): T | undefined {
+    return table !== undefined && Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 /**
  * Map a CLI-level crews call (group + action) to the public MCP tool, action and
  * param names of the current catalog. Throws for an action the CLI has no route for.
  */
 export function resolveCrewsCall(group: CrewsGroup, args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } {
     const action = String(args.action ?? '');
-    const route = CREWS_ROUTES[group][action];
+    const route = ownValue(CREWS_ROUTES[group], action);
     if (!route) throw new Error(`unsupported crews action: ${group}.${action}`);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(args)) {
         if (v === undefined) continue;
-        out[route.rename?.[k] ?? k] = v;
+        out[ownValue(route.rename, k) ?? k] = v;
     }
     if (route.action) out.action = route.action;
     return { tool: route.tool, args: out };
@@ -255,7 +260,7 @@ const DOCS_ROUTES: Record<string, string> = {
  */
 export function resolveDocsCall(args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } {
     const action = String(args.action ?? '');
-    const tool = DOCS_ROUTES[action];
+    const tool = ownValue(DOCS_ROUTES, action);
     if (!tool) throw new Error(`unsupported docs action: ${action}`);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(args)) {

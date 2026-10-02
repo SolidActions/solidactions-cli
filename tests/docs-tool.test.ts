@@ -8,7 +8,7 @@
 
 import * as http from 'http';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { callDocsTool, resolveDocsCall } from '../src/utils/mcp';
+import { callDocsTool, resolveCrewsCall, resolveDocsCall } from '../src/utils/mcp';
 import type { Config } from '../src/utils/config';
 
 // ---------------------------------------------------------------------------
@@ -186,5 +186,29 @@ describe('resolveDocsCall', () => {
 
     it('throws for an unrouted action', () => {
         expect(() => resolveDocsCall({ action: 'read' })).toThrow('unsupported docs action: read');
+    });
+});
+
+describe('route tables ignore inherited Object.prototype keys (cli#155)', () => {
+    const inherited = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
+
+    it.each(inherited)('resolveDocsCall throws for %s', (action) => {
+        expect(() => resolveDocsCall({ action })).toThrow(`unsupported docs action: ${action}`);
+    });
+
+    it.each(inherited)('resolveCrewsCall throws for skills.%s and roles.%s', (action) => {
+        expect(() => resolveCrewsCall('skills', { action })).toThrow(`unsupported crews action: skills.${action}`);
+        expect(() => resolveCrewsCall('roles', { action })).toThrow(`unsupported crews action: roles.${action}`);
+    });
+
+    it('a param named like an inherited key passes through unrenamed', () => {
+        const r = resolveCrewsCall('skills', { action: 'sandbox_exec', constructor: 'x', toString: 'y', environment: 'dev' });
+        expect(r.args).toEqual({ action: 'skill_exec', constructor: 'x', toString: 'y', skill_exec_environment: 'dev' });
+        expect(r.tool).toBe('crews_sandbox');
+    });
+
+    it('routed actions still resolve', () => {
+        expect(resolveDocsCall({ action: 'write', id: 1, body: 'b' }).tool).toBe('docs_manage');
+        expect(resolveCrewsCall('roles', { action: 'read' }).tool).toBe('crews_roles_read');
     });
 });
