@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
-import { formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
@@ -529,8 +529,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             productionExists = false;
             // Project doesn't exist yet — this is the normal first-deploy path.
             // Do NOT print a warning here; the deploy proceeds to create/deploy successfully.
+        } else if (error.response?.status === 401) {
+            // The key is rejected before the deploy even starts: name the host
+            // that refused it like every other command's 401.
+            console.error(chalk.red(authFailedLine(config.host)));
+            process.exit(1);
         } else {
-            // 5xx, network error, auth failure, etc. — fail conservatively rather
+            // 5xx, network error, etc. — fail conservatively rather
             // than treating the project as non-existent and potentially creating it.
             console.error(chalk.red('Failed to check project existence:'), error.response?.data?.message || error.message);
             process.exit(1);

@@ -293,15 +293,20 @@ async function backfillDocTypes(config: Config, fetched: FetchedDoc[]): Promise<
     for (const doc of fetched) {
         if (doc.docTypeKnown) continue;
         let slug: string | null = null;
+        let readOk = false;
         try {
             const result = await callDocsTool(config, { action: 'read_doc', id: doc.id });
             if (result.ok) {
+                readOk = true;
                 slug = result.data?.doc_type?.slug ?? null;
             }
         } catch {
-            slug = null;
+            readOk = false;
         }
-        if (slug == null) {
+        // A successful read that simply reports no type (doc_type: null) is a
+        // valid untyped doc, not a failure — warn only when the type could
+        // not be read at all.
+        if (!readOk) {
             warnings.push(`warn: could not read the type of doc ${doc.id} (${doc.title}); writing it as .md`);
         }
         doc.docType = slug;
@@ -753,6 +758,22 @@ async function report(
                 currentHash = null;
             }
             renameMoves.push({ oldRel: old, newRel: p.relPath, id: p.doc.id, modified: currentHash === null || currentHash !== entry.body_sha256 });
+        }
+        // An edited rename source whose old path is itself a write target in the
+        // new plan would be overwritten by commitDocs below — even with
+        // --overwrite, which otherwise keeps edited twins. Refuse before ANY
+        // write: overwriting unpublished edits while claiming to keep them is
+        // data loss. This runs before the plain modified-rename refusal so the
+        // collision (where --overwrite does not help) is reported accurately.
+        const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
+        for (const m of renameMoves) {
+            if (!m.modified) continue;
+            const taker = plannedPaths.get(m.oldRel);
+            if (!taker) continue;
+            const oldTitle = previousManifest.docs[m.oldRel]?.title ?? `#${m.id}`;
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${oldTitle}", now written as ${m.newRel}), but this pull would write doc ${taker.doc.id} ("${taker.doc.title}") to ${m.oldRel}.\n`));
+            process.stderr.write(chalk.red(`Move or rename the edited ${m.oldRel} (or push it first) and pull again.\n`));
+            process.exit(1);
         }
         const blocked = renameMoves.filter((m) => m.modified && !options.overwrite);
         if (blocked.length > 0) {

@@ -101,12 +101,10 @@ describe('env set missing environment deploy-first hint', () => {
         );
     });
 
-    it('preserves the plain prefix and creation command when discovery returns null', async () => {
+    it('prints the server message (never a missing-environment hint) when discovery returns null', async () => {
         const output = await failedEnvSet('missing-project', { yes: true, env: 'production' });
 
-        expect(output).toContain('Project "missing-project" has no production environment.');
-        expect(output).toContain(
-            "Run 'solidactions project deploy missing-project -e production --create' first.",
-        );
+        expect(output).toContain('Failed: 404 Project not found.');
+        expect(output).not.toMatch(/has no .* environment/);
     });
 });

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { authFailedLine, describeProjectEnvironments, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import { resolveProjectSlug } from '../utils/project-ref';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
@@ -169,11 +169,16 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
                 if (error.response.status === 401) {
                     console.error(chalk.red(authFailedLine(config.host)));
                 } else if (error.response.status === 404) {
-                    const envsList = await describeProjectEnvironments(config, projectName);
-                    console.error(chalk.red(
-                        `Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`
-                        + `\nRun 'solidactions project deploy ${projectName} -e ${environment} --create' first.`,
-                    ));
+                    const family = await lookupProjectFamilyEnvironments(config, projectName);
+                    const envs = family?.environments ?? [];
+                    if (envs.length > 0 && !envs.includes(environment)) {
+                        console.error(chalk.red(
+                            `Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}).`
+                            + `\nRun 'solidactions project deploy ${projectName} -e ${environment} --create' first.`,
+                        ));
+                    } else {
+                        console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                    }
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {

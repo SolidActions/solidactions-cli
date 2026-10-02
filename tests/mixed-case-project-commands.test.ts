@@ -214,7 +214,8 @@ describe('mixed-case project arguments resolve by the canonical slug', () => {
     it('a typo still prints the not-found message (exit 1), not a stack trace', async () => {
         const result = await runCli(['run', 'start', 'NoSuchApp', 'hello', '-e', 'production'], env.home, env.cwd);
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain('Project or workflow not found.');
+        expect(result.stderr).toContain('Failed: 404 Not found.');
+        expect(result.stderr).not.toMatch(/has no .* environment/);
     });
 
     it('a 403 on the project read falls back to the command route (PM ruling 3)', async () => {

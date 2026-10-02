@@ -23,6 +23,7 @@ export async function workspacesList() {
 
     if (workspaces.length === 0) {
         console.log(chalk.yellow('No workspaces found.'));
+        warnDanglingPin(config.workspace, config.workspaceId, resolved.sources.workspaceId, true);
         return;
     }
 
@@ -40,13 +41,38 @@ export async function workspacesList() {
 
     // cli#113: a pin the list doesn't contain gets no "← current" — say so instead of looking normal.
     if (config.workspaceId && !workspaces.some((ws) => ws.id === config.workspaceId)) {
-        const label = config.workspace ? `${config.workspace} (${config.workspaceId})` : config.workspaceId;
-        const from = resolved.sources.workspaceId === 'env' ? '$SOLIDACTIONS_WORKSPACE_ID' : resolved.sources.workspaceId;
-        console.log('');
-        console.log(chalk.yellow(`warn: the active workspace ${label} (from ${from}) is not in this list — it may belong to another host, or you may no longer have access.`));
-        console.log(chalk.yellow('Pick one from the list with `solidactions workspace set <slug> --local` (or --global).'));
+        warnDanglingPin(config.workspace, config.workspaceId, resolved.sources.workspaceId, false);
     }
     console.log('');
+}
+
+/**
+ * Warn about a pinned workspace the server's list does not contain (cli#113).
+ * Runs against an empty list too: losing access to every workspace is exactly
+ * the lost-access case, so the pin is evaluated rather than skipped. With
+ * nothing listed there is nothing to pick from, so the remedy says how to
+ * clear or change the pin instead of pointing at the list.
+ */
+function warnDanglingPin(
+    workspace: string | undefined,
+    workspaceId: string | undefined,
+    workspaceIdSource: unknown,
+    emptyList: boolean,
+): void {
+    if (!workspaceId) return;
+    const label = workspace ? `${workspace} (${workspaceId})` : workspaceId;
+    const from = workspaceIdSource === 'env'
+        ? '$SOLIDACTIONS_WORKSPACE_ID'
+        : workspaceIdSource === 'cli'
+            ? 'the -w/--workspace-override flag'
+            : workspaceIdSource;
+    console.log('');
+    console.log(chalk.yellow(`warn: the active workspace ${label} (from ${from}) is not in this list — it may belong to another host, or you may no longer have access.`));
+    if (emptyList) {
+        console.log(chalk.yellow('Clear or change the pin with `solidactions workspace set <slug> --local` (or --global).'));
+    } else {
+        console.log(chalk.yellow('Pick one from the list with `solidactions workspace set <slug> --local` (or --global).'));
+    }
 }
 
 interface WorkspaceSetOptions {

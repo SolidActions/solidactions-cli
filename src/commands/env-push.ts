@@ -238,7 +238,11 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         console.log(chalk.green(`\n✓ Pushed ${toPush.length} variable(s) to ${projectSlug}`));
         console.log(chalk.gray(`  ${created} created, ${updated} updated` + (toSkip.length > 0 ? `, ${toSkip.length} skipped` : '')));
     } catch (error: any) {
-        console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
+        if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else {
+            console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
+        }
         process.exit(1);
     }
 }

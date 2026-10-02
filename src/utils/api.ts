@@ -345,13 +345,33 @@ export function requireConfig(): Config {
 }
 
 /**
+ * Host as shown in user-facing output: a URL with any userinfo stripped
+ * (credentials must never reach the terminal), otherwise shown as
+ * configured. Shared by every authentication-failure message (cli#156).
+ */
+export function displayHost(host: string): string {
+    let shown = host;
+    try {
+        const url = new URL(host);
+        if (url.username || url.password) {
+            url.username = '';
+            url.password = '';
+            shown = url.toString().replace(/\/$/, '');
+        }
+    } catch {
+        // Not a URL: show it as configured.
+    }
+    return shown;
+}
+
+/**
  * Contextual 401 message — names the host being called and where the (now
  * apparently invalid/expired) API key came from, instead of a bare
  * "Authentication failed" that gives no clue which config is at fault.
  */
 export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
     const keySource = sources?.apiKey ?? 'config';
-    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
+    return `Authentication failed against ${displayHost(config.host)} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
 }
 
 /**
@@ -370,18 +390,7 @@ export function formatApiFailure(status: number, data: unknown): string {
 
 /** The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo. */
 export function authFailedLine(host: string): string {
-    let shown = host;
-    try {
-        const url = new URL(host);
-        if (url.username || url.password) {
-            url.username = '';
-            url.password = '';
-            shown = url.toString().replace(/\/$/, '');
-        }
-    } catch {
-        // Not a URL: show it as configured.
-    }
-    return `Authentication failed against ${shown}. Run "solidactions login --global" to re-configure.`;
+    return `Authentication failed against ${displayHost(host)}. Run "solidactions login --global" to re-configure.`;
 }
 
 export async function ensureWorkspaceSelected(

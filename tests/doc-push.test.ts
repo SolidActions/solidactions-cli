@@ -114,9 +114,9 @@ function makeDefaultBulkSuccess(count: number): string {
     });
 }
 
-let responseQueue: Array<string | ((body: any) => string)> = [];
+let responseQueue: Array<string | ((body: any) => string) | ((body: any) => Promise<string>)> = [];
 
-function nextResponseBody(body: any): string {
+async function nextResponseBody(body: any): Promise<string> {
     const entry = responseQueue.length > 0 ? responseQueue.shift()! : null;
     if (entry === null) {
         // Default: a bulk_create success for however many items were sent
@@ -131,7 +131,7 @@ beforeAll(async () => {
     stubServer = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
         req.on('data', (chunk) => { chunks.push(chunk); });
-        req.on('end', () => {
+        req.on('end', async () => {
             const rawBody = Buffer.concat(chunks);
             const contentType = req.headers['content-type'];
             const isMultipart = contentType?.startsWith('multipart/form-data') ?? false;
@@ -168,7 +168,9 @@ beforeAll(async () => {
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(nextResponseBody(parsedBody));
+            // Awaited so a queued entry may hold the response (e.g. to edit a
+            // local file mid-push) before answering.
+            res.end(await nextResponseBody(parsedBody));
         });
     });
 
@@ -3339,6 +3341,110 @@ describe('doc push records created docs in the manifest (cli#157)', () => {
             expect(result.code).toBe(0);
             expect(result.stderr).toContain('board.canvas.json: skipped — a doc with this title already exists');
             expect(result.stderr).toContain('--replace 77');
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Recording integrity: snapshot hashes (C2) and per-chunk persistence (I3)
+// ---------------------------------------------------------------------------
+
+describe('doc push recording integrity', () => {
+    function readManifest(dir: string): DocsManifest {
+        return JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+    }
+
+    it('records the submitted snapshot hash, so an edit saved mid-push is sent by the next push', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'note.md': '# v1' });
+        try {
+            let bulkReceivedResolve!: () => void;
+            const bulkReceived = new Promise<void>((resolve) => { bulkReceivedResolve = resolve; });
+            let releaseBulk!: () => void;
+            responseQueue = [
+                async (body: any) => {
+                    expect(body.params.arguments.action).toBe('bulk_create');
+                    expect(body.params.arguments.items[0].body).toBe('# v1');
+                    bulkReceivedResolve();
+                    await new Promise<void>((resolve) => { releaseBulk = resolve; });
+                    return makeMcpSuccess({
+                        results: [{ index: 0, status: 'created', id: 101, title: 'note', current_revision_id: 11 }],
+                        summary: { created: 1 },
+                    });
+                },
+            ];
+
+            const firstPush = runPush(dir, {});
+            await bulkReceived;
+            // Saved after the CLI snapshotted the file but before the server answered.
+            fs.writeFileSync(path.join(dir, 'note.md'), '# v2', 'utf8');
+            releaseBulk();
+            expect((await firstPush).code).toBe(0);
+
+            // The manifest records the bytes the server received, not the later edit.
+            expect(readManifest(dir).docs['note.md'].body_sha256).toBe(sha256Hex('# v1'));
+
+            // So the second push sends the newer body by id instead of skipping it.
+            let writeArgs: any = null;
+            responseQueue = [
+                (body: any) => {
+                    writeArgs = body.params.arguments;
+                    return makeMcpSuccess({ current_revision_id: 12 });
+                },
+            ];
+            expect((await runPush(dir, {})).code).toBe(0);
+            expect(writeArgs).toMatchObject({ action: 'write', id: 101, body: '# v2', base_revision: 11 });
+            expect(readManifest(dir).docs['note.md'].body_sha256).toBe(sha256Hex('# v2'));
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('persists the first chunk when a later chunk fails', async () => {
+        const files: Record<string, string> = {};
+        for (let i = 0; i < 51; i++) {
+            files[`doc-${i}.md`] = `# Doc ${i}\n\nContent for doc ${i}.`;
+        }
+        const { dir, cleanup } = makeTmpDocsDir(files);
+        try {
+            responseQueue = [
+                (body: any) => {
+                    // Echo the received chunk: readdir order is not sorted, so
+                    // derive each row from the item actually sent at that index.
+                    const items = body.params.arguments.items;
+                    expect(items.length).toBe(50);
+                    return makeMcpSuccess({
+                        results: items.map((item: any, i: number) => ({
+                            index: i,
+                            status: 'created',
+                            id: 1000 + i,
+                            title: item.title,
+                            current_revision_id: 5,
+                        })),
+                        summary: { created: 50 },
+                    });
+                },
+                makeMcpError('bulk_failed', 'the second chunk blew up'),
+            ];
+
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(1);
+
+            // The failed chunk's file is the only one missing; every recorded
+            // entry carries the sent file's id, revision and snapshot hash.
+            const manifest = readManifest(dir);
+            const keys = Object.keys(manifest.docs);
+            expect(keys).toHaveLength(50);
+            const allNames = Object.keys(files);
+            expect(allNames.filter((n) => !keys.includes(n))).toHaveLength(1);
+            for (const key of keys) {
+                const n = Number(key.match(/^doc-(\d+)\.md$/)![1]);
+                const entry = manifest.docs[key];
+                expect(entry.current_revision_id).toBe(5);
+                expect(entry.title).toBe(`doc-${n}`);
+                expect(entry.body_sha256).toBe(sha256Hex(`# Doc ${n}\n\nContent for doc ${n}.`));
+            }
         } finally {
             cleanup();
         }

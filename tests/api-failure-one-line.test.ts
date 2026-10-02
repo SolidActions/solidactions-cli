@@ -10,7 +10,7 @@ import * as childProcess from 'child_process';
 import * as http from 'http';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { authFailedLine } from '../src/utils/api';
+import { authFailedLine, displayHost } from '../src/utils/api';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
@@ -112,6 +112,17 @@ describe('authFailedLine', () => {
     });
 });
 
+describe('displayHost', () => {
+    it('strips userinfo from a URL host', () => {
+        expect(displayHost('https://user:secret@host.example')).toBe('https://host.example');
+    });
+
+    it('leaves a clean URL and a non-URL unchanged', () => {
+        expect(displayHost('https://app.example')).toBe('https://app.example');
+        expect(displayHost('not a url')).toBe('not a url');
+    });
+});
+
 describe('API failures print one line', () => {
     let env: ReturnType<typeof makeTmpEnv>;
 
@@ -161,5 +172,19 @@ describe('API failures print one line', () => {
         expect(failureLines(result.stderr)).toEqual([
             `Authentication failed against http://127.0.0.1:${port}. Run "solidactions login --global" to re-configure.`,
         ]);
+    });
+
+    it('workspace bootstrap: a 401 on the workspace fetch strips userinfo from the host', async () => {
+        respondWith = { status: 401, body: { message: 'Unauthenticated.' } };
+        // No workspace pin, so the CLI fetches /api/v1/workspaces before the
+        // command runs and fails there with the contextual 401 message.
+        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key' });
+
+        const result = await runCli(['run', 'list'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`Authentication failed against http://127.0.0.1:${port}`);
+        expect(result.stderr).not.toContain('user:secret@');
+        expect(result.stderr).not.toContain('secret');
     });
 });

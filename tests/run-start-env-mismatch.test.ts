@@ -96,7 +96,7 @@ describe('run start — env-mismatch not-found (cleanroom finding)', () => {
         }
     });
 
-    it('falls back to the bare "not found" message when the project truly does not exist (describeProjectEnvironments finds nothing)', async () => {
+    it('prints the server message (never a missing-environment hint) when the family lookup finds no such project', async () => {
         const env = makeTmpEnv();
         writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'sk_test', workspaceId: 'ws-1' });
         const restoreExit = patchProcessExit();
@@ -112,7 +112,9 @@ describe('run start — env-mismatch not-found (cleanroom finding)', () => {
             }
 
             expect(caught?.code).toBe(1);
-            expect(lines.join('\n')).toContain('Project or workflow not found.');
+            const text = lines.join('\n');
+            expect(text).toContain('Failed: 404 Not found.');
+            expect(text).not.toMatch(/has no .* environment/);
         } finally {
             restoreExit();
             restoreErr();

@@ -22,11 +22,12 @@ const WORKSPACES_PAYLOAD = {
 
 let server: http.Server;
 let port: number;
+let currentPayload: unknown = WORKSPACES_PAYLOAD;
 
 beforeAll(async () => {
     server = http.createServer((_request, response) => {
         response.writeHead(200, { 'Content-Type': 'application/json' });
-        response.end(JSON.stringify(WORKSPACES_PAYLOAD));
+        response.end(JSON.stringify(currentPayload));
     });
     await new Promise<void>((resolve) => {
         server.listen(0, '127.0.0.1', () => {
@@ -86,6 +87,7 @@ describe('solidactions workspace list with a pin the list does not contain', () 
 
     beforeEach(() => {
         env = makeTmpEnv();
+        currentPayload = WORKSPACES_PAYLOAD;
     });
     afterEach(() => env.cleanup());
 
@@ -125,6 +127,33 @@ describe('solidactions workspace list with a pin the list does not contain', () 
         expect(result.status).toBe(0);
         expect(result.stdout).toContain('Main');
         expect(result.stdout).not.toContain('← current');
+        expect(result.stdout).not.toContain('warn:');
+    });
+
+    it('still warns about the pin when the list is empty, without pointing at the list', async () => {
+        currentPayload = { workspaces: {} };
+        writeGlobal(env.home, { ...baseConfig(), workspace: 'gone-ws', workspaceId: 'ws-9' });
+
+        const result = await runCli(['workspace', 'list'], env.home, env.cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('No workspaces found.');
+        const warning = result.stdout.slice(result.stdout.indexOf('warn:'));
+        expect(warning).toContain('gone-ws');
+        expect(warning).toContain('ws-9');
+        expect(warning).toContain('another host');
+        expect(warning).toContain('workspace set');
+        expect(warning).not.toContain('Pick one from the list');
+    });
+
+    it('warns nothing on an empty list when nothing is pinned', async () => {
+        currentPayload = { workspaces: [] };
+        writeGlobal(env.home, baseConfig());
+
+        const result = await runCli(['workspace', 'list'], env.home, env.cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('No workspaces found.');
         expect(result.stdout).not.toContain('warn:');
     });
 });
