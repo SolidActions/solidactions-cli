@@ -11,7 +11,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
-import { docPushWithConfig } from '../src/commands/doc-push';
+import { docPushWithConfig, docFileKind, MAX_DOC_BODY_BYTES, MAX_CHUNK_BYTES } from '../src/commands/doc-push';
 import type { DocPushOptions } from '../src/commands/doc-push';
 import type { Config } from '../src/utils/config';
 import { DOCS_MANIFEST, sha256Hex } from '../src/commands/doc-pull';
@@ -2525,6 +2525,461 @@ describe('docPushWithConfig — server-side bulk_create errors', () => {
         } finally {
             restoreExit();
             restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: visual docs and canvases (cli#154)
+// ---------------------------------------------------------------------------
+
+describe('docPushWithConfig — file kinds (cli#154)', () => {
+    /** Run a push, catching process.exit; returns the exit code and both streams. */
+    async function runPush(dir: string, options: DocPushOptions): Promise<{ code: number | undefined; stdout: string[]; stderr: string[] }> {
+        const restoreExit = patchProcessExit();
+        const { lines: outLines, restore: restoreStdout } = captureStdout();
+        const { lines: errLines, restore: restoreStderr } = captureStderr();
+        try {
+            let code: number | undefined;
+            try {
+                await docPushWithConfig(dir, options, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) code = e.code;
+                else throw e;
+            }
+            return { code, stdout: outLines, stderr: errLines };
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+        }
+    }
+
+    it('docFileKind classifies every suffix, longest match first', () => {
+        expect(docFileKind('a.md')).toEqual({ suffix: '.md' });
+        expect(docFileKind('a.html')).toEqual({ suffix: '.html', type: 'visual' });
+        expect(docFileKind('a.canvas.json')).toEqual({ suffix: '.canvas.json', type: 'canvas' });
+        expect(docFileKind('a.canvas')).toEqual({ suffix: '.canvas', type: 'canvas' });
+        expect(docFileKind('a.json')).toBeNull();
+        expect(docFileKind('a.png')).toBeNull();
+        expect(docFileKind('a.htm')).toBeNull();
+        expect(docFileKind('.md')).toBeNull();
+        expect(docFileKind('.canvas')).toBeNull();
+    });
+
+    it('one bulk_create carries per-item types; binaries still warn', async () => {
+        const canvasBody = '{"nodes":[],"edges":[]}';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'notes.md': '# Notes\n',
+            'page.html': '<h1>hi</h1>',
+            'board.canvas.json': canvasBody,
+            'sketch.canvas': canvasBody,
+            'pic.png': 'fake-png-bytes',
+        });
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            const items = [...allCaptures[0].body.params.arguments.items].sort((a: any, b: any) =>
+                a.title < b.title ? -1 : 1,
+            );
+            expect(items).toEqual([
+                { title: 'board', body: canvasBody, type: 'canvas' },
+                { title: 'notes', body: '# Notes\n' },
+                { title: 'page', body: '<h1>hi</h1>', type: 'visual' },
+                { title: 'sketch', body: canvasBody, type: 'canvas' },
+            ]);
+            const err = result.stderr.join('\n');
+            expect(err).toContain('pic.png');
+            expect(err).toContain('not pushed');
+            for (const f of ['notes.md', 'page.html', 'board.canvas.json', 'sketch.canvas']) {
+                expect(err).not.toContain(`${f}: not pushed`);
+            }
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a top-level --type applies to markdown while .html keeps visual', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'notes.md': '# Notes\n',
+            'page.html': '<h1>hi</h1>',
+        });
+        try {
+            const result = await runPush(dir, { type: 'meeting-notes' });
+            expect(result.code).toBe(0);
+            const args = allCaptures[0].body.params.arguments;
+            expect(args.type).toBe('meeting-notes');
+            const byTitle: Record<string, any> = {};
+            for (const item of args.items) byTitle[item.title] = item;
+            expect(byTitle['notes'].type).toBeUndefined();
+            expect(byTitle['page'].type).toBe('visual');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.each([
+        ['bad.canvas.json', '{nodes:'],
+        ['bad.canvas.json', '[]'],
+        ['bad.canvas', '{nodes:'],
+        ['bad.canvas', '[]'],
+    ])('invalid canvas %s refuses before any request', async (name, body) => {
+        const { dir, cleanup } = makeTmpDocsDir({ [name]: body });
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+            const err = result.stderr.join('\n');
+            expect(err).toContain(name);
+            expect(err).toContain('not a valid JSON Canvas file');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a body over 1 MiB refuses naming file and size; exactly 1 MiB pushes', async () => {
+        const big = 'x'.repeat(MAX_DOC_BODY_BYTES + 1);
+        const { dir, cleanup } = makeTmpDocsDir({ 'small.md': 'tiny\n', 'big.html': big });
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+            const err = result.stderr.join('\n');
+            expect(err).toContain('big.html');
+            expect(err).toContain(String(big.length));
+            expect(err).toContain('1 MiB');
+        } finally {
+            cleanup();
+        }
+
+        const exact = 'y'.repeat(MAX_DOC_BODY_BYTES);
+        const again = makeTmpDocsDir({ 'exact.md': exact });
+        try {
+            const result = await runPush(again.dir, {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+        } finally {
+            again.cleanup();
+        }
+    });
+
+    it('duplicate titles in one folder refuse naming both files; different folders do not collide', async () => {
+        const canvasBody = '{"nodes":[],"edges":[]}';
+        const duped = makeTmpDocsDir({ 'board.canvas': canvasBody, 'board.canvas.json': canvasBody });
+        try {
+            const result = await runPush(duped.dir, {});
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+            const err = result.stderr.join('\n');
+            expect(err).toContain('board.canvas');
+            expect(err).toContain('board.canvas.json');
+            expect(err).toContain('"board"');
+        } finally {
+            duped.cleanup();
+        }
+
+        const fine = makeTmpDocsDir({ 'notes.md': '# A\n', 'sub/notes.md': '# B\n' });
+        try {
+            const result = await runPush(fine.dir, {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments.items.length).toBe(2);
+        } finally {
+            fine.cleanup();
+        }
+    });
+
+    it('chunks by bytes too: five 900 KiB files go 4 + 1', async () => {
+        expect(MAX_CHUNK_BYTES).toBe(4_194_304);
+        const files: Record<string, string> = {};
+        for (let i = 0; i < 5; i++) {
+            files[`page-${i}.html`] = 'h'.repeat(921_600);
+        }
+        const { dir, cleanup } = makeTmpDocsDir(files);
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures[0].body.params.arguments.items.length).toBe(4);
+            expect(allCaptures[1].body.params.arguments.items.length).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a skipped visual row says how to update it; a skipped .md row stays quiet', async () => {
+        const skipped = (id: unknown) => makeMcpSuccess({
+            results: [{ index: 0, status: 'skipped', id, code: 'duplicate_title' }],
+            summary: { skipped: 1 },
+        });
+
+        const visual = makeTmpDocsDir({ 'page.html': '<h1>hi</h1>' });
+        try {
+            responseQueue = [skipped('42')];
+            const result = await runPush(visual.dir, {});
+            expect(result.code).toBe(0);
+            const err = result.stderr.join('\n');
+            expect(err).toContain('page.html: skipped — a doc with this title already exists');
+            expect(err).toContain('--on-conflict overwrite');
+            expect(err).toContain('--replace 42');
+        } finally {
+            visual.cleanup();
+        }
+
+        const markdown = makeTmpDocsDir({ 'notes.md': '# Notes\n' });
+        try {
+            responseQueue = [skipped('7')];
+            const result = await runPush(markdown.dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr.join('\n')).not.toContain('skipped — a doc');
+        } finally {
+            markdown.cleanup();
+        }
+
+        const noId = makeTmpDocsDir({ 'page.html': '<h1>hi</h1>' });
+        try {
+            responseQueue = [skipped(undefined)];
+            const result = await runPush(noId.dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr.join('\n')).toContain('--replace <doc-id>');
+        } finally {
+            noId.cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: single file and --replace (cli#154)
+// ---------------------------------------------------------------------------
+
+describe('docPushWithConfig — single file and --replace (cli#154)', () => {
+    async function runPush(dir: string, options: DocPushOptions): Promise<{ code: number | undefined; stdout: string[]; stderr: string[] }> {
+        const restoreExit = patchProcessExit();
+        const { lines: outLines, restore: restoreStdout } = captureStdout();
+        const { lines: errLines, restore: restoreStderr } = captureStderr();
+        try {
+            let code: number | undefined;
+            try {
+                await docPushWithConfig(dir, options, stubConfig());
+            } catch (e) {
+                if (e instanceof ProcessExitError) code = e.code;
+                else throw e;
+            }
+            return { code, stdout: outLines, stderr: errLines };
+        } finally {
+            restoreExit();
+            restoreStdout();
+            restoreStderr();
+        }
+    }
+
+    function writeManifestFor(dir: string, docs: DocsManifest['docs']): void {
+        const manifest: DocsManifest = { folder_path: '', docs };
+        fs.writeFileSync(path.join(dir, DOCS_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+
+    const PAGE_BODY = '<h1>pricing</h1>\n';
+
+    function queueReadThenWrite(docType: { slug: string } | null, writeRevision = 8): void {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                expect(body.params.arguments.id).toBe(42);
+                return makeMcpSuccess({ id: 42, title: 'Pricing page', doc_type: docType, current_revision_id: 7 });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('write');
+                expect(body.params.arguments.id).toBe(42);
+                expect(body.params.arguments.body).toBe(PAGE_BODY);
+                expect(body.params.arguments).not.toHaveProperty('base_revision');
+                return makeMcpSuccess({ id: 42, current_revision_id: writeRevision });
+            },
+        ];
+    }
+
+    it('a single .html file pushes one visual item; same-dir binaries stay unwarned', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY, 'pic.png': 'fake-png-bytes' });
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(args.action).toBe('bulk_create');
+            expect(args.items).toEqual([{ title: 'page', body: PAGE_BODY, type: 'visual' }]);
+            expect(result.stderr.join('\n')).not.toContain('pic.png');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a single tracked file writes by id with its base_revision, no bulk_create', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': '<h1>new</h1>\n' });
+        writeManifestFor(dir, {
+            'page.html': { id: 42, title: 'page', current_revision_id: 7, media: false, body_sha256: sha256Hex('old') },
+        });
+        responseQueue = [makeMcpSuccess({ id: 42, current_revision_id: 8 })];
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            const args = allCaptures[0].body.params.arguments;
+            expect(args).toEqual({ action: 'write', id: 42, body: '<h1>new</h1>\n', base_revision: 7 });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a single file of another kind refuses with no request', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'pic.png': 'fake-png-bytes' });
+        try {
+            const result = await runPush(path.join(dir, 'pic.png'), {});
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+            expect(result.stderr.join('\n')).toContain('is not a .md, .html, .canvas.json or .canvas file');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--replace reads, type-checks, then writes with no base_revision', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        queueReadThenWrite({ slug: 'visual' });
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), { replace: '42' });
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+            expect(allCaptures.map((c) => c.body.params.arguments.action)).toEqual(['read_doc', 'write']);
+            expect(result.stdout.join('\n')).toContain('replaced doc 42 ("Pricing page") with page.html (revision 8)');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--replace --json prints the replacement object', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        queueReadThenWrite({ slug: 'visual' });
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), { replace: '42', json: true });
+            expect(result.code).toBe(0);
+            expect(JSON.parse(result.stdout.join('\n'))).toEqual({
+                replaced: { id: 42, title: 'Pricing page', file: 'page.html', current_revision_id: 8 },
+            });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.each([
+        ['notes.md', '# Notes\n', null],
+        ['notes.md', '# Notes\n', { slug: 'skill' }],
+        ['board.canvas', '{"nodes":[],"edges":[]}', { slug: 'canvas' }],
+    ])('--replace accepts %s onto %j', async (file, body, docType) => {
+        const { dir, cleanup } = makeTmpDocsDir({ [file]: body });
+        responseQueue = [
+            makeMcpSuccess({ id: 42, title: 'Pricing page', doc_type: docType, current_revision_id: 7 }),
+            makeMcpSuccess({ id: 42, current_revision_id: 8 }),
+        ];
+        try {
+            const result = await runPush(path.join(dir, file), { replace: '42' });
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(2);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.each([
+        ['page.html', '<h1>x</h1>', null, ['markdown', 'visual']],
+        ['page.html', '<h1>x</h1>', { slug: 'canvas' }, ['canvas', 'visual']],
+        ['board.canvas.json', '{"nodes":[],"edges":[]}', { slug: 'visual' }, ['visual', 'canvas']],
+        ['notes.md', '# N\n', { slug: 'visual' }, ['visual', 'markdown']],
+        ['notes.md', '# N\n', { slug: 'canvas' }, ['canvas', 'markdown']],
+        ['notes.md', '# N\n', { slug: 'media' }, ['media', 'markdown']],
+    ])('--replace refuses %s onto %j naming title and both kinds', async (file, body, docType, kinds) => {
+        const { dir, cleanup } = makeTmpDocsDir({ [file]: body });
+        responseQueue = [
+            makeMcpSuccess({ id: 42, title: 'Pricing page', doc_type: docType, current_revision_id: 7 }),
+        ];
+        try {
+            const result = await runPush(path.join(dir, file), { replace: '42' });
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(1);
+            const err = result.stderr.join('\n');
+            expect(err).toContain('Pricing page');
+            for (const kind of kinds as string[]) expect(err).toContain(kind);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.each([
+        ['directory path', true, { replace: '42' }, 'not a directory'],
+        ['non-numeric id abc', false, { replace: 'abc' }, 'numeric doc id'],
+        ['non-numeric id 4x', false, { replace: '4x' }, 'numeric doc id'],
+        ['with folder', false, { replace: '42', folder: 'x' }, 'cannot be combined'],
+        ['with type', false, { replace: '42', type: 'meeting-notes' }, 'cannot be combined'],
+        ['with onConflict', false, { replace: '42', onConflict: 'overwrite' }, 'cannot be combined'],
+    ])('--replace refuses %s before any request', async (_label, isDir, options, snippet) => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        try {
+            const target = isDir ? dir : path.join(dir, 'page.html');
+            const result = await runPush(target, options as DocPushOptions);
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+            expect(result.stderr.join('\n')).toContain(snippet);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--replace refuses an oversize file before any request', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': 'x'.repeat(MAX_DOC_BODY_BYTES + 1) });
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), { replace: '42' });
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--replace --dry-run previews without writing; a mismatch still refuses', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        queueReadThenWrite({ slug: 'visual' });
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), { replace: '42', dryRun: true });
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(result.stdout.join('\n')).toContain('[dry-run preview] would replace doc 42 ("Pricing page") with page.html');
+        } finally {
+            cleanup();
+        }
+
+        const mismatch = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        responseQueue = [
+            makeMcpSuccess({ id: 42, title: 'Pricing page', doc_type: { slug: 'canvas' }, current_revision_id: 7 }),
+        ];
+        allCaptures = [];
+        try {
+            const result = await runPush(path.join(mismatch.dir, 'page.html'), { replace: '42', dryRun: true });
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(1);
+        } finally {
+            mismatch.cleanup();
+        }
+    });
+
+    it('--replace reports a read_doc MCP error with no write', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'page.html': PAGE_BODY });
+        responseQueue = [makeMcpError('doc_not_found', 'No doc with id 42')];
+        try {
+            const result = await runPush(path.join(dir, 'page.html'), { replace: '42' });
+            expect(result.code).toBe(1);
+            expect(allCaptures.length).toBe(1);
+            expect(result.stderr.join('\n')).toContain('error: doc_not_found:');
+        } finally {
             cleanup();
         }
     });

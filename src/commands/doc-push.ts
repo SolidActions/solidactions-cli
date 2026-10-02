@@ -1,8 +1,9 @@
 /**
- * solidactions doc push <dir>
+ * solidactions doc push <path>
  *
- * Recursively uploads a local markdown tree into SA-Docs via the docs MCP
- * server's `docs_manage` tool's `bulk_create` action, mirroring folder structure.
+ * Recursively uploads a local docs tree (.md, .html, .canvas.json, .canvas) into
+ * SA-Docs via the docs MCP server's `docs_manage` tool's `bulk_create` action,
+ * mirroring folder structure — or pushes one such file alone.
  *
  * Prints a report distinguishing fully-published docs from "properties pending"
  * ones (docs whose frontmatter properties couldn't be validated yet).
@@ -23,6 +24,8 @@ export interface DocPushOptions {
     type?: string;
     /** Nest the whole upload under this base folder path in SA-Docs. */
     folder?: string;
+    /** Replace the body of an existing doc (numeric id) with a single file. */
+    replace?: string;
     dryRun?: boolean;
     json?: boolean;
     /** Overwrite tracked docs without a base_revision guard, ignoring server-side drift. */
@@ -31,10 +34,34 @@ export interface DocPushOptions {
 
 const CHUNK_SIZE = 50;
 
+/**
+ * The file kinds `doc push` creates docs from (cli#154). Order matters: `.canvas.json`
+ * must be tested before any shorter suffix. `type` is the built-in doc type the server
+ * creates the doc as; markdown sends none. `.canvas` is the JSON Canvas extension other
+ * tools write (PM ruling 8).
+ */
+const DOC_FILE_KINDS: ReadonlyArray<{ suffix: string; type?: 'visual' | 'canvas' }> = [
+    { suffix: '.canvas.json', type: 'canvas' },
+    { suffix: '.canvas', type: 'canvas' },
+    { suffix: '.html', type: 'visual' },
+    { suffix: '.md' },
+];
+
+export function docFileKind(fileName: string): { suffix: string; type?: 'visual' | 'canvas' } | null {
+    return DOC_FILE_KINDS.find((kind) => fileName.endsWith(kind.suffix) && fileName.length > kind.suffix.length) ?? null;
+}
+
+/** The server's body cap (docs.blob_size_cap_bytes): refuse locally rather than send a doomed request (PM ruling 3). */
+export const MAX_DOC_BODY_BYTES = 1_048_576;
+
+/** A bulk_create request carries at most CHUNK_SIZE items and about this many body bytes (PM ruling 3). */
+export const MAX_CHUNK_BYTES = 4_194_304;
+
 interface DocItem {
     title: string;
     body: string;
     relative_folder_path?: string;
+    type?: 'visual' | 'canvas';
     /** local file path for correlating results back to filenames */
     _filePath: string;
 }
@@ -122,10 +149,11 @@ function isSkippedEntry(name: string): boolean {
 }
 
 /**
- * Recursively walk `dir` and collect all *.md files.
+ * Recursively walk `dir` and collect all pushable doc files (.md, .html,
+ * .canvas.json, .canvas).
  * Returns a list of absolute paths.
  */
-function walkMarkdownFiles(dir: string): string[] {
+function walkDocFiles(dir: string): string[] {
     const results: string[] = [];
 
     const walk = (current: string): void => {
@@ -134,7 +162,7 @@ function walkMarkdownFiles(dir: string): string[] {
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
                 walk(abs);
-            } else if (entry.isFile() && entry.name.endsWith('.md')) {
+            } else if (entry.isFile() && docFileKind(entry.name) !== null) {
                 results.push(abs);
             }
         }
@@ -145,9 +173,9 @@ function walkMarkdownFiles(dir: string): string[] {
 }
 
 /**
- * Recursively walk `dir` and collect relative paths of non-.md files that
- * are not present in the manifest — never uploaded by `doc push`; `doc
- * upload` is the way to create media docs from these. Dotfiles and
+ * Recursively walk `dir` and collect relative paths of files of no pushable
+ * kind that are not present in the manifest — never uploaded by `doc push`;
+ * `doc upload` is the way to create media docs from these. Dotfiles and
  * dot-directories are excluded (`entry.name.startsWith('.')` also covers the
  * `.solidactions-docs.json` sidecar itself).
  */
@@ -160,7 +188,7 @@ function walkUntrackedBinaries(dir: string, manifest: DocsManifest | null): stri
             const abs = path.join(current, entry.name);
             if (entry.isDirectory()) {
                 walk(abs);
-            } else if (entry.isFile() && !entry.name.endsWith('.md')) {
+            } else if (entry.isFile() && docFileKind(entry.name) === null) {
                 const relPath = path.relative(dir, abs).split(path.sep).join('/');
                 if (!manifest?.docs[relPath]) {
                     results.push(relPath);
@@ -177,7 +205,8 @@ function walkUntrackedBinaries(dir: string, manifest: DocsManifest | null): stri
  * Convert an absolute file path to a bulk_create item, relative to `rootDir`.
  */
 function fileToItem(absPath: string, rootDir: string): DocItem {
-    const title = path.basename(absPath, '.md');
+    const kind = docFileKind(path.basename(absPath))!;
+    const title = path.basename(absPath).slice(0, -kind.suffix.length);
     const body = fs.readFileSync(absPath, 'utf8');
     const relDir = path.relative(rootDir, path.dirname(absPath));
     // Use POSIX separators; omit if file is in the root dir
@@ -187,7 +216,147 @@ function fileToItem(absPath: string, rootDir: string): DocItem {
     if (relative_folder_path !== undefined) {
         item.relative_folder_path = relative_folder_path;
     }
+    if (kind.type !== undefined) {
+        item.type = kind.type;
+    }
     return item;
+}
+
+/** Two files in one push that would create the same title in the same folder are refused locally (PM ruling 11). */
+function assertUniqueTitles(files: string[], rootDir: string): void {
+    const seen = new Map<string, string>();
+    for (const file of files) {
+        const name = path.basename(file);
+        const kind = docFileKind(name)!;
+        const relDir = path.relative(rootDir, path.dirname(file)).split(path.sep).join('/');
+        const title = name.slice(0, -kind.suffix.length);
+        const key = `${relDir}\u0000${title}`;
+        const relFile = path.relative(rootDir, file).split(path.sep).join('/');
+        const other = seen.get(key);
+        if (other !== undefined) {
+            process.stderr.write(chalk.red(`error: ${other} and ${relFile} would both create the doc "${title}"${relDir ? ` in ${relDir}` : ''} — rename one of them\n`));
+            process.exit(1);
+        }
+        seen.set(key, relFile);
+    }
+}
+
+function assertBodiesWithinCap(files: string[], rootDir: string): void {
+    for (const file of files) {
+        const size = fs.statSync(file).size;
+        if (size > MAX_DOC_BODY_BYTES) {
+            const rel = path.relative(rootDir, file).split(path.sep).join('/');
+            process.stderr.write(chalk.red(`error: ${rel}: ${size} bytes is over the 1 MiB (${MAX_DOC_BODY_BYTES} bytes) doc body limit\n`));
+            process.exit(1);
+        }
+    }
+}
+
+/** A canvas file must at least be a JSON object; shape is the server's (invalid_canvas_body). */
+function assertCanvasFilesParse(files: string[], rootDir: string): void {
+    for (const file of files) {
+        if (docFileKind(path.basename(file))?.type !== 'canvas') continue;
+        const rel = path.relative(rootDir, file).split(path.sep).join('/');
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        } catch (e: any) {
+            process.stderr.write(chalk.red(`error: ${rel}: not a valid JSON Canvas file (${e.message})\n`));
+            process.exit(1);
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            process.stderr.write(chalk.red(`error: ${rel}: not a valid JSON Canvas file (expected a JSON object)\n`));
+            process.exit(1);
+        }
+    }
+}
+
+function chunkItems(items: DocItem[]): DocItem[][] {
+    const chunks: DocItem[][] = [];
+    let current: DocItem[] = [];
+    let bytes = 0;
+    for (const item of items) {
+        const size = Buffer.byteLength(item.body, 'utf8');
+        if (current.length > 0 && (current.length >= CHUNK_SIZE || bytes + size > MAX_CHUNK_BYTES)) {
+            chunks.push(current);
+            current = [];
+            bytes = 0;
+        }
+        current.push(item);
+        bytes += size;
+    }
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+}
+
+/** Which doc types a file kind may replace. `.md` may replace anything that is not visual, canvas or media. */
+function replaceKindMismatch(fileType: 'visual' | 'canvas' | undefined, docSlug: string | null): boolean {
+    if (fileType !== undefined) return docSlug !== fileType;
+    return docSlug === 'visual' || docSlug === 'canvas' || docSlug === 'media';
+}
+
+/**
+ * `doc push <file> --replace <id>`: replace one existing doc's body by id (cli#154). No
+ * base_revision — the user named the doc — so the doc's type is checked first: the server
+ * accepts any body under the cap for a visual or markdown doc (PM ruling 2).
+ */
+async function replaceDocBody(absPath: string, singleFile: boolean, options: DocPushOptions, config: Config): Promise<void> {
+    const fail = (message: string): never => {
+        process.stderr.write(chalk.red(`error: ${message}\n`));
+        process.exit(1);
+    };
+    if (!/^\d+$/.test(options.replace ?? '')) fail(`--replace takes a numeric doc id (got "${options.replace}").`);
+    if (!singleFile) fail('--replace takes a single .md, .html, .canvas.json or .canvas file, not a directory.');
+    if (options.folder !== undefined || options.type !== undefined || options.onConflict !== undefined) {
+        fail('--replace cannot be combined with --folder, --type or --on-conflict.');
+    }
+    assertBodiesWithinCap([absPath], path.dirname(absPath));
+    assertCanvasFilesParse([absPath], path.dirname(absPath));
+    const id = Number(options.replace);
+    const file = path.basename(absPath);
+    const fileType = docFileKind(file)!.type;
+
+    let read: Awaited<ReturnType<typeof callDocsTool>>;
+    try {
+        read = await callDocsTool(config, { action: 'read_doc', id });
+    } catch (e: any) {
+        return fail(e.message);
+    }
+    if (!read.ok) {
+        fail(`${read.data?.code ?? 'unknown_error'}: ${read.data?.message ?? 'MCP returned an error with no message'}`);
+    }
+    const title = String(read.data?.title ?? '');
+    const docSlug: string | null = read.data?.doc_type?.slug ?? null;
+    if (replaceKindMismatch(fileType, docSlug)) {
+        fail(`doc ${id} ("${title}") is a ${docSlug ?? 'markdown'} doc, and ${file} is a ${fileType ?? 'markdown'} file — refusing to replace it.`);
+    }
+
+    if (options.dryRun) {
+        if (options.json) {
+            console.log(JSON.stringify({ replaced: { id, title, file, dry_run: true } }));
+        } else {
+            console.log(chalk.cyan(`[dry-run preview] would replace doc ${id} ("${title}") with ${file}`));
+        }
+        process.exit(0);
+    }
+
+    const body = fs.readFileSync(absPath, 'utf8');
+    let result: Awaited<ReturnType<typeof callDocsTool>>;
+    try {
+        result = await callDocsTool(config, { action: 'write', id, body });
+    } catch (e: any) {
+        return fail(e.message);
+    }
+    if (!result.ok) {
+        fail(`${result.data?.code ?? 'unknown_error'}: ${result.data?.message ?? 'MCP returned an error with no message'}`);
+    }
+    const revision = result.data?.current_revision_id ?? null;
+    if (options.json) {
+        console.log(JSON.stringify({ replaced: { id, title, file, current_revision_id: revision } }));
+    } else {
+        console.log(chalk.green(`replaced doc ${id} ("${title}") with ${file}${revision !== null ? ` (revision ${revision})` : ''}`));
+    }
+    process.exit(0);
 }
 
 /**
@@ -239,24 +408,43 @@ export async function docPushWithConfig(
     options: DocPushOptions,
     config: Config,
 ): Promise<void> {
-    const absDir = path.resolve(dir);
-
-    if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
-        process.stderr.write(chalk.red(`error: "${dir}" is not a directory.\n`));
+    const absPath = path.resolve(dir);
+    if (!fs.existsSync(absPath)) {
+        process.stderr.write(chalk.red(`error: "${dir}" does not exist.\n`));
         process.exit(1);
     }
+    const singleFile = fs.statSync(absPath).isFile();
+    if (singleFile && docFileKind(path.basename(absPath)) === null) {
+        process.stderr.write(chalk.red(`error: "${dir}" is not a .md, .html, .canvas.json or .canvas file (use \`solidactions doc upload\` for media).\n`));
+        process.exit(1);
+    }
+    if (options.replace !== undefined) {
+        await replaceDocBody(absPath, singleFile, options, config);
+        return;
+    }
+    // A single file is pushed as if its directory held only that file.
+    const absDir = singleFile ? path.dirname(absPath) : absPath;
 
-    const allFiles = walkMarkdownFiles(absDir);
+    const allFiles = singleFile ? [absPath] : walkDocFiles(absDir);
+    assertBodiesWithinCap(allFiles, absDir);
+    assertCanvasFilesParse(allFiles, absDir);
+    if (!singleFile) {
+        assertUniqueTitles(allFiles, absDir);
+    }
 
     // A missing/unparseable manifest means nothing is tracked — everything is untracked,
     // matching the existing (pre-drift-guard) bulk_create behavior byte-for-byte.
     const manifest = readManifest(absDir, { warnOnParseError: true });
-    const trackedMediaEntries = Object.entries(manifest?.docs ?? {}).filter(([, e]) => e.media);
+    const trackedMediaEntries = singleFile
+        ? Object.entries(manifest?.docs ?? {}).filter(
+            ([relPath, e]) => e.media && relPath === path.relative(absDir, absPath).split(path.sep).join('/'),
+        )
+        : Object.entries(manifest?.docs ?? {}).filter(([, e]) => e.media);
 
-    // A pulled folder of images alone (no .md files) must still be pushable — the early
+    // A pulled folder of images alone (no doc files) must still be pushable — the early
     // exit only fires when there's truly nothing to push.
     if (allFiles.length === 0 && trackedMediaEntries.length === 0) {
-        process.stderr.write(chalk.red(`error: no .md files or tracked media found under "${dir}" — nothing to push.\n`));
+        process.stderr.write(chalk.red(`error: no .md, .html, .canvas.json or .canvas files or tracked media found under "${dir}" — nothing to push.\n`));
         process.exit(1);
     }
 
@@ -418,7 +606,7 @@ export async function docPushWithConfig(
         writeManifest(absDir, manifest!);
     }
 
-    const untrackedMedia = walkUntrackedBinaries(absDir, manifest);
+    const untrackedMedia = singleFile ? [] : walkUntrackedBinaries(absDir, manifest);
 
     const items: DocItem[] = untrackedFiles.map((f) => fileToItem(f, absDir));
 
@@ -428,11 +616,8 @@ export async function docPushWithConfig(
     const effectiveFolder = options.folder ?? manifest?.folder_path;
     const folderInferredFromManifest = !options.folder && !!manifest?.folder_path;
 
-    // Chunk into groups of CHUNK_SIZE
-    const chunks: DocItem[][] = [];
-    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-        chunks.push(items.slice(i, i + CHUNK_SIZE));
-    }
+    // Chunk into groups of CHUNK_SIZE items and about MAX_CHUNK_BYTES of bodies.
+    const chunks = chunkItems(items);
 
     if (folderInferredFromManifest && items.length > 0 && !options.json) {
         console.log(chalk.gray(`creating untracked docs under "${effectiveFolder}" (from ${DOCS_MANIFEST})`));
@@ -446,10 +631,13 @@ export async function docPushWithConfig(
         const callArgs: Record<string, unknown> = {
             action: 'bulk_create',
             on_conflict: onConflict,
-            items: chunk.map(({ title, body, relative_folder_path }) => {
+            items: chunk.map(({ title, body, relative_folder_path, type }) => {
                 const item: Record<string, unknown> = { title, body };
                 if (relative_folder_path !== undefined) {
                     item.relative_folder_path = relative_folder_path;
+                }
+                if (type !== undefined) {
+                    item.type = type;
                 }
                 return item;
             }),
@@ -571,6 +759,17 @@ export async function docPushWithConfig(
         for (const row of erroredRows) {
             process.stderr.write(chalk.red(`${row.file}: ${row.error ?? row.code ?? 'unknown error'}\n`));
         }
+    }
+
+    // Docs created by an untracked push are not in the manifest, so re-pushing an edited page
+    // skips it under the default --on-conflict skip. Say how to update it (cli#154; the
+    // pull-side mapping that would track it is cli#157).
+    for (const row of allResultRows) {
+        if (row.status !== 'skipped' || docFileKind(path.basename(row.file))?.type === undefined) continue;
+        process.stderr.write(chalk.yellow(
+            `${row.file}: skipped — a doc with this title already exists. To update it, push again with --on-conflict overwrite, `
+            + `or run \`solidactions doc push ${row.file} --replace ${row.id ?? '<doc-id>'}\`\n`,
+        ));
     }
 
     if (pendingItems.length > 0) {
