@@ -304,6 +304,7 @@ describe('applyWorkspaceGuard', () => {
                 expect(announces[0]).toContain('Workspace:');
                 expect(announces[0]).toContain('new-ws — organization Acme');
                 expect(announces[0]).toContain('ws-new');
+                expect(announces[0]).toContain(' on https://host');
             } finally {
                 env.cleanup();
             }
@@ -323,6 +324,7 @@ describe('applyWorkspaceGuard', () => {
                 expect(announces).toHaveLength(1);
                 expect(announces[0]).toContain('Workspace: new-ws (ws-new)');
                 expect(announces[0]).not.toContain('organization');
+                expect(announces[0]).toContain(' on https://host');
             } finally {
                 env.cleanup();
             }

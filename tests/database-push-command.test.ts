@@ -171,6 +171,8 @@ describe('database push workflow', () => {
         expect(output.join('\n').toLowerCase()).toContain('reacquire');
         expect(output.join('\n')).toContain('countable rows');
         expect(output.join('\n')).toMatch(/WAL.*4096.*auto-vacuum NONE.*source file is unchanged/i);
+        const warning = output.find((line) => line.startsWith('WARNING:'))!;
+        expect(warning).toContain('database "analytics" in workspace w1 on https://app.test.');
     });
 
     it('uses POST for the default Turso /v1/upload transport', async () => {

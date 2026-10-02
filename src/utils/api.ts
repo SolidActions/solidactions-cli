@@ -586,7 +586,8 @@ export async function applyWorkspaceGuard(
     }
 
     if (options.mutating && config.workspaceId) {
-        announce(chalk.gray(`Workspace: ${describeWorkspace(config, sources)}`));
+        // Name the host too (cli#124): the same workspace name on two hosts confirms nothing.
+        announce(chalk.gray(`Workspace: ${describeWorkspace(config, sources)} on ${config.host}`));
     }
 
     // state.json means "the workspace you last WROTE to" — that is precisely what the write

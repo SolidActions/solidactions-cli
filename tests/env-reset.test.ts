@@ -115,7 +115,7 @@ describe('env reset', () => {
         expect(result.status).toBe(0);
         // env reset is a mutating command — requireConfigWithWorkspace() always announces
         // the resolved workspace on stderr, first, even on success (#1437).
-        expect(result.stderr).toBe('Workspace: workspace-1 (workspace-1)\n');
+        expect(result.stderr).toBe(`Workspace: workspace-1 (workspace-1) on http://127.0.0.1:${port}\n`);
         expect(requests).toEqual([
             expect.objectContaining({
                 method: 'GET',

@@ -256,7 +256,7 @@ export async function databasePushWithConfig(name: string, file: string, options
             return value;
         };
         const controlRemaining = (): number => Math.min(DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, remaining());
-        stdout(`WARNING: This destructively replaces database "${name}". Quiesce all writers; old URLs and credentials will become invalid. A private snapshot is normalized to WAL, 4096-byte pages, and auto-vacuum NONE; the source file is unchanged.`);
+        stdout(`WARNING: This destructively replaces database "${name}" in workspace ${config.workspaceId ?? '(none)'} on ${config.host}. Quiesce all writers; old URLs and credentials will become invalid. A private snapshot is normalized to WAL, 4096-byte pages, and auto-vacuum NONE; the source file is unchanged.`);
         stdout(`Hard deadline: ${Math.ceil(deadlineMs / 60_000)} minutes for ${normalized.inputBytes} bytes. Idempotency key: ${key}`);
         const prepareBody = {
             operation: 'bulk_load_prepare', name, bulk_mode: 'replace', input_bytes: normalized.inputBytes,
