@@ -90,11 +90,12 @@ export const program = new Command();
 
 if (process.env.SOLIDACTIONS_DEBUG === '1') {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { resolveConfig } = require('./utils/config');
+    const { resolveConfig, credentialConflictMessage } = require('./utils/config');
     const resolved = resolveConfig();
     if (resolved) {
         const fmt = (src: any) => {
             if (src === 'env') return '(from $SOLIDACTIONS_* env var)';
+            if (src === 'default') return '(default)';
             if (src === null) return '(unset)';
             return `(from ${src})`;
         };
@@ -103,6 +104,9 @@ if (process.env.SOLIDACTIONS_DEBUG === '1') {
         process.stderr.write(`  apiKey:      <redacted> ${fmt(resolved.sources.apiKey)}\n`);
         process.stderr.write(`  workspaceId: ${resolved.config.workspaceId ?? ''} ${fmt(resolved.sources.workspaceId)}\n`);
         process.stderr.write(`  activePath:  ${resolved.activePath}\n`);
+        if (resolved.credentialConflict) {
+            process.stderr.write(`  credentials: REFUSED — ${credentialConflictMessage(resolved.credentialConflict).split('\n')[0]}\n`);
+        }
     } else {
         process.stderr.write('[SOLIDACTIONS_DEBUG] no config resolvable\n');
     }

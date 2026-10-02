@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import path from 'path';
 import prompts from 'prompts';
-import { Config, ResolvedConfig, resolveConfig, writeConfigFile, getGlobalConfigPath } from './config';
+import { Config, ResolvedConfig, credentialConflictMessage, readConfigFile, resolveConfig, writeConfigFile, writeWorkspaceToFile, getGlobalConfigPath } from './config';
 import {
     formatWorkspaceWithOrg,
     resolveWorkspaceInput,
@@ -321,6 +322,10 @@ export function formatValidationError(data: unknown): string {
  */
 export function requireResolvedConfig(): ResolvedConfig {
     const resolved = resolveConfig();
+    if (resolved?.credentialConflict) {
+        console.error(chalk.red(credentialConflictMessage(resolved.credentialConflict)));
+        process.exit(1);
+    }
     if (!resolved || !resolved.config.apiKey) {
         console.error(chalk.red('Not initialized. Run `solidactions login --global` first.'));
         process.exit(1);
@@ -355,6 +360,7 @@ export async function ensureWorkspaceSelected(
     const workspaceSource = resolved?.sources.workspaceId ?? null;
 
     let workspaces: Array<{ id: string; name: string; slug?: string; org_name: string; role: string }>;
+    let responseScope: { mode: 'all' | 'subset' | 'single'; workspace_ids: string[] } | null = null;
     try {
         const response = await axios.get(`${config.host}/api/v1/workspaces`, {
             headers: {
@@ -384,6 +390,7 @@ export async function ensureWorkspaceSelected(
         if (scope) {
             config.scopeMode = scope.mode;
             config.scopedWorkspaceIds = scope.workspace_ids;
+            responseScope = scope;
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
@@ -429,8 +436,18 @@ export async function ensureWorkspaceSelected(
     config.workspaceOrg = selected.org_name;
 
     if (workspaceSource !== 'env') {
+        // Persist ONLY the pin. Writing the merged config here copied host/apiKey (from env or
+        // the global file) into whichever file was active — a credential crossing layers (cli#124).
         const targetPath = resolved?.activePath ?? getGlobalConfigPath();
-        writeConfigFile(targetPath, config);
+        writeWorkspaceToFile(targetPath, config.workspace!, config.workspaceId!, config.workspaceOrg);
+        // Correction (cli#124): the token's scope describes the API key, so it belongs in
+        // the file that holds that key — and only there. Never into a local pin file whose
+        // key lives in another file, and never for an env key.
+        const keySource = resolved?.sources.apiKey;
+        if (responseScope && keySource !== 'env' && keySource != null && path.resolve(keySource) === path.resolve(targetPath)) {
+            const existing: Partial<Config> = readConfigFile(targetPath) ?? {};
+            writeConfigFile(targetPath, { ...existing, scopeMode: responseScope.mode, scopedWorkspaceIds: responseScope.workspace_ids } as Config);
+        }
     }
 
     return config;

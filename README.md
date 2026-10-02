@@ -197,13 +197,15 @@ The CLI stores `host`, `apiKey`, and `workspaceId` in a JSON config file. Two lo
 
 ### Resolution order
 
-For each field (`host`, `apiKey`, `workspaceId`), the CLI resolves independently in this order:
+Each field is looked up in this order, and the first layer that sets it wins:
 
 1. Environment variables: `SOLIDACTIONS_HOST`, `SOLIDACTIONS_API_KEY`, `SOLIDACTIONS_WORKSPACE_ID`
 2. Nearest local `./.solidactions/config.json` (walking up from cwd)
 3. Global `~/.solidactions/config.json`
 
-You can mix: e.g., set only `SOLIDACTIONS_WORKSPACE_ID` in the environment while letting `host` and `apiKey` come from a file.
+**An API key is only ever sent to the host configured with it.** If a layer above the one that supplies the key sets a *different* `host` (for example a local file with only `"host"`, or `SOLIDACTIONS_HOST` on its own), the CLI refuses instead of sending that key to the other host, and says which file or variable to change. A key from `SOLIDACTIONS_API_KEY` without `SOLIDACTIONS_HOST` goes only to the host in the global config (`~/.solidactions/config.json`), or to `https://app.solidactions.com` when no file names a host. It is never sent to a host that a project folder's `.solidactions/config.json` names (unless that is the same host as the global one), so a cloned repository cannot redirect an exported key; set `SOLIDACTIONS_HOST` as well to use another host. A layer may still set only the workspace (`workspace set --local`, or `SOLIDACTIONS_WORKSPACE_ID`) and use the credentials from the layer below.
+
+Hosts are compared exactly, ignoring only surrounding space, trailing slashes and letter case: `https://example.com` and `https://example.com:443` count as different hosts and are refused rather than guessed at. Write the host the same way in every file.
 
 ### Workspace safety
 
