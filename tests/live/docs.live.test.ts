@@ -209,6 +209,15 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         expect(again.stderr).toContain('page.html: skipped');
         console.log(`skip hint form: ${/--replace \d+/.test(again.stderr) ? 'id from the server row' : '<doc-id> fallback'}`);
         expect(/--replace (\d+|<doc-id>)/.test(again.stderr)).toBe(true);
+
+        // cli#157: pull writes the pushed visual doc and canvas by extension,
+        // byte-identical to what was pushed.
+        const pulled = path.join(mkTmp(), 'visual-pulled');
+        const pull = runCli(['doc', 'pull', `${root}/visual`, pulled, '--json']);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        expect(json(pull).files.map((f: any) => f.path).sort()).toEqual(['board.canvas.json', 'page.html']);
+        expect(read(pulled, 'page.html').toString('utf8')).toBe(pageV2);
+        expect(read(pulled, 'board.canvas.json').toString('utf8')).toBe(boardBody);
     });
 
     it('doc pull <folder>/<doc> reads a single doc (read_doc by folder_path + title)', () => {

@@ -287,7 +287,7 @@ describe('docPullWithConfig — folder tree', () => {
                 expect(body.params.arguments.folder_path).toBe('marketing/fb-campaign');
                 return makeMcpSuccess({
                     folders: [{ id: 100, name: 'ads', parent_folder_id: 1, folder_path: 'marketing/fb-campaign/ads' }],
-                    docs: [{ id: 1, title: 'brief', properties: {}, folder_id: 1, updated_at: '2026-01-01' }],
+                    docs: [{ id: 1, title: 'brief', doc_type: null, properties: {}, folder_id: 1, updated_at: '2026-01-01' }],
                 });
             },
             // list on marketing/fb-campaign/ads -> one doc "ad-a"
@@ -296,7 +296,7 @@ describe('docPullWithConfig — folder tree', () => {
                 expect(body.params.arguments.folder_path).toBe('marketing/fb-campaign/ads');
                 return makeMcpSuccess({
                     folders: [],
-                    docs: [{ id: 2, title: 'ad-a', properties: {}, folder_id: 100, updated_at: '2026-01-01' }],
+                    docs: [{ id: 2, title: 'ad-a', doc_type: null, properties: {}, folder_id: 100, updated_at: '2026-01-01' }],
                 });
             },
             // bulk_read for ids [1, 2]
@@ -351,7 +351,7 @@ describe('docPullWithConfig — folder tree', () => {
     });
 
     it('bulk_read is chunked at 50 ids per call', async () => {
-        const docs = Array.from({ length: 60 }, (_, i) => ({ id: i + 1, title: `doc-${i + 1}`, properties: {} }));
+        const docs = Array.from({ length: 60 }, (_, i) => ({ id: i + 1, title: `doc-${i + 1}`, doc_type: null, properties: {} }));
         responseQueue = [
             makeMcpSuccess({ folders: [], docs }),
             (body: any) => {
@@ -411,14 +411,14 @@ describe('docPullWithConfig — title collisions', () => {
             makeMcpSuccess({
                 folders: [{ id: 10, name: 'sub', parent_folder_id: 1, folder_path: 'root/sub' }],
                 docs: [
-                    { id: 1, title: 'Same', properties: {} },
-                    { id: 2, title: 'Same', properties: {} },
+                    { id: 1, title: 'Same', doc_type: null, properties: {} },
+                    { id: 2, title: 'Same', doc_type: null, properties: {} },
                 ],
             }),
             // sub list: one doc "Same"
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 3, title: 'Same', properties: {} }],
+                docs: [{ id: 3, title: 'Same', doc_type: null, properties: {} }],
             }),
             // bulk_read for [1, 2, 3]
             (body: any) => {
@@ -678,7 +678,7 @@ describe('docPullWithConfig — single-doc fallback', () => {
 
     it('the parent folder may be pulled into a single-doc directory', async () => {
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 5, title: 'solo', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 5, title: 'solo', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 5, title: 'solo', folder_path: 'notes', current_revision_id: 3, properties: {}, body: 'x' }],
             }),
@@ -871,7 +871,7 @@ describe('docPullWithConfig — overwrite confirm', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 1, title: 'brief', properties: {} }],
+                docs: [{ id: 1, title: 'brief', doc_type: null, properties: {} }],
             }),
         ];
 
@@ -904,7 +904,7 @@ describe('docPullWithConfig — overwrite confirm', () => {
         fs.writeFileSync(path.join(dest, 'existing.txt'), 'hi', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
@@ -949,7 +949,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
 
         // The doc still exists on the server — this is a genuine conflict, not an orphan.
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 15, properties: {}, body: '# Server Content' }],
             }),
@@ -993,7 +993,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 7, title: 'hero', properties: { blob_sha: 'abc', mime: 'image/png', size: 4 } }],
+                docs: [{ id: 7, title: 'hero', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 4 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -1042,7 +1042,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
 
         // doc.md's doc (id 2) is no longer returned by the server — it was deleted remotely.
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1090,7 +1090,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
 
         // Server still has doc 1 (a) and doc 2 (conflict), but doc 3 (orphan) is gone.
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }, { id: 2, title: 'conflict', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }, { id: 2, title: 'conflict', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [
                     { index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' },
@@ -1136,7 +1136,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
         fs.writeFileSync(path.join(dest, 'doc.md'), 'local edits, unpushed', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 99, properties: {}, body: '# Server Content' }],
             }),
@@ -1171,7 +1171,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
         fs.writeFileSync(path.join(dest, 'doc.md'), '# Original', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 11, properties: {}, body: '# Original updated' }],
             }),
@@ -1203,7 +1203,7 @@ describe('docPullWithConfig — unpushed local changes', () => {
         fs.writeFileSync(path.join(dest, 'doc.md'), 'arbitrary local content, no hash to compare against', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'doc', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'doc', folder_path: 'marketing/docs', current_revision_id: 12, properties: {}, body: '# Fresh Pull' }],
             }),
@@ -1246,7 +1246,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         // The clobber check runs against the resolved folder once the server answers,
         // but still before anything is written.
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 3, title: 'b-doc', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 3, title: 'b-doc', doc_type: null, properties: {} }] }),
         ];
 
         try {
@@ -1277,7 +1277,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 2, title: 'y', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 2, title: 'y', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 2, title: 'y', folder_path: 'marketing/b', current_revision_id: 1, properties: {}, body: 'Y' }],
             }),
@@ -1314,7 +1314,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         fs.writeFileSync(path.join(dest, 'x.md'), 'X', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 2, properties: {}, body: 'X updated' }],
             }),
@@ -1342,7 +1342,7 @@ describe('docPullWithConfig — manifest tracks a different folder', () => {
         const dest = path.join(tmpDest, 'out');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'x', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'x', folder_path: 'marketing/a', current_revision_id: 1, properties: {}, body: 'X' }],
             }),
@@ -1426,7 +1426,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'gone.md'), 'G', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1468,7 +1468,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1496,7 +1496,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.mkdirSync(path.join(dest, 'a.md'), { recursive: true });
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1532,7 +1532,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'subdir', 'keep.txt'), 'keep', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1566,7 +1566,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'gone.md'), 'CHANGED', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1606,7 +1606,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'gone.md'), 'anything', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1641,7 +1641,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'unmodified.md'), 'U', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1667,10 +1667,14 @@ describe('docPullWithConfig — deletion propagation', () => {
     });
 
     it('propagates no deletions on the single-doc fallback path', async () => {
+        // NOTE (cli#157, PM ruling 2): the orphan keeps a DIFFERENT id from the
+        // pulled doc on purpose. Same id under a different path is a rename now
+        // (removed when unmodified — see the cli#157 rename tests), so only a
+        // true orphan (another id entirely) proves deletions are not propagated.
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         writeManifest(dest, {
-            'unrelated.md': { id: 5, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+            'unrelated.md': { id: 6, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
         }, 'notes');
         fs.writeFileSync(path.join(dest, 'unrelated.md'), 'X', 'utf8');
 
@@ -1708,7 +1712,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'hero.png'), mediaBytes);
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1744,7 +1748,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'kept.md'), 'CHANGED', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1794,7 +1798,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'a.md'), 'A', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1836,7 +1840,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         });
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'readme', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'readme', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'readme', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'BODY' }],
             }),
@@ -1879,7 +1883,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'hero.png'), Buffer.from([9, 9, 9, 9]));
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1918,7 +1922,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'gone.md'), 'CHANGED', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -1955,7 +1959,7 @@ describe('docPullWithConfig — deletion propagation', () => {
         fs.writeFileSync(path.join(dest, 'unmodified.md'), 'U', 'utf8');
 
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'a', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'a', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'A' }],
             }),
@@ -2025,7 +2029,7 @@ describe('docPullWithConfig — deletion propagation', () => {
 describe('docPullWithConfig — --json', () => {
     it('prints {manifest, files} JSON instead of chalk lines', async () => {
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
@@ -2064,7 +2068,7 @@ describe('docPullWithConfig — --json', () => {
 describe('docPullWithConfig — default destination', () => {
     it('defaults dest to ./<last-path-segment>/ when dest is omitted', async () => {
         responseQueue = [
-            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', properties: {} }] }),
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'brief', doc_type: null, properties: {} }] }),
             makeMcpSuccess({
                 results: [{ index: 0, status: 'found', id: 1, title: 'brief', folder_path: 'marketing/fb-campaign', current_revision_id: 10, properties: {}, body: '# Brief' }],
             }),
@@ -2100,7 +2104,7 @@ describe('docPullWithConfig — media docs', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 7, title: 'hero.png', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+                docs: [{ id: 7, title: 'hero.png', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -2147,7 +2151,7 @@ describe('docPullWithConfig — media docs', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 8, title: 'fake', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+                docs: [{ id: 8, title: 'fake', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -2187,7 +2191,7 @@ describe('docPullWithConfig — media docs', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 9, title: 'hero', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+                docs: [{ id: 9, title: 'hero', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -2224,7 +2228,7 @@ describe('docPullWithConfig — media docs', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 11, title: 'lost.png', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+                docs: [{ id: 11, title: 'lost.png', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -2266,7 +2270,7 @@ describe('docPullWithConfig — media docs', () => {
         responseQueue = [
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 10, title: 'broken', properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
+                docs: [{ id: 10, title: 'broken', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: 3 } }],
             }),
             makeMcpSuccess({
                 results: [{
@@ -2310,8 +2314,8 @@ describe('docPullWithConfig — content hashes', () => {
             makeMcpSuccess({
                 folders: [],
                 docs: [
-                    { id: 1, title: 'hashed-doc', properties: {} },
-                    { id: 2, title: 'hashed.png', properties: { blob_sha: 'abc', mime: 'image/png', size: mediaBytes.length } },
+                    { id: 1, title: 'hashed-doc', doc_type: null, properties: {} },
+                    { id: 2, title: 'hashed.png', doc_type: null, properties: { blob_sha: 'abc', mime: 'image/png', size: mediaBytes.length } },
                 ],
             }),
             makeMcpSuccess({
@@ -2359,9 +2363,9 @@ describe('docPullWithConfig — bulk_read row-status guard', () => {
             makeMcpSuccess({
                 folders: [],
                 docs: [
-                    { id: 1, title: 'good', properties: {} },
-                    { id: 2, title: 'broken', properties: {} },
-                    { id: 3, title: 'ghost', properties: {} },
+                    { id: 1, title: 'good', doc_type: null, properties: {} },
+                    { id: 2, title: 'broken', doc_type: null, properties: {} },
+                    { id: 3, title: 'ghost', doc_type: null, properties: {} },
                 ],
             }),
             (body: any) => {
@@ -2419,7 +2423,7 @@ describe('docPullWithConfig — folder-name path traversal', () => {
             }),
             makeMcpSuccess({
                 folders: [],
-                docs: [{ id: 1, title: 'gotcha', properties: {} }],
+                docs: [{ id: 1, title: 'gotcha', doc_type: null, properties: {} }],
             }),
             makeMcpSuccess({
                 results: [
@@ -2477,6 +2481,365 @@ describe('docPullWithConfig — destination is a file', () => {
         } finally {
             restoreExit();
             restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// cli#157: visual docs pull as .html, canvases as .canvas.json (spawned CLI)
+// ---------------------------------------------------------------------------
+
+describe('doc pull writes the right extension (cli#157)', () => {
+    function mcpArgs(cap: CapturedRequest): any {
+        return cap.body.params.arguments;
+    }
+
+    function readDocCalls(): CapturedRequest[] {
+        return allCaptures.filter((cap) => cap.body?.params?.name === 'docs_read' && mcpArgs(cap).action === 'read_doc');
+    }
+
+    it('writes .html for visual, .canvas.json for canvas, .md otherwise', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({
+                    folders: [],
+                    docs: [
+                        { id: 1, title: 'page', doc_type: { slug: 'visual' } },
+                        { id: 2, title: 'board', doc_type: { slug: 'canvas' } },
+                        { id: 3, title: 'notes', doc_type: null },
+                        { id: 4, title: 'skill-doc', doc_type: { slug: 'skill' } },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 1, title: 'page', current_revision_id: 10, properties: {}, body: '<h1>Hi</h1>' },
+                        { index: 1, status: 'found', id: 2, title: 'board', current_revision_id: 20, properties: {}, body: '{"nodes":[]}' },
+                        { index: 2, status: 'found', id: 3, title: 'notes', current_revision_id: 30, properties: {}, body: '# Notes' },
+                        { index: 3, status: 'found', id: 4, title: 'skill-doc', current_revision_id: 40, properties: {}, body: '# Skill' },
+                    ],
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Hi</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'board.canvas.json'), 'utf8')).toBe('{"nodes":[]}');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'notes.md'), 'utf8')).toBe('# Notes');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'skill-doc.md'), 'utf8')).toBe('# Skill');
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs).sort()).toEqual(['board.canvas.json', 'notes.md', 'page.html', 'skill-doc.md']);
+
+            // Every row carried its type, so no read_doc backfill was needed.
+            expect(readDocCalls()).toEqual([]);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('asks read_doc for a list row without a doc_type key', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                expect('doc_type' in body).toBe(false);
+                return makeMcpSuccess({
+                    folders: [],
+                    docs: [{ id: 5, title: 'mystery' }],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 5, title: 'mystery', current_revision_id: 50, properties: {}, body: '{"cells":[]}' },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                expect(body.params.arguments.id).toBe(5);
+                return makeMcpSuccess({ id: 5, title: 'mystery', doc_type: { slug: 'canvas' } });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'mystery.canvas.json'), 'utf8')).toBe('{"cells":[]}');
+            expect(readDocCalls().length).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('writes a single pulled visual doc as <title>.html', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpError('folder_path_not_found', 'no such folder');
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                return makeMcpSuccess({
+                    id: 7, title: 'page', folder_path: 'docs', body: '<h1>Solo</h1>',
+                    current_revision_id: 70, properties: {}, doc_type: { slug: 'visual' },
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Solo</h1>');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('collides per extension: page.html + page.md, x.html + x-2.html', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({
+                    folders: [],
+                    docs: [
+                        { id: 1, title: 'page', doc_type: { slug: 'visual' } },
+                        { id: 2, title: 'page', doc_type: null },
+                        { id: 3, title: 'x', doc_type: { slug: 'visual' } },
+                        { id: 4, title: 'x', doc_type: { slug: 'visual' } },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 1, title: 'page', current_revision_id: 10, properties: {}, body: '<h1>P</h1>' },
+                        { index: 1, status: 'found', id: 2, title: 'page', current_revision_id: 20, properties: {}, body: '# P' },
+                        { index: 2, status: 'found', id: 3, title: 'x', current_revision_id: 30, properties: {}, body: '<h1>X1</h1>' },
+                        { index: 3, status: 'found', id: 4, title: 'x', current_revision_id: 40, properties: {}, body: '<h1>X2</h1>' },
+                    ],
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>P</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# P');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'x.html'), 'utf8')).toBe('<h1>X1</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'x-2.html'), 'utf8')).toBe('<h1>X2</h1>');
+        } finally {
+            cleanup();
+        }
+    });
+
+    /** Pre-seed a destination whose manifest tracks doc 5 at page.md. */
+    function seedRenameDir(dir: string, pageBody: string): void {
+        const dest = path.join(dir, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'page.md'), pageBody, 'utf8');
+        const manifest: DocsManifest = {
+            folder_path: 'docs',
+            docs: {
+                'page.md': { id: 5, title: 'page', current_revision_id: 7, media: false, body_sha256: sha256Hex('# Old') },
+            },
+        };
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    }
+
+    function renameQueue(servedBody: string, extraListDoc?: object, extraBulkRow?: object): Array<string | ((body: any) => string)> {
+        const docs: object[] = [{ id: 5, title: 'page', doc_type: { slug: 'visual' } }];
+        const results: object[] = [
+            { index: 0, status: 'found', id: 5, title: 'page', current_revision_id: 8, properties: {}, body: servedBody },
+        ];
+        if (extraListDoc !== undefined && extraBulkRow !== undefined) {
+            docs.push(extraListDoc);
+            results.push(extraBulkRow);
+        }
+        return [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({ folders: [], docs });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({ results });
+            },
+        ];
+    }
+
+    it('rename, unmodified: stale page.md removed after page.html is written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.md'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.html']);
+            expect(manifest.docs['page.html'].id).toBe(5);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, unmodified: a new doc taking page.md keeps it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = renameQueue(
+                '<h1>Old</h1>',
+                { id: 6, title: 'page', doc_type: null },
+                { index: 1, status: 'found', id: 6, title: 'page', current_revision_id: 60, properties: {}, body: '# Six' },
+            );
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Six');
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(manifest.docs['page.html'].id).toBe(5);
+            expect(manifest.docs['page.md'].id).toBe(6);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, modified: refuses before anything is written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(1);
+
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(result.stderr).toMatch(/rename .*page\.md.* to .*page\.html/i);
+            expect(result.stderr).toContain('--overwrite');
+
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.md']);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, modified with --overwrite: keeps the edited twin untracked', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--overwrite']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toMatch(/untracked/i);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.html']);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('single-doc rename, unmodified: no stale page.md twin', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 5, title: 'page', folder_path: 'docs', body: '<h1>Old</h1>',
+                        current_revision_id: 8, properties: {}, doc_type: { slug: 'visual' },
+                    });
+                },
+            ];
+
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.md'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(manifest.docs['page.html'].id).toBe(5);
+            expect(manifest.docs['page.md']).toBeUndefined();
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('single-doc rename, modified: refuses', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 5, title: 'page', folder_path: 'docs', body: '<h1>Old</h1>',
+                        current_revision_id: 8, properties: {}, doc_type: { slug: 'visual' },
+                    });
+                },
+            ];
+
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(1);
+
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+        } finally {
             cleanup();
         }
     });
