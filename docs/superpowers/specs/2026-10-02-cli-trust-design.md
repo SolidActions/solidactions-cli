@@ -3,6 +3,7 @@
 **Wave:** cli-trust (CrewOps wave card task-waveclitrustcli-3f00, run seq:sa-wave-cli:94e95f4a), branch `wave/2026-10-02-cli-trust`.
 **Issues:** cli#124, cli#114, cli#112, cli#99, cli#102, cli#129, cli#153, cli#154, cli#155. Peter approved the wave in CrewOps ask task-approvewave2cli-9ad4 ("Approve: start Wave 2 now", 2026-10-02); the PM filed cli#154 and cli#155 for pitch items 2 and 4 and recorded that approval on them.
 **Plan:** `docs/superpowers/plans/2026-10-02-cli-trust.md`.
+**Plan review:** Fable (task-planreviewwave-19c8) returned REQUEST CHANGES on ea01583; the PM accepted every finding as nine numbered rulings on plan card task-planclitrust-faad. This revision carries them; each is cited as "PM ruling N" where it applies. Follow-ups out of this wave: cli#156 (raw error bodies elsewhere), cli#157 (pull-side visual/canvas mapping), app#1940 (`workflows_guide` drift).
 
 This spec records the design calls the issues leave open. Where an issue already states the fix, the plan follows the issue and this spec says nothing more.
 
@@ -23,6 +24,8 @@ Definitions, per call to `mergeConfigs(env, local, localPath, global, globalPath
 - *Key host*: the `host` of the highest layer **at or below the key layer** that sets one, or none.
 - *Conflict*: there is a key layer, the resolved host comes from a layer **above** the key layer, and the key host is missing or differs from the resolved host after normalization (trim, strip trailing `/`, lowercase).
 
+**A key from the environment** (PM ruling 1 on plan card task-planclitrust-faad, after Fable's plan review): when `SOLIDACTIONS_API_KEY` supplies the key and `SOLIDACTIONS_HOST` is not set, the key has no host of its own, so the rule above can never fire for it. It is used only if **every file layer that sets a host agrees** (after normalization) with the resolved host; otherwise the CLI refuses and tells the user to set `SOLIDACTIONS_HOST` too. An env key with only a global host, or with no file host at all, keeps working, so CI that exports only the key is unaffected unless two files name different hosts. This matches the repo's existing stance in `src/commands/dev.ts:318-330`, which refuses a half-set env override for `dev --env`.
+
 On a conflict, `mergeConfigs` still returns the merged config, but with `apiKey: ''` (fail closed: no code path can send the key) and a `credentialConflict` describing both sides. `requireResolvedConfig` refuses with exit 1 and one message, `whoami` shows the same message and exits 1, and `SOLIDACTIONS_DEBUG=1` prints it.
 
 The message (exact wording is the plan's; these facts are required): the resolved host and where it came from, the key's host (or "no host") and where the key came from, and the two fixes: run `solidactions login --local` in this folder (when the host came from a local file) or unset `SOLIDACTIONS_HOST` / set `SOLIDACTIONS_API_KEY` too (when it came from env), or remove `host` from the file that set it.
@@ -42,8 +45,15 @@ No config file is rewritten. Every shape the CLI itself writes keeps working:
 | **local `host` only, different host from global** | **global key sent to the local host** | **refused** |
 | **env `SOLIDACTIONS_HOST` only, different from the file's host** | **file's key sent to the env host** | **refused** |
 | env `SOLIDACTIONS_HOST` + a file with a key and no host | key sent to the env host | refused (the key has no host of its own) |
+| env `SOLIDACTIONS_API_KEY` only + local `host` equal to the global host (or no global) | works | works (every file host agrees) |
+| **env `SOLIDACTIONS_API_KEY` only + local `host` different from the global host** | **env key sent to the local host** | **refused: set `SOLIDACTIONS_HOST` too** |
+| **env `SOLIDACTIONS_API_KEY` only + local host+key different from the global host** | **env key sent to the local host, in place of the local key** | **refused: set `SOLIDACTIONS_HOST` too** |
 
-The last row is a hand-edited file (the CLI never writes a key without a host). Refusing it is the fail-closed choice; the message tells the user to put `host` in that file.
+The "file with a key and no host" row is a hand-edited file (the CLI never writes a key without a host). Refusing it is the fail-closed choice; the message tells the user to put `host` in that file.
+
+**Host comparison** is exact after trimming, stripping trailing slashes and lowercasing the whole string. So `https://host` and `https://host:443` count as different hosts, as do two paths that differ only in case. Both fail closed (a refusal, never a leak), and the README says so, because the refusal can surprise someone.
+
+**`whoami`** prints the refusal on stderr, as `requireResolvedConfig` does. The unused `saveConfig()` and `getConfig()` in `src/commands/login.ts` (no callers) are deleted: `saveConfig` wrote a whole merged config to the active file, the same crossing the auto-select fix removes.
 
 The README's "Resolution order" section says each field resolves independently and "you can mix". It is rewritten to state the rule above; mixing workspace fields stays allowed.
 
@@ -58,7 +68,7 @@ The README's "Resolution order" section says each field resolves independently a
 
 ## 2. cli#114 — one line, never a raw error body
 
-A shared helper `formatApiFailure(status, data)` in `src/utils/api.ts` returns `Failed: <status> <message>` when the response body is an object whose `message` is a non-empty string, and `Failed: <status>` otherwise. It never stringifies a response body (a debug-mode server puts the stack trace there; a proxy may send an HTML page). `env list` and `connection list` print their HTTP failures through it, so a 403 reads `Failed: 403 This action is unauthorized.`; a request that never got a response keeps its existing `Connection failed:` line. `env list` prints its `Global variables:` / `Variables for project …` header only after the request succeeded.
+A shared helper `formatApiFailure(status, data)` in `src/utils/api.ts` returns `Failed: <status> <message>` when the response body is an object whose `message` is a non-empty string, and `Failed: <status>` otherwise. It never stringifies a response body (a debug-mode server puts the stack trace there; a proxy may send an HTML page). `env list` and `connection list` print their HTTP failures through it, so a 403 reads `Failed: 403 This action is unauthorized.`; a request that never got a response keeps its existing `Connection failed:` line. Their 401 line names the host (`Authentication failed against <host>. Run "solidactions login --global" to re-configure.`), like the shared `authFailureMessage` already does (PM ruling 7). `env list` prints its `Global variables:` / `Variables for project …` header only after the request succeeded.
 
 Scope: the issue names `env list` and `connection list`. About 25 other commands dump `error.response.data` the same way; the manager files one follow-up issue for them (scope ladder rung 4) instead of widening this wave.
 
@@ -81,7 +91,7 @@ Since the issue was filed, #132 (app#1196, 2026-08-20) made a cross-org name col
 
 ## 6. cli#129 — `env pull` on a bind-mounted `.env`
 
-`writeSecretFileSync` keeps temp + rename. When the rename fails with `EBUSY` (a file-level bind mount is a mount point, and `rename(2)` over it fails), it falls back to writing in place, tightening the mode before any secret byte lands: `openSync(target, 'r+')` → `fchmodSync(fd, 0o600)` → `ftruncateSync(fd, 0)` → write → `closeSync`, then removes its temp file. Any other rename error still throws as today. If `fchmod` fails, nothing has been truncated or written and the error is thrown.
+`writeSecretFileSync` keeps temp + rename. When the rename fails with `EBUSY` (a file-level bind mount is a mount point, and `rename(2)` over it fails), it falls back to writing in place, tightening the mode before any secret byte lands: `openSync(target, O_RDWR | O_NOFOLLOW)` → `fchmodSync(fd, 0o600)` → `ftruncateSync(fd, 0)` → write → `closeSync`, then removes its temp file. Any other rename error still throws as today. If `fchmod` fails, nothing has been truncated or written and the error is thrown.
 
 The temp file becomes `<basename>.<pid>.<hex>.tmp` (no leading dot), so a temp leaked by a SIGKILL during `env pull` of `.env` still matches a `.env*` gitignore pattern.
 
@@ -89,11 +99,13 @@ The temp file becomes `<basename>.<pid>.<hex>.tmp` (no leading dot), so a temp l
 - On the `EBUSY` fallback only, the write is not atomic: a reader that opens the file mid-write can see a truncated or partial file.
 - On that path the file keeps its inode, owner and group; only its mode is forced to 0600.
 
+The fallback never writes through a symlink (PM ruling 5): it opens the target with `O_RDWR | O_NOFOLLOW`, so a target that is a symlink makes the fallback throw (`ELOOP`) and writes nothing. (`writeSecretFileSync` already passes the realpath, so this guards the exported `writeViaTempFileSync` and the window between `realpath` and `open`.)
+
 The fallback is tested through an injected rename function (the issue's "rename wrapper injection point"), never by mocking `fs`.
 
 ## 7. cli#153 — single-doc pulls record the doc's folder
 
-- The single-doc fallback of `doc pull <folder>/<doc>` records the doc's real folder in the manifest's `folder_path`: the `folder_path` `read_doc` returns when it is a string, otherwise `path.posix.dirname` of the argument, with `''` for the root (`.`).
+- The single-doc fallback of `doc pull <folder>/<doc>` records the doc's real folder in the manifest's `folder_path`: the `folder_path` `read_doc` returns when it is a string, otherwise `path.posix.dirname` of the argument, with `''` for the root (`.`). (Today's `read_doc` payload, solidactions-app `DocReadService::read`, carries `folderId` but no `folder_path`, so the dirname is what runs; the found doc lives exactly at the folder the CLI asked `read_doc` for.)
 - The manifest-clobber check compares the previous manifest's `folder_path` with that **resolved** folder, so it runs after the server tells the CLI whether the argument is a folder or a doc, and still before anything is written. Re-pulling the same doc agrees with itself; pulling the parent folder into a single-doc directory is allowed.
 - A single-doc pull into a directory whose manifest tracks the same folder **merges** its one entry into the existing manifest instead of replacing it, so the other tracked files stay tracked. Deletions are still never propagated from a single-doc pull.
 
@@ -101,12 +113,12 @@ The fallback is tested through an injected rename function (the issue's "rename 
 
 The approach is the PM-accepted technical ruling recorded on cli#154: bodies go inline through `docs_manage`, not app#1902's upload links.
 
-- **File kinds.** `doc push` picks up three kinds: `<title>.md` (markdown, as today), `<title>.html` (doc type `visual`) and `<title>.canvas.json` (doc type `canvas`). The title is the file name without that suffix. Untracked `.html` / `.canvas.json` files go through `bulk_create` with a per-item `type` (`visual` / `canvas`), which overrides the top-level `--type` for that item. They are no longer reported as "not pushed — use doc upload".
-- **Canvas files are checked locally.** A `.canvas.json` whose text does not parse as a JSON object fails the push before any server call, naming the file. Everything else about canvas shape is the server's (`invalid_canvas_body`), reported per file like any other row error.
+- **File kinds.** `doc push` picks up these kinds: `<title>.md` (markdown, as today), `<title>.html` (doc type `visual`), and `<title>.canvas.json` or `<title>.canvas` (doc type `canvas`; `.canvas` is the JSON Canvas extension other tools write, accepted by PM ruling 8). The title is the file name without that suffix. Untracked visual and canvas files go through `bulk_create` with a per-item `type` (`visual` / `canvas`), which overrides the top-level `--type` for that item. They are no longer reported as "not pushed — use doc upload".
+- **Canvas files are checked locally.** A canvas file whose text does not parse as a JSON object fails the push before any server call, naming the file. Everything else about canvas shape is the server's (`invalid_canvas_body`), reported per file like any other row error.
+- **Size, checked locally (PM ruling 3).** The server caps a body at 1 MiB (`docs.blob_size_cap_bytes`, 1,048,576 bytes; app#1902 uses the same cap for markdown and visual). Any file the push would send that is larger fails the push before the first request, naming the file and its size. `bulk_create` chunks are cut at 50 items **or** about 4 MiB of bodies (4,194,304 bytes), whichever comes first, so fifty large pages never become one 50 MB request a proxy rejects with an HTML page.
 - **A single file.** `doc push <path>` accepts a file as well as a directory. A file is pushed alone, as if its directory were pushed with only that file present: a tracked file is written by id with the drift guard, an untracked one is created through `bulk_create`, and `--folder`, `--on-conflict`, `--type`, `--dry-run` and `--json` mean what they mean for a directory. Untracked binaries elsewhere in that directory are ignored.
-- **`--replace <id>`** replaces the body of an existing doc by numeric id: `docs_manage write {id, body}` with no `base_revision` (the user named the doc). It requires a single `.md`, `.html` or `.canvas.json` file and refuses `--folder`, `--on-conflict` and `--type`. `--dry-run` prints the planned replace without calling the server; `--json` prints `{replaced: {id, file, current_revision_id}}`. The server keeps the doc's type and validates the body for it.
-- **Size.** The server caps a body at 1 MiB (`docs.blob_size_cap_bytes`); the CLI does not duplicate the check, and the server's per-row error names the file.
-- `doc pull` is unchanged: it still writes every non-media doc as `<title>.md`.
+- **`--replace <id>`** replaces the body of an existing doc by numeric id. It requires a single doc-kind file and refuses `--folder`, `--on-conflict` and `--type`. **It checks the doc's type first (PM ruling 2)**, because the server does not: a visual doc accepts any body under the cap (solidactions-app `VisualBodyValidator.php:16-21` checks size only) and a markdown doc accepts any text, and this path has no drift guard. The CLI calls `docs_read read_doc {id}`, then compares `doc_type.slug` with the file kind: `.html` needs `visual`, `.canvas.json` / `.canvas` need `canvas`, `.md` needs anything that is not `visual`, `canvas` or `media` (no type, or another type such as `skill`). A mismatch refuses with both kinds and the doc's title named; nothing is written. On a match it sends `docs_manage write {id, body}` with no `base_revision` (the user named the doc). The success and `--dry-run` lines name the doc's title (`replaced doc 42 ("Pricing page") with page.html (revision 8)`); the dry run still reads the doc (a read, not a write). `--json` prints `{replaced: {id, title, file, current_revision_id}}`.
+- **Push and pull do not round-trip the new kinds yet (PM ruling 4).** `doc pull` is unchanged: it still writes every non-media doc as `<title>.md`; mapping visual → `.html` and canvas → `.canvas.json` on pull is cli#157. Docs created by an untracked push are not added to the manifest (as for markdown today), so pushing the same directory again skips them under the default `--on-conflict skip`. When a push skips a visual or canvas row, it prints one line saying how to update that doc: push again with `--on-conflict overwrite`, or `doc push <file> --replace <id>` (with the id when the row carries one). The README states both limits.
 
 ## 9. cli#155 — route tables only resolve their own keys
 
