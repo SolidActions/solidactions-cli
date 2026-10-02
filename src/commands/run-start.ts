@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeTerminalRun } from '../utils/run-status';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
     const config = await requireConfigWithWorkspace();
@@ -48,16 +49,15 @@ export async function run(projectName: string, workflowName: string, options: { 
                         headers: getApiHeaders(config),
                     });
 
-                    const status = statusResponse.data.status;
-
-                    if (status === 'completed') {
+                    const outcome = describeTerminalRun(statusResponse.data ?? {});
+                    if (outcome) {
                         clearInterval(poll);
-                        console.log(chalk.green('\nWorkflow completed successfully!'));
-                        process.exit(0);
-                    } else if (status === 'failed') {
-                        clearInterval(poll);
-                        console.error(chalk.red('\nWorkflow failed!'));
-                        process.exit(1);
+                        if (outcome.exitCode === 0) {
+                            console.log(chalk.green(`\n${outcome.message}`));
+                        } else {
+                            console.error(chalk.red(`\n${outcome.message}`));
+                        }
+                        process.exit(outcome.exitCode);
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.yellow('\nTimeout waiting for workflow. It may still be running.'));

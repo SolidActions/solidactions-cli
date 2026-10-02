@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { describeAdmissionDenied, formatRunStatusLabel, getStatusColor } from '../utils/run-status';
 import { formatDetailedRevision } from '../utils/source-provenance';
 
 interface RunViewOptions {
@@ -147,7 +148,11 @@ function displayFullView(runData: any, timeline: any, steps: any[], logsData: an
 
     // Status line
     const exitStr = exitCode !== null && exitCode !== undefined ? ` (exit ${exitCode})` : '';
-    console.log(`  Status:    ${statusColor(status)}${chalk.gray(exitStr)}`);
+    console.log(`  Status:    ${statusColor(formatRunStatusLabel(status))}${chalk.gray(exitStr)}`);
+    const admission = describeAdmissionDenied(runData.admission_denied_reason);
+    if (admission) {
+        console.log(`  Admission: ${chalk.red(admission)}`);
+    }
     console.log(`  Trigger:   ${chalk.gray(runData.triggered_by || '-')}`);
     if (Object.prototype.hasOwnProperty.call(runData, 'deployed_revision')) {
         console.log(`  Revision (latest session): ${chalk.gray(formatDetailedRevision(runData.deployed_revision))}`);
@@ -338,20 +343,3 @@ function truncate(str: string, max: number): string {
     return str.substring(0, max - 3) + '...';
 }
 
-function getStatusColor(status: string): (text: string) => string {
-    switch (status?.toLowerCase()) {
-        case 'completed':
-        case 'success':
-            return chalk.green;
-        case 'running':
-            return chalk.blue;
-        case 'pending':
-        case 'queued':
-            return chalk.yellow;
-        case 'failed':
-        case 'error':
-            return chalk.red;
-        default:
-            return chalk.gray;
-    }
-}
