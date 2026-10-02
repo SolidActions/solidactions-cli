@@ -7,6 +7,10 @@
  *
  * Prints a report distinguishing fully-published docs from "properties pending"
  * ones (docs whose frontmatter properties couldn't be validated yet).
+ *
+ * Docs the push creates from untracked files are recorded in the directory's
+ * manifest (cli#157), so pushing again updates them by id instead of skipping
+ * them — but only when they landed in the manifest's own folder tree.
  */
 
 import fs from 'fs';
@@ -75,7 +79,11 @@ interface DocItem {
 interface BulkCreateResultRow {
     index: number;
     status: string;
-    id?: string;
+    id?: string | number;
+    /** The title the server created the doc under (differs from the local title on a `renamed` row). */
+    title?: string;
+    /** The revision the created doc is at, for the drift guard on the next push. */
+    current_revision_id?: number | null;
     folder_path?: string;
     action?: string;
     /** Server-side reason when `status === 'error'` (e.g. a trashed doc holds the title). */
@@ -704,6 +712,40 @@ export async function docPushWithConfig(
         }
 
         mergedSummary = mergeSummaries(mergedSummary, summary);
+    }
+
+    // cli#157: record what this push created, so the next push updates it instead of skipping it.
+    // Only when the docs landed in the manifest's own folder tree.
+    // PM ruling 5: a single-file push records only into a manifest its directory already has.
+    const recordable = !options.dryRun
+        && (manifest !== null || !singleFile)
+        && (manifest === null || options.folder === undefined || options.folder === manifest.folder_path);
+    // PM ruling 8: never dereference a missing manifest. The "went elsewhere" note is only for an
+    // existing manifest with a different --folder; a single-file push with no manifest stays quiet.
+    if (!options.dryRun && manifest !== null && options.folder !== undefined && options.folder !== manifest.folder_path
+        && allResultRows.some((r) => ['created', 'renamed', 'overwritten'].includes(r.status))) {
+        process.stderr.write(chalk.yellow(`created docs were not recorded in ${DOCS_MANIFEST}: they went to "${options.folder}", not "${manifest.folder_path}"\n`));
+    }
+    if (recordable) {
+        const target: DocsManifest = manifest ?? { folder_path: options.folder ?? '', docs: {} };
+        let changed = false;
+        for (const row of allResultRows) {
+            if (!['created', 'renamed', 'overwritten'].includes(row.status) || row.id === undefined) continue;
+            const relPath = row.file.split(path.sep).join('/');
+            const bytes = fs.readFileSync(path.join(absDir, ...relPath.split('/')));
+            if (row.status === 'renamed' && row.title) {
+                process.stderr.write(chalk.yellow(`${relPath}: created as "${row.title}" (the original title was taken); the next doc pull will name the local file after "${row.title}"\n`));
+            }
+            target.docs[relPath] = {
+                id: Number(row.id),
+                title: row.title ?? path.basename(relPath),
+                current_revision_id: row.current_revision_id ?? null,
+                media: false,
+                body_sha256: sha256Hex(bytes),
+            };
+            changed = true;
+        }
+        if (changed) writeManifest(absDir, target);
     }
 
     // Collect pending items (results that have property_validation)

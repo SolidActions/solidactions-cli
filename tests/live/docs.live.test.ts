@@ -204,7 +204,13 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         expect(still.ok, JSON.stringify(still.data)).toBe(true);
         expect(still.data.body).toBe(pageV2);
 
-        const again = runCli(['doc', 'push', dir, '--folder', `${root}/visual`]);
+        // cli#157: the first push recorded dir in its manifest, so re-pushing
+        // from there takes the tracked-write path now. The skip hint lives on
+        // the untracked (bulk_create) path — exercise it from a fresh dir.
+        const againDir = mkTmp();
+        fs.copyFileSync(pageFile, path.join(againDir, 'page.html'));
+        fs.copyFileSync(boardFile, path.join(againDir, 'board.canvas.json'));
+        const again = runCli(['doc', 'push', againDir, '--folder', `${root}/visual`]);
         expect(again.status, again.stdout + again.stderr).toBe(0);
         expect(again.stderr).toContain('page.html: skipped');
         console.log(`skip hint form: ${/--replace \d+/.test(again.stderr) ? 'id from the server row' : '<doc-id> fallback'}`);
@@ -258,5 +264,42 @@ describe.skipIf(!LIVE)('doc push / pull / upload (live, real CLI)', () => {
         const pull = runCli(['doc', 'pull', root, dest]);
         expect(pull.status, pull.stdout + pull.stderr).toBe(0);
         expect(Buffer.compare(read(dest, name), PNG_BYTES)).toBe(0);
+    });
+
+    it('push records what it creates: a second push updates the same doc, and a pull into the same dir stays consistent', async () => {
+        const roundDir = path.join(mkTmp(), 'round');
+        fs.mkdirSync(roundDir, { recursive: true });
+        const pageV1 = '<!doctype html><html><body><h1>round one</h1></body></html>';
+        fs.writeFileSync(path.join(roundDir, 'page.html'), pageV1, 'utf8');
+
+        const push1 = runCli(['doc', 'push', roundDir, '--folder', `${root}/round`, '--json']);
+        expect(push1.status, push1.stdout + push1.stderr).toBe(0);
+        expect(json(push1).summary.created).toBe(1);
+
+        const manifest = JSON.parse(fs.readFileSync(path.join(roundDir, '.solidactions-docs.json'), 'utf8'));
+        expect(manifest.folder_path).toBe(`${root}/round`);
+        const docId = manifest.docs['page.html'].id;
+        expect(docId).toEqual(expect.any(Number));
+
+        const pageV2 = '<!doctype html><html><body><h1>round two</h1></body></html>';
+        fs.writeFileSync(path.join(roundDir, 'page.html'), pageV2, 'utf8');
+        const push2 = runCli(['doc', 'push', roundDir, '--json']);
+        expect(push2.status, push2.stdout + push2.stderr).toBe(0);
+        const updated = json(push2);
+        expect(updated.tracked.written.map((w: any) => w.file)).toEqual(['page.html']);
+        expect(updated.results).toEqual([]);
+
+        const reread = await callDocsTool(config, { action: 'read_doc', path: { folder_path: `${root}/round`, title: 'page' } });
+        expect(reread.ok, JSON.stringify(reread.data)).toBe(true);
+        expect(reread.data.body).toBe(pageV2);
+        expect(reread.data.id).toBe(docId);
+        expect(await listFolder(`${root}/round`)).toEqual({ docs: ['page'], folders: [] });
+
+        const pull = runCli(['doc', 'pull', `${root}/round`, roundDir]);
+        expect(pull.status, pull.stdout + pull.stderr).toBe(0);
+        expect(fs.readFileSync(path.join(roundDir, 'page.html'), 'utf8')).toBe(pageV2);
+        const manifest2 = JSON.parse(fs.readFileSync(path.join(roundDir, '.solidactions-docs.json'), 'utf8'));
+        expect(manifest2.folder_path).toBe(`${root}/round`);
+        expect(manifest2.docs['page.html'].id).toBe(docId);
     });
 });

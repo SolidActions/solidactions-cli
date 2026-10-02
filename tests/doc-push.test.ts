@@ -3126,3 +3126,221 @@ describe('docPushWithConfig — single file and --replace (cli#154)', () => {
         }
     });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: doc push records the docs it creates in the manifest (cli#157, Task 6)
+// ---------------------------------------------------------------------------
+
+describe('doc push records created docs in the manifest (cli#157)', () => {
+    /** A canned bulk_create that answers realistic created rows for the sent items. */
+    function queueCreatedRows(opts: { baseId?: number; baseRevision?: number; folderPath?: string } = {}): void {
+        const baseId = opts.baseId ?? 101;
+        const baseRevision = opts.baseRevision ?? 500;
+        responseQueue = [
+            (body: any) => {
+                const items = body.params.arguments.items ?? [];
+                return makeMcpSuccess({
+                    results: items.map((item: any, i: number) => ({
+                        index: i,
+                        status: 'created',
+                        id: baseId + i,
+                        title: item.title,
+                        folder_path: opts.folderPath ?? body.params.arguments.folder_path ?? '',
+                        current_revision_id: baseRevision + i,
+                    })),
+                    summary: { created: items.length },
+                });
+            },
+        ];
+    }
+
+    function readDirManifest(dir: string): any {
+        return JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+    }
+
+    it('a directory with no manifest gets one with folder_path "" and an entry per created file', async () => {
+        const files: Record<string, string> = { 'notes.md': '# Notes\n', 'page.html': '<h1>hi</h1>' };
+        const { dir, cleanup } = makeTmpDocsDir(files);
+        queueCreatedRows();
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            const manifest = readDirManifest(dir);
+            expect(manifest.folder_path).toBe('');
+            const items = allCaptures[0].body.params.arguments.items;
+            expect(Object.keys(manifest.docs)).toHaveLength(items.length);
+            const byBody = new Map(Object.entries(files).map(([rel, body]) => [body, rel]));
+            items.forEach((item: any, i: number) => {
+                const rel = byBody.get(item.body)!;
+                expect(rel).toBeDefined();
+                expect(manifest.docs[rel]).toEqual({
+                    id: 101 + i,
+                    title: item.title,
+                    current_revision_id: 500 + i,
+                    media: false,
+                    body_sha256: sha256Hex(files[rel]),
+                });
+            });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a pulled directory records the new file; a second push writes it by id; unchanged sends nothing', async () => {
+        const first = '<h1>one</h1>';
+        const { dir, cleanup } = makeTmpDocsDir({
+            'extra.html': first,
+            [DOCS_MANIFEST]: JSON.stringify({ folder_path: 'notes', docs: {} }),
+        });
+        queueCreatedRows({ folderPath: 'notes' });
+        try {
+            const created = await runPush(dir, {});
+            expect(created.code).toBe(0);
+            let manifest = readDirManifest(dir);
+            expect(manifest.folder_path).toBe('notes');
+            expect(manifest.docs['extra.html']).toEqual({
+                id: 101, title: 'extra', current_revision_id: 500, media: false, body_sha256: sha256Hex(first),
+            });
+
+            // Second push after editing: a write by id with the base_revision guard, no bulk_create.
+            const second = '<h1>two</h1>';
+            fs.writeFileSync(path.join(dir, 'extra.html'), second, 'utf8');
+            allCaptures = [];
+            responseQueue = [makeMcpSuccess({ id: 101, current_revision_id: 501 })];
+            const updated = await runPush(dir, {});
+            expect(updated.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(allCaptures[0].body.params.arguments).toEqual({ action: 'write', id: 101, body: second, base_revision: 500 });
+            manifest = readDirManifest(dir);
+            expect(manifest.docs['extra.html']).toEqual({
+                id: 101, title: 'extra', current_revision_id: 501, media: false, body_sha256: sha256Hex(second),
+            });
+
+            // Third push unchanged: nothing sent.
+            allCaptures = [];
+            responseQueue = [];
+            const quiet = await runPush(dir, {});
+            expect(quiet.code).toBe(0);
+            expect(allCaptures.length).toBe(0);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--folder different from the manifest folder_path records nothing and says where the docs went', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({
+            'extra.html': '<h1>extra</h1>',
+            [DOCS_MANIFEST]: JSON.stringify({ folder_path: 'notes', docs: {} }),
+        });
+        const before = fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8');
+        queueCreatedRows({ folderPath: 'other' });
+        try {
+            const result = await runPush(dir, { folder: 'other' });
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8')).toBe(before);
+            expect(result.stderr).toContain(`created docs were not recorded in ${DOCS_MANIFEST}`);
+            expect(result.stderr).toContain('"other"');
+            expect(result.stderr).toContain('"notes"');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('skipped and error rows are not recorded; a renamed row is recorded under the local path with the new title', async () => {
+        const files: Record<string, string> = { 'a.md': '# A\n', 'b.md': '# B\n', 'c.md': '# C\n', 'd.md': '# D\n' };
+        const { dir, cleanup } = makeTmpDocsDir(files);
+        responseQueue = [
+            (body: any) => {
+                const items = body.params.arguments.items ?? [];
+                const byTitle: Record<string, any> = {
+                    a: { status: 'skipped', code: 'duplicate_title' },
+                    b: { status: 'error', code: 'boom', error: 'kaput' },
+                    c: { status: 'renamed', id: 103, title: 'c (1)', current_revision_id: 502 },
+                    d: { status: 'created', id: 104, title: 'd', current_revision_id: 503 },
+                };
+                return makeMcpSuccess({
+                    results: items.map((item: any, i: number) => ({ index: i, folder_path: '', ...byTitle[item.title] })),
+                    summary: { created: 1, renamed: 1, skipped: 1, errors: 1 },
+                });
+            },
+        ];
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(1);
+            const manifest = readDirManifest(dir);
+            expect(Object.keys(manifest.docs).sort()).toEqual(['c.md', 'd.md']);
+            expect(manifest.docs['c.md']).toEqual({
+                id: 103, title: 'c (1)', current_revision_id: 502, media: false, body_sha256: sha256Hex(files['c.md']),
+            });
+            expect(manifest.docs['d.md']).toEqual({
+                id: 104, title: 'd', current_revision_id: 503, media: false, body_sha256: sha256Hex(files['d.md']),
+            });
+            expect(result.stderr).toContain('c.md: created as "c (1)" (the original title was taken); the next doc pull will name the local file after "c (1)"');
+            expect(result.stderr).toContain('b.md: kaput');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('--dry-run writes no manifest', async () => {
+        const { dir, cleanup } = makeTmpDocsDir({ 'notes.md': '# Notes\n' });
+        try {
+            const result = await runPush(dir, { dryRun: true });
+            expect(result.code).toBe(0);
+            expect(fs.existsSync(path.join(dir, DOCS_MANIFEST))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a single-file push without a manifest stays quiet and writes none; with a manifest it records', async () => {
+        const body = '<h1>solo</h1>';
+        const bare = makeTmpDocsDir({ 'page.html': body });
+        queueCreatedRows();
+        try {
+            const result = await runPush(path.join(bare.dir, 'page.html'), {});
+            expect(result.code).toBe(0);
+            expect(allCaptures.length).toBe(1);
+            expect(fs.existsSync(path.join(bare.dir, DOCS_MANIFEST))).toBe(false);
+            expect(result.stderr).not.toContain('not recorded');
+            expect(result.stderr).not.toContain('TypeError');
+        } finally {
+            bare.cleanup();
+        }
+
+        const tracked = makeTmpDocsDir({
+            'page.html': body,
+            [DOCS_MANIFEST]: JSON.stringify({ folder_path: '', docs: {} }),
+        });
+        queueCreatedRows();
+        allCaptures = [];
+        try {
+            const result = await runPush(path.join(tracked.dir, 'page.html'), {});
+            expect(result.code).toBe(0);
+            expect(readDirManifest(tracked.dir).docs['page.html']).toEqual({
+                id: 101, title: 'page', current_revision_id: 500, media: false, body_sha256: sha256Hex(body),
+            });
+        } finally {
+            tracked.cleanup();
+        }
+    });
+
+    it('a skipped canvas row still says how to update it', async () => {
+        const canvasBody = '{"nodes":[],"edges":[]}';
+        const { dir, cleanup } = makeTmpDocsDir({ 'board.canvas.json': canvasBody });
+        responseQueue = [
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'skipped', id: 77, code: 'duplicate_title' }],
+                summary: { skipped: 1 },
+            }),
+        ];
+        try {
+            const result = await runPush(dir, {});
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain('board.canvas.json: skipped — a doc with this title already exists');
+            expect(result.stderr).toContain('--replace 77');
+        } finally {
+            cleanup();
+        }
+    });
+});
