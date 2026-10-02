@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-02-cli-polish-design.md` (read the section for your task's issue first).
 
+**Plan review:** revised after Fable's REQUEST CHANGES on 3e59485; the PM's rulings 1-6 are on plan card task-planclipolish-9da6 and are cited as "PM ruling N" in Tasks 3-6.
+
 **Issues:** approved by Peter in CrewOps ask task-startthenextcli-6fc8 ("Approve: start it now", 2026-10-02), recorded on each issue; cli#158 folded in by the PM with cli#91:
 - `cli#91` Vitest toolchain past the Vite/PostCSS advisories, `cli#158` Vite config-loader warning (Task 1)
 - `cli#162` whoami shows the organization, `cli#113` workspace pin hygiene (Task 2)
@@ -130,16 +132,17 @@ Read spec §2. This is one batch of the same mechanical change across many files
 **Files (file scope — the only paths this task may touch):**
 - Modify: `src/utils/api.ts` (add `authFailedLine`)
 - Modify (each site's raw-body print and its 401 branch): `src/commands/env-reset.ts`, `oauth-action-search.ts`, `webhook-secret.ts`, `run-list.ts`, `webhook-list.ts`, `run-start.ts`, `crew-env-set.ts`, `env-map.ts`, `schedule-list.ts`, `env-pull.ts`, `crew-env-delete.ts`, `project-list.ts`, `env-set.ts` (2 sites), `oauth-action-view.ts`, `oauth-action-list.ts`, `schedule-set.ts`, `crew-env-list.ts`, `schedule-delete.ts`, `run-view.ts`, `env-delete.ts`, `oauth-action-platforms.ts`, `project-logs.ts`, `schedule-state.ts`, `deploy.ts` (the `JSON.stringify(error.response.data)` print ~line 883 and its 404 line), `env-list.ts` (401 line and the global 404 `Resource not found.`), `connection-list.ts` (401 line) — all under `src/commands/`
+- Modify (401 line only, PM ruling 1): `src/commands/crew-env-push.ts`, `doc-upload.ts`, `env-push.ts`, `project-create.ts`, `project-view.ts`, `pull.ts`, `state.ts`, `workflow-view.ts`
 - Modify: `tests/workflow-view.test.ts` (only its expectation of the old 401 text, if it fails)
 - Create: `tests/api-failure-one-line.test.ts`
 - Create: `tests/no-raw-error-body.test.ts`
 
 **Interfaces:**
 - Consumes: `formatApiFailure(status: number, data: unknown): string` (`src/utils/api.ts:355`), `formatValidationError(data: unknown): string` (same file).
-- Produces: `export function authFailedLine(host: string): string` in `src/utils/api.ts` → `Authentication failed against ${host}. Run "solidactions login --global" to re-configure.`
+- Produces: `export function authFailedLine(host: string): string` in `src/utils/api.ts` → `Authentication failed against ${host}. Run "solidactions login --global" to re-configure.`, with userinfo (`user:pass@`) stripped from the host (PM ruling 6).
 
 - [ ] **Step 1: Write the failing tests.**
-  - `tests/no-raw-error-body.test.ts` (static guard, real files): read every `src/commands/*.ts`; assert no line matches `/error\.response\.data\)\s*;/` or `/error\.response\.data\?\.message \?\? error\.response\.data/` or `/JSON\.stringify\(error\.response\.data/`, and no line contains `'Authentication failed. Run "solidactions login --global"` (old 401 text). Print the offending file:line on failure.
+  - `tests/no-raw-error-body.test.ts` (static guard, real files; PM ruling 1: the PRINT shape only): read every `src/commands/*.ts`; fail on a line where `error.response.data` is passed bare as an argument of a `console.<method>(` call (e.g. `/console\.\w+\(.*[(,]\s*error\.response\.data(\?\.message \?\? error\.response\.data)?\s*\)/`), on `JSON.stringify(error.response.data`, and on the old 401 text `/Authentication failed\. Run/`. `return formatValidationError(error.response.data);` (`state.ts:99`) must NOT be flagged: add a case asserting the guard's matcher accepts that line and rejects `console.error(chalk.red(`x`), error.response.data);`. Print the offending file:line on failure.
   - `tests/api-failure-one-line.test.ts` (spawned, `it.each`): one in-process server that answers every request with status 403 and a Laravel-shaped body (`{ message: 'This action is unauthorized.', exception: '…AccessDeniedHttpException', file: '/var/www/html/vendor/…', trace: [50 frames] }`); global config `{ host, apiKey: 'test-key', workspaceId: 'workspace-1' }`. For at least these commands: `env reset FOO my-app -e production`, `webhook list my-app -e production`, `run list`, `schedule list my-app -e production`, `project list`, `env map FOO my-app`, `run view 7`, `oauth-action list`, `crew env list my-crew`, `project logs my-app`, `env pull my-app -e production` (with `--output <tmp>/.env --yes`), `env delete FOO my-app -e production --yes` — each: exit 1; stderr (after dropping the `AGENT NOTE` and `Workspace:` banner lines) has exactly one line and it is `Failed: 403 This action is unauthorized.`; nothing contains `vendor`. Read each command's `--help` (or `src/index.ts`) for its exact argument shape before writing its case. Plus a 401 case (`run list` against a server answering 401 `{message:'Unauthenticated.'}`) → stderr line `Authentication failed against http://127.0.0.1:<port>. Run "solidactions login --global" to re-configure.`
 - [ ] **Step 2: Run and see them fail.**
 Run: `npm run build && npx vitest run --project unit tests/no-raw-error-body.test.ts tests/api-failure-one-line.test.ts`
@@ -148,13 +151,26 @@ Expected: FAIL (the guard lists the 25 sites).
   - `src/utils/api.ts`:
 
 ```ts
-/** The one-line 401 every command prints: names the host that refused the key (cli#156). */
+/** The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo. */
 export function authFailedLine(host: string): string {
-    return `Authentication failed against ${host}. Run "solidactions login --global" to re-configure.`;
+    let shown = host;
+    try {
+        const url = new URL(host);
+        if (url.username || url.password) {
+            url.username = '';
+            url.password = '';
+            shown = url.toString().replace(/\/$/, '');
+        }
+    } catch {
+        // Not a URL: show it as configured.
+    }
+    return `Authentication failed against ${shown}. Run "solidactions login --global" to re-configure.`;
 }
 ```
 
-  - In every listed command: replace `console.error(chalk.red(\`Failed: ${error.response.status}\`), error.response.data);` (and the `schedule-state.ts` variant) with `console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));`, and the 401 line with `console.error(chalk.red(authFailedLine(config.host)));` (use the command's config variable; every listed command has one in scope). In `deploy.ts` replace `console.error(error.response.status, JSON.stringify(error.response.data, null, 2));` with the same `formatApiFailure` call. In `env-list.ts` and `connection-list.ts` replace the inline 401 text with `authFailedLine(config.host)`, and `env-list.ts`'s global-mode 404 `console.error(chalk.red('Resource not found.'));` with `console.error(chalk.red(formatApiFailure(404, error.response.data)));`. In `env-map.ts` and `schedule-set.ts`, replace `error.response.data.message || error.response.data.errors` in the 422 line with `formatValidationError(error.response.data)`. Keep every other branch (404 messages, 422 handling) as it is.
+  Add a pure test (in `tests/api-failure-one-line.test.ts`): `authFailedLine('https://u:p@host.example')` contains `https://host.example` and not `u:p`.
+
+  - In every listed command: replace `console.error(chalk.red(\`Failed: ${error.response.status}\`), error.response.data);` (and the `schedule-state.ts` variant) with `console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));`, and the 401 line with `console.error(chalk.red(authFailedLine(config.host)));` (use the command's config variable; every listed command has one in scope). In `deploy.ts` replace `console.error(error.response.status, JSON.stringify(error.response.data, null, 2));` with the same `formatApiFailure` call. In `env-list.ts`, `connection-list.ts` and the eight 401-only files (PM ruling 1) replace the old 401 text with `authFailedLine(config.host)` (use the config variable in scope), and `env-list.ts`'s global-mode 404 `console.error(chalk.red('Resource not found.'));` with `console.error(chalk.red(formatApiFailure(404, error.response.data)));`. In `env-map.ts` and `schedule-set.ts`, replace `error.response.data.message || error.response.data.errors` in the 422 line with `formatValidationError(error.response.data)`. Keep every other branch (404 messages, 422 handling) as it is.
 - [ ] **Step 4: Run and see them pass.**
 Run: `npm run build && npx vitest run --project unit tests/no-raw-error-body.test.ts tests/api-failure-one-line.test.ts tests/env-list-forbidden.test.ts tests/connection-list.test.ts tests/workflow-view.test.ts tests/run-list.test.ts tests/env-reset.test.ts tests/run-start-env-mismatch.test.ts`
 Expected: PASS. If `tests/workflow-view.test.ts` asserts the old 401 text, update only that expectation.
@@ -182,7 +198,7 @@ Read spec §3. Task 3 changed the error branches of many of the same files; buil
   - `export async function resolveProjectSlug(config: Config, typed: string, environment?: string): Promise<string>`.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `tests/project-ref.test.ts`: pure cases for `projectSlugCandidates` (`('CliTrustSmoke','production')` → `['CliTrustSmoke','clitrustsmoke']`; `('CliTrustSmoke','dev')` → `['CliTrustSmoke-dev','clitrustsmoke-dev']`; `('my-app','production')` → `['my-app']`; `('!!!')` → `['!!!']`), and `resolveProjectSlug` against a real in-process server: typed hit (one request); typed 404 → canonical 200 `{slug:'clitrustsmoke'}` → returns `'clitrustsmoke'`; all 404 → returns the first candidate; a 401 on the first lookup → rejects with status 401 (no second request); a 500 → rejects.
+  - `tests/project-ref.test.ts`: pure cases for `projectSlugCandidates` (`('CliTrustSmoke','production')` → `['CliTrustSmoke','clitrustsmoke']`; `('CliTrustSmoke','dev')` → `['CliTrustSmoke-dev','clitrustsmoke-dev']`; `('my-app','production')` → `['my-app']`; `('!!!')` → `['!!!']`), and `resolveProjectSlug` against a real in-process server: typed hit (one request); typed 404 → canonical 200 `{slug:'clitrustsmoke'}` → returns `'clitrustsmoke'`; all 404 → returns the first candidate; a 401 on the first lookup → rejects with status 401 (no second request); a 500 → rejects; a 403 on the first lookup → resolves to the first candidate (no second request; PM ruling 3).
   - `tests/mixed-case-project-commands.test.ts` (spawned built binary, one in-process server that knows a project with name `CliTrustSmoke` and slug `clitrustsmoke`: `GET /api/v1/projects/clitrustsmoke` → 200 `{ "slug": "clitrustsmoke", "name": "CliTrustSmoke" }`, `GET /api/v1/projects/CliTrustSmoke` → 404, `GET /api/v1/projects` → `{ "data": [{ "name": "CliTrustSmoke", "slug": "clitrustsmoke", "environment": "production" }] }`, and 200s for the project-scoped routes under `clitrustsmoke` only; it records every request path). Each case asserts exit 0 and that the project-scoped request went to `/api/v1/projects/clitrustsmoke/...`:
     1. `run start CliTrustSmoke hello -e production` (trigger answered 202 `{ "run": { "id": 1 } }`);
     2. `webhook secret CliTrustSmoke -e production` (webhooks answered `{ "data": [] }` or the shape the command expects — read it);
@@ -191,6 +207,8 @@ Read spec §3. Task 3 changed the error branches of many of the same files; buil
     5. `project view CliTrustSmoke -e production`;
     6. `run list CliTrustSmoke`: the server answers `GET /api/v1/runs?project=CliTrustSmoke…` with `{ "error": "project_not_found" }` only when `project` isn't exactly `CliTrustSmoke` — and the case where the user types `clitrustsmoke`: the first `/api/v1/runs?project=clitrustsmoke` answers `project_not_found`, the CLI looks up `/api/v1/projects`, retries with `project=CliTrustSmoke`, exit 0.
     7. A typo (`run start NoSuchApp hello -e production`) still prints the command's existing not-found message (exit 1), not a stack trace.
+    8. (PM ruling 3) A token that may not read the project: the server answers `GET /api/v1/projects/<anything>` with 403 but `POST /api/v1/projects/my-app/workflows/hello/trigger` with 202 → `run start my-app hello -e production` exits 0.
+    9. (PM ruling 4) `run list main-app` where `GET /api/v1/projects` lists `Main-App` and `MAIN-APP` (different slugs) and the runs request answers `project_not_found` → exit 1, stderr names both projects and asks for the exact name or slug; no second runs request.
 - [ ] **Step 2: Run and see them fail.**
 Run: `npm run build && npx vitest run --project unit tests/project-ref.test.ts tests/mixed-case-project-commands.test.ts`
 Expected: FAIL.
@@ -222,9 +240,13 @@ export async function resolveProjectSlug(config: Config, typed: string, environm
     const candidates = projectSlugCandidates(typed, environment);
     for (const candidate of candidates) {
         try {
-            const response = await axios.get(`${config.host}/api/v1/projects/${encodeURIComponent(candidate)}`, { headers: getApiHeaders(config) });
+            // Unencoded, as the commands put the slug into their own URLs (PM ruling 6).
+            const response = await axios.get(`${config.host}/api/v1/projects/${candidate}`, { headers: getApiHeaders(config) });
             return (typeof response.data?.slug === 'string' && response.data.slug) || candidate;
         } catch (error: any) {
+            // PM ruling 3: a token may be allowed the command's own route but not the project read —
+            // a 403 here is not a failure; let the command's own request decide.
+            if (error.response?.status === 403) return candidates[0];
             if (error.response?.status !== 404) throw error;
         }
     }
@@ -234,13 +256,13 @@ export async function resolveProjectSlug(config: Config, typed: string, environm
 
   plus `getProjectBySlugOrCanonical` moved here verbatim (deploy imports it from `../utils/project-ref`; the test file's import changes accordingly).
 - [ ] **Step 4: Use it in every command.** In each listed command, replace the local slug building (`environment === 'production' ? projectName : \`${projectName}-${environment}\``, `projectSlugForView(...)`, or the raw `projectName` in the URL) with `const projectSlug = await resolveProjectSlug(config, projectName, environment);` placed inside the command's existing `try` (so a lookup error reaches the command's existing error branches), before the first project-scoped request; keep the variable names the command already uses. For `project-logs.ts` only the path without `-e` changes (the `-e` path already asks the server to resolve the name). For `env-map.ts` (no environment) call `resolveProjectSlug(config, projectName)`. Keep `state.ts`, `workflow-view.ts` and `project-create.ts` as they are (they already slugify).
-  - `run-list.ts`: when the response is `{ error: 'project_not_found' }` and a project argument was given, `GET /api/v1/projects`, pick the first project whose `name === typed`, else `slug === typed`, else `slug === slugifyName(typed)`, else `name.toLowerCase() === typed.toLowerCase()`, and if found and its name differs from the typed text, repeat the runs request once with `project` set to that name. Otherwise keep the existing message.
-  - `src/utils/api.ts` `lookupProjectFamilyEnvironments`: match `p.name === projectName || p.slug === projectName || p.slug === slugifyName(projectName) || p.name?.toLowerCase() === projectName.toLowerCase()`.
+  - `run-list.ts`: when the response is `{ error: 'project_not_found' }` and a project argument was given, `GET /api/v1/projects` and match in rungs, stopping at the first rung with a hit: `name === typed`, then `slug === typed`, then `slug === slugifyName(typed)`, then `name.toLowerCase() === typed.toLowerCase()`. If the last rung matches more than one project, refuse (exit 1) with `"<typed>" matches more than one project: <name> (<slug>), … — re-run with the exact name or slug.` (PM ruling 4). If exactly one matches and its name differs from the typed text, repeat the runs request once with `project` set to that name. Otherwise keep the existing message.
+  - `src/utils/api.ts` `lookupProjectFamilyEnvironments`: the same rungs; an ambiguous last rung returns `null` (no hint rather than a guess).
   - `deploy.ts`: the webhook hint prints `slugifyName(projectName) || projectName` instead of `projectName`.
 - [ ] **Step 5: Run and see them pass.**
 Run: `npm run build && npx vitest run --project unit tests/project-ref.test.ts tests/mixed-case-project-commands.test.ts tests/deploy-mixed-case.test.ts tests/api-failure-one-line.test.ts tests/no-raw-error-body.test.ts tests/run-list.test.ts tests/run-start-env-mismatch.test.ts tests/run-start-wait.test.ts tests/env-reset.test.ts tests/env-set-oauth-connection.test.ts tests/env-pull.test.ts tests/schedule*.test.ts tests/project-view*.test.ts tests/webhook*.test.ts`
 Expected: PASS. Existing tests whose stub server only answers the old raw slug may now see one extra `GET /api/v1/projects/<slug>` first: if a test fails only because its server 404s or errors on that lookup, extend the stub to answer it (that test file joins your scope; list it in the report). Never weaken an assertion.
-- [ ] **Step 6: Report (do not commit).** Manager's commit: `fix: every command resolves a project argument by its canonical slug (#161)`.
+- [ ] **Step 6: Report (do not commit).** List every extra test file you pulled into scope and why (PM ruling 6). Manager's commit: `fix: every command resolves a project argument by its canonical slug (#161)`.
 
 ---
 
@@ -261,7 +283,9 @@ Read spec §5 "Pull writes the right extension". The sa-dev stack must be up for
   2. A `list` row WITHOUT a `doc_type` key → the CLI asks `read_doc {id}` for that doc (assert the request) and uses its `doc_type.slug`.
   3. Single-doc pull of a visual doc (`read_doc` returns `doc_type: { slug: 'visual' }`) → `<title>.html`.
   4. Collision: a visual doc `page` and a markdown doc `page` in one folder → `page.html` and `page.md` (no suffix needed); two visual docs whose titles sanitize alike → `x.html`, `x-2.html`.
-  5. A directory previously pulled with `page.md` (unmodified, tracked) for a doc that is now visual → after the pull, `page.html` exists and `page.md` is removed (deletion propagation, unmodified); if `page.md` was edited locally, it is kept with the existing warning.
+  5. (PM ruling 2) Rename, unmodified: a directory whose manifest tracks doc 5 at `page.md` (file matches `body_sha256`), and the server now lists doc 5 as visual → exit 0; `page.html` holds the served body; `page.md` is gone; the manifest has doc 5 only at `page.html`; no "deleted remotely" line.
+  6. (PM ruling 2) Rename, modified: same, but `page.md` was edited locally → exit 1 before anything is written; stderr names `page.md` and `page.html` and says to rename `page.md` to `page.html` and push it first (or pass `--overwrite`); files and manifest unchanged. With `--overwrite` → exit 0, `page.html` written, the edited `page.md` kept (not deleted) with a warning that it is now untracked, and the manifest tracks only `page.html`.
+  7. (PM ruling 2) Single-doc rename: the same two cases through `doc pull <folder>/page` (single-doc fallback) — unmodified leaves no stale `page.md` twin; modified refuses.
 - [ ] **Step 2: Run and see them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull.test.ts`
 Expected: FAIL on the new cases.
@@ -270,6 +294,7 @@ Expected: FAIL on the new cases.
   - Before planning, for every fetched doc with `docTypeKnown === false`, call `callDocsTool(config, { action: 'read_doc', id })` and take `data.doc_type?.slug ?? null` (an error → keep `null`, add a warning `warn: could not read the type of doc <id> (<title>); writing it as .md`).
   - Single-doc fallback: set `docType` from `data.doc_type?.slug ?? null`, `docTypeKnown: true`.
   - `planDocs`: for non-media docs, `const ext = doc.docType === 'visual' ? '.html' : doc.docType === 'canvas' ? '.canvas.json' : '.md';` (media keeps its existing extension logic). Pass `ext` to `allocateName` as today.
+  - **Renames (PM ruling 2)**, in `report`, before the existing unpushed-changes check: for every planned doc whose id the previous manifest tracks under a DIFFERENT path `old`, with a file at `old`: if `old` is modified (its bytes' sha256 ≠ the entry's `body_sha256`) and not `--overwrite`, collect it; after the loop, if any were collected, refuse (exit 1, before any write) with, per file, `<old> is now written as <new> (doc <id> changed type); rename <old> to <new> and push it first, or pass --overwrite.` After `commitDocs`, remove each unmodified `old` file (same containment and identity safeguards the deletion loop uses), and with `--overwrite` keep each modified one and warn `! kept <old> — doc <id> is now <new>; <old> is untracked`. Exclude every `old` path handled here from the deletion-propagation loop and its "deleted remotely" messages. This runs for folder pulls and single-doc pulls alike.
   - Update the file's header comment and the kept-modified hint wording if it names `.md` only.
 - [ ] **Step 4: Run and see them pass.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull.test.ts tests/doc-push.test.ts tests/docs-manifest.test.ts`
@@ -300,6 +325,8 @@ Read spec §5 "Push records the docs it creates". Task 5 changed `doc-pull.ts` a
   3. `--folder other` while the manifest's `folder_path` is `notes` → nothing recorded, and stderr says the created docs were not recorded because they went to `other`, not `notes`.
   4. A `skipped` row and an `error` row are not recorded; a `renamed` row is recorded under the local file's path with the row's (new) title.
   5. `--dry-run` writes no manifest.
+  5b. (PM ruling 5) A single-file push (`doc push <dir>/page.html`) into a directory with no manifest creates no manifest; the same push into a directory that has one records the entry.
+  5c. (PM ruling 5) A `renamed` row prints `<file>: created as "<title>" (the original title was taken); the next doc pull will name the local file after "<title>"`.
   6. The skip hint for a skipped visual/canvas row still prints.
 - [ ] **Step 2: Run and see them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-push.test.ts`
@@ -309,7 +336,10 @@ Expected: FAIL on the new cases.
 ```ts
     // cli#157: record what this push created, so the next push updates it instead of skipping it.
     // Only when the docs landed in the manifest's own folder tree.
-    const recordable = !options.dryRun && (manifest === null || options.folder === undefined || options.folder === manifest.folder_path);
+    // PM ruling 5: a single-file push records only into a manifest its directory already has.
+    const recordable = !options.dryRun
+        && (manifest !== null || !singleFile)
+        && (manifest === null || options.folder === undefined || options.folder === manifest.folder_path);
     if (!options.dryRun && !recordable && allResultRows.some((r) => ['created', 'renamed', 'overwritten'].includes(r.status))) {
         process.stderr.write(chalk.yellow(`created docs were not recorded in ${DOCS_MANIFEST}: they went to "${options.folder}", not "${manifest!.folder_path}"\n`));
     }
@@ -320,6 +350,9 @@ Expected: FAIL on the new cases.
             if (!['created', 'renamed', 'overwritten'].includes(row.status) || row.id === undefined) continue;
             const relPath = row.file.split(path.sep).join('/');
             const bytes = fs.readFileSync(path.join(absDir, ...relPath.split('/')));
+            if (row.status === 'renamed' && row.title) {
+                process.stderr.write(chalk.yellow(`${relPath}: created as "${row.title}" (the original title was taken); the next doc pull will name the local file after "${row.title}"\n`));
+            }
             target.docs[relPath] = {
                 id: Number(row.id),
                 title: row.title ?? path.basename(relPath),
