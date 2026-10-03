@@ -13,7 +13,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 
 export interface ProjectCreateOptions {
@@ -57,7 +57,7 @@ export async function projectCreateWithConfig(
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else {
                 console.error(chalk.red('Failed to create project:'), error.response.data?.message || error.message);
             }

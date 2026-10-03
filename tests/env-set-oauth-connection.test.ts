@@ -100,8 +100,12 @@ describe('env set --oauth-connection', () => {
         // env set is a mutating command — requireConfigWithWorkspace() always announces
         // the resolved workspace on stderr, first, even on success (#1437).
         expect(result.stderr).toBe(`Workspace: workspace-1 (workspace-1) on http://127.0.0.1:${port}\n`);
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/mail-worker-dev',
+        });
+        expect(requests[1]).toMatchObject({
             method: 'POST',
             url: '/api/v1/projects/mail-worker-dev/variable-mappings',
             body: {
@@ -109,8 +113,8 @@ describe('env set --oauth-connection', () => {
                 oauth_connection_name: 'Primary Gmail',
             },
         });
-        expect(requests[0].headers.authorization).toBe('Bearer test-key');
-        expect(requests[0].headers['x-workspace-id']).toBe('workspace-1');
+        expect(requests[1].headers.authorization).toBe('Bearer test-key');
+        expect(requests[1].headers['x-workspace-id']).toBe('workspace-1');
         expect(result.stdout).toContain('GMAIL_TOKEN');
         expect(result.stdout).toContain('Primary Gmail');
     });
@@ -140,7 +144,9 @@ describe('env set --oauth-connection', () => {
         expect(staging.status).toBe(0);
         expect(production.status).toBe(0);
         expect(requests.map((request) => request.url)).toEqual([
+            '/api/v1/projects/mail-worker-staging',
             '/api/v1/projects/mail-worker-staging/variable-mappings',
+            '/api/v1/projects/mail-worker',
             '/api/v1/projects/mail-worker/variable-mappings',
         ]);
     });

@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { isReservedEnvName, reservedEnvNameError } from '../utils/env';
 
 export async function envMap(projectName: string, projectKey: string, globalKey: string, options: { yes?: boolean } = {}) {
@@ -15,6 +16,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
     console.log(chalk.blue(`Mapping global variable "${globalKey}" to project key "${projectKey}" in "${projectName}"...`));
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName);
         // First, get the global variable ID by key
         const varsResponse = await axios.get(`${config.host}/api/v1/variables`, {
             headers: getApiHeaders(config),
@@ -32,7 +34,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
         // Check if project key already has a mapping
         if (!options.yes) {
             const mappingsResponse = await axios.get(
-                `${config.host}/api/v1/projects/${projectName}/variable-mappings`,
+                `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,
                 { headers: getApiHeaders(config) }
             );
             const mappings = mappingsResponse.data || [];
@@ -57,7 +59,7 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
         }
 
         // Create the mapping
-        await axios.post(`${config.host}/api/v1/projects/${projectName}/variable-mappings`, {
+        await axios.post(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
             project_key: projectKey,
             global_variable_id: globalVar.id,
         }, {
@@ -69,13 +71,13 @@ export async function envMap(projectName: string, projectKey: string, globalKey:
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {
-                console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
+                console.error(chalk.red('Validation error:'), formatValidationError(error.response.data));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

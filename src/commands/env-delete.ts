@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 export async function envDelete(keyOrProject: string, keyIfProject?: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -11,12 +12,12 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
     const projectName = isProjectMode ? keyOrProject : undefined;
     const key = isProjectMode ? keyIfProject : keyOrProject;
     const environment = options.env ?? 'dev';
-    const projectSlug = projectName && environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     try {
         if (isProjectMode) {
             // Delete project variable
             console.log(chalk.blue(`Deleting variable "${key}" from project "${projectName}" (${environment})...`));
+            const projectSlug = await resolveProjectSlug(config, projectName!, environment);
 
             // First, get the variable to find its ID
             const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
@@ -100,16 +101,21 @@ export async function envDelete(keyOrProject: string, keyIfProject?: string, opt
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 if (isProjectMode) {
-                    const envsList = await describeProjectEnvironments(config, projectName!);
-                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
+                    const family = await lookupProjectFamilyEnvironments(config, projectName!);
+                    const envs = family?.environments ?? [];
+                    if (envs.length > 0 && !envs.includes(environment)) {
+                        console.error(chalk.red(`Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}).`));
+                    } else {
+                        console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                    }
                 } else {
                     console.error(chalk.red(`Variable "${key}" not found.`));
                 }
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

@@ -1,15 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import axios, { type AxiosResponse } from 'axios';
+import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
+import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
 import {
@@ -472,25 +473,12 @@ export async function handlePlanLimitReached(
     try {
         return await createEnvironmentProject(config, projectName, 'production');
     } catch (prodError: any) {
-        console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
-        process.exit(1);
-    }
-}
-
-/**
- * GET a project by the name as typed, then — on a 404 only — by its canonical slug when
- * that differs (cli#102). The server stores `Issue970-QX` as `issue970-qx`; without the
- * retry a redeploy 404s, tries to create, and collides with the slug that already exists.
- * The typed spelling goes first so a legacy slug the slugifier would rewrite still resolves.
- */
-export async function getProjectBySlugOrCanonical(config: Config, typed: string, canonical: string): Promise<AxiosResponse> {
-    try {
-        return await axios.get(`${config.host}/api/v1/projects/${typed}`, { headers: getApiHeaders(config) });
-    } catch (error: any) {
-        if (error.response?.status !== 404 || canonical === '' || canonical === typed) {
-            throw error;
+        if (prodError.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else {
+            console.error(chalk.red('Failed to create project:'), prodError.response?.data?.message || prodError.message);
         }
-        return axios.get(`${config.host}/api/v1/projects/${canonical}`, { headers: getApiHeaders(config) });
+        process.exit(1);
     }
 }
 
@@ -545,8 +533,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             productionExists = false;
             // Project doesn't exist yet — this is the normal first-deploy path.
             // Do NOT print a warning here; the deploy proceeds to create/deploy successfully.
+        } else if (error.response?.status === 401) {
+            // The key is rejected before the deploy even starts: name the host
+            // that refused it like every other command's 401.
+            console.error(chalk.red(authFailedLine(config.host)));
+            process.exit(1);
         } else {
-            // 5xx, network error, auth failure, etc. — fail conservatively rather
+            // 5xx, network error, etc. — fail conservatively rather
             // than treating the project as non-existent and potentially creating it.
             console.error(chalk.red('Failed to check project existence:'), error.response?.data?.message || error.message);
             process.exit(1);
@@ -651,11 +644,17 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     environment = 'production';
                     envLabel = '';
                     console.log(chalk.blue(`Deploying to project "${projectName}" (production) instead.`));
+                } else if (createError.response?.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
+                    process.exit(1);
                 } else {
                     console.error(chalk.red('Failed to create project:'), createError.response?.data?.message || createError.message);
                     process.exit(1);
                 }
             }
+        } else if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+            process.exit(1);
         } else {
             console.error(chalk.red('Failed to check project:'), error.response?.data?.message || error.message);
             process.exit(1);
@@ -672,7 +671,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         try {
             await pushYamlDeclarations(config, projectSlug, yamlConfig);
         } catch (error: any) {
-            console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+            if (error.response?.status === 401) {
+                console.error(chalk.red(authFailedLine(config.host)));
+            } else {
+                console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+            }
             process.exit(1);
         }
         console.log(chalk.green(`✓ Config synced for ${projectSlug}${envLabel}`));
@@ -826,7 +829,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             try {
                                 await pushYamlDeclarations(config, projectSlug, yamlConfig);
                             } catch (error: any) {
-                                console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                                if (error.response?.status === 401) {
+                                    console.error(chalk.red(authFailedLine(config.host)));
+                                } else {
+                                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                                }
                                 cleanupArchive();
                                 process.exit(1);
                             }
@@ -835,7 +842,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
                             const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
                             console.log('');
-                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${projectName}${envFlag}\` to retrieve the generated secret.`));
+                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
                             console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                         }
 
@@ -879,8 +886,10 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             if (error.response) {
                 if (error.response.status === 404) {
                     console.error("Project not found.");
+                } else if (error.response.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else {
-                    console.error(error.response.status, JSON.stringify(error.response.data, null, 2));
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(error.message);

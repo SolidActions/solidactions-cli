@@ -12,6 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildCommandManifest } from '../src/utils/command-manifest';
+import { slugifyName } from '../src/utils/slug';
 import { workflowEffectiveState } from '../src/utils/workflow-state';
 import { writeGlobal } from './helpers';
 
@@ -55,6 +56,15 @@ beforeAll(async () => {
         let rawBody = '';
         request.on('data', (chunk) => { rawBody += chunk; });
         request.on('end', () => {
+            // The shared project resolver's bare `GET /projects/<slug>` is answered
+            // with the canonical slug and is not one of the command's own requests,
+            // so it neither consumes a queued response nor shows up in `requests`.
+            if (/^\/api\/v1\/projects\/[^/?]+$/.test(request.url ?? '')) {
+                const typed = decodeURIComponent((request.url ?? '').split('/').pop() ?? '');
+                response.writeHead(200, { 'Content-Type': 'application/json' });
+                response.end(JSON.stringify({ slug: slugifyName(typed) }));
+                return;
+            }
             requests.push({
                 method: request.method,
                 url: request.url,
@@ -343,7 +353,7 @@ describe('workflow view failures', () => {
 
         expect(result.status).toBe(1);
         expect(result.stdout).toBe('');
-        expect(result.stderr).toContain('Authentication failed. Run "solidactions login --global" to re-configure.');
+        expect(result.stderr).toMatch(/Authentication failed against http:\/\/127\.0\.0\.1:\d+\. Run "solidactions login --global" to re-configure\./);
     });
 
     it('prints safe ambiguity candidates and tells the operator to retry with a slug', async () => {

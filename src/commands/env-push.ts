@@ -3,7 +3,8 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { SolidActionsConfig, parseEnvFile, getYamlDeclaredVars, loadSolidActionsConfig, isReservedEnvName, RESERVED_ENV_PREFIX } from '../utils/env';
 
 interface EnvPushOptions {
@@ -96,23 +97,20 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         process.exit(1);
     }
 
-    // Build project slug
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
-
     console.log(chalk.blue(`Pushing variables to "${projectName}" (${environment})...`));
 
     // Fetch current server state
     let serverMappings: any[] = [];
+    let projectSlug = '';
     try {
+        projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
             headers: getApiHeaders(config),
         });
         serverMappings = response.data || [];
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(config.host)));
             process.exit(1);
         } else if (error.response?.status === 404) {
             console.error(chalk.red(`Project "${projectSlug}" not found.`));
@@ -240,7 +238,11 @@ export async function envPush(projectName: string, sourcePath: string, options: 
         console.log(chalk.green(`\n✓ Pushed ${toPush.length} variable(s) to ${projectSlug}`));
         console.log(chalk.gray(`  ${created} created, ${updated} updated` + (toSkip.length > 0 ? `, ${toSkip.length} skipped` : '')));
     } catch (error: any) {
-        console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
+        if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else {
+            console.error(chalk.red('Failed to push variables:'), error.response?.data?.message || error.message);
+        }
         process.exit(1);
     }
 }

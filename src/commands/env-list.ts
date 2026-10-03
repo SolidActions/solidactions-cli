@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { renderTable } from '../utils/table';
 
 interface EnvListOptions {
@@ -36,9 +37,7 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     try {
         if (projectName) {
             // List project variable mappings
-            const projectSlug = environment === 'production'
-                ? projectName
-                : `${projectName}-${environment}`;
+            const projectSlug = await resolveProjectSlug(config, projectName, environment);
 
             const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings`, {
                 headers: getApiHeaders(config),
@@ -237,13 +236,18 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red(`Authentication failed against ${config.host}. Run "solidactions login --global" to re-configure.`));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 if (projectName) {
-                    const envsList = await describeProjectEnvironments(config, projectName);
-                    console.error(chalk.red(`Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`));
+                    const family = await lookupProjectFamilyEnvironments(config, projectName);
+                    const envs = family?.environments ?? [];
+                    if (envs.length > 0 && !envs.includes(environment)) {
+                        console.error(chalk.red(`Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}).`));
+                    } else {
+                        console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                    }
                 } else {
-                    console.error(chalk.red('Resource not found.'));
+                    console.error(chalk.red(formatApiFailure(404, error.response.data)));
                 }
             } else {
                 console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));

@@ -3,7 +3,7 @@ import * as path from 'path';
 import axios from 'axios';
 import FormData from 'form-data';
 import chalk from 'chalk';
-import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 
 export interface DocUploadOptions {
@@ -49,7 +49,9 @@ async function resolveReplaceTarget(config: Config, replace: string): Promise<nu
     } catch (error: any) {
         const status = error.response?.status;
         const code = error.response?.data?.code;
-        if (status === 422 && code === 'folder_path_not_found') {
+        if (status === 401) {
+            console.error(chalk.red(`✗ ${authFailedLine(config.host)}`));
+        } else if (status === 422 && code === 'folder_path_not_found') {
             console.error(chalk.red(`✗ no folder "${folderPath}" in this workspace`));
         } else if (status === 404) {
             console.error(chalk.red(`✗ no doc titled "${title}"${folderPath ? ` in "${folderPath}"` : ' at the docs root'}`));
@@ -134,7 +136,7 @@ export async function docUpload(files: string[], options: DocUploadOptions = {})
                 if (status === 413) {
                     console.error(chalk.red(`✗ ${displayName} — ${data?.message || 'File exceeds the maximum upload size (20MB).'}`));
                 } else if (status === 401) {
-                    console.error(chalk.red(`✗ ${displayName} — Authentication failed. Run "solidactions login --global" to re-configure.`));
+                    console.error(chalk.red(`✗ ${displayName} — ${authFailedLine(config.host)}`));
                 } else if (status === 404 && data?.code === 'media_not_found') {
                     console.error(chalk.red(`✗ ${displayName} — doc ${replaceDocId} is not a media doc`));
                 } else if (status === 422) {

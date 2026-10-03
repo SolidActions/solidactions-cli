@@ -119,6 +119,11 @@ describe('env reset', () => {
         expect(requests).toEqual([
             expect.objectContaining({
                 method: 'GET',
+                url: '/api/v1/projects/mail-worker-dev',
+                body: null,
+            }),
+            expect.objectContaining({
+                method: 'GET',
                 url: '/api/v1/projects/mail-worker-dev/variable-mappings',
                 body: null,
             }),
@@ -156,8 +161,10 @@ describe('env reset', () => {
         expect(staging.status).toBe(0);
         expect(production.status).toBe(0);
         expect(requests.map((request) => request.url)).toEqual([
+            '/api/v1/projects/mail-worker-staging',
             '/api/v1/projects/mail-worker-staging/variable-mappings',
             '/api/v1/projects/mail-worker-staging/variable-mappings/17/reset',
+            '/api/v1/projects/mail-worker',
             '/api/v1/projects/mail-worker/variable-mappings',
             '/api/v1/projects/mail-worker/variable-mappings/17/reset',
         ]);
@@ -170,8 +177,12 @@ describe('env reset', () => {
         expect(result.stdout).toBe('');
         expect(result.stderr).toContain('MISSING_KEY');
         expect(result.stderr).toContain('no variable mapping');
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]).toMatchObject({
+            method: 'GET',
+            url: '/api/v1/projects/mail-worker-dev',
+        });
+        expect(requests[1]).toMatchObject({
             method: 'GET',
             url: '/api/v1/projects/mail-worker-dev/variable-mappings',
         });

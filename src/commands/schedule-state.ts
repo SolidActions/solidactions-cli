@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export interface ScheduleStateOptions {
     env?: string;
@@ -9,30 +10,21 @@ export interface ScheduleStateOptions {
 
 type ScheduleTarget = 'enable' | 'disable';
 
-function renderScheduleStateError(error: any, projectName: string, scheduleId: string): never {
+function renderScheduleStateError(error: any, projectName: string, scheduleId: string, host: string): never {
     if (error.response) {
         if (error.response.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(host)));
         } else if (error.response.status === 404) {
             console.error(chalk.red(error.response.data?.message ?? `Project "${projectName}" or schedule ${scheduleId} not found.`));
         } else if (error.response.status === 422) {
             console.error(chalk.red(error.response.data?.message ?? 'Validation error.'));
         } else {
-            console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data?.message ?? error.response.data);
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
         }
     } else {
         console.error(chalk.red('Connection failed:'), error.message);
     }
     process.exit(1);
-}
-
-function resolveProjectSlug(projectName: string, options: ScheduleStateOptions): string {
-    try {
-        return projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-    }
 }
 
 async function setScheduleTarget(
@@ -42,10 +34,12 @@ async function setScheduleTarget(
     options: ScheduleStateOptions = {},
 ): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    const projectSlug = resolveProjectSlug(projectName, options);
     const enabled = target === 'enable';
 
+    if (!isUsableProjectRef(projectName, options.env)) return;
+
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         await axios.patch(
             `${config.host}/api/v1/projects/${encodeURIComponent(projectSlug)}/schedules/${encodeURIComponent(scheduleId)}`,
             { enabled },
@@ -54,7 +48,7 @@ async function setScheduleTarget(
         console.log(chalk.green(`Schedule ${scheduleId} ${enabled ? 'enabled' : 'disabled'}.`));
         console.log(chalk.gray('This is a sticky override and survives redeploy until changed or reset.'));
     } catch (error: any) {
-        renderScheduleStateError(error, projectName, scheduleId);
+        renderScheduleStateError(error, projectName, scheduleId, config.host);
     }
 }
 
@@ -80,9 +74,11 @@ export async function scheduleReset(
     options: ScheduleStateOptions = {},
 ): Promise<void> {
     const config = await requireConfigWithWorkspace();
-    const projectSlug = resolveProjectSlug(projectName, options);
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         await axios.post(
             `${config.host}/api/v1/projects/${encodeURIComponent(projectSlug)}/schedules/${encodeURIComponent(scheduleId)}/reset`,
             {},
@@ -90,6 +86,6 @@ export async function scheduleReset(
         );
         console.log(chalk.green(`Schedule ${scheduleId} reset. YAML controls this schedule again.`));
     } catch (error: any) {
-        renderScheduleStateError(error, projectName, scheduleId);
+        renderScheduleStateError(error, projectName, scheduleId, config.host);
     }
 }

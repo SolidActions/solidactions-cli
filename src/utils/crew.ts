@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { Config } from './config';
-import { getApiHeaders } from './api';
+import { authFailedLine, getApiHeaders } from './api';
 import { callCrewsTool } from './mcp';
 
 export interface CrewRecord {
@@ -60,7 +60,11 @@ export async function resolveCrewId(config: Config, input: string): Promise<Crew
     try {
         crews = await fetchCrews(config);
     } catch (error: any) {
-        console.error(chalk.red('Failed to list crews:'), error.response?.data?.message || error.message);
+        if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else {
+            console.error(chalk.red('Failed to list crews:'), error.response?.data?.message || error.message);
+        }
         process.exit(1);
     }
 

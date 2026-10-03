@@ -1,10 +1,11 @@
 /**
  * solidactions doc pull <folder> [dest]
  *
- * Downloads a Docs folder tree from SA-Docs into a local markdown tree (the
+ * Downloads a Docs folder tree from SA-Docs into a local file tree (the
  * inverse of `doc push`): BFS-walks the folder via `docs_read` `list`,
  * bulk-fetches doc bodies via `docs_read` `bulk_read`, and writes each doc as
- * <dest>/<relative-folder>/<sanitized-title>.md plus a revision manifest
+ * <dest>/<relative-folder>/<sanitized-title>.md — visual docs as `.html` and
+ * canvases as `.canvas.json` — plus a revision manifest
  * (<dest>/.solidactions-docs.json) recording id/title/current_revision_id
  * per file for later diffing.
  *
@@ -83,6 +84,9 @@ interface DocRow {
     title: string;
     /** Relative folder path from the pull root, '' for the root itself, using '/' separators. */
     relative: string;
+    /** The list row's doc_type slug (null for untyped docs), plus whether the row carried the key. */
+    docType?: string | null;
+    docTypeKnown: boolean;
 }
 
 /** Row after bulk_read/read has filled in body + revision. */
@@ -206,7 +210,13 @@ async function listTree(config: Config, folderPath: string): Promise<{ ok: true;
             queue.push({ folder_path: folder.folder_path, relative: childRelative });
         }
         for (const doc of result.data?.docs ?? []) {
-            rows.push({ id: doc.id, title: doc.title, relative });
+            rows.push({
+                id: doc.id,
+                title: doc.title,
+                relative,
+                docType: doc.doc_type == null ? null : (doc.doc_type.slug ?? null),
+                docTypeKnown: Object.prototype.hasOwnProperty.call(doc, 'doc_type'),
+            });
         }
     }
 
@@ -274,6 +284,38 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
 }
 
 /**
+ * Fill in the doc type for fetched docs whose list row did not carry a
+ * `doc_type` key (cli#157): one `read_doc {id}` per unknown doc. A doc whose
+ * type still cannot be read keeps `null` (written as .md) with a warning.
+ */
+async function backfillDocTypes(config: Config, fetched: FetchedDoc[]): Promise<string[]> {
+    const warnings: string[] = [];
+    for (const doc of fetched) {
+        if (doc.docTypeKnown) continue;
+        let slug: string | null = null;
+        let readOk = false;
+        try {
+            const result = await callDocsTool(config, { action: 'read_doc', id: doc.id });
+            if (result.ok) {
+                readOk = true;
+                slug = result.data?.doc_type?.slug ?? null;
+            }
+        } catch {
+            readOk = false;
+        }
+        // A successful read that simply reports no type (doc_type: null) is a
+        // valid untyped doc, not a failure — warn only when the type could
+        // not be read at all.
+        if (!readOk) {
+            warnings.push(`warn: could not read the type of doc ${doc.id} (${doc.title}); writing it as .md`);
+        }
+        doc.docType = slug;
+        doc.docTypeKnown = true;
+    }
+    return warnings;
+}
+
+/**
  * A fetched doc resolved to its final on-disk path (including per-directory
  * collision suffixes), with media confirmed/downloaded and its content hash
  * computed. No filesystem writes happen while building this — see
@@ -307,7 +349,8 @@ export interface SingleDocReserved {
 function allocateName(used: Set<string>, base: string, ext: string): string {
     let candidate = base;
     let suffix = 2;
-    while (used.has(`${candidate}${ext}`)) {
+    const usedFolded = new Set([...used].map((name) => name.toLowerCase()));
+    while (usedFolded.has(`${candidate}${ext}`.toLowerCase())) {
         candidate = `${base}-${suffix}`;
         suffix++;
     }
@@ -341,9 +384,11 @@ function isCollisionVariant(file: string, base: string, ext: string): boolean {
  * name still forces a suffix. When the tracked title is unchanged and the
  * tracked path is a collision variant of that title in the same folder,
  * the doc keeps that exact path (R2-I2); a renamed/stale path still
- * reallocates. Folder pulls pass nothing and behave exactly as before.
+ * reallocates. Folder pulls reserve only paths whose title, directory and
+ * extension stay unchanged, keeping their exact spelling regardless of list
+ * order without reserving the old names of docs that move away.
  */
-async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved, previousManifest?: DocsManifest | null): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
@@ -353,27 +398,17 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
         }
     }
 
+    const pathById = reserved?.pathById ?? new Map<number, string>();
+    const titleById = reserved?.titleById ?? new Map<number, string>();
+    if (!reserved && previousManifest) {
+        for (const [rel, entry] of Object.entries(previousManifest.docs)) {
+            if (pathById.has(entry.id)) continue;
+            pathById.set(entry.id, rel);
+            titleById.set(entry.id, entry.title);
+        }
+    }
+    const prepared: Array<{ doc: FetchedDoc; media: MediaResolution; base: string; ext: string; bodySha256: string | null; mediaBytes: Buffer | null }> = [];
     for (const doc of docs) {
-        const dirRel = doc.relative;
-
-        let used = usedNamesByDir.get(dirRel);
-        if (!used) {
-            used = new Set();
-            usedNamesByDir.set(dirRel, used);
-        }
-
-        // The pulled doc keeps its own tracked name: free it in its own
-        // directory so allocation below can hand it back. Names other ids
-        // own stay reserved.
-        const ownRelPath = reserved?.pathById.get(doc.id);
-        if (ownRelPath !== undefined) {
-            const slash = ownRelPath.lastIndexOf('/');
-            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
-            if (ownDir === dirRel) {
-                used.delete(slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1));
-            }
-        }
-
         const media = isMediaCandidate(doc) ? await resolveMedia(config, doc) : { isMedia: false as const };
         if (media.warning) warnings.push(media.warning);
 
@@ -389,32 +424,10 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
                 base = sanitized;
                 ext = (media.mime && MIME_EXTENSIONS[media.mime]) ?? '';
             }
-        }
-
-        // Unchanged title keeps its existing collision-assigned path (R2-I2):
-        // the tracked path must be in this same folder and be the base name
-        // or a `-N` collision variant of it. A stale/renamed path (e.g. the
-        // `renamed.md` merge fixture) falls through to reallocation below.
-        const ownTitle = reserved?.titleById.get(doc.id);
-        let fileName: string;
-        let relPath: string;
-        if (ownRelPath !== undefined && ownTitle !== undefined && ownTitle === doc.title) {
-            const slash = ownRelPath.lastIndexOf('/');
-            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
-            const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
-            if (ownDir === dirRel && isCollisionVariant(ownFile, base, ext)) {
-                fileName = ownFile;
-                relPath = ownRelPath;
-                used.add(ownFile);
-            } else {
-                const allocated = allocateName(used, base, ext);
-                fileName = allocated;
-                relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
-            }
-        } else {
-            const allocated = allocateName(used, base, ext);
-            fileName = allocated;
-            relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
+        } else if (doc.docType === 'visual') {
+            ext = '.html';
+        } else if (doc.docType === 'canvas') {
+            ext = '.canvas.json';
         }
 
         let bodySha256: string | null;
@@ -433,6 +446,40 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
             bodySha256 = sha256Hex(doc.body);
         }
 
+        prepared.push({ doc, media, base, ext, bodySha256, mediaBytes });
+    }
+
+    const stablePath = (doc: FetchedDoc, base: string, ext: string): string | undefined => {
+        const ownRelPath = pathById.get(doc.id);
+        if (ownRelPath === undefined || titleById.get(doc.id) !== doc.title) return undefined;
+        const slash = ownRelPath.lastIndexOf('/');
+        const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+        const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
+        return ownDir === doc.relative && isCollisionVariant(ownFile, base, ext) ? ownRelPath : undefined;
+    };
+    if (!reserved) {
+        for (const { doc, base, ext } of prepared) {
+            const rel = stablePath(doc, base, ext);
+            if (rel === undefined) continue;
+            const used = usedNamesByDir.get(doc.relative) ?? new Set<string>();
+            used.add(path.posix.basename(rel));
+            usedNamesByDir.set(doc.relative, used);
+        }
+    }
+    for (const { doc, media, base, ext, bodySha256, mediaBytes } of prepared) {
+        const dirRel = doc.relative;
+        const used = usedNamesByDir.get(dirRel) ?? new Set<string>();
+        usedNamesByDir.set(dirRel, used);
+        const ownRelPath = pathById.get(doc.id);
+        if (reserved && ownRelPath !== undefined && path.posix.dirname(ownRelPath) === (dirRel || '.')) {
+            // Exact ownership matters: freeing Page.md must not free page.md
+            // when another tracked doc owns that differently cased name.
+            used.delete(path.posix.basename(ownRelPath));
+        }
+        const keptPath = stablePath(doc, base, ext);
+        const fileName = keptPath === undefined ? allocateName(used, base, ext) : path.posix.basename(keptPath);
+        const relPath = keptPath ?? (dirRel ? `${dirRel}/${fileName}` : fileName);
+        used.add(fileName);
         planned.push({ doc, relPath, dirRel, fileName, isMedia: media.isMedia, mediaBytes, bodySha256 });
     }
 
@@ -442,9 +489,10 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
 /**
  * Write every planned doc to disk under `destination` and build the
  * manifest docs map. The only step in the whole pull that creates
- * directories or writes/overwrites files — called only after any
- * unpushed-local-changes conflict has already refused, so it never clobbers
- * a file the caller decided to keep.
+ * directories or writes/overwrites files — called only after every refusal
+ * (unpushed local changes, rename conflicts, a target that is not a regular
+ * file) has had its chance, so it never stops half-way or clobbers a file
+ * the caller decided to keep.
  */
 function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
     const manifestDocs: DocsManifest['docs'] = {};
@@ -453,15 +501,7 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
     for (const p of planned) {
         const dirAbs = p.dirRel ? path.join(destination, ...p.dirRel.split('/')) : destination;
         fs.mkdirSync(dirAbs, { recursive: true });
-
-        // A destination path that already exists as a directory would make writeFileSync
-        // throw EISDIR mid-walk, after earlier docs were written and before the manifest
-        // is saved — a half-pulled tree with a stale sidecar. Fail cleanly instead.
         const targetAbs = path.join(dirAbs, p.fileName);
-        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
-            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
-            process.exit(1);
-        }
 
         if (p.isMedia) {
             if (p.mediaBytes) {
@@ -580,6 +620,8 @@ export async function docPullWithConfig(
             id: data.id,
             title: data.title,
             relative: '',
+            docType: data.doc_type?.slug ?? null,
+            docTypeKnown: true,
             body: data.body ?? '',
             current_revision_id: data.current_revision_id ?? null,
             properties: data.properties ?? {},
@@ -599,7 +641,72 @@ export async function docPullWithConfig(
     }
 
     const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
-    await report(destination, folderPath, fetched, options, config, fetchWarnings, previousManifest, usedSingleDocFallback);
+    const typeWarnings = await backfillDocTypes(config, fetched);
+    await report(destination, folderPath, fetched, options, config, [...fetchWarnings, ...typeWarnings], previousManifest, usedSingleDocFallback);
+}
+
+/**
+ * Safety guards shared by deletion propagation and rename cleanup (cli#157):
+ * lexical containment in the destination, a regular file, physical
+ * containment of the real parent directory (no symlink escape), and never a
+ * file this pull just wrote. The only code in the CLI that deletes files —
+ * never act on a path it did not create.
+ */
+function isSafeToRemoveTrackedFile(absPath: string, destPrefix: string, realDest: string, writtenIdentities: Set<string>): boolean {
+    // Containment: a hand-edited or corrupt manifest key such as "../../etc/passwd"
+    // would otherwise resolve outside the pull destination.
+    if (!absPath.startsWith(destPrefix)) return false;
+
+    // Only ever remove regular files. A directory here means a corrupt manifest;
+    // rmSync would throw mid-pull, leaving a half-deleted tree.
+    let stat: fs.Stats;
+    try {
+        stat = fs.statSync(absPath);
+    } catch {
+        return false;
+    }
+    if (!stat.isFile()) return false;
+
+    // Physical containment: the lexical check above only guards the string. If
+    // an intermediate path segment is a symlink to a directory OUTSIDE the
+    // destination, statSync/rmSync all follow it transparently.
+    let realParent: string;
+    try {
+        realParent = fs.realpathSync(path.dirname(absPath));
+    } catch {
+        return false;
+    }
+    if (realParent !== realDest && !realParent.startsWith(realDest + path.sep)) return false;
+
+    // Identity: never delete a file this pull just wrote.
+    if (writtenIdentities.has(`${stat.dev}:${stat.ino}`)) return false;
+
+    return true;
+}
+
+/** Resolve directory aliases even when a planned file or its parent does not exist yet. */
+function physicalTargetPath(absPath: string): string {
+    const missing: string[] = [];
+    let existing = absPath;
+    while (true) {
+        try {
+            return path.join(fs.realpathSync(existing), ...missing.reverse());
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            try {
+                if (fs.lstatSync(existing).isSymbolicLink()) {
+                    existing = path.resolve(path.dirname(existing), fs.readlinkSync(existing));
+                    continue;
+                }
+            } catch (linkError) {
+                if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
+            }
+            const parent = path.dirname(existing);
+            if (parent === existing) throw error;
+            missing.push(path.basename(existing));
+            existing = parent;
+        }
+    }
 }
 
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
@@ -637,7 +744,215 @@ async function report(
         }
         reserved = { usedNames, pathById, titleById };
     }
-    const { planned, warnings } = await planDocs(fetched, config, reserved);
+    const { planned, warnings } = await planDocs(fetched, config, reserved, previousManifest);
+
+    // Same doc id under a different path is a rename (PM ruling 2, cli#157):
+    // the previous manifest tracks a planned doc under a DIFFERENT path `old`,
+    // whatever is on disk at `old` (cli#157 FR4-C1). What is at `old` decides
+    // only what happens to `old`; the target checks below apply to every
+    // rename. Every rename ends one of three ways:
+    //   (a) `old` is removed only after its replacement is written (nothing to
+    //       remove when `old` holds no regular file);
+    //   (b) `old`'s tracking (and file, if any) is kept, the replacement is
+    //       not written;
+    //   (c) the pull refuses here, before any write.
+    // Never: bytes lost, an untracked file overwritten without --overwrite,
+    // or one doc's tracking attached to another doc's bytes.
+    interface RenameMove {
+        oldRel: string;
+        newRel: string;
+        id: number;
+        title: string;
+        /** `old` holds a regular file (following a symlink); absent, a directory or a dangling link is nothing to keep or remove. */
+        sourcePresent: boolean;
+        /** Device + inode of a present source, following filesystem aliases. */
+        sourceIdentity: string | null;
+        /** The present source's bytes differ from its recorded hash (or cannot be read). Always false without a source. */
+        modified: boolean;
+        replacementWritten: boolean;
+        /** `new` is the very file at `old` (a case-only rename on a case-insensitive filesystem). */
+        targetIsSource: boolean;
+    }
+    const renameMoves: RenameMove[] = [];
+    if (previousManifest) {
+        const pathById = new Map<number, string>();
+        for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
+            if (!pathById.has(entry.id)) pathById.set(entry.id, relPath);
+        }
+        for (const p of planned) {
+            const old = pathById.get(p.doc.id);
+            if (old === undefined || old === p.relPath) continue;
+            const absOld = path.join(destination, ...old.split('/'));
+            let sourceStat: fs.Stats | null = null;
+            try {
+                const stat = fs.statSync(absOld);
+                if (stat.isFile()) sourceStat = stat;
+            } catch {
+                sourceStat = null;
+            }
+            let modified = false;
+            let targetIsSource = false;
+            if (sourceStat !== null) {
+                const entry = previousManifest.docs[old];
+                let currentHash: string | null = null;
+                try {
+                    currentHash = sha256Hex(fs.readFileSync(absOld));
+                } catch {
+                    currentHash = null;
+                }
+                modified = currentHash === null || currentHash !== entry.body_sha256;
+                try {
+                    const targetStat = fs.statSync(path.join(destination, ...p.relPath.split('/')));
+                    targetIsSource = targetStat.dev === sourceStat.dev && targetStat.ino === sourceStat.ino;
+                } catch {
+                    targetIsSource = false;
+                }
+            }
+            renameMoves.push({
+                oldRel: old,
+                newRel: p.relPath,
+                id: p.doc.id,
+                title: p.doc.title,
+                sourcePresent: sourceStat !== null,
+                sourceIdentity: sourceStat === null ? null : `${sourceStat.dev}:${sourceStat.ino}`,
+                modified,
+                // A failed media download plans a new path but writes nothing there.
+                replacementWritten: !p.isMedia || p.mediaBytes !== null,
+                targetIsSource,
+            });
+        }
+        const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
+        const plannedByIdentity = new Map<string, PlannedDoc[]>();
+        const plannedByPhysicalPath = new Map<string, PlannedDoc[]>();
+        for (const p of planned) {
+            const physicalPath = physicalTargetPath(path.resolve(destination, ...p.relPath.split('/')));
+            const physicalTargets = plannedByPhysicalPath.get(physicalPath) ?? [];
+            physicalTargets.push(p);
+            plannedByPhysicalPath.set(physicalPath, physicalTargets);
+            try {
+                const stat = fs.statSync(path.join(destination, ...p.relPath.split('/')));
+                if (!stat.isFile()) continue;
+                const identity = `${stat.dev}:${stat.ino}`;
+                const targets = plannedByIdentity.get(identity) ?? [];
+                targets.push(p);
+                plannedByIdentity.set(identity, targets);
+            } catch {
+                // An absent target cannot alias a present source.
+                continue;
+            }
+        }
+        // Path claims matter even without a source (a failed download restores
+        // its old tracking). Present sources also need protection from writes
+        // through another name, hard link, symlink or directory component alias.
+        const plannedTargetForSource = (m: RenameMove): PlannedDoc | undefined =>
+            plannedPaths.get(m.oldRel)
+            ?? plannedByPhysicalPath.get(physicalTargetPath(path.resolve(destination, ...m.oldRel.split('/'))))?.find((p) => p.doc.id !== m.id)
+            ?? (m.sourceIdentity === null
+                ? undefined
+                : plannedByIdentity.get(m.sourceIdentity)?.find((p) => p.doc.id !== m.id));
+
+        // Edited sources cannot be discarded by --overwrite during a rename.
+        // Report a cross-doc collision first, including an alias's actual path.
+        for (const m of renameMoves) {
+            if (!m.modified) continue;
+            const taker = plannedTargetForSource(m);
+            if (!taker) continue;
+            const oldTitle = previousManifest.docs[m.oldRel]?.title ?? `#${m.id}`;
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${oldTitle}", now written as ${m.newRel}), but this pull would write doc ${taker.doc.id} ("${taker.doc.title}") to ${taker.relPath}, the same file.\n`));
+            process.stderr.write(chalk.red(`Move or rename the edited ${m.oldRel} (or push it first) and pull again.\n`));
+            process.exit(1);
+        }
+        // A rename whose replacement will not be written keeps its old file and
+        // tracking (b) — which is only possible while no other doc in this pull
+        // claims the old path. Otherwise refuse (cli#157 issuecomment-5962867475):
+        // no relocation or re-allocation of names.
+        for (const m of renameMoves) {
+            if (m.replacementWritten) continue;
+            const taker = plannedTargetForSource(m);
+            if (!taker) continue;
+            process.stderr.write(chalk.red(`error: doc ${m.id} ("${m.title}") failed to download to ${m.newRel}, so ${m.oldRel} must keep its previous file and tracking, but this pull would put doc ${taker.doc.id} ("${taker.doc.title}") at ${taker.relPath}, the same file.\n`));
+            process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
+            process.exit(1);
+        }
+        // An edited source whose replacement will not be written cannot move
+        // and must not lose its tracking: refuse, with or without --overwrite.
+        for (const m of renameMoves) {
+            if (m.replacementWritten || !m.modified) continue;
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, but its download failed.\n`));
+            process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside), then pull again once the download succeeds.\n`));
+            process.exit(1);
+        }
+        const blocked = renameMoves.filter((m) => m.modified);
+        if (blocked.length > 0) {
+            for (const m of blocked) {
+                process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${m.title}"), which is now written as ${m.newRel}.\n`));
+                process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside) and pull again.\n`));
+            }
+            process.exit(1);
+        }
+        // Two writes through different names of one file cannot both retain
+        // their own doc's bytes and hash. Refuse compositions involving a
+        // rename or legacy case-folded names that already alias one file.
+        // Other non-rename-only target handling is outside this rule.
+        // Physical paths cover absent targets under aliased directories, where
+        // there is no inode yet to compare.
+        const renamedIds = new Set(renameMoves.map((m) => m.id));
+        for (const targets of [...plannedByIdentity.values(), ...plannedByPhysicalPath.values()]) {
+            const writes = targets.filter((p) => !p.isMedia || p.mediaBytes !== null);
+            if (writes.length < 2) continue;
+            const foldedPaths = new Set(writes.map((p) => p.relPath.toLowerCase()));
+            if (!writes.some((p) => renamedIds.has(p.doc.id)) && foldedPaths.size === writes.length) continue;
+            const [first, second] = writes;
+            process.stderr.write(chalk.red(`error: ${first.relPath} (doc ${first.doc.id}) and ${second.relPath} (doc ${second.doc.id}) are the same file on this filesystem; this pull would write different docs through those names.\n`));
+            process.stderr.write(chalk.red('Nothing was written. Move the aliased files apart and pull again.\n'));
+            process.exit(1);
+        }
+        // A rename target that is a symbolic link would be written through, to
+        // a file this pull does not own (possibly outside the destination):
+        // refuse, with or without --overwrite.
+        for (const m of renameMoves) {
+            if (!m.replacementWritten) continue;
+            let isLink = false;
+            try {
+                isLink = fs.lstatSync(path.join(destination, ...m.newRel.split('/'))).isSymbolicLink();
+            } catch {
+                isLink = false;
+            }
+            if (!isLink) continue;
+            process.stderr.write(chalk.red(`error: ${m.newRel} is a symbolic link; this pull would write doc ${m.id} ("${m.title}", renamed from ${m.oldRel}) through it.\n`));
+            process.stderr.write(chalk.red(`Replace ${m.newRel} with a regular file (or remove it) and pull again.\n`));
+            process.exit(1);
+        }
+        // A rename target holding an untracked local file (not in the previous
+        // manifest) would be overwritten: refuse unless --overwrite, whatever
+        // the source's state. A file already holding exactly the bytes this
+        // pull writes loses nothing and is adopted. A target tracked by another
+        // doc with a recorded hash is protected by the unpushed-local-changes
+        // check below; one tracked without a hash cannot be verified there, so
+        // it is checked here like an untracked file. A target that is the
+        // source itself is governed by the source rules above.
+        if (!options.overwrite) {
+            for (const m of renameMoves) {
+                if (!m.replacementWritten || m.targetIsSource) continue;
+                const targetEntry = previousManifest.docs[m.newRel];
+                if (targetEntry !== undefined && targetEntry.body_sha256 != null) continue;
+                const absNew = path.join(destination, ...m.newRel.split('/'));
+                let existing: Buffer;
+                try {
+                    if (!fs.statSync(absNew).isFile()) continue;
+                    existing = fs.readFileSync(absNew);
+                } catch {
+                    continue;
+                }
+                if (sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
+                const state = targetEntry === undefined ? 'exists locally but is not tracked' : `holds local bytes with no recorded hash (tracked for doc ${targetEntry.id})`;
+                process.stderr.write(chalk.red(`error: ${m.newRel} ${state}; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
+                process.stderr.write(chalk.red(`Move ${m.newRel} aside and pull again, or pass --overwrite to replace it.\n`));
+                process.exit(1);
+            }
+        }
+    }
+    const handledOldPaths = new Set(renameMoves.map((m) => m.oldRel));
 
     // Unpushed-local-changes protection: now that the server walk is known, refuse only
     // for a file whose doc still exists remotely — i.e. its relative path is part of this
@@ -661,7 +976,20 @@ async function report(
         }
     }
 
+    // A destination path that already exists as a directory would make writeFileSync
+    // throw EISDIR mid-walk, after earlier docs were written and before the manifest
+    // is saved — a half-pulled tree with a stale sidecar. Refuse before any write.
+    for (const p of planned) {
+        const targetAbs = path.join(destination, ...p.relPath.split('/'));
+        if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
+            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
+            process.exit(1);
+        }
+    }
+
     fs.mkdirSync(destination, { recursive: true });
+    const destPrefix = path.resolve(destination) + path.sep;
+    const realDest = fs.realpathSync(destination);
     const { manifestDocs, files } = commitDocs(destination, planned);
 
     // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
@@ -673,6 +1001,40 @@ async function report(
         try {
             const stat = fs.statSync(path.join(destination, ...file.path.split('/')));
             writtenIdentities.add(`${stat.dev}:${stat.ino}`);
+        } catch {
+            continue;
+        }
+    }
+
+    // Rename cleanup (PM ruling 2, cli#157): each unmodified old twin is gone
+    // now that the new file is written — but never one this pull just wrote
+    // for another doc (e.g. a new markdown doc that now takes `page.md`).
+    // Edited sources were all refused before any write, even with --overwrite.
+    // A twin whose replacement was NOT written (a failed media download plans
+    // a new path but writes nothing) keeps its old file and its old manifest
+    // entry — deleting it would destroy the only good copy. Without an old
+    // file the old entry is still kept, so the doc is not tracked (with no
+    // hash) at a new path that may hold an untracked file. The refusals above
+    // guarantee no other doc in this pull claims that old path.
+    for (const m of renameMoves) {
+        if (!m.replacementWritten) {
+            delete manifestDocs[m.newRel];
+            const oldEntry = previousManifest?.docs[m.oldRel];
+            if (oldEntry !== undefined) {
+                manifestDocs[m.oldRel] = oldEntry;
+            }
+            if (m.sourcePresent) {
+                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} download failed; still tracked as ${m.oldRel}\n`));
+            } else {
+                process.stderr.write(chalk.yellow(`! doc ${m.id} download failed; still tracked as ${m.oldRel}, which is not present locally\n`));
+            }
+            continue;
+        }
+        if (!m.sourcePresent) continue;
+        const absOld = path.resolve(destination, ...m.oldRel.split('/'));
+        if (!isSafeToRemoveTrackedFile(absOld, destPrefix, realDest, writtenIdentities)) continue;
+        try {
+            fs.rmSync(absOld);
         } catch {
             continue;
         }
@@ -716,45 +1078,20 @@ async function report(
     const keptModifiedMedia = new Set<string>();
 
     if (canPropagateDeletions) {
-        const destPrefix = path.resolve(destination) + path.sep;
-        const realDest = fs.realpathSync(destination);
-
         for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
             if (manifestDocs[relPath]) continue;
+            // Rename cleanup (cli#157) already handled this path: never a
+            // "deleted remotely" orphan warning for it.
+            if (handledOldPaths.has(relPath)) continue;
 
             const absPath = path.resolve(destination, ...relPath.split('/'));
 
-            // Containment: a hand-edited or corrupt manifest key such as "../../etc/passwd"
-            // would otherwise resolve outside the pull destination. `doc pull` never writes
-            // such a key (titles are sanitized), but this loop is the only code in the CLI
-            // that deletes files — never let it act on a path it did not create.
-            if (!absPath.startsWith(destPrefix)) continue;
-
-            // Only ever remove regular files. A directory here means a corrupt manifest;
-            // rmSync would throw mid-pull, leaving a half-deleted tree.
-            //
             // The whole entry is guarded: the new manifest is already on disk by now, so an
             // uncaught throw would abort the report, silently skip every later orphan, and
             // print a raw stack trace instead of this command's normal error format. One bad
             // entry must cost only that entry.
             try {
-                const stat = fs.statSync(absPath);
-                if (!stat.isFile()) continue;
-
-                // Physical containment: the lexical check above only guards the string. If
-                // an intermediate path segment (e.g. "sub" in "sub/x.png") is a symlink to a
-                // directory OUTSIDE the destination, statSync/readFileSync/rmSync all follow
-                // it transparently. Resolve the real parent directory and require it to
-                // physically live under the real destination before ever touching the file.
-                const realParent = fs.realpathSync(path.dirname(absPath));
-                if (realParent !== realDest && !realParent.startsWith(realDest + path.sep)) continue;
-
-                // Identity: never delete a file this pull just wrote. A case-only title
-                // rename on a case-insensitive filesystem (or a hand-edited manifest with a
-                // hardlinked entry) can make an "orphan" key resolve to the very file the
-                // new manifest just wrote under a different key — bytes trivially match.
-                const identity = `${stat.dev}:${stat.ino}`;
-                if (writtenIdentities.has(identity)) continue;
+                if (!isSafeToRemoveTrackedFile(absPath, destPrefix, realDest, writtenIdentities)) continue;
 
                 const currentHash = sha256Hex(fs.readFileSync(absPath));
                 if (entry.body_sha256 != null && entry.body_sha256 === currentHash) {

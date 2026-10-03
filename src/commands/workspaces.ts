@@ -1,11 +1,12 @@
 import chalk from 'chalk';
-import { requireConfig, requireResolvedConfig } from '../utils/api';
+import { authFailedLine, formatApiFailure, requireResolvedConfig } from '../utils/api';
 import { writeWorkspaceToFile } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
 import { fetchWorkspaces, formatWorkspaceWithOrg, groupWorkspacesByOrg, resolveWorkspaceInput, WorkspaceLookupRecord } from '../utils/workspace-lookup';
 
 export async function workspacesList() {
-    const config = requireConfig();
+    const resolved = requireResolvedConfig();
+    const config = resolved.config;
 
     // Grouping keys are tenant ids (app#1214), so the org header and the
     // same-name disambiguation both come from per-row tenant data, never
@@ -14,7 +15,13 @@ export async function workspacesList() {
     try {
         ({ workspaces } = await fetchWorkspaces(config));
     } catch (error: any) {
-        console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
+        if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else if (error.response) {
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
+        } else {
+            console.error(chalk.red('Connection failed:'), error.message);
+        }
         process.exit(1);
     }
 
@@ -22,6 +29,7 @@ export async function workspacesList() {
 
     if (workspaces.length === 0) {
         console.log(chalk.yellow('No workspaces found.'));
+        warnDanglingPin(config.workspace, config.workspaceId, resolved.sources.workspaceId, true);
         return;
     }
 
@@ -36,7 +44,51 @@ export async function workspacesList() {
             console.log(chalk.gray(`      ID: ${ws.id}`));
         }
     }
+
+    // cli#113: a pin the list doesn't contain gets no "← current" — say so instead of looking normal.
+    if (config.workspaceId && !workspaces.some((ws) => ws.id === config.workspaceId)) {
+        warnDanglingPin(config.workspace, config.workspaceId, resolved.sources.workspaceId, false);
+    }
     console.log('');
+}
+
+/**
+ * Warn about a pinned workspace the server's list does not contain (cli#113).
+ * Runs against an empty list too: losing access to every workspace is exactly
+ * the lost-access case, so the pin is evaluated rather than skipped. With
+ * nothing listed there is nothing to pick from, so the remedy says how to
+ * clear or change the pin instead of pointing at the list.
+ */
+function warnDanglingPin(
+    workspace: string | undefined,
+    workspaceId: string | undefined,
+    workspaceIdSource: unknown,
+    emptyList: boolean,
+): void {
+    if (!workspaceId) return;
+    const label = workspace ? `${workspace} (${workspaceId})` : workspaceId;
+    const from = workspaceIdSource === 'env'
+        ? '$SOLIDACTIONS_WORKSPACE_ID'
+        : workspaceIdSource === 'cli'
+            ? 'the -w/--workspace-override flag'
+            : workspaceIdSource;
+    console.log('');
+    console.log(chalk.yellow(`warn: the active workspace ${label} (from ${from}) is not in this list — it may belong to another host, or you may no longer have access.`));
+    if (workspaceIdSource === 'env') {
+        // `workspace set` refuses while $SOLIDACTIONS_WORKSPACE_ID is set, list or no list.
+        console.log(chalk.yellow(`Unset $SOLIDACTIONS_WORKSPACE_ID, then select a workspace with \`solidactions workspace set <slug>\`${emptyList ? ' once `workspace list` shows one' : ''}.`));
+    } else if (emptyList) {
+        // `workspace set` resolves an accessible workspace first, so it cannot
+        // clear or change a pin when the list is empty: name the action that
+        // applies to where this pin came from instead.
+        if (workspaceIdSource === 'cli') {
+            console.log(chalk.yellow('Re-run without -w/--workspace-override, then select a workspace with `solidactions workspace set <slug>` once `workspace list` shows one.'));
+        } else {
+            console.log(chalk.yellow(`Remove the workspace pin (workspaceId and related keys) from ${from}, then select a workspace with \`solidactions workspace set <slug>\` once \`workspace list\` shows one.`));
+        }
+    } else {
+        console.log(chalk.yellow('Pick one from the list with `solidactions workspace set <slug> --local` (or --global).'));
+    }
 }
 
 interface WorkspaceSetOptions {

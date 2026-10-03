@@ -1,15 +1,13 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { describeProjectEnvironments, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { describeTerminalRun } from '../utils/run-status';
 
 export async function run(projectName: string, workflowName: string, options: { input?: string; wait?: boolean; env?: string }) {
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
 
     console.log(chalk.blue(`Running workflow "${workflowName}" in project "${projectName}" (${environment})...`));
 
@@ -24,6 +22,7 @@ export async function run(projectName: string, workflowName: string, options: { 
     }
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.post(
             `${config.host}/api/v1/projects/${projectSlug}/workflows/${workflowName}/trigger`,
             { input: inputData },
@@ -73,20 +72,24 @@ export async function run(projectName: string, workflowName: string, options: { 
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
-                const envsList = await describeProjectEnvironments(config, projectName);
-                if (envsList) {
+                // Claim the environment is missing only when the family
+                // genuinely lacks it (project view's pattern): otherwise the
+                // 404 names a missing workflow, not a missing environment.
+                const family = await lookupProjectFamilyEnvironments(config, projectName);
+                const envs = family?.environments ?? [];
+                if (envs.length > 0 && !envs.includes(environment)) {
                     console.error(chalk.red(
-                        `Project "${projectName}" has no ${environment} environment (exists in: ${envsList}). Pass -e <env> to target a different environment.`
+                        `Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}). Pass -e <env> to target a different environment.`
                     ));
                 } else {
-                    console.error(chalk.red('Project or workflow not found.'));
+                    console.error(chalk.red(formatApiFailure(404, error.response.data)));
                 }
             } else if (error.response.status === 422) {
                 console.error(chalk.red('Validation error:'), error.response.data.message);
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

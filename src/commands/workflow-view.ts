@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { sanitizeDisplayText } from '../utils/source-provenance';
 import { workflowEffectiveState } from '../utils/workflow-state';
@@ -80,14 +80,14 @@ function printAmbiguity(error: any): void {
     console.error('Re-run with an exact slug.');
 }
 
-function printWorkflowViewError(error: any): void {
+function printWorkflowViewError(error: any, host: string): void {
     if (!error.response) {
         console.error(chalk.red('Connection failed:'), display(error.message, 'Unknown network error.', 500));
         return;
     }
 
     if (error.response.status === 401) {
-        console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+        console.error(chalk.red(authFailedLine(host)));
         return;
     }
 
@@ -138,7 +138,7 @@ export async function workflowViewWithConfig(
             console.log(line);
         }
     } catch (error: any) {
-        printWorkflowViewError(error);
+        printWorkflowViewError(error, config.host);
         process.exit(1);
     }
 }

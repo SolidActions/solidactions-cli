@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { describeProjectEnvironments, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
 
 /** Returns true when stdin is not an interactive terminal (CI, pipes, scripts). */
@@ -86,15 +87,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
 
         const environment = options.env || 'dev';
 
-        // Build project slug
-        const projectSlug = environment === 'production'
-            ? projectName
-            : `${projectName}-${environment}`;
-
         // Auto-detect secrets
         const isSecret = options.secret || /secret|key|token|password|credential/i.test(key);
 
         try {
+            const projectSlug = await resolveProjectSlug(config, projectName, environment);
             if (isOauthConnectionMode) {
                 await axios.post(
                     `${config.host}/api/v1/projects/${projectSlug}/variable-mappings`,
@@ -170,17 +167,22 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else if (error.response.status === 404) {
-                    const envsList = await describeProjectEnvironments(config, projectName);
-                    console.error(chalk.red(
-                        `Project "${projectName}" has no ${environment} environment${envsList ? ` (exists in: ${envsList})` : ''}.`
-                        + `\nRun 'solidactions project deploy ${projectName} -e ${environment} --create' first.`,
-                    ));
+                    const family = await lookupProjectFamilyEnvironments(config, projectName);
+                    const envs = family?.environments ?? [];
+                    if (envs.length > 0 && !envs.includes(environment)) {
+                        console.error(chalk.red(
+                            `Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}).`
+                            + `\nRun 'solidactions project deploy ${projectName} -e ${environment} --create' first.`,
+                        ));
+                    } else {
+                        console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                    }
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
-                    console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(chalk.red('Connection failed:'), error.message);
@@ -306,11 +308,11 @@ export async function envSet(keyOrProject: string, valueOrKey?: string, valueIfP
         } catch (error: any) {
             if (error.response) {
                 if (error.response.status === 401) {
-                    console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                    console.error(chalk.red(authFailedLine(config.host)));
                 } else if (error.response.status === 422) {
                     console.error(chalk.red(formatValidationError(error.response.data)));
                 } else {
-                    console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                    console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
                 }
             } else {
                 console.error(chalk.red('Connection failed:'), error.message);

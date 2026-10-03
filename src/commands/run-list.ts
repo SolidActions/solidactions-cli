@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { matchProjectRungs } from '../utils/project-ref';
 import { getStatusColor } from '../utils/run-status';
 import { computeColumnWidths, sanitizeCell, truncateCell } from '../utils/table';
 import { formatDetailedRevision, formatRevisionCell } from '../utils/source-provenance';
@@ -48,10 +49,31 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
     try {
         const params = buildRunListParams(projectName, options);
 
-        const response = await axios.get(`${config.host}/api/v1/runs`, {
+        let response = await axios.get(`${config.host}/api/v1/runs`, {
             headers: getApiHeaders(config),
             params,
         });
+
+        // cli#161: the filter text may be a name whose slug differs (or the
+        // other way round) — look the project up once and retry with its
+        // exact name (PM ruling 4: an ambiguous match refuses instead).
+        if (response.data?.error === 'project_not_found' && projectName) {
+            const listResponse = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
+            const rows = listResponse.data?.data ?? listResponse.data ?? [];
+            const match = matchProjectRungs(rows, projectName);
+            if (match.ambiguous.length > 0) {
+                const names = match.ambiguous.map((p: any) => `${p.name} (${p.slug})`).join(', ');
+                console.error(chalk.red(`"${projectName}" matches more than one project: ${names} — re-run with the exact name or slug.`));
+                process.exit(1);
+            }
+            const hit = match.project;
+            if (hit && typeof hit.name === 'string' && hit.name !== projectName) {
+                response = await axios.get(`${config.host}/api/v1/runs`, {
+                    headers: getApiHeaders(config),
+                    params: { ...params, project: hit.name },
+                });
+            }
+        }
 
         const runsList = response.data.data || response.data;
 
@@ -90,9 +112,9 @@ export async function runs(projectName?: string, options: RunListOptions = {}) {
                 console.error(chalk.yellow(`Ambiguous project '${projectName}': found in environments: ${envs}.`));
                 console.error(chalk.yellow(`Pass -e <env> to disambiguate, e.g.: solidactions run list ${projectName} -e dev`));
             } else if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

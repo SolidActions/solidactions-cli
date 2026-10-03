@@ -1,8 +1,9 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { authFailedLine, formatApiFailure, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export interface ScheduleSetOptions {
     workflow?: string;
@@ -54,14 +55,8 @@ export const EXISTING_SCHEDULE_CHOICES = [
 
 export async function scheduleSet(projectName: string, cron: string, options: ScheduleSetOptions) {
     const config = await requireConfigWithWorkspace();
-    let projectSlug: string;
-    try {
-        projectSlug = projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-        return;
-    }
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     // Parse input JSON if provided
     let inputData: Record<string, any> | undefined;
@@ -74,45 +69,47 @@ export async function scheduleSet(projectName: string, cron: string, options: Sc
         }
     }
 
-    // Check for existing schedule on the same workflow
-    if (!options.yes) {
-        try {
-            const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
-                headers: getApiHeaders(config),
-            });
-            const schedules = listResponse.data.data || listResponse.data || [];
-            const existing = schedules.find((s: any) => {
-                if (options.workflow) {
-                    return s.workflow_name === options.workflow || s.workflow_slug === options.workflow;
-                }
-                return true; // No workflow specified — any existing schedule is a match
-            });
-
-            if (existing) {
-                const workflowName = existing.workflow_name || existing.workflow_slug || 'unknown';
-                console.log(chalk.yellow(`"${workflowName}" already has a schedule: ${existing.cron_expression}`));
-                const confirm = await prompts({
-                    type: 'select',
-                    name: 'action',
-                    message: 'What would you like to do?',
-                    choices: EXISTING_SCHEDULE_CHOICES,
-                });
-                if (confirm.action === 'cancel' || confirm.action === undefined) {
-                    console.log(chalk.gray('Cancelled.'));
-                    return;
-                }
-                // The API owns the one-schedule-per-workflow invariant and
-                // updates the existing row. Do not delete first: deletion
-                // loses YAML provenance and any persistent override state.
-            }
-        } catch {
-            // If we can't check, proceed anyway
-        }
-    }
-
     console.log(chalk.blue(`Setting schedule for project "${projectName}"...`));
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
+
+        // Check for existing schedule on the same workflow
+        if (!options.yes) {
+            try {
+                const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
+                    headers: getApiHeaders(config),
+                });
+                const schedules = listResponse.data.data || listResponse.data || [];
+                const existing = schedules.find((s: any) => {
+                    if (options.workflow) {
+                        return s.workflow_name === options.workflow || s.workflow_slug === options.workflow;
+                    }
+                    return true; // No workflow specified — any existing schedule is a match
+                });
+
+                if (existing) {
+                    const workflowName = existing.workflow_name || existing.workflow_slug || 'unknown';
+                    console.log(chalk.yellow(`"${workflowName}" already has a schedule: ${existing.cron_expression}`));
+                    const confirm = await prompts({
+                        type: 'select',
+                        name: 'action',
+                        message: 'What would you like to do?',
+                        choices: EXISTING_SCHEDULE_CHOICES,
+                    });
+                    if (confirm.action === 'cancel' || confirm.action === undefined) {
+                        console.log(chalk.gray('Cancelled.'));
+                        return;
+                    }
+                    // The API owns the one-schedule-per-workflow invariant and
+                    // updates the existing row. Do not delete first: deletion
+                    // loses YAML provenance and any persistent override state.
+                }
+            } catch {
+                // If we can't check, proceed anyway
+            }
+        }
+
         const payload = buildSchedulePayload(cron, options, inputData);
 
         const response = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/schedules`, payload, {
@@ -147,13 +144,13 @@ export async function scheduleSet(projectName: string, cron: string, options: Sc
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" not found.`));
             } else if (error.response.status === 422) {
-                console.error(chalk.red('Validation error:'), error.response.data.message || error.response.data.errors);
+                console.error(chalk.red('Validation error:'), formatValidationError(error.response.data));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

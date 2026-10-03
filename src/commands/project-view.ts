@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import {
     formatDetailedRevision,
@@ -96,6 +97,24 @@ export function projectViewJsonProjection(project: ProjectDeploymentDetail): Rec
  */
 export function quoteCommandArg(arg: string): string {
     return /^[A-Za-z0-9._/-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Fail fast on a bad project reference before any HTTP (cli#161 kept
+ * resolution; validation still refuses locally). Returns true when the
+ * reference is usable. On a bad reference prints the long-standing message
+ * to stderr and exits 1; the false return only matters when process.exit is
+ * a test double, so the caller still stops.
+ */
+export function isUsableProjectRef(project: string, environment?: string): boolean {
+    try {
+        projectSlugForView(project, environment);
+        return true;
+    } catch (error: any) {
+        console.error(chalk.red(error.message));
+        process.exit(1);
+        return false;
+    }
 }
 
 export function projectSlugForView(project: string, environment?: string): string {
@@ -204,16 +223,14 @@ export async function projectViewWithConfig(
     writeLine: (line: string) => void = console.log,
 ): Promise<void> {
     const environment = options.env ?? 'dev';
-    let slug: string;
-    try {
-        slug = projectSlugForView(project, environment);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-        return;
-    }
+    let slug = '';
+
+    // Local input validation first (cli#161 kept resolution; validation
+    // still fails fast before any HTTP).
+    if (!isUsableProjectRef(project, environment)) return;
 
     try {
+        slug = await resolveProjectSlug(config, project, environment);
         const response = await axios.get(
             `${config.host}/api/v1/projects/${encodeURIComponent(slug)}?include=deployment`,
             { headers: getApiHeaders(config) },
@@ -227,7 +244,7 @@ export async function projectViewWithConfig(
         }
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+            console.error(chalk.red(authFailedLine(config.host)));
         } else if (error.response?.status === 404) {
             const family = await lookupProjectFamilyEnvironments(config, project);
             const envs = family?.environments ?? [];

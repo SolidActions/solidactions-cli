@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 
 interface SecretRow {
     workflow_name?: string;
@@ -38,7 +39,6 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
     const config = await requireConfigWithWorkspace();
 
     const environment = options.env || 'dev';
-    const projectSlug = environment === 'production' ? projectName : `${projectName}-${environment}`;
 
     if (format === 'text') {
         process.stderr.write(
@@ -47,6 +47,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
     }
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, environment);
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/webhooks`, {
             headers: getApiHeaders(config),
             params: { show_secrets: 'true' },
@@ -78,12 +79,20 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
         if (error.response) {
             if (error.response.status === 401) {
                 console.error(
-                    chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.')
+                    chalk.red(authFailedLine(config.host))
                 );
             } else if (error.response.status === 404) {
-                console.error(chalk.red(`Project "${projectName}" not found.`));
+                const family = await lookupProjectFamilyEnvironments(config, projectName);
+                const envs = family?.environments ?? [];
+                if (envs.length > 0 && !envs.includes(environment)) {
+                    console.error(chalk.red(
+                        `Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}). Pass -e <env> to target a different environment.`
+                    ));
+                } else {
+                    console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                }
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

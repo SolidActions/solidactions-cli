@@ -11,6 +11,7 @@ import {
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
 import { activeCommandIsMutating } from './mutating-commands';
+import { matchProjectRungs } from './project-ref';
 import {
     decideWorkspaceGuard,
     isCwdInferredWorkspace,
@@ -240,7 +241,13 @@ export async function lookupProjectFamilyEnvironments(config: Config, projectNam
     try {
         const res = await axios.get(`${config.host}/api/v1/projects`, { headers: getApiHeaders(config) });
         const rows = res.data?.data ?? res.data ?? [];
-        const hit = rows.find((p: any) => p.name === projectName || p.slug === projectName);
+        // The same rungs `run list` retries with (cli#161): an ambiguous
+        // case-insensitive match yields no hint rather than a guess.
+        const match = matchProjectRungs(rows, projectName);
+        if (match.ambiguous.length > 0) {
+            return null;
+        }
+        const hit = match.project;
         const environments: string[] | undefined = hit?.environments;
         if (!environments?.length) {
             return null;
@@ -338,13 +345,33 @@ export function requireConfig(): Config {
 }
 
 /**
+ * Host as shown in user-facing output: a URL with any userinfo stripped
+ * (credentials must never reach the terminal), otherwise shown as
+ * configured. Shared by every authentication-failure message (cli#156).
+ */
+export function displayHost(host: string): string {
+    let shown = host;
+    try {
+        const url = new URL(host);
+        if (url.username || url.password) {
+            url.username = '';
+            url.password = '';
+            shown = url.toString().replace(/\/$/, '');
+        }
+    } catch {
+        // Not a URL: show it as configured.
+    }
+    return shown;
+}
+
+/**
  * Contextual 401 message — names the host being called and where the (now
  * apparently invalid/expired) API key came from, instead of a bare
  * "Authentication failed" that gives no clue which config is at fault.
  */
 export function authFailureMessage(config: Config, sources: ResolvedConfig['sources'] | null): string {
     const keySource = sources?.apiKey ?? 'config';
-    return `Authentication failed against ${config.host} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
+    return `Authentication failed against ${displayHost(config.host)} (key from ${keySource}). Run \`solidactions login --global\` to re-configure.`;
 }
 
 /**
@@ -359,6 +386,11 @@ export function formatApiFailure(status: number, data: unknown): string {
     return typeof message === 'string' && message.trim() !== ''
         ? `Failed: ${status} ${message.trim()}`
         : `Failed: ${status}`;
+}
+
+/** The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo. */
+export function authFailedLine(host: string): string {
+    return `Authentication failed against ${displayHost(host)}. Run "solidactions login --global" to re-configure.`;
 }
 
 export async function ensureWorkspaceSelected(

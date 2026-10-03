@@ -39,8 +39,36 @@ let stubServer: http.Server;
 let stubPort: number;
 let allCaptures: CapturedRequest[] = [];
 
-/** Build a canned MCP success response wrapping toolData. */
+/**
+ * Build a canned MCP success response wrapping toolData.
+ *
+ * The real server always sends the `doc_type` key on list rows (null for
+ * untyped docs), so a list row without the key gets `doc_type: null` by
+ * default — matching the server without editing every fixture. The one test
+ * that covers a genuinely keyless row (the read_doc backfill) uses
+ * `makeMcpSuccessRaw` to opt into the keyless shape explicitly.
+ */
 function makeMcpSuccess(toolData: object): string {
+    const data: Record<string, unknown> = { ...toolData };
+    if (Array.isArray(data.docs)) {
+        data.docs = (data.docs as Array<Record<string, unknown>>).map((row) =>
+            row !== null && typeof row === 'object' && !Object.prototype.hasOwnProperty.call(row, 'doc_type')
+                ? { ...row, doc_type: null }
+                : row,
+        );
+    }
+    return JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+            isError: false,
+            content: [{ type: 'text', text: JSON.stringify(data) }],
+        },
+    });
+}
+
+/** Like makeMcpSuccess but sends toolData verbatim — for the keyless-row backfill test. */
+function makeMcpSuccessRaw(toolData: object): string {
     return JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
@@ -1667,10 +1695,14 @@ describe('docPullWithConfig — deletion propagation', () => {
     });
 
     it('propagates no deletions on the single-doc fallback path', async () => {
+        // NOTE (cli#157, PM ruling 2): the orphan keeps a DIFFERENT id from the
+        // pulled doc on purpose. Same id under a different path is a rename now
+        // (removed when unmodified — see the cli#157 rename tests), so only a
+        // true orphan (another id entirely) proves deletions are not propagated.
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         writeManifest(dest, {
-            'unrelated.md': { id: 5, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
+            'unrelated.md': { id: 6, title: 'unrelated', current_revision_id: 1, media: false, body_sha256: sha256Hex('X') },
         }, 'notes');
         fs.writeFileSync(path.join(dest, 'unrelated.md'), 'X', 'utf8');
 
@@ -1679,19 +1711,14 @@ describe('docPullWithConfig — deletion propagation', () => {
             makeMcpSuccess({ id: 5, title: 'solo', body: 'x', current_revision_id: 3, folder_path: 'notes' }),
         ];
 
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
-
         try {
-            const code = await runExpectingExit(() =>
-                docPullWithConfig('notes/solo', dest, { overwrite: true }, stubConfig()),
-            );
-            expect(code).toBe(0);
+            const result = await runPullCli(['notes/solo', dest, '--overwrite']);
+            expect(result.code).toBe(0);
 
             expect(fs.existsSync(path.join(dest, 'unrelated.md'))).toBe(true);
+            expect(fs.readFileSync(path.join(dest, 'unrelated.md'), 'utf8')).toBe('X');
+            expect(fs.readFileSync(path.join(dest, 'solo.md'), 'utf8')).toBe('x');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -2477,6 +2504,571 @@ describe('docPullWithConfig — destination is a file', () => {
         } finally {
             restoreExit();
             restoreStderr();
+            cleanup();
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// cli#157: visual docs pull as .html, canvases as .canvas.json (spawned CLI)
+// ---------------------------------------------------------------------------
+
+describe('doc pull writes the right extension (cli#157)', () => {
+    function mcpArgs(cap: CapturedRequest): any {
+        return cap.body.params.arguments;
+    }
+
+    function readDocCalls(): CapturedRequest[] {
+        return allCaptures.filter((cap) => cap.body?.params?.name === 'docs_read' && mcpArgs(cap).action === 'read_doc');
+    }
+
+    it('writes .html for visual, .canvas.json for canvas, .md otherwise', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({
+                    folders: [],
+                    docs: [
+                        { id: 1, title: 'page', doc_type: { slug: 'visual' } },
+                        { id: 2, title: 'board', doc_type: { slug: 'canvas' } },
+                        { id: 3, title: 'notes', doc_type: null },
+                        { id: 4, title: 'skill-doc', doc_type: { slug: 'skill' } },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 1, title: 'page', current_revision_id: 10, properties: {}, body: '<h1>Hi</h1>' },
+                        { index: 1, status: 'found', id: 2, title: 'board', current_revision_id: 20, properties: {}, body: '{"nodes":[]}' },
+                        { index: 2, status: 'found', id: 3, title: 'notes', current_revision_id: 30, properties: {}, body: '# Notes' },
+                        { index: 3, status: 'found', id: 4, title: 'skill-doc', current_revision_id: 40, properties: {}, body: '# Skill' },
+                    ],
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Hi</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'board.canvas.json'), 'utf8')).toBe('{"nodes":[]}');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'notes.md'), 'utf8')).toBe('# Notes');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'skill-doc.md'), 'utf8')).toBe('# Skill');
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs).sort()).toEqual(['board.canvas.json', 'notes.md', 'page.html', 'skill-doc.md']);
+
+            // Every row carried its type, so no read_doc backfill was needed.
+            expect(readDocCalls()).toEqual([]);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('asks read_doc for a list row without a doc_type key', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                // Deliberately keyless (makeMcpSuccessRaw): the one fixture
+                // that exercises the read_doc backfill for a row that omits
+                // the key. Every other list fixture carries doc_type.
+                return makeMcpSuccessRaw({
+                    folders: [],
+                    docs: [{ id: 5, title: 'mystery' }],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 5, title: 'mystery', current_revision_id: 50, properties: {}, body: '{"cells":[]}' },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                expect(body.params.arguments.id).toBe(5);
+                return makeMcpSuccess({ id: 5, title: 'mystery', doc_type: { slug: 'canvas' } });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'mystery.canvas.json'), 'utf8')).toBe('{"cells":[]}');
+            expect(readDocCalls().length).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a successful read_doc reporting doc_type null writes .md with no unreadable-type warning', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccessRaw({
+                    folders: [],
+                    docs: [{ id: 6, title: 'plain' }],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 6, title: 'plain', current_revision_id: 60, properties: {}, body: '# Plain' },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                return makeMcpSuccess({ id: 6, title: 'plain', doc_type: null });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'plain.md'), 'utf8')).toBe('# Plain');
+            expect(readDocCalls().length).toBe(1);
+            expect(result.stderr).not.toContain('could not read the type');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('a failed read_doc still warns that the type could not be read', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccessRaw({
+                    folders: [],
+                    docs: [{ id: 7, title: 'broken-type' }],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 7, title: 'broken-type', current_revision_id: 70, properties: {}, body: '# B' },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                return makeMcpError('type_unavailable', 'no type for you');
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'broken-type.md'), 'utf8')).toBe('# B');
+            expect(result.stderr).toContain('could not read the type of doc 7 (broken-type)');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('writes a single pulled visual doc as <title>.html', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpError('folder_path_not_found', 'no such folder');
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('read_doc');
+                return makeMcpSuccess({
+                    id: 7, title: 'page', folder_path: 'docs', body: '<h1>Solo</h1>',
+                    current_revision_id: 70, properties: {}, doc_type: { slug: 'visual' },
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Solo</h1>');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('collides per extension: page.html + page.md, x.html + x-2.html', async () => {
+        responseQueue = [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({
+                    folders: [],
+                    docs: [
+                        { id: 1, title: 'page', doc_type: { slug: 'visual' } },
+                        { id: 2, title: 'page', doc_type: null },
+                        { id: 3, title: 'x', doc_type: { slug: 'visual' } },
+                        { id: 4, title: 'x', doc_type: { slug: 'visual' } },
+                    ],
+                });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({
+                    results: [
+                        { index: 0, status: 'found', id: 1, title: 'page', current_revision_id: 10, properties: {}, body: '<h1>P</h1>' },
+                        { index: 1, status: 'found', id: 2, title: 'page', current_revision_id: 20, properties: {}, body: '# P' },
+                        { index: 2, status: 'found', id: 3, title: 'x', current_revision_id: 30, properties: {}, body: '<h1>X1</h1>' },
+                        { index: 3, status: 'found', id: 4, title: 'x', current_revision_id: 40, properties: {}, body: '<h1>X2</h1>' },
+                    ],
+                });
+            },
+        ];
+
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out')]);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>P</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# P');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'x.html'), 'utf8')).toBe('<h1>X1</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'x-2.html'), 'utf8')).toBe('<h1>X2</h1>');
+        } finally {
+            cleanup();
+        }
+    });
+
+    /** Pre-seed a destination whose manifest tracks doc 5 at page.md. */
+    function seedRenameDir(dir: string, pageBody: string): void {
+        const dest = path.join(dir, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'page.md'), pageBody, 'utf8');
+        const manifest: DocsManifest = {
+            folder_path: 'docs',
+            docs: {
+                'page.md': { id: 5, title: 'page', current_revision_id: 7, media: false, body_sha256: sha256Hex('# Old') },
+            },
+        };
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    }
+
+    function renameQueue(servedBody: string, extraListDoc?: object, extraBulkRow?: object): Array<string | ((body: any) => string)> {
+        const docs: object[] = [{ id: 5, title: 'page', doc_type: { slug: 'visual' } }];
+        const results: object[] = [
+            { index: 0, status: 'found', id: 5, title: 'page', current_revision_id: 8, properties: {}, body: servedBody },
+        ];
+        if (extraListDoc !== undefined && extraBulkRow !== undefined) {
+            docs.push(extraListDoc);
+            results.push(extraBulkRow);
+        }
+        return [
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('list');
+                return makeMcpSuccess({ folders: [], docs });
+            },
+            (body: any) => {
+                expect(body.params.arguments.action).toBe('bulk_read');
+                return makeMcpSuccess({ results });
+            },
+        ];
+    }
+
+    it('rename, unmodified: stale page.md removed after page.html is written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.md'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.html']);
+            expect(manifest.docs['page.html'].id).toBe(5);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, unmodified: a new doc taking page.md keeps it', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = renameQueue(
+                '<h1>Old</h1>',
+                { id: 6, title: 'page', doc_type: null },
+                { index: 1, status: 'found', id: 6, title: 'page', current_revision_id: 60, properties: {}, body: '# Six' },
+            );
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Six');
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(manifest.docs['page.html'].id).toBe(5);
+            expect(manifest.docs['page.md'].id).toBe(6);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, modified: refuses before anything is written', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(1);
+
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(result.stderr).toMatch(/push|move/i);
+            expect(result.stderr).toContain('doc 5');
+
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.md']);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, modified with --overwrite: refuses and preserves the edited file and manifest', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            const manifestBefore = fs.readFileSync(path.join(tmpDest, 'out', DOCS_MANIFEST), 'utf8');
+            responseQueue = renameQueue('<h1>Old</h1>');
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--overwrite']);
+            expect(result.code).toBe(1);
+
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(result.stderr).toContain('doc 5');
+            expect(result.stderr).toMatch(/push|move/i);
+            expect(result.stderr).not.toMatch(/untracked/i);
+            expect(result.stdout).not.toContain('pulled');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.md']);
+
+            expect(result.stdout).not.toContain('deleted remotely');
+            expect(result.stderr).not.toContain('deleted remotely');
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename collision with --overwrite: refuses before any write when another doc takes the edited source path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            // Doc 5 moves page.md -> page.html; a different doc (6) now takes page.md.
+            responseQueue = renameQueue(
+                '<h1>Old</h1>',
+                { id: 6, title: 'page', doc_type: null },
+                { index: 1, status: 'found', id: 6, title: 'page', current_revision_id: 60, properties: {}, body: '# Six' },
+            );
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--overwrite']);
+            expect(result.code).toBe(1);
+
+            // Nothing was written: the edited bytes are unchanged, no new file
+            // exists, and the manifest still tracks only the old path.
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['page.md']);
+            expect(manifest.docs['page.md'].id).toBe(5);
+
+            // The refusal names both docs and tells the user how to proceed.
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(result.stderr).toContain('doc 5');
+            expect(result.stderr).toContain('doc 6');
+            expect(result.stderr).toMatch(/push it first/);
+            expect(result.stderr).not.toMatch(/untracked/);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('single-doc rename, unmodified: no stale page.md twin', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old');
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 5, title: 'page', folder_path: 'docs', body: '<h1>Old</h1>',
+                        current_revision_id: 8, properties: {}, doc_type: { slug: 'visual' },
+                    });
+                },
+            ];
+
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.md'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(manifest.docs['page.html'].id).toBe(5);
+            expect(manifest.docs['page.md']).toBeUndefined();
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('single-doc rename, modified: refuses', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            seedRenameDir(tmpDest, '# Old EDITED');
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 5, title: 'page', folder_path: 'docs', body: '<h1>Old</h1>',
+                        current_revision_id: 8, properties: {}, doc_type: { slug: 'visual' },
+                    });
+                },
+            ];
+
+            const result = await runPullCli(['docs/page', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(1);
+
+            expect(result.stderr).toContain('page.md');
+            expect(result.stderr).toContain('page.html');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
+        } finally {
+            cleanup();
+        }
+    });
+
+    /** Pre-seed a destination whose manifest tracks media doc 7 at old.png. */
+    function seedMediaRenameDir(dir: string, oldBytes: Buffer): void {
+        const dest = path.join(dir, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'old.png'), oldBytes);
+        const manifest: DocsManifest = {
+            folder_path: 'docs',
+            docs: {
+                'old.png': { id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) },
+            },
+        };
+        fs.writeFileSync(path.join(dest, DOCS_MANIFEST), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    }
+
+    const MEDIA_BLOB_PROPS = { blob_sha: 'abc', mime: 'image/png', size: 4 };
+
+    it('rename, failed media download (folder pull): keeps old.png bytes and tracks the old path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const oldBytes = Buffer.from([7, 7, 7, 7]);
+            seedMediaRenameDir(tmpDest, oldBytes);
+            responseQueue = [
+                makeMcpSuccess({
+                    folders: [],
+                    docs: [{ id: 7, title: 'new.png', properties: MEDIA_BLOB_PROPS }],
+                }),
+                makeMcpSuccess({
+                    results: [{
+                        index: 0, status: 'found', id: 7, title: 'new.png', current_revision_id: 11,
+                        properties: MEDIA_BLOB_PROPS, body: '',
+                    }],
+                }),
+            ];
+            mediaResponseQueue = [
+                { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+            ];
+            blobResponseQueue = [{ status: 503, bytes: Buffer.alloc(0) }];
+
+            const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain('failed to download media');
+
+            // The only good copy survives: old bytes unchanged, no replacement written.
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'old.png'))).toEqual(oldBytes);
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'new.png'))).toBe(false);
+
+            // Tracking stays recoverable: the old path with its old hash, no unwritten new path.
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['old.png']);
+            expect(manifest.docs['old.png']).toEqual({ id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) });
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('rename, failed media download (single-doc pull): keeps old.png bytes and tracks the old path', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        try {
+            const oldBytes = Buffer.from([7, 7, 7, 7]);
+            seedMediaRenameDir(tmpDest, oldBytes);
+            responseQueue = [
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('list');
+                    return makeMcpError('folder_path_not_found', 'no such folder');
+                },
+                (body: any) => {
+                    expect(body.params.arguments.action).toBe('read_doc');
+                    return makeMcpSuccess({
+                        id: 7, title: 'new.png', folder_path: 'docs', body: '',
+                        current_revision_id: 11, properties: MEDIA_BLOB_PROPS, doc_type: null,
+                    });
+                },
+            ];
+            mediaResponseQueue = [
+                { status: 200, body: { url: `http://127.0.0.1:${stubPort}/blob/7`, mime: 'image/png', size: 4 } },
+            ];
+            blobResponseQueue = [{ status: 503, bytes: Buffer.alloc(0) }];
+
+            const result = await runPullCli(['docs/old', path.join(tmpDest, 'out'), '--yes']);
+            expect(result.code).toBe(0);
+            expect(result.stderr).toContain('failed to download media');
+
+            expect(fs.readFileSync(path.join(tmpDest, 'out', 'old.png'))).toEqual(oldBytes);
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'new.png'))).toBe(false);
+
+            const manifest = readManifest(path.join(tmpDest, 'out'));
+            expect(Object.keys(manifest.docs)).toEqual(['old.png']);
+            expect(manifest.docs['old.png']).toEqual({ id: 7, title: 'old.png', current_revision_id: 10, media: true, body_sha256: sha256Hex(oldBytes) });
+        } finally {
             cleanup();
         }
     });

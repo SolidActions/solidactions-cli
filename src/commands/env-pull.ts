@@ -3,7 +3,8 @@ import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
 import { writeSecretFileSync } from '../utils/secure-write';
 
 interface EnvPullOptions {
@@ -84,18 +85,15 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
 
     const environment = options.env || 'dev';
 
-    // Build the project slug for lookup
-    const projectSlug = environment === 'production'
-        ? projectName
-        : `${projectName}-${environment}`;
-
     // Determine output file
     const outputFile = options.output || (environment === 'production' ? '.env' : `.env.${environment}`);
     const outputPath = path.resolve(outputFile);
 
     console.log(chalk.blue(`Pulling variables from "${projectName}" (${environment})...`));
 
+    let projectSlug = '';
     try {
+        projectSlug = await resolveProjectSlug(config, projectName, environment);
         // First, check if there are any secrets
         const checkResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/variable-mappings?resolve_oauth=true`, {
             headers: getApiHeaders(config),
@@ -357,7 +355,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectSlug}" not found.`));
                 if (environment !== 'production') {
@@ -374,7 +372,7 @@ export async function envPull(projectName: string, options: EnvPullOptions = {})
                     : 'Permission denied.';
                 console.error(chalk.red(detail ? `${lead}\n\n${detail}` : lead));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else if (!axios.isAxiosError(error) && error.code) {
             // A filesystem failure writing the .env — not a connection problem.

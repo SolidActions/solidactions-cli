@@ -1,4 +1,6 @@
+import * as childProcess from 'child_process';
 import * as http from 'http';
+import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     formatProjectView,
@@ -7,6 +9,9 @@ import {
     type ProjectDeploymentDetail,
 } from '../src/commands/project-view';
 import type { Config } from '../src/utils/config';
+import { makeTmpEnv, writeGlobal } from './helpers';
+
+const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 
 let server: http.Server;
 let port: number;
@@ -16,8 +21,16 @@ let responseBody: Record<string, unknown>;
 beforeAll(async () => {
     server = http.createServer((req, res) => {
         requests.push(req.url ?? '');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(responseBody));
+        // The slug-resolution lookup (a bare project path) 404s so the
+        // command falls back to its first candidate; the detail request
+        // carries the deployment include as before.
+        if ((req.url ?? '').includes('?include=deployment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(responseBody));
+        } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ message: 'Not found.' }));
+        }
     });
     await new Promise<void>((resolve) => {
         server.listen(0, '127.0.0.1', () => {
@@ -68,6 +81,50 @@ function config(): Config {
     };
 }
 
+interface CliResult {
+    stdout: string;
+    stderr: string;
+    status: number | null;
+}
+
+/**
+ * Run project view through the real built CLI: real stdout, stderr and exit
+ * status against this file's stub server. The temp HOME points at the stub;
+ * no credentialed env reaches the child.
+ */
+function runViewCli(args: string[], home: string, cwd: string): Promise<CliResult> {
+    return new Promise((resolve, reject) => {
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+        delete childEnv.SOLIDACTIONS_HOST;
+        delete childEnv.SOLIDACTIONS_API_KEY;
+        delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+
+        const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'project', 'view', ...args], { cwd, env: childEnv });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk;
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk;
+        });
+
+        const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
+        }, 15_000);
+
+        child.on('close', (status) => {
+            clearTimeout(timer);
+            resolve({ stdout, stderr, status });
+        });
+        child.on('error', (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
+
 describe('project slug resolution for view', () => {
     it('passes through the exact project when the environment is omitted', () => {
         // #970's six schedule commands share this helper and intentionally pass undefined;
@@ -108,20 +165,33 @@ describe('project view request and rendering', () => {
     });
 
     it('requests the default dev project with the bounded deployment include', async () => {
-        const lines: string[] = [];
-        await projectViewWithConfig('billing', {}, config(), (line) => lines.push(line));
+        const env = makeTmpEnv();
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        try {
+            const result = await runViewCli(['billing'], env.home, env.cwd);
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
-        expect(lines.join('\n')).toContain('Status: deployed');
-        expect(lines.join('\n')).toContain('abcdef123456');
-        expect(lines.join('\n')).toContain('clean');
-        expect(lines.join('\n')).toContain('Client-reported');
+            expect(result.status).toBe(0);
+            expect(requests).toEqual(['/api/v1/projects/billing-dev', '/api/v1/projects/billing-dev?include=deployment']);
+            expect(result.stdout).toContain('Status: deployed');
+            expect(result.stdout).toContain('abcdef123456');
+            expect(result.stdout).toContain('clean');
+            expect(result.stdout).toContain('Client-reported');
+        } finally {
+            env.cleanup();
+        }
     });
 
     it('treats an exact-suffixed project as a family on the default-dev view surface', async () => {
-        await projectViewWithConfig('billing-dev', {}, config(), () => undefined);
+        const env = makeTmpEnv();
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        try {
+            const result = await runViewCli(['billing-dev'], env.home, env.cwd);
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev-dev?include=deployment']);
+            expect(result.status).toBe(0);
+            expect(requests).toEqual(['/api/v1/projects/billing-dev-dev', '/api/v1/projects/billing-dev-dev?include=deployment']);
+        } finally {
+            env.cleanup();
+        }
     });
 
     it.each([
@@ -258,11 +328,18 @@ describe('project view --json', () => {
         body.latest_successful_deployment.commits_behind = 4;
         responseBody = body;
 
-        const lines: string[] = [];
-        await projectViewWithConfig('billing', { json: true }, config(), (line) => lines.push(line));
+        const env = makeTmpEnv();
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        let output: any;
+        try {
+            const result = await runViewCli(['billing', '--json'], env.home, env.cwd);
 
-        expect(requests).toEqual(['/api/v1/projects/billing-dev?include=deployment']);
-        const output = JSON.parse(lines.join('\n'));
+            expect(result.status).toBe(0);
+            expect(requests).toEqual(['/api/v1/projects/billing-dev', '/api/v1/projects/billing-dev?include=deployment']);
+            output = JSON.parse(result.stdout);
+        } finally {
+            env.cleanup();
+        }
         expect(output).toEqual({
             slug: 'billing-dev',
             name: null,

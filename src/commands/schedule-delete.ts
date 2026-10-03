@@ -1,23 +1,19 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { projectSlugForView } from './project-view';
+import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { resolveProjectSlug } from '../utils/project-ref';
+import { isUsableProjectRef } from './project-view';
 
 export async function scheduleDelete(projectName: string, scheduleId: string, options: { yes?: boolean; env?: string } = {}) {
     const config = await requireConfigWithWorkspace();
-    let projectSlug: string;
-    try {
-        projectSlug = projectSlugForView(projectName, options.env);
-    } catch (error: any) {
-        console.error(chalk.red(error.message));
-        process.exit(1);
-        return;
-    }
+
+    if (!isUsableProjectRef(projectName, options.env)) return;
 
     console.log(chalk.blue(`Deleting schedule ${scheduleId} from project "${projectName}"...`));
 
     try {
+        const projectSlug = await resolveProjectSlug(config, projectName, options.env);
         // First, get the schedule details for confirmation
         const listResponse = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/schedules`, {
             headers: getApiHeaders(config),
@@ -57,11 +53,11 @@ export async function scheduleDelete(projectName: string, scheduleId: string, op
     } catch (error: any) {
         if (error.response) {
             if (error.response.status === 401) {
-                console.error(chalk.red('Authentication failed. Run "solidactions login --global" to re-configure.'));
+                console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
                 console.error(chalk.red(`Project "${projectName}" or schedule ${scheduleId} not found.`));
             } else {
-                console.error(chalk.red(`Failed: ${error.response.status}`), error.response.data);
+                console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
         } else {
             console.error(chalk.red('Connection failed:'), error.message);

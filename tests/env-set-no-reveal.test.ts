@@ -55,6 +55,14 @@ beforeAll(async () => {
             return;
         }
 
+        // cli#161: the slug-resolution lookup misses, so the command falls
+        // back to its first candidate.
+        if (req.method === 'GET' && req.url?.match(/\/api\/v1\/projects\/[^/]+$/)) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ message: 'Not found.' }));
+            return;
+        }
+
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ message: `Unexpected ${req.method} ${req.url}` }));
     });

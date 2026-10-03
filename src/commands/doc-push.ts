@@ -7,6 +7,10 @@
  *
  * Prints a report distinguishing fully-published docs from "properties pending"
  * ones (docs whose frontmatter properties couldn't be validated yet).
+ *
+ * Docs the push creates from untracked files are recorded in the directory's
+ * manifest (cli#157), so pushing again updates them by id instead of skipping
+ * them — but only when they landed in the manifest's own folder tree.
  */
 
 import fs from 'fs';
@@ -70,12 +74,22 @@ interface DocItem {
     type?: 'visual' | 'canvas';
     /** local file path for correlating results back to filenames */
     _filePath: string;
+    /**
+     * sha256 of the exact local bytes submitted in this item. Recording uses
+     * this snapshot hash after success and never re-reads the file: an edit
+     * saved while the push is in flight must not be recorded as synchronized.
+     */
+    _hash: string;
 }
 
 interface BulkCreateResultRow {
     index: number;
     status: string;
-    id?: string;
+    id?: string | number;
+    /** The title the server created the doc under (differs from the local title on a `renamed` row). */
+    title?: string;
+    /** The revision the created doc is at, for the drift guard on the next push. */
+    current_revision_id?: number | null;
     folder_path?: string;
     action?: string;
     /** Server-side reason when `status === 'error'` (e.g. a trashed doc holds the title). */
@@ -218,7 +232,7 @@ function fileToItem(absPath: string, rootDir: string): DocItem {
     // Use POSIX separators; omit if file is in the root dir
     const relative_folder_path = relDir === '' ? undefined : relDir.split(path.sep).join('/');
 
-    const item: DocItem = { title, body, _filePath: absPath };
+    const item: DocItem = { title, body, _filePath: absPath, _hash: sha256Hex(body) };
     if (relative_folder_path !== undefined) {
         item.relative_folder_path = relative_folder_path;
     }
@@ -646,6 +660,16 @@ export async function docPushWithConfig(
     const allResultRows: ResultRow[] = [];
     let mergedSummary: BulkCreateSummary = {};
 
+    // cli#157: record what this push creates, so the next push updates it instead of skipping it.
+    // Only when the docs landed in the manifest's own folder tree.
+    // PM ruling 5: a single-file push records only into a manifest its directory already has.
+    const recordable = !options.dryRun
+        && (manifest !== null || !singleFile)
+        && (manifest === null || options.folder === undefined || options.folder === manifest.folder_path);
+    const recordTarget: DocsManifest | null = recordable
+        ? (manifest ?? { folder_path: options.folder ?? '', docs: {} })
+        : null;
+
     for (const chunk of chunks) {
         const callArgs: Record<string, unknown> = {
             action: 'bulk_create',
@@ -695,17 +719,53 @@ export async function docPushWithConfig(
         const summary: BulkCreateSummary = data?.summary ?? {};
 
         // Correlate rows back to source files using chunk index
+        const chunkResultRows: ResultRow[] = [];
         for (const row of rows) {
             const sourceFile = chunk[row.index]?._filePath ?? '(unknown)';
-            allResultRows.push({
+            const resultRow: ResultRow = {
                 ...row,
                 file: path.relative(absDir, sourceFile),
-            });
+            };
+            chunkResultRows.push(resultRow);
+            allResultRows.push(resultRow);
         }
 
         mergedSummary = mergeSummaries(mergedSummary, summary);
+
+        // Record and persist this chunk's successes before the next chunk is
+        // sent: a later chunk's failure exits first, and docs already created
+        // must still be updatable by id on the next push. The folder /
+        // dry-run / single-file guards and existing manifest entries are kept
+        // (recordTarget is null unless recording applies).
+        if (recordTarget !== null) {
+            let changed = false;
+            for (const row of chunkResultRows) {
+                if (!['created', 'renamed', 'overwritten'].includes(row.status) || row.id === undefined) continue;
+                const snapshotHash = chunk[row.index]?._hash;
+                if (snapshotHash === undefined) continue;
+                const relPath = row.file.split(path.sep).join('/');
+                if (row.status === 'renamed' && row.title) {
+                    process.stderr.write(chalk.yellow(`${relPath}: created as "${row.title}" (the original title was taken); the next doc pull will name the local file after "${row.title}"\n`));
+                }
+                recordTarget.docs[relPath] = {
+                    id: Number(row.id),
+                    title: row.title ?? path.basename(relPath),
+                    current_revision_id: row.current_revision_id ?? null,
+                    media: false,
+                    body_sha256: snapshotHash,
+                };
+                changed = true;
+            }
+            if (changed) writeManifest(absDir, recordTarget);
+        }
     }
 
+    // PM ruling 8: never dereference a missing manifest. The "went elsewhere" note is only for an
+    // existing manifest with a different --folder; a single-file push with no manifest stays quiet.
+    if (!options.dryRun && manifest !== null && options.folder !== undefined && options.folder !== manifest.folder_path
+        && allResultRows.some((r) => ['created', 'renamed', 'overwritten'].includes(r.status))) {
+        process.stderr.write(chalk.yellow(`created docs were not recorded in ${DOCS_MANIFEST}: they went to "${options.folder}", not "${manifest.folder_path}"\n`));
+    }
     // Collect pending items (results that have property_validation)
     const pendingItems: PendingItem[] = allResultRows
         .filter((r) => r.property_validation != null)
