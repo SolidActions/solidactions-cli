@@ -19,6 +19,11 @@
 
 **Plan review:** Fable (task-planreviewcli-9e43) REQUEST CHANGES 5bc563f. The PM accepted all findings (plan card task-planclisafety-7af2), and this revision folds them in, cited as "I<n>/m<n>".
 
+**Mandatory build rulings 9-11** (PM, build card task-buildclisafety-8dde, from Sol's plan re-check task-planrecheckcli-cff2). They override any code block below that disagrees:
+- 9 (C1, security): a host that is non-empty but strips to nothing (`/`, `///`) is invalid and refuses. It never falls back to the cloud default. This is in Task 1.
+- 10 (R1): the ELOOP case uses a failed renamed-media download whose old path is a self-link. That path actually reaches the old-path resolution, and the test must fail without the fix. This is in Task 4.
+- 11 (R2): host-guard exemptions are per interpolation, not per line, with mixed-line guard cases. This is in Task 2.
+
 ## Global Constraints
 
 - **Where:** the CLI wave slot `/home/mercer/projects/solid/solidactions-cli/__worktrees/wave-a`, branch `wave/2026-10-03-cli-safety`. Work only there.
@@ -64,6 +69,7 @@
   - `resolveLoginHost(options: { dev?: boolean; host?: string }, env?: NodeJS.ProcessEnv): { host: string; isDefault: boolean }`. `env` defaults to `process.env`. It throws `LoginHostConflictError` on a disagreement.
   - The returned `host` has trailing slashes stripped (m5).
   - `export class LoginHostConflictError extends Error { flag: string; envHost: string }`.
+  - `export class LoginHostInvalidError extends Error { label: string; raw: string }` (ruling 9).
 
 - [ ] **Step 1: Write the failing spawned tests** in `tests/login-env-host.test.ts`. Use the `runCli` pattern from `tests/workspace-list-401.test.ts`, extended so the child env can carry `SOLIDACTIONS_HOST` and the proxy variables. Two servers:
   - `api`: answers `GET /api/v1/workspaces` with `{ "workspaces": { "Org": [{ "id": "ws-1", "slug": "ws-1", "name": "WS", "tenant_name": "Org" }] }, "scope": null }` and records every request path.
@@ -80,10 +86,15 @@
   5. `SOLIDACTIONS_HOST=https://example.com` plus `--host https://example.com:443`: exit 1 (ports compare literally, cli#124).
   6. `SOLIDACTIONS_HOST` set plus `--dev`: exit 1, stderr names `--dev (http://localhost:8000)`.
   7. `login --device` with `SOLIDACTIONS_HOST=http://127.0.0.1:<apiPort>` and `--host https://other.example`: exit 1 with the same refusal, before any request.
+  8. **Ruling 9:** `SOLIDACTIONS_HOST=/` (and, separately, `///`) with no flag:
+     - exit 1, stderr names `SOLIDACTIONS_HOST="/"` as not a usable host;
+     - `proxy` saw 0 requests and 0 connects, and `api` saw 0;
+     - no config file was written.
+     - The same holds for `--host /` with no env, and for `login --device` with `SOLIDACTIONS_HOST=/`.
 
 - [ ] **Step 2: Run them and watch them fail.** Test 1 must show a `proxy` hit (the old code goes to the cloud).
 Run: `npm run build && npx vitest run --project unit tests/login-env-host.test.ts 2>&1 | tee .superpowers/sdd/2026-10-03-cli-safety/task-1-red.log`
-Expected: FAIL. Test 1 records ≥1 proxy request or connect; tests 2, 5, 6 and 7 do not refuse.
+Expected: FAIL. Test 1 records ≥1 proxy request or connect; tests 2, 5, 6, 7 and 8 do not refuse.
 
 - [ ] **Step 3: Implement** in `src/commands/login.ts`:
 
@@ -96,14 +107,27 @@ export class LoginHostConflictError extends Error {
     }
 }
 
+export class LoginHostInvalidError extends Error {
+    constructor(public label: string, public raw: string) {
+        super(`${label}=${JSON.stringify(raw)} is not a usable host; refusing to send the API key.`);
+    }
+}
+
 export function resolveLoginHost(
     options: { dev?: boolean; host?: string },
     env: NodeJS.ProcessEnv = process.env,
 ): { host: string; isDefault: boolean } {
     const strip = (h: string) => h.trim().replace(/\/+$/, '');
-    const envHost = env.SOLIDACTIONS_HOST?.trim() ? strip(env.SOLIDACTIONS_HOST) : undefined;
-    const explicit = options.host
-        ? { host: strip(options.host), flag: `--host ${displayHost(strip(options.host))}` }
+    // Ruling 9: a non-empty value that strips to nothing is INVALID, never "absent".
+    const usable = (raw: string, label: string): string => {
+        const value = strip(raw);
+        if (value === '') throw new LoginHostInvalidError(label, raw);
+        return value;
+    };
+    const rawEnv = env.SOLIDACTIONS_HOST;
+    const envHost = rawEnv !== undefined && rawEnv.trim() !== '' ? usable(rawEnv, 'SOLIDACTIONS_HOST') : undefined;
+    const explicit = options.host !== undefined && options.host !== ''
+        ? (() => { const h = usable(options.host, '--host'); return { host: h, flag: `--host ${displayHost(h)}` }; })()
         : options.dev
             ? { host: 'http://localhost:8000', flag: '--dev (http://localhost:8000)' }
             : undefined;
@@ -130,6 +154,10 @@ try {
         console.error(chalk.red('Unset SOLIDACTIONS_HOST or pass the same host to --host.'));
         process.exit(1);
     }
+    if (error instanceof LoginHostInvalidError) {
+        console.error(chalk.red(`error: ${error.message}`));
+        process.exit(1);
+    }
     throw error;
 }
 ```
@@ -141,6 +169,9 @@ Reading the key from stdin or the prompt before the refusal is fine. What must n
   - `{ host: 'http://H:1/' }` with env `http://h:1` gives no throw.
   - `{ host: 'https://x' }` with env `http://h:1` throws `LoginHostConflictError`.
   - `{ host: 'https://example.com:443' }` with env `https://example.com` throws.
+  - `resolveLoginHost({}, { SOLIDACTIONS_HOST: '/' })` and `'///'` throw `LoginHostInvalidError` (ruling 9).
+  - `{ host: '/' }` with env `{}` throws `LoginHostInvalidError`.
+  - `resolveLoginHost({}, { SOLIDACTIONS_HOST: '  ' })` returns the cloud default: whitespace-only counts as absent.
 
   These are pure-function tests, which ruling 14 allows.
 
@@ -197,10 +228,17 @@ A host or 401 site the audit finds outside this list is a plan defect: list it i
 
 - [ ] **Step 2: Write the failing tests.**
   - `tests/host-display-guard.test.ts`:
-    - It reads every `src/**/*.ts` file line by line. It fails on a line with a `${…}` interpolation whose expression matches `/([Hh]ost|keyHome)/`, unless:
-      - the line contains `displayHost(`;
-      - or the line is a request URL (contains `/api/`, `/oauth/`, `/mcp`, `new URL(`, `axios.`, or `fetch(`);
-      - or `file:line-substring` is in an explicit `ALLOWLIST` array in the test, with a reason comment per entry.
+    - Put the check in an exported pure function in the test file, `findRawHostInterpolations(source: string): Array<{ line: number; expr: string }>`. It examines **each `${…}` interpolation separately** (ruling 11), never the line as a whole.
+    - An interpolation whose expression matches `/([Hh]ost|keyHome)/` is a finding unless:
+      - **that expression** is a `displayHost(…)` call;
+      - or it **starts a request URL**: the template text right after it begins with `/api/`, `/oauth/` or `/mcp`, AND the template is an argument of `axios.`, `fetch(`, `new URL(` or `projectStatusUrl(`;
+      - or it is on an explicit `ALLOWLIST` (file + expression, a reason comment per entry).
+    - The test runs the function over every `src/**/*.ts` file and expects no findings.
+    - Fixture cases the function must flag (ruling 11):
+      - `` console.error(`Cannot reach ${host}/api/v1`) `` (a printed template that merely looks like a URL);
+      - `` console.log(`${displayHost(host)} and ${config.host}`) `` (one sanitised, one raw);
+      - `` `  Host: ${config.host.padEnd(50)}` ``.
+    - Fixture cases it must not flag: `` axios.get(`${config.host}/api/v1/x`) `` and `` console.log(`on ${displayHost(config.host)}`) ``.
     - Pure cases:
       - `displayHost('http://u:p@localhost:8007')` is `http://localhost:8007`;
       - `displayHost('http://localhost:8007')` is `http://localhost:8007`;
@@ -327,7 +365,7 @@ Expected: PASS.
     7. **I3:** `Note.md` is a self-referential symlink (`ln -s Note.md Note.md`):
        - (a) no previous manifest: exit 1 with the **symbolic link** message (rule 2);
        - (b) a previous manifest present (from a prior pull, then the self-link created): the same symbolic-link message;
-       - (c) ELOOP pinned. A previous manifest tracks `Note` at `Note.md`, the server now returns `Note` as a visual doc (so it is renamed to `Note.html`), and `Note.md` is replaced by a self-referential link. Exit 1, stderr `cannot resolve Note.md: too many symbolic links (ELOOP)`, nothing written.
+       - (c) **ELOOP pinned (ruling 10).** A previous manifest tracks media doc `pic.png` at `pic.png`. The server now returns it under a new title, so it is renamed to `pic2.png`, and its blob download fails (503). `pic.png` is replaced by a self-referential link (`ln -s pic.png pic.png`). The failed-download path resolves the old path for its cross-doc claim check (`plannedTargetForSource`), so the expected result is exit 1, stderr `cannot resolve pic.png: too many symbolic links (ELOOP)`, nothing written and the manifest unchanged. This case must FAIL on the unfixed code: an uncaught ELOOP stack trace, not the one-line message. A successful replacement never resolves the old path, so it is not used here.
     8. A tracked doc at an unchanged path whose file was replaced by a symlink: refuses, with or without `--overwrite`.
 
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-write-safety.test.ts 2>&1 | tee .superpowers/sdd/2026-10-03-cli-safety/task-4-red.log`
@@ -388,7 +426,7 @@ function checkPlannedWrites(destination: string, planned: PlannedDoc[] /* , prev
 }
 ```
 
-In the rename block, replace the `physicalTargetPath(path.resolve(destination, ...p.relPath.split('/')))` call (planned targets) with `resolveOrExplain(destination, p.relPath, p.doc)`. Replace the old-path call (`m.oldRel`) with `resolveOrExplain(destination, m.oldRel)`, with no target: an old path is not a write target, so its ELOOP gets the "cannot resolve" line (case 7c).
+In the rename block, replace the `physicalTargetPath(path.resolve(destination, ...p.relPath.split('/')))` call (planned targets) with `resolveOrExplain(destination, p.relPath, p.doc)`. Replace the old-path call (`m.oldRel`, inside `plannedTargetForSource`) with `resolveOrExplain(destination, m.oldRel)`, with no target: an old path is not a write target, so its ELOOP gets the "cannot resolve" line. Case 7c reaches it through the failed-download loop (ruling 10).
 
 - [ ] **Step 3: Run GREEN, the rename matrix and the doc-pull tests.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-write-safety.test.ts tests/doc-pull-rename-matrix.test.ts tests/doc-pull.test.ts 2>&1 | tee .superpowers/sdd/2026-10-03-cli-safety/task-4-green.log`

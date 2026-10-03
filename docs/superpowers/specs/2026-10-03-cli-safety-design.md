@@ -18,6 +18,7 @@ This spec records the design calls the issues leave open. Cited later as "spec �
   For `--dev` the first line reads `--dev (http://localhost:8000)`.
 - **Same host** is cli#124's existing rule, reused rather than duplicated: `normalizeHost` in src/utils/config.ts (trim, drop trailing slashes, lower-case the whole string). Ports compare literally: `https://example.com` and `https://example.com:443` differ, as README "Resolution order" documents. `http://LocalHost:8002/` equals `http://localhost:8002`. (Plan review I8.)
 - **Stored host:** `login` strips trailing slashes from the host it resolves, whichever source it came from. `SOLIDACTIONS_HOST=http://h:1/` is stored as `http://h:1`, so requests are not built as `//api/…`. (Plan review m5.)
+- **A non-empty host that strips to nothing is invalid** (PM ruling 9, from Sol's plan re-check C1). A `SOLIDACTIONS_HOST` or `--host` that is non-empty but has nothing left once whitespace and trailing slashes are stripped (`/`, `///`, `' / '`) refuses before any request or write, in `login` and `login --device`: `error: SOLIDACTIONS_HOST="/" is not a usable host; refusing to send the API key.` (or `--host "/"`). It never falls back to the cloud default. Only an unset or empty/whitespace-only `SOLIDACTIONS_HOST` counts as absent.
 - The host line `login` already prints (`Host: <url>` / `Logging into … (SolidActions Cloud)`) reports the chosen host; it goes through §3's `displayHost`.
 - **README** (`### solidactions login flags`): one bullet, "`login` uses `SOLIDACTIONS_HOST` when it is set." It does not name `--host`, which stays hidden (#994; plan review m4). Plus one line that decides app#1951: "An agent that should be credited as itself in SolidActions (e.g. docs it pushes are recorded as Agent) logs the CLI in with its own agent token, not a person's key."
 - **Test (issue ask):** a spawned test proves zero requests reach the cloud when `SOLIDACTIONS_HOST` points elsewhere.
@@ -50,7 +51,7 @@ Wave cli-polish made every **rename** path safe (the rename matrix, `tests/doc-p
    - Otherwise it prints one line naming the relative path and the reason, then exits 1 before any write:
      `error: cannot resolve <rel>: too many symbolic links (ELOOP). Fix or remove the link and pull again.`
      For other codes: `error: cannot resolve <rel>: <code> <message>.`
-   - Example: a renamed doc's **old** path that is now a self-referential link, which is not a write target.
+   - Example (PM ruling 10, Sol's re-check R1): a renamed **media** doc whose download fails, where its tracked old path (`pic.png`) is now a self-referential link. The failed-download path resolves the old path through `resolveOrExplain` (the cross-doc claim check), which is not a write target, so it prints `cannot resolve pic.png: too many symbolic links (ELOOP)`. A successful replacement never resolves the old path. That case is not where ELOOP is pinned.
 4. **Untracked bytes are not overwritten without `--overwrite` (cli#167).** A target that holds a regular file the pull does not own refuses unless `--overwrite`, once for all such paths:
    `N file(s) exist locally but are not tracked:` then the paths, then `Move them aside and pull again, or pass --overwrite to replace them.`
    - Not owned means: the previous manifest has no entry at that path, or its entry has no recorded hash (`body_sha256` null).
@@ -82,8 +83,10 @@ Wave cli-polish made every **rename** path safe (the rename matrix, `tests/doc-p
 
 **The audit and guard are structural, not a list of names** (plan review I6). The guard test is a static test in the style of `tests/no-raw-error-body.test.ts`:
 - It fails on any template interpolation under `src/` whose expression names a host. That means an identifier containing `host`/`Host`, such as `config.host.padEnd(50)`, `resolved.config.host`, `conflict.otherHost` or `conflict.keyHost`, or the `keyHome` value built from one.
-- It ignores interpolations in a request URL: the line also builds `/api/`, `/oauth/`, `/mcp` or `new URL(`, or is an axios/fetch call argument.
-- It ignores interpolations wrapped in `displayHost(`.
+- **Exemptions are per interpolation, not per line** (PM ruling 11, Sol's re-check R2). An interpolation is exempt only when **that interpolation itself** is `displayHost(…)`, or begins a request URL: the template continues directly with `/api/`, `/oauth/` or `/mcp`, and the template is an argument to an axios/fetch call or a URL builder (`new URL(`, `projectStatusUrl(`).
+  - A printed template such as `console.error(`Cannot reach ${host}/api/v1`)` is NOT exempt.
+  - A template with both `${displayHost(host)}` and `${config.host}` fails on the second.
+  - Genuine builder sites the parser cannot classify go on the allowlist by file and expression.
 - The rest goes on an **explicit allowlist** with a reason per entry: src/utils/mcp.ts's `URL.host`, which has no userinfo, and src/utils/source-provenance.ts's git remote.
 
 Returned strings (`loginHostLines`, config.ts's refusal builders) count as prints. The audit covers, at least:
