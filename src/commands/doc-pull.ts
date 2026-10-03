@@ -721,14 +721,30 @@ async function report(
     const { planned, warnings } = await planDocs(fetched, config, reserved);
 
     // Same doc id under a different path is a rename (PM ruling 2, cli#157):
-    // the previous manifest tracks a planned doc under a DIFFERENT path `old`
-    // with a file still at `old`. Every rename ends one of three ways:
-    //   (a) `old` is removed only after its replacement is written;
-    //   (b) `old` and its tracking are kept (the replacement is not written);
+    // the previous manifest tracks a planned doc under a DIFFERENT path `old`,
+    // whatever is on disk at `old` (cli#157 FR4-C1). What is at `old` decides
+    // only what happens to `old`; the target checks below apply to every
+    // rename. Every rename ends one of three ways:
+    //   (a) `old` is removed only after its replacement is written (nothing to
+    //       remove when `old` holds no regular file);
+    //   (b) `old`'s tracking (and file, if any) is kept, the replacement is
+    //       not written;
     //   (c) the pull refuses here, before any write.
     // Never: bytes lost, an untracked file overwritten without --overwrite,
     // or one doc's tracking attached to another doc's bytes.
-    interface RenameMove { oldRel: string; newRel: string; id: number; title: string; modified: boolean; replacementWritten: boolean }
+    interface RenameMove {
+        oldRel: string;
+        newRel: string;
+        id: number;
+        title: string;
+        /** `old` holds a regular file (following a symlink); absent, a directory or a dangling link is nothing to keep or remove. */
+        sourcePresent: boolean;
+        /** The present source's bytes differ from its recorded hash (or cannot be read). Always false without a source. */
+        modified: boolean;
+        replacementWritten: boolean;
+        /** `new` is the very file at `old` (a case-only rename on a case-insensitive filesystem). */
+        targetIsSource: boolean;
+    }
     const renameMoves: RenameMove[] = [];
     if (previousManifest) {
         const pathById = new Map<number, string>();
@@ -739,28 +755,41 @@ async function report(
             const old = pathById.get(p.doc.id);
             if (old === undefined || old === p.relPath) continue;
             const absOld = path.join(destination, ...old.split('/'));
-            let isFile = false;
+            let sourceStat: fs.Stats | null = null;
             try {
-                isFile = fs.statSync(absOld).isFile();
+                const stat = fs.statSync(absOld);
+                if (stat.isFile()) sourceStat = stat;
             } catch {
-                isFile = false;
+                sourceStat = null;
             }
-            if (!isFile) continue;
-            const entry = previousManifest.docs[old];
-            let currentHash: string | null = null;
-            try {
-                currentHash = sha256Hex(fs.readFileSync(absOld));
-            } catch {
-                currentHash = null;
+            let modified = false;
+            let targetIsSource = false;
+            if (sourceStat !== null) {
+                const entry = previousManifest.docs[old];
+                let currentHash: string | null = null;
+                try {
+                    currentHash = sha256Hex(fs.readFileSync(absOld));
+                } catch {
+                    currentHash = null;
+                }
+                modified = currentHash === null || currentHash !== entry.body_sha256;
+                try {
+                    const targetStat = fs.statSync(path.join(destination, ...p.relPath.split('/')));
+                    targetIsSource = targetStat.dev === sourceStat.dev && targetStat.ino === sourceStat.ino;
+                } catch {
+                    targetIsSource = false;
+                }
             }
             renameMoves.push({
                 oldRel: old,
                 newRel: p.relPath,
                 id: p.doc.id,
                 title: p.doc.title,
-                modified: currentHash === null || currentHash !== entry.body_sha256,
+                sourcePresent: sourceStat !== null,
+                modified,
                 // A failed media download plans a new path but writes nothing there.
                 replacementWritten: !p.isMedia || p.mediaBytes !== null,
+                targetIsSource,
             });
         }
         const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
@@ -799,6 +828,16 @@ async function report(
             process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
             process.exit(1);
         }
+        // An edited source that is the very file the replacement goes to (a
+        // case-only rename on a case-insensitive filesystem) cannot be kept
+        // untracked: writing the new path overwrites it. Refuse, with or
+        // without --overwrite.
+        for (const m of renameMoves) {
+            if (!m.modified || !m.targetIsSource) continue;
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, the same file on this filesystem, so the edits cannot be kept.\n`));
+            process.stderr.write(chalk.red(`Push ${m.oldRel} first (or move it aside) and pull again.\n`));
+            process.exit(1);
+        }
         const blocked = renameMoves.filter((m) => m.modified && !options.overwrite);
         if (blocked.length > 0) {
             for (const m of blocked) {
@@ -807,12 +846,35 @@ async function report(
             }
             process.exit(1);
         }
+        // A rename target that is a symbolic link would be written through, to
+        // a file this pull does not own (possibly outside the destination):
+        // refuse, with or without --overwrite.
+        for (const m of renameMoves) {
+            if (!m.replacementWritten) continue;
+            let isLink = false;
+            try {
+                isLink = fs.lstatSync(path.join(destination, ...m.newRel.split('/'))).isSymbolicLink();
+            } catch {
+                isLink = false;
+            }
+            if (!isLink) continue;
+            process.stderr.write(chalk.red(`error: ${m.newRel} is a symbolic link; this pull would write doc ${m.id} ("${m.title}", renamed from ${m.oldRel}) through it.\n`));
+            process.stderr.write(chalk.red(`Replace ${m.newRel} with a regular file (or remove it) and pull again.\n`));
+            process.exit(1);
+        }
         // A rename target holding an untracked local file (not in the previous
-        // manifest) would be overwritten: refuse unless --overwrite. A file
-        // already holding exactly the bytes this pull writes loses nothing.
+        // manifest) would be overwritten: refuse unless --overwrite, whatever
+        // the source's state. A file already holding exactly the bytes this
+        // pull writes loses nothing and is adopted. A target tracked by another
+        // doc with a recorded hash is protected by the unpushed-local-changes
+        // check below; one tracked without a hash cannot be verified there, so
+        // it is checked here like an untracked file. A target that is the
+        // source itself is governed by the source rules above.
         if (!options.overwrite) {
             for (const m of renameMoves) {
-                if (!m.replacementWritten || previousManifest.docs[m.newRel] !== undefined) continue;
+                if (!m.replacementWritten || m.targetIsSource) continue;
+                const targetEntry = previousManifest.docs[m.newRel];
+                if (targetEntry !== undefined && targetEntry.body_sha256 != null) continue;
                 const absNew = path.join(destination, ...m.newRel.split('/'));
                 let existing: Buffer;
                 try {
@@ -822,7 +884,8 @@ async function report(
                     continue;
                 }
                 if (sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
-                process.stderr.write(chalk.red(`error: ${m.newRel} exists locally but is not tracked; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
+                const state = targetEntry === undefined ? 'exists locally but is not tracked' : `holds local bytes with no recorded hash (tracked for doc ${targetEntry.id})`;
+                process.stderr.write(chalk.red(`error: ${m.newRel} ${state}; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
                 process.stderr.write(chalk.red(`Move ${m.newRel} aside and pull again, or pass --overwrite to replace it.\n`));
                 process.exit(1);
             }
@@ -889,22 +952,29 @@ async function report(
     // untracked with a warning.
     // A twin whose replacement was NOT written (a failed media download plans
     // a new path but writes nothing) keeps its old file and its old manifest
-    // entry — deleting it would destroy the only good copy. The refusals above
+    // entry — deleting it would destroy the only good copy. Without an old
+    // file the old entry is still kept, so the doc is not tracked (with no
+    // hash) at a new path that may hold an untracked file. The refusals above
     // guarantee no other doc in this pull claims that old path.
     for (const m of renameMoves) {
-        if (m.modified) {
-            if (options.overwrite) {
-                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} is now ${m.newRel}; ${m.oldRel} is untracked\n`));
-            }
-            continue;
-        }
         if (!m.replacementWritten) {
             delete manifestDocs[m.newRel];
             const oldEntry = previousManifest?.docs[m.oldRel];
             if (oldEntry !== undefined) {
                 manifestDocs[m.oldRel] = oldEntry;
             }
-            process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} download failed; still tracked as ${m.oldRel}\n`));
+            if (m.sourcePresent) {
+                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} download failed; still tracked as ${m.oldRel}\n`));
+            } else {
+                process.stderr.write(chalk.yellow(`! doc ${m.id} download failed; still tracked as ${m.oldRel}, which is not present locally\n`));
+            }
+            continue;
+        }
+        if (!m.sourcePresent) continue;
+        if (m.modified) {
+            if (options.overwrite) {
+                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} is now ${m.newRel}; ${m.oldRel} is untracked\n`));
+            }
             continue;
         }
         const absOld = path.resolve(destination, ...m.oldRel.split('/'));
