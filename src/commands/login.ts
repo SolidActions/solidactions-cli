@@ -29,7 +29,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceScope,
 } from '../utils/workspace-lookup';
-import { displayHost } from '../utils/api';
+import { displayHost } from '../utils/host-display';
 
 export { selectWorkspaceInteractively } from '../utils/workspace-lookup';
 
@@ -329,9 +329,9 @@ export async function persistPreflightedLoginCredential(
 
 export function loginHostLines(resolved: { host: string; isDefault: boolean }): string[] {
     if (resolved.isDefault) {
-        return [`Logging into ${resolved.host} (SolidActions Cloud)`];
+        return [`Logging into ${displayHost(resolved.host)} (SolidActions Cloud)`];
     }
-    return [`Host: ${resolved.host}`];
+    return [`Host: ${displayHost(resolved.host)}`];
 }
 
 /**
@@ -519,7 +519,7 @@ export async function login(
 
     if (!apiKey || apiKey.trim().length === 0) {
         console.error(chalk.red('Error: API key is required.'));
-        console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${host}/settings/api-keys`));
+        console.log(chalk.gray('Generate an API key at: ') + chalk.blue(`${displayHost(host)}/settings/api-keys`));
         process.exit(1);
     }
 
@@ -540,9 +540,9 @@ export async function login(
         ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (e: any) {
         if (e.response?.status === 401) {
-            console.error(chalk.red(`Invalid API key for ${host}.`));
+            console.error(chalk.red(`Invalid API key for ${displayHost(host)}.`));
         } else {
-            console.error(chalk.red(`Could not reach ${host}: ${e.message}`));
+            console.error(chalk.red(`Could not reach ${displayHost(host)}: ${e.message}`));
         }
         process.exit(1);
         return;
@@ -618,7 +618,7 @@ export function whoami() {
                 : `${workspaceName}${config.workspaceId ? ` (${config.workspaceId})` : ''}`;
 
     console.log(chalk.blue('Current configuration:'));
-    console.log(`  Host:        ${config.host.padEnd(50)} ${fmt(sources.host)}`);
+    console.log(`  Host:        ${displayHost(config.host).padEnd(50)} ${fmt(sources.host)}`);
     console.log(`  API Key:     ${maskedKey.padEnd(50)} ${fmt(sources.apiKey)}`);
     console.log(`  Workspace:   ${workspaceLabel.padEnd(50)} ${fmt(sources.workspaceId)}`);
 }
