@@ -765,6 +765,16 @@ function checkPlannedWrites(
     options: DocPullOptions,
     renameMoves: RenameMove[],
 ): void {
+    // First, so a destination that is itself a looping link gets one line, not a raw ELOOP from the sidecar check below.
+    let realDest: string;
+    try {
+        realDest = physicalTargetPath(path.resolve(destination));
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
+        const reason = code === 'ELOOP' ? 'too many symbolic links (ELOOP). Fix or remove the link and pull again.' : `${code} ${(error as Error).message}.`;
+        process.stderr.write(chalk.red(`error: cannot resolve ${destination}: ${reason}\n`));
+        process.exit(1);
+    }
     // The manifest sidecar is written at the end of every pull: never through a link.
     try {
         if (fs.lstatSync(path.join(destination, DOCS_MANIFEST)).isSymbolicLink()) {
@@ -773,13 +783,17 @@ function checkPlannedWrites(
             process.exit(1);
         }
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
+        if (code !== 'ENOENT') {
+            process.stderr.write(chalk.red(`error: cannot resolve ${DOCS_MANIFEST}: ${code} ${(error as Error).message}.\n`));
+            process.exit(1);
+        }
     }
-    const realDest = physicalTargetPath(path.resolve(destination));
     for (const p of planned) {
         const link = linkOnTheWay(destination, p.relPath);
         if (link !== null) refuseLink(p.relPath, link, p.doc);
         const physical = resolveOrExplain(destination, p.relPath, p.doc);
+        // Belt and braces behind linkOnTheWay, which refuses every link first; kept in case the physical path ever diverges without one.
         if (physical !== realDest && !physical.startsWith(realDest + path.sep)) {
             process.stderr.write(chalk.red(`error: ${p.relPath} resolves outside the destination (${physical}); this pull would write doc ${p.doc.id} ("${p.doc.title}") there.\n`));
             process.exit(1);

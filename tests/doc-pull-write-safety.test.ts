@@ -596,5 +596,21 @@ describe('doc pull never writes outside the destination or through a link (cli#1
 
             await expectRefusal(false, [/cannot resolve pic\.png: too many symbolic links \(ELOOP\)/]);
         });
+
+        it('as the destination itself gets the one-line ELOOP message, no stack trace, nothing written', async () => {
+            const loop = path.join(root, 'loop');
+            fs.symlinkSync('loop', loop);
+            const before = world(root);
+
+            const result = await runPull(root, loop, false);
+
+            expect(result.stderr).not.toMatch(/\n\s+at /);
+            expect(result.code).toBe(1);
+            expect(result.stderr.trim().split('\n')).toEqual([
+                `error: cannot resolve ${loop}: too many symbolic links (ELOOP). Fix or remove the link and pull again.`,
+            ]);
+            expect(result.stdout).not.toContain('pulled');
+            expect(world(root)).toEqual(before);
+        });
     });
 });

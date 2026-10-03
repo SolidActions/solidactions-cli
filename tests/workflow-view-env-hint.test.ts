@@ -160,6 +160,25 @@ describe('workflow view names the missing environment (cli#179)', () => {
         expect(result.stderr).not.toContain('has no dev environment');
     });
 
+    it('keeps the server message when the family has the environment but the workflow route answers 404', async () => {
+        const result = await runCli(['workflow', 'view', 'CliTrustSmoke', 'nope', '-e', 'production'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Project 'clitrustsmoke' not found in your active workspace 'ws'.");
+        expect(result.stderr).not.toContain('has no production environment');
+    });
+
+    it('keeps the server message with no hint when the family lookup itself is refused', async () => {
+        projectReadStatus = 403;
+
+        const result = await runCli(['workflow', 'view', 'CliTrustSmoke', 'hello'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Project 'clitrustsmoke-dev' not found in your active workspace 'ws'.");
+        expect(result.stderr).not.toContain('has no dev environment');
+        expect(requests).toContain('GET /api/v1/projects');
+    });
+
     it('prints a project name with a newline through display(), never raw', async () => {
         const result = await runCli(['workflow', 'view', 'Cli\nTrust', 'hello'], env.home, env.cwd);
 
