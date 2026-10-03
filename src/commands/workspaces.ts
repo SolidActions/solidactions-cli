@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { requireResolvedConfig } from '../utils/api';
+import { authFailedLine, formatApiFailure, requireResolvedConfig } from '../utils/api';
 import { writeWorkspaceToFile } from '../utils/config';
 import { decideWriteTarget, pathForTarget, ensureGitignoreCovers } from '../utils/config-write-target';
 import { fetchWorkspaces, formatWorkspaceWithOrg, groupWorkspacesByOrg, resolveWorkspaceInput, WorkspaceLookupRecord } from '../utils/workspace-lookup';
@@ -15,7 +15,13 @@ export async function workspacesList() {
     try {
         ({ workspaces } = await fetchWorkspaces(config));
     } catch (error: any) {
-        console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
+        if (error.response?.status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else if (error.response) {
+            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
+        } else {
+            console.error(chalk.red('Connection failed:'), error.message);
+        }
         process.exit(1);
     }
 

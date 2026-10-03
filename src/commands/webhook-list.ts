@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import { resolveProjectSlug } from '../utils/project-ref';
 import { formatTable, formatJson, type WebhookRow } from '../utils/webhook-formatters';
 
@@ -62,7 +62,15 @@ export async function webhookList(projectName: string, options: WebhookListOptio
             if (error.response.status === 401) {
                 console.error(chalk.red(authFailedLine(config.host)));
             } else if (error.response.status === 404) {
-                console.error(chalk.red(`Project "${projectName}" not found.`));
+                const family = await lookupProjectFamilyEnvironments(config, projectName);
+                const envs = family?.environments ?? [];
+                if (envs.length > 0 && !envs.includes(environment)) {
+                    console.error(chalk.red(
+                        `Project "${projectName}" has no ${environment} environment (exists in: ${envs.join(', ')}). Pass -e <env> to target a different environment.`
+                    ));
+                } else {
+                    console.error(chalk.red(formatApiFailure(404, error.response.data)));
+                }
             } else {
                 console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
             }
