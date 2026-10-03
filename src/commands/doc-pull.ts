@@ -575,7 +575,7 @@ export async function docPullWithConfig(
         const entries = fs.readdirSync(destination);
         if (entries.length > 0 && !options.yes && !options.overwrite) {
             console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
-            console.log(chalk.yellow('Pulling will overwrite existing files.'));
+            console.log(chalk.yellow("Pulling overwrites tracked files; local files the folder doesn't track are refused unless --overwrite."));
             const response = await prompts({
                 type: 'confirm',
                 name: 'proceed',
@@ -751,8 +751,12 @@ function resolveOrExplain(destination: string, rel: string, target?: { id: numbe
  * Refuse, before any write, a pull that would write a planned doc through a
  * symbolic link or to a place that resolves outside the destination. Covers
  * every planned doc, including a failed media download: commitDocs still
- * creates its directory. `previousManifest`, `options` and `renameMoves` are
- * for the checks that build on this one.
+ * creates its directory. Also refuse, unless `--overwrite`, a planned write
+ * over a regular file the pull does not own (cli#167): one the previous
+ * manifest does not track with a hash and whose bytes differ from the
+ * pulled ones. A file already holding the pulled bytes is adopted, and a
+ * rename's own source file (a case-only retitle on a case-insensitive
+ * filesystem) is never "untracked".
  */
 function checkPlannedWrites(
     destination: string,
@@ -761,6 +765,16 @@ function checkPlannedWrites(
     options: DocPullOptions,
     renameMoves: RenameMove[],
 ): void {
+    // The manifest sidecar is written at the end of every pull: never through a link.
+    try {
+        if (fs.lstatSync(path.join(destination, DOCS_MANIFEST)).isSymbolicLink()) {
+            process.stderr.write(chalk.red(`error: ${DOCS_MANIFEST} is a symbolic link; this pull would write the docs manifest through it.\n`));
+            process.stderr.write(chalk.red('Replace it with a regular file or folder and pull again.\n'));
+            process.exit(1);
+        }
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     const realDest = physicalTargetPath(path.resolve(destination));
     for (const p of planned) {
         const link = linkOnTheWay(destination, p.relPath);
@@ -770,6 +784,35 @@ function checkPlannedWrites(
             process.stderr.write(chalk.red(`error: ${p.relPath} resolves outside the destination (${physical}); this pull would write doc ${p.doc.id} ("${p.doc.title}") there.\n`));
             process.exit(1);
         }
+    }
+    if (options.overwrite) return;
+
+    const untracked: string[] = [];
+    for (const p of planned) {
+        if (p.isMedia && p.mediaBytes === null) continue; // a failed download writes nothing
+        const tracked = previousManifest?.docs[p.relPath];
+        if (tracked !== undefined && tracked.body_sha256 != null) continue; // checked as unpushed local changes
+        const targetAbs = path.join(destination, ...p.relPath.split('/'));
+        let targetStat: fs.Stats;
+        let current: Buffer;
+        try {
+            targetStat = fs.statSync(targetAbs);
+            if (!targetStat.isFile()) continue;
+            current = fs.readFileSync(targetAbs);
+        } catch {
+            continue; // absent or unreadable: nothing to overwrite here
+        }
+        if (sha256Hex(current) === p.bodySha256) continue;
+        const ownSource = renameMoves.find((m) => m.id === p.doc.id)?.sourceIdentity;
+        if (ownSource === `${targetStat.dev}:${targetStat.ino}`) continue;
+        untracked.push(p.relPath);
+    }
+    if (untracked.length > 0) {
+        const one = untracked.length === 1;
+        process.stderr.write(chalk.red(`${untracked.length} ${one ? 'file exists' : 'files exist'} locally but ${one ? 'is' : 'are'} not tracked:\n`));
+        for (const rel of untracked) process.stderr.write(chalk.red(`  ${rel}\n`));
+        process.stderr.write(chalk.red('Move them aside and pull again, or pass --overwrite to replace them.\n'));
+        process.exit(1);
     }
 }
 
@@ -1061,15 +1104,41 @@ async function report(
     const realDest = fs.realpathSync(destination);
     const { manifestDocs, files } = commitDocs(destination, planned);
 
+    // cli#167: a media doc whose download failed must not be tracked over a
+    // local file the previous manifest does not track, with a hash, for that
+    // same doc: nothing was written, so the manifest would claim bytes the
+    // pull never gave it. A rename keeps its restore-old-entry handling below.
+    const renamedIds = new Set(renameMoves.map((m) => m.id));
+    for (const p of planned) {
+        if (!p.isMedia || p.mediaBytes !== null || renamedIds.has(p.doc.id)) continue;
+        const tracked = previousManifest?.docs[p.relPath];
+        if (tracked !== undefined && tracked.id === p.doc.id && tracked.body_sha256 != null) continue;
+        let holdsLocalFile = false;
+        try {
+            holdsLocalFile = fs.statSync(path.join(destination, ...p.relPath.split('/'))).isFile();
+        } catch {
+            holdsLocalFile = false;
+        }
+        if (!holdsLocalFile) continue;
+        delete manifestDocs[p.relPath];
+        process.stderr.write(chalk.yellow(`! doc ${p.doc.id} ("${p.doc.title}") failed to download and ${p.relPath} holds a local file; not tracking it — pull again later\n`));
+    }
+
     // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
     // deletion-propagation loop below to recognize an "orphan" that is really just the
     // same file this pull wrote under a different manifest key (e.g. a case-only title
     // rename on a case-insensitive filesystem) — that file must never be deleted.
+    // writtenPathByIdentity names the path this pull wrote for each identity, so
+    // rename cleanup can warn instead of silently keeping an old path that
+    // aliases a written file (cli#167 M2).
     const writtenIdentities = new Set<string>();
+    const writtenPathByIdentity = new Map<string, string>();
     for (const file of files) {
         try {
             const stat = fs.statSync(path.join(destination, ...file.path.split('/')));
-            writtenIdentities.add(`${stat.dev}:${stat.ino}`);
+            const identity = `${stat.dev}:${stat.ino}`;
+            writtenIdentities.add(identity);
+            writtenPathByIdentity.set(identity, file.path);
         } catch {
             continue;
         }
@@ -1101,6 +1170,23 @@ async function report(
         }
         if (!m.sourcePresent) continue;
         const absOld = path.resolve(destination, ...m.oldRel.split('/'));
+        // cli#167 M2: the old path is the same file as one this pull just
+        // wrote under another name (a link) — it is kept, loudly, so the
+        // extra name is not mistaken for an orphan. The same-file case
+        // (targetIsSource) stays silent: there is no extra name.
+        if (!m.targetIsSource) {
+            let oldIdentity: string | null = null;
+            try {
+                const oldStat = fs.statSync(absOld);
+                if (oldStat.isFile()) oldIdentity = `${oldStat.dev}:${oldStat.ino}`;
+            } catch {
+                oldIdentity = null;
+            }
+            const writtenPath = oldIdentity === null ? undefined : writtenPathByIdentity.get(oldIdentity);
+            if (writtenPath !== undefined) {
+                process.stderr.write(chalk.yellow(`! kept ${m.oldRel}: it is the same file as ${writtenPath} (a link); the extra name is not tracked — remove it yourself if you don't need it\n`));
+            }
+        }
         if (!isSafeToRemoveTrackedFile(absOld, destPrefix, realDest, writtenIdentities)) continue;
         try {
             fs.rmSync(absOld);
