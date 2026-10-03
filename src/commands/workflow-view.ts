@@ -1,8 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { authFailedLine, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
-import { resolveProjectSlug } from '../utils/project-ref';
 import { sanitizeDisplayText } from '../utils/source-provenance';
 import { workflowEffectiveState } from '../utils/workflow-state';
 import { projectSlugForState, resolveStateEnvironment } from './state';
@@ -81,20 +80,6 @@ function printAmbiguity(error: any): void {
     console.error('Re-run with an exact slug.');
 }
 
-/**
- * The hint for a 404 when the project family exists but lacks the requested
- * environment (the default dev one, typically): the server's own 404 would
- * blame the workspace. Null when the family has the environment or is unknown.
- */
-async function missingEnvironmentHint(config: Config, project: string, environment: string): Promise<string | null> {
-    const family = await lookupProjectFamilyEnvironments(config, project);
-    const envs = family?.environments ?? [];
-    if (envs.length > 0 && !envs.includes(environment)) {
-        return `Project "${project}" has no ${environment} environment (exists in: ${envs.join(', ')}). Pass -e <env> to target a different environment.`;
-    }
-    return null;
-}
-
 function printWorkflowViewError(error: any, host: string): void {
     if (!error.response) {
         console.error(chalk.red('Connection failed:'), display(error.message, 'Unknown network error.', 500));
@@ -127,10 +112,10 @@ export async function workflowViewWithConfig(
     options: WorkflowViewOptions,
     config: Config,
 ): Promise<void> {
-    let environment: ReturnType<typeof resolveStateEnvironment>;
+    let projectSlug: string;
     try {
-        environment = resolveStateEnvironment(options.env);
-        projectSlugForState(project, environment);
+        const environment = resolveStateEnvironment(options.env);
+        projectSlug = projectSlugForState(project, environment);
     } catch (error: any) {
         console.error(chalk.red(error.message));
         process.exit(1);
@@ -138,7 +123,6 @@ export async function workflowViewWithConfig(
     }
 
     try {
-        const projectSlug = await resolveProjectSlug(config, project, environment);
         const response = await axios.get(
             `${config.host}/api/v1/projects/${encodeURIComponent(projectSlug)}/workflows/${encodeURIComponent(workflow)}`,
             { headers: getApiHeaders(config) },
@@ -154,14 +138,7 @@ export async function workflowViewWithConfig(
             console.log(line);
         }
     } catch (error: any) {
-        const hint = error.response?.status === 404
-            ? await missingEnvironmentHint(config, project, environment)
-            : null;
-        if (hint) {
-            console.error(chalk.red(hint));
-        } else {
-            printWorkflowViewError(error, config.host);
-        }
+        printWorkflowViewError(error, config.host);
         process.exit(1);
     }
 }
