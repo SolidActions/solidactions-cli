@@ -7,7 +7,7 @@ import {
     completeLogin,
     persistPreflightedLoginCredential,
     preflightDeviceLoginWrite,
-    resolveLoginHost,
+    resolveLoginHostOrExit,
 } from './login';
 
 // Public device-flow client id — not a secret; matches the server-seeded
@@ -134,7 +134,7 @@ export async function pollForToken(
 export async function deviceLogin(
     options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
 ): Promise<void> {
-    const resolved = resolveLoginHost(options);
+    const resolved = resolveLoginHostOrExit(options);
     const host = resolved.host;
     const preflight = await preflightDeviceLoginWrite(options);
 

@@ -6,6 +6,7 @@ import {
     Config,
     ConfigSource,
     credentialConflictMessage,
+    normalizeHost,
     resolveConfig,
     writeConfigFile,
     removeConfigFile,
@@ -28,6 +29,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceScope,
 } from '../utils/workspace-lookup';
+import { displayHost } from '../utils/api';
 
 export { selectWorkspaceInteractively } from '../utils/workspace-lookup';
 
@@ -108,14 +110,67 @@ export function clearConfig(): void {
 }
 
 
-export function resolveLoginHost(options: { dev?: boolean; host?: string }): { host: string; isDefault: boolean } {
-    if (options.host) {
-        return { host: options.host, isDefault: false };
+export class LoginHostConflictError extends Error {
+    constructor(public flag: string, public envHost: string) {
+        super(`${flag} disagrees with SOLIDACTIONS_HOST=${displayHost(envHost)}; refusing to send the API key.`);
     }
-    if (options.dev) {
-        return { host: 'http://localhost:8000', isDefault: false };
+}
+
+export class LoginHostInvalidError extends Error {
+    constructor(public label: string, public raw: string) {
+        super(`${label}=${JSON.stringify(raw)} is not a usable host; refusing to send the API key.`);
     }
+}
+
+export function resolveLoginHost(
+    options: { dev?: boolean; host?: string },
+    env: NodeJS.ProcessEnv = process.env,
+): { host: string; isDefault: boolean } {
+    const strip = (h: string) => h.trim().replace(/\/+$/, '');
+    // Ruling 9: a non-empty value that strips to nothing is INVALID, never "absent".
+    const usable = (raw: string, label: string): string => {
+        const value = strip(raw);
+        if (value === '') throw new LoginHostInvalidError(label, raw);
+        return value;
+    };
+    const rawEnv = env.SOLIDACTIONS_HOST;
+    const envHost = rawEnv !== undefined && rawEnv.trim() !== '' ? usable(rawEnv, 'SOLIDACTIONS_HOST') : undefined;
+    const explicitHostFlag = (raw: string) => {
+        const host = usable(raw, '--host');
+        return { host, flag: `--host ${displayHost(host)}` };
+    };
+    const explicit = options.host !== undefined && options.host !== ''
+        ? explicitHostFlag(options.host)
+        : options.dev
+            ? { host: 'http://localhost:8000', flag: '--dev (http://localhost:8000)' }
+            : undefined;
+    if (explicit && envHost && normalizeHost(explicit.host) !== normalizeHost(envHost)) {
+        throw new LoginHostConflictError(explicit.flag, envHost);
+    }
+    if (explicit) return { host: explicit.host, isDefault: false };
+    if (envHost) return { host: envHost, isDefault: false };
     return { host: 'https://app.solidactions.com', isDefault: true };
+}
+
+/**
+ * `resolveLoginHost` for the login commands: a refused host prints the
+ * refusal to stderr and exits 1 before any request or config write.
+ */
+export function resolveLoginHostOrExit(options: { dev?: boolean; host?: string }): { host: string; isDefault: boolean } {
+    try {
+        return resolveLoginHost(options);
+    } catch (error) {
+        if (error instanceof LoginHostConflictError) {
+            console.error(chalk.red(`error: ${error.message}`));
+            console.error(chalk.red('Unset SOLIDACTIONS_HOST or pass the same host to --host.'));
+            process.exit(1);
+        }
+        if (error instanceof LoginHostInvalidError) {
+            console.error(chalk.red(`error: ${error.message}`));
+            process.exit(1);
+        }
+        throw error;
+    }
 }
 
 /**
@@ -459,7 +514,7 @@ export async function login(
     apiKey: string,
     options: { dev?: boolean; host?: string; workspace?: string; local?: boolean; global?: boolean; gitignore?: boolean },
 ) {
-    const resolved = resolveLoginHost(options);
+    const resolved = resolveLoginHostOrExit(options);
     const host = resolved.host;
 
     if (!apiKey || apiKey.trim().length === 0) {
