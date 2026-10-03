@@ -139,7 +139,7 @@ export function resolveLoginHost(
         const host = usable(raw, '--host');
         return { host, flag: `--host ${displayHost(host)}` };
     };
-    const explicit = options.host !== undefined && options.host !== ''
+    const explicit = options.host !== undefined
         ? explicitHostFlag(options.host)
         : options.dev
             ? { host: 'http://localhost:8000', flag: '--dev (http://localhost:8000)' }

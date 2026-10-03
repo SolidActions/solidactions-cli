@@ -320,6 +320,39 @@ describe('displayHost', () => {
         expect(displayHost('http://localhost:8007')).toBe('http://localhost:8007');
     });
 
+    it('drops userinfo from a URL that does not parse (a bad port)', () => {
+        const shown = displayHost('http://u:secret@localhost:bad-port');
+
+        expect(shown).not.toContain('secret');
+        expect(shown).not.toContain('u:');
+        expect(shown).toBe('http://localhost:bad-port');
+    });
+
+    it('drops userinfo from a scheme-less credential host', () => {
+        const shown = displayHost('u:secret@host');
+
+        expect(shown).not.toContain('secret');
+        expect(shown).not.toContain('u:');
+        expect(shown).toBe('host');
+    });
+
+    it('cuts at the last @ before the path, so an @ inside the password cannot leak', () => {
+        const shown = displayHost('http://u:pa@ss@localhost:bad-port/x');
+
+        expect(shown).not.toContain('pa@');
+        expect(shown).not.toContain('ss@');
+        expect(shown).toBe('http://localhost:bad-port/x');
+    });
+
+    it('shows a placeholder when an @ is still left after the authority is cut', () => {
+        expect(displayHost('http://u:se/cret@localhost:bad-port')).toBe('<invalid host>');
+    });
+
+    it('shows a placeholder when nothing safe is left after stripping', () => {
+        expect(displayHost('http://u:secret@')).toBe('<invalid host>');
+        expect(displayHost('u:secret@')).toBe('<invalid host>');
+    });
+
     it('shows a value that is not a URL as configured', () => {
         expect(displayHost('not a url')).toBe('not a url');
     });

@@ -355,12 +355,12 @@ describe('doc pull never writes outside the destination or through a link (cli#1
         expect(fs.readFileSync(path.join(realParent, 'out', 'sub', 'deeper', 'Deep.md'))).toEqual(DEEP_BYTES);
     });
 
-    it('refuses a failed media download planned under a folder symlink, creating no directory outside', async () => {
+    it.each([false, true])('refuses a failed media download planned under a folder symlink, creating no directory outside (overwrite=%s)', async (overwrite) => {
         const failing: ServedDoc = { id: 2, title: 'pic.png', revision: 11, relative: 'sub/deeper', media: 'fail' };
         served = [NOTE, failing];
         fs.symlinkSync(outside, path.join(dest, 'sub'));
 
-        await expectRefusal(false, [/sub\/deeper\/pic\.png is a symbolic link \(or sits under one: sub\); this pull would write doc 2 \("pic\.png"\) through it/]);
+        await expectRefusal(overwrite, [/sub\/deeper\/pic\.png is a symbolic link \(or sits under one: sub\); this pull would write doc 2 \("pic\.png"\) through it/]);
 
         expect(fs.existsSync(path.join(outside, 'deeper'))).toBe(false);
     });

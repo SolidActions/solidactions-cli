@@ -132,3 +132,37 @@ describe('a host with userinfo never reaches the terminal (cli#163)', () => {
         expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 });
+
+describe('a malformed host with userinfo never reaches the terminal (cli#163)', () => {
+    let env: ReturnType<typeof makeTmpEnv>;
+
+    beforeEach(() => {
+        env = makeTmpEnv();
+        writeGlobal(env.home, {
+            host: 'http://someuser:somepass@localhost:invalid-port',
+            apiKey: 'test-key-0123456789',
+            workspaceId: 'ws-1',
+            workspace: 'ws-1',
+            workspaceOrg: 'Org',
+        });
+    });
+    afterEach(() => env.cleanup());
+
+    it('whoami shows the host without userinfo', async () => {
+        const result = await runCli(['whoami'], env.home, env.cwd);
+
+        const hostLine = result.stdout.split('\n').find((line) => line.includes('Host:')) ?? '';
+        expect(hostLine).toContain('http://localhost:invalid-port');
+        expect(result.stdout + result.stderr).not.toContain('somepass');
+        expect(result.stdout + result.stderr).not.toContain('someuser');
+    });
+
+    it('the SOLIDACTIONS_DEBUG dump shows the host without userinfo', async () => {
+        const result = await runCli(['whoami'], env.home, env.cwd, { SOLIDACTIONS_DEBUG: '1' });
+
+        const debugLine = result.stderr.split('\n').find((line) => line.includes('host:')) ?? '';
+        expect(debugLine).toContain('http://localhost:invalid-port');
+        expect(result.stdout + result.stderr).not.toContain('somepass');
+        expect(result.stdout + result.stderr).not.toContain('someuser');
+    });
+});

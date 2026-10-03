@@ -331,5 +331,34 @@ describe('login honours SOLIDACTIONS_HOST (cli#170)', () => {
         expect(apiRequests).toEqual([]);
         expect(fs.existsSync(configPathFor(env.home))).toBe(false);
     });
+
+    it('rejects an explicitly empty --host for login --stdin instead of selecting the cloud (cli#170)', async () => {
+        const result = await runCli(
+            ['login', '--stdin', '--global', '--host', ''],
+            env.home,
+            env.cwd,
+            { stdin: 'sk-test' },
+        );
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('--host=""');
+        expect(result.stderr).toContain('not a usable host');
+        expect(proxyRequests).toEqual([]);
+        expect(proxyConnects).toEqual([]);
+        expect(apiRequests).toEqual([]);
+        expect(fs.existsSync(configPathFor(env.home))).toBe(false);
+    });
+
+    it('rejects an explicitly empty --host for login --device instead of selecting the cloud (cli#170)', async () => {
+        const result = await runCli(['login', '--device', '--global', '--host', ''], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('--host=""');
+        expect(result.stderr).toContain('not a usable host');
+        expect(proxyRequests).toEqual([]);
+        expect(proxyConnects).toEqual([]);
+        expect(apiRequests).toEqual([]);
+        expect(fs.existsSync(configPathFor(env.home))).toBe(false);
+    });
 });
 

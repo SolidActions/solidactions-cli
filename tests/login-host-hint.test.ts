@@ -59,6 +59,20 @@ describe('resolveLoginHost', () => {
         expect(() => resolveLoginHost({ host: '  ' }, {})).toThrow(LoginHostInvalidError);
     });
 
+    it('treats an explicitly empty --host as invalid, never absent (cli#170)', () => {
+        expect(() => resolveLoginHost({ host: '' }, {})).toThrow(LoginHostInvalidError);
+        expect(() => resolveLoginHost({ host: '   ' }, {})).toThrow(LoginHostInvalidError);
+    });
+
+    it('treats an explicitly empty --host as invalid even when --dev is also passed', () => {
+        expect(() => resolveLoginHost({ host: '', dev: true }, {})).toThrow(LoginHostInvalidError);
+    });
+
+    it('treats empty SOLIDACTIONS_HOST as absent (cloud default)', () => {
+        expect(resolveLoginHost({}, { SOLIDACTIONS_HOST: '' }))
+            .toEqual({ host: 'https://app.solidactions.com', isDefault: true });
+    });
+
     it('treats whitespace-only SOLIDACTIONS_HOST as absent (cloud default)', () => {
         expect(resolveLoginHost({}, { SOLIDACTIONS_HOST: '  ' }))
             .toEqual({ host: 'https://app.solidactions.com', isDefault: true });
