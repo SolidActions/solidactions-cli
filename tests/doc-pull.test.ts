@@ -2842,8 +2842,8 @@ describe('doc pull writes the right extension (cli#157)', () => {
 
             expect(result.stderr).toContain('page.md');
             expect(result.stderr).toContain('page.html');
-            expect(result.stderr).toMatch(/rename .*page\.md.* to .*page\.html/i);
-            expect(result.stderr).toContain('--overwrite');
+            expect(result.stderr).toMatch(/push|move/i);
+            expect(result.stderr).toContain('doc 5');
 
             expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
             expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
@@ -2854,22 +2854,28 @@ describe('doc pull writes the right extension (cli#157)', () => {
         }
     });
 
-    it('rename, modified with --overwrite: keeps the edited twin untracked', async () => {
+    it('rename, modified with --overwrite: refuses and preserves the edited file and manifest', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         try {
             seedRenameDir(tmpDest, '# Old EDITED');
+            const manifestBefore = fs.readFileSync(path.join(tmpDest, 'out', DOCS_MANIFEST), 'utf8');
             responseQueue = renameQueue('<h1>Old</h1>');
 
             const result = await runPullCli(['docs', path.join(tmpDest, 'out'), '--overwrite']);
-            expect(result.code).toBe(0);
+            expect(result.code).toBe(1);
 
-            expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.html'), 'utf8')).toBe('<h1>Old</h1>');
+            expect(fs.existsSync(path.join(tmpDest, 'out', 'page.html'))).toBe(false);
             expect(fs.readFileSync(path.join(tmpDest, 'out', 'page.md'), 'utf8')).toBe('# Old EDITED');
             expect(result.stderr).toContain('page.md');
-            expect(result.stderr).toMatch(/untracked/i);
+            expect(result.stderr).toContain('page.html');
+            expect(result.stderr).toContain('doc 5');
+            expect(result.stderr).toMatch(/push|move/i);
+            expect(result.stderr).not.toMatch(/untracked/i);
+            expect(result.stdout).not.toContain('pulled');
+            expect(fs.readFileSync(path.join(tmpDest, 'out', DOCS_MANIFEST), 'utf8')).toBe(manifestBefore);
 
             const manifest = readManifest(path.join(tmpDest, 'out'));
-            expect(Object.keys(manifest.docs)).toEqual(['page.html']);
+            expect(Object.keys(manifest.docs)).toEqual(['page.md']);
 
             expect(result.stdout).not.toContain('deleted remotely');
             expect(result.stderr).not.toContain('deleted remotely');

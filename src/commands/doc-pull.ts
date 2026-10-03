@@ -349,7 +349,8 @@ export interface SingleDocReserved {
 function allocateName(used: Set<string>, base: string, ext: string): string {
     let candidate = base;
     let suffix = 2;
-    while (used.has(`${candidate}${ext}`)) {
+    const usedFolded = new Set([...used].map((name) => name.toLowerCase()));
+    while (usedFolded.has(`${candidate}${ext}`.toLowerCase())) {
         candidate = `${base}-${suffix}`;
         suffix++;
     }
@@ -383,9 +384,11 @@ function isCollisionVariant(file: string, base: string, ext: string): boolean {
  * name still forces a suffix. When the tracked title is unchanged and the
  * tracked path is a collision variant of that title in the same folder,
  * the doc keeps that exact path (R2-I2); a renamed/stale path still
- * reallocates. Folder pulls pass nothing and behave exactly as before.
+ * reallocates. Folder pulls reserve only paths whose title, directory and
+ * extension stay unchanged, keeping their exact spelling regardless of list
+ * order without reserving the old names of docs that move away.
  */
-async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved, previousManifest?: DocsManifest | null): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
@@ -395,27 +398,17 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
         }
     }
 
+    const pathById = reserved?.pathById ?? new Map<number, string>();
+    const titleById = reserved?.titleById ?? new Map<number, string>();
+    if (!reserved && previousManifest) {
+        for (const [rel, entry] of Object.entries(previousManifest.docs)) {
+            if (pathById.has(entry.id)) continue;
+            pathById.set(entry.id, rel);
+            titleById.set(entry.id, entry.title);
+        }
+    }
+    const prepared: Array<{ doc: FetchedDoc; media: MediaResolution; base: string; ext: string; bodySha256: string | null; mediaBytes: Buffer | null }> = [];
     for (const doc of docs) {
-        const dirRel = doc.relative;
-
-        let used = usedNamesByDir.get(dirRel);
-        if (!used) {
-            used = new Set();
-            usedNamesByDir.set(dirRel, used);
-        }
-
-        // The pulled doc keeps its own tracked name: free it in its own
-        // directory so allocation below can hand it back. Names other ids
-        // own stay reserved.
-        const ownRelPath = reserved?.pathById.get(doc.id);
-        if (ownRelPath !== undefined) {
-            const slash = ownRelPath.lastIndexOf('/');
-            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
-            if (ownDir === dirRel) {
-                used.delete(slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1));
-            }
-        }
-
         const media = isMediaCandidate(doc) ? await resolveMedia(config, doc) : { isMedia: false as const };
         if (media.warning) warnings.push(media.warning);
 
@@ -437,32 +430,6 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
             ext = '.canvas.json';
         }
 
-        // Unchanged title keeps its existing collision-assigned path (R2-I2):
-        // the tracked path must be in this same folder and be the base name
-        // or a `-N` collision variant of it. A stale/renamed path (e.g. the
-        // `renamed.md` merge fixture) falls through to reallocation below.
-        const ownTitle = reserved?.titleById.get(doc.id);
-        let fileName: string;
-        let relPath: string;
-        if (ownRelPath !== undefined && ownTitle !== undefined && ownTitle === doc.title) {
-            const slash = ownRelPath.lastIndexOf('/');
-            const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
-            const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
-            if (ownDir === dirRel && isCollisionVariant(ownFile, base, ext)) {
-                fileName = ownFile;
-                relPath = ownRelPath;
-                used.add(ownFile);
-            } else {
-                const allocated = allocateName(used, base, ext);
-                fileName = allocated;
-                relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
-            }
-        } else {
-            const allocated = allocateName(used, base, ext);
-            fileName = allocated;
-            relPath = dirRel ? `${dirRel}/${fileName}` : fileName;
-        }
-
         let bodySha256: string | null;
         let mediaBytes: Buffer | null = null;
         if (media.isMedia) {
@@ -479,6 +446,40 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
             bodySha256 = sha256Hex(doc.body);
         }
 
+        prepared.push({ doc, media, base, ext, bodySha256, mediaBytes });
+    }
+
+    const stablePath = (doc: FetchedDoc, base: string, ext: string): string | undefined => {
+        const ownRelPath = pathById.get(doc.id);
+        if (ownRelPath === undefined || titleById.get(doc.id) !== doc.title) return undefined;
+        const slash = ownRelPath.lastIndexOf('/');
+        const ownDir = slash === -1 ? '' : ownRelPath.slice(0, slash);
+        const ownFile = slash === -1 ? ownRelPath : ownRelPath.slice(slash + 1);
+        return ownDir === doc.relative && isCollisionVariant(ownFile, base, ext) ? ownRelPath : undefined;
+    };
+    if (!reserved) {
+        for (const { doc, base, ext } of prepared) {
+            const rel = stablePath(doc, base, ext);
+            if (rel === undefined) continue;
+            const used = usedNamesByDir.get(doc.relative) ?? new Set<string>();
+            used.add(path.posix.basename(rel));
+            usedNamesByDir.set(doc.relative, used);
+        }
+    }
+    for (const { doc, media, base, ext, bodySha256, mediaBytes } of prepared) {
+        const dirRel = doc.relative;
+        const used = usedNamesByDir.get(dirRel) ?? new Set<string>();
+        usedNamesByDir.set(dirRel, used);
+        const ownRelPath = pathById.get(doc.id);
+        if (reserved && ownRelPath !== undefined && path.posix.dirname(ownRelPath) === (dirRel || '.')) {
+            // Exact ownership matters: freeing Page.md must not free page.md
+            // when another tracked doc owns that differently cased name.
+            used.delete(path.posix.basename(ownRelPath));
+        }
+        const keptPath = stablePath(doc, base, ext);
+        const fileName = keptPath === undefined ? allocateName(used, base, ext) : path.posix.basename(keptPath);
+        const relPath = keptPath ?? (dirRel ? `${dirRel}/${fileName}` : fileName);
+        used.add(fileName);
         planned.push({ doc, relPath, dirRel, fileName, isMedia: media.isMedia, mediaBytes, bodySha256 });
     }
 
@@ -683,6 +684,31 @@ function isSafeToRemoveTrackedFile(absPath: string, destPrefix: string, realDest
     return true;
 }
 
+/** Resolve directory aliases even when a planned file or its parent does not exist yet. */
+function physicalTargetPath(absPath: string): string {
+    const missing: string[] = [];
+    let existing = absPath;
+    while (true) {
+        try {
+            return path.join(fs.realpathSync(existing), ...missing.reverse());
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            try {
+                if (fs.lstatSync(existing).isSymbolicLink()) {
+                    existing = path.resolve(path.dirname(existing), fs.readlinkSync(existing));
+                    continue;
+                }
+            } catch (linkError) {
+                if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
+            }
+            const parent = path.dirname(existing);
+            if (parent === existing) throw error;
+            missing.push(path.basename(existing));
+            existing = parent;
+        }
+    }
+}
+
 /** Write the docs + manifest to disk and print the result (chalk lines or --json). */
 async function report(
     destination: string,
@@ -718,7 +744,7 @@ async function report(
         }
         reserved = { usedNames, pathById, titleById };
     }
-    const { planned, warnings } = await planDocs(fetched, config, reserved);
+    const { planned, warnings } = await planDocs(fetched, config, reserved, previousManifest);
 
     // Same doc id under a different path is a rename (PM ruling 2, cli#157):
     // the previous manifest tracks a planned doc under a DIFFERENT path `old`,
@@ -739,6 +765,8 @@ async function report(
         title: string;
         /** `old` holds a regular file (following a symlink); absent, a directory or a dangling link is nothing to keep or remove. */
         sourcePresent: boolean;
+        /** Device + inode of a present source, following filesystem aliases. */
+        sourceIdentity: string | null;
         /** The present source's bytes differ from its recorded hash (or cannot be read). Always false without a source. */
         modified: boolean;
         replacementWritten: boolean;
@@ -786,6 +814,7 @@ async function report(
                 id: p.doc.id,
                 title: p.doc.title,
                 sourcePresent: sourceStat !== null,
+                sourceIdentity: sourceStat === null ? null : `${sourceStat.dev}:${sourceStat.ino}`,
                 modified,
                 // A failed media download plans a new path but writes nothing there.
                 replacementWritten: !p.isMedia || p.mediaBytes !== null,
@@ -793,18 +822,43 @@ async function report(
             });
         }
         const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
-        // An edited rename source whose old path is itself a write target in the
-        // new plan would be overwritten by commitDocs below — even with
-        // --overwrite, which otherwise keeps edited twins. Refuse before ANY
-        // write: overwriting unpublished edits while claiming to keep them is
-        // data loss. This runs before the plain modified-rename refusal so the
-        // collision (where --overwrite does not help) is reported accurately.
+        const plannedByIdentity = new Map<string, PlannedDoc[]>();
+        const plannedByPhysicalPath = new Map<string, PlannedDoc[]>();
+        for (const p of planned) {
+            const physicalPath = physicalTargetPath(path.resolve(destination, ...p.relPath.split('/')));
+            const physicalTargets = plannedByPhysicalPath.get(physicalPath) ?? [];
+            physicalTargets.push(p);
+            plannedByPhysicalPath.set(physicalPath, physicalTargets);
+            try {
+                const stat = fs.statSync(path.join(destination, ...p.relPath.split('/')));
+                if (!stat.isFile()) continue;
+                const identity = `${stat.dev}:${stat.ino}`;
+                const targets = plannedByIdentity.get(identity) ?? [];
+                targets.push(p);
+                plannedByIdentity.set(identity, targets);
+            } catch {
+                // An absent target cannot alias a present source.
+                continue;
+            }
+        }
+        // Path claims matter even without a source (a failed download restores
+        // its old tracking). Present sources also need protection from writes
+        // through another name, hard link, symlink or directory component alias.
+        const plannedTargetForSource = (m: RenameMove): PlannedDoc | undefined =>
+            plannedPaths.get(m.oldRel)
+            ?? plannedByPhysicalPath.get(physicalTargetPath(path.resolve(destination, ...m.oldRel.split('/'))))?.find((p) => p.doc.id !== m.id)
+            ?? (m.sourceIdentity === null
+                ? undefined
+                : plannedByIdentity.get(m.sourceIdentity)?.find((p) => p.doc.id !== m.id));
+
+        // Edited sources cannot be discarded by --overwrite during a rename.
+        // Report a cross-doc collision first, including an alias's actual path.
         for (const m of renameMoves) {
             if (!m.modified) continue;
-            const taker = plannedPaths.get(m.oldRel);
+            const taker = plannedTargetForSource(m);
             if (!taker) continue;
             const oldTitle = previousManifest.docs[m.oldRel]?.title ?? `#${m.id}`;
-            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${oldTitle}", now written as ${m.newRel}), but this pull would write doc ${taker.doc.id} ("${taker.doc.title}") to ${m.oldRel}.\n`));
+            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${oldTitle}", now written as ${m.newRel}), but this pull would write doc ${taker.doc.id} ("${taker.doc.title}") to ${taker.relPath}, the same file.\n`));
             process.stderr.write(chalk.red(`Move or rename the edited ${m.oldRel} (or push it first) and pull again.\n`));
             process.exit(1);
         }
@@ -814,9 +868,9 @@ async function report(
         // no relocation or re-allocation of names.
         for (const m of renameMoves) {
             if (m.replacementWritten) continue;
-            const taker = plannedPaths.get(m.oldRel);
+            const taker = plannedTargetForSource(m);
             if (!taker) continue;
-            process.stderr.write(chalk.red(`error: doc ${m.id} ("${m.title}") failed to download to ${m.newRel}, so ${m.oldRel} still holds its only local copy, but this pull would put doc ${taker.doc.id} ("${taker.doc.title}") at ${m.oldRel}.\n`));
+            process.stderr.write(chalk.red(`error: doc ${m.id} ("${m.title}") failed to download to ${m.newRel}, so ${m.oldRel} must keep its previous file and tracking, but this pull would put doc ${taker.doc.id} ("${taker.doc.title}") at ${taker.relPath}, the same file.\n`));
             process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
             process.exit(1);
         }
@@ -825,25 +879,32 @@ async function report(
         for (const m of renameMoves) {
             if (m.replacementWritten || !m.modified) continue;
             process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, but its download failed.\n`));
-            process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
+            process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside), then pull again once the download succeeds.\n`));
             process.exit(1);
         }
-        // An edited source that is the very file the replacement goes to (a
-        // case-only rename on a case-insensitive filesystem) cannot be kept
-        // untracked: writing the new path overwrites it. Refuse, with or
-        // without --overwrite.
-        for (const m of renameMoves) {
-            if (!m.modified || !m.targetIsSource) continue;
-            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, the same file on this filesystem, so the edits cannot be kept.\n`));
-            process.stderr.write(chalk.red(`Push ${m.oldRel} first (or move it aside) and pull again.\n`));
-            process.exit(1);
-        }
-        const blocked = renameMoves.filter((m) => m.modified && !options.overwrite);
+        const blocked = renameMoves.filter((m) => m.modified);
         if (blocked.length > 0) {
             for (const m of blocked) {
-                const reason = path.extname(m.oldRel) !== path.extname(m.newRel) ? 'changed type' : 'was renamed';
-                process.stderr.write(chalk.red(`${m.oldRel} is now written as ${m.newRel} (doc ${m.id} ${reason}); rename ${m.oldRel} to ${m.newRel} and push it first, or pass --overwrite.\n`));
+                process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${m.title}"), which is now written as ${m.newRel}.\n`));
+                process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside) and pull again.\n`));
             }
+            process.exit(1);
+        }
+        // Two writes through different names of one file cannot both retain
+        // their own doc's bytes and hash. Refuse compositions involving a
+        // rename or legacy case-folded names that already alias one file.
+        // Other non-rename-only target handling is outside this rule.
+        // Physical paths cover absent targets under aliased directories, where
+        // there is no inode yet to compare.
+        const renamedIds = new Set(renameMoves.map((m) => m.id));
+        for (const targets of [...plannedByIdentity.values(), ...plannedByPhysicalPath.values()]) {
+            const writes = targets.filter((p) => !p.isMedia || p.mediaBytes !== null);
+            if (writes.length < 2) continue;
+            const foldedPaths = new Set(writes.map((p) => p.relPath.toLowerCase()));
+            if (!writes.some((p) => renamedIds.has(p.doc.id)) && foldedPaths.size === writes.length) continue;
+            const [first, second] = writes;
+            process.stderr.write(chalk.red(`error: ${first.relPath} (doc ${first.doc.id}) and ${second.relPath} (doc ${second.doc.id}) are the same file on this filesystem; this pull would write different docs through those names.\n`));
+            process.stderr.write(chalk.red('Nothing was written. Move the aliased files apart and pull again.\n'));
             process.exit(1);
         }
         // A rename target that is a symbolic link would be written through, to
@@ -948,8 +1009,7 @@ async function report(
     // Rename cleanup (PM ruling 2, cli#157): each unmodified old twin is gone
     // now that the new file is written — but never one this pull just wrote
     // for another doc (e.g. a new markdown doc that now takes `page.md`).
-    // Edited twins were either refused above or, with --overwrite, are kept
-    // untracked with a warning.
+    // Edited sources were all refused before any write, even with --overwrite.
     // A twin whose replacement was NOT written (a failed media download plans
     // a new path but writes nothing) keeps its old file and its old manifest
     // entry — deleting it would destroy the only good copy. Without an old
@@ -971,12 +1031,6 @@ async function report(
             continue;
         }
         if (!m.sourcePresent) continue;
-        if (m.modified) {
-            if (options.overwrite) {
-                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} is now ${m.newRel}; ${m.oldRel} is untracked\n`));
-            }
-            continue;
-        }
         const absOld = path.resolve(destination, ...m.oldRel.split('/'));
         if (!isSafeToRemoveTrackedFile(absOld, destPrefix, realDest, writtenIdentities)) continue;
         try {

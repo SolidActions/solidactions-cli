@@ -1,5 +1,5 @@
 /**
- * The `doc pull` rename matrix (cli#157, final reviews 3 and 4: FR3-C1, FR4-C1).
+ * The `doc pull` rename matrix (cli#157, final reviews 3–5: FR3-C1, FR4-C1, FR5-C1).
  *
  * One real-process test per rename path: the built CLI (`node dist/index.js`)
  * against a real in-process HTTP server, a temp HOME and a temp destination
@@ -16,6 +16,10 @@
  * modified / absent) x target (free / tracked by another doc / untracked with
  * different bytes / untracked with the same bytes) x --overwrite x folder or
  * single-doc pull, for every rename kind and for a failed media download.
+ *
+ * An edited rename source always refuses, even with --overwrite. Preserved
+ * sources must not alias another doc's planned target. New allocations compare
+ * names case-insensitively while tracked unchanged docs keep exact paths.
  *
  * Each case asserts the bytes of every file in the destination, the whole
  * manifest (path -> id, revision, hash), the exit status, and the refusal
@@ -47,6 +51,7 @@ interface ServedDoc {
     title: string;
     revision: number;
     docType: 'visual' | 'canvas' | null;
+    relative?: string;
     /** Body for a non-media doc. */
     body?: Buffer;
     /** Media bytes, or 'fail' for a signed-URL download that answers 503. */
@@ -72,9 +77,16 @@ function bodyOf(doc: ServedDoc): string {
 function answerMcp(args: Record<string, any>): string {
     if (args.action === 'list') {
         if (served.form === 'single') return mcpResult({ code: 'folder_path_not_found', message: 'no such folder' }, true);
+        const relative = String(args.folder_path).slice('docs'.length).replace(/^\//, '');
+        const prefix = relative ? `${relative}/` : '';
+        const folders = new Set(served.docs
+            .map((d) => d.relative ?? '')
+            .filter((dir) => dir.startsWith(prefix) && dir !== relative)
+            .map((dir) => dir.slice(prefix.length).split('/')[0]));
         return mcpResult({
-            folders: [],
-            docs: served.docs.map((d) => ({ id: d.id, title: d.title, doc_type: d.docType === null ? null : { slug: d.docType } })),
+            folders: [...folders].map((name) => ({ name, folder_path: `docs/${prefix}${name}` })),
+            docs: served.docs.filter((d) => (d.relative ?? '') === relative)
+                .map((d) => ({ id: d.id, title: d.title, doc_type: d.docType === null ? null : { slug: d.docType } })),
         });
     }
     if (args.action === 'bulk_read') {
@@ -198,7 +210,7 @@ interface TrackedFile {
  * What the seed leaves at a tracked path: the file (default), nothing, a
  * directory, or a symlink to another name in the destination.
  */
-type SeedState = 'file' | 'absent' | 'dir' | { symlinkTo: string };
+type SeedState = 'file' | 'absent' | 'dir' | { symlinkTo: string } | { hardlinkTo: string };
 
 interface Kind {
     label: string;
@@ -342,6 +354,8 @@ interface MatrixCase {
     tracked: Record<string, TrackedSeed>;
     /** Untracked local entries: bytes, a directory, a hard link to another seeded name, or a symlink. */
     untracked?: Record<string, Buffer | 'dir' | { hardlinkTo: string } | { symlinkTo: string }>;
+    /** Directory aliases installed before the tracked files. */
+    directoryAliases?: Record<string, string>;
     served: ServedDoc[];
     /** Expected entries after a non-refused pull, and the expected manifest. Omitted for (c). */
     after?: { files: Record<string, Entry>; manifest: Record<string, ManifestExpectation> };
@@ -425,12 +439,7 @@ function crossCase(kind: Kind, form: 'folder' | 'single', src: SourceState, targ
     const base = { name: caseName(kind, form, `${src} source, ${targetText(target, form)}`, overwrite), form, overwrite, tracked: trackedSeed, untracked, served };
 
     if (src === 'modified') {
-        if (!overwrite) {
-            return { ...base, outcome: 'c', stderr: [new RegExp(`rename ${escape(oldRel)} to ${escape(docRel)}`), /--overwrite/] };
-        }
-        // Ruled (cli#157 issuecomment-5962166707): the edited bytes stay, untracked.
-        files[oldRel] = kind.editedBytes;
-        return { ...base, outcome: 'b', after: { files, manifest }, stderr: [new RegExp(`kept ${escape(oldRel)}.*untracked`)] };
+        return { ...base, outcome: 'c', stderr: [new RegExp(`${escape(oldRel)} holds unpublished edits for doc 5`), new RegExp(escape(docRel)), /push|move/i] };
     }
     if (target === 'untracked' && !overwrite) {
         return { ...base, outcome: 'c', stderr: [new RegExp(`${escape(newRel)} exists locally but is not tracked`), /doc 5/, /--overwrite/] };
@@ -443,17 +452,19 @@ function kindSpecialCases(kind: Kind): MatrixCase[] {
     const cases: MatrixCase[] = [];
     const newBytes = newBytesOf(kind);
     const { oldRel, newRel } = kind;
+    const reusedRel = kind === CASE_KIND ? 'Page-2.md' : oldRel;
+    const reuseText = kind === CASE_KIND ? 'another doc gets a suffix for the case-colliding old name' : 'old path written by another doc';
 
     for (const overwrite of [false, true]) {
         for (const src of ['unmodified', 'absent'] as const) {
             cases.push({
-                name: caseName(kind, 'folder', `${src} source, free target, old path written by another doc`, overwrite),
+                name: caseName(kind, 'folder', `${src} source, free target, ${reuseText}`, overwrite),
                 outcome: 'a', form: 'folder', overwrite,
                 tracked: { [oldRel]: source(kind, src) },
                 served: [kind.renamed(), kind.reuser()],
                 after: {
-                    files: { [newRel]: newBytes, [oldRel]: servedBytes(kind.reuser()) },
-                    manifest: { [newRel]: entry(5, 8, newBytes), [oldRel]: entry(6, 60, servedBytes(kind.reuser())) },
+                    files: { [newRel]: newBytes, [reusedRel]: servedBytes(kind.reuser()) },
+                    manifest: { [newRel]: entry(5, 8, newBytes), [reusedRel]: entry(6, 60, servedBytes(kind.reuser())) },
                 },
             });
             cases.push({
@@ -494,11 +505,13 @@ function kindSpecialCases(kind: Kind): MatrixCase[] {
             });
         }
         cases.push({
-            name: caseName(kind, 'folder', 'modified source, old path written by another doc', overwrite),
+            name: caseName(kind, 'folder', `modified source, ${reuseText}`, overwrite),
             outcome: 'c', form: 'folder', overwrite,
             tracked: { [oldRel]: source(kind, 'modified') },
             served: [kind.renamed(), kind.reuser()],
-            stderr: [/doc 5/, /doc 6/, new RegExp(escape(oldRel)), /push it first/],
+            stderr: kind === CASE_KIND
+                ? [/doc 5/, new RegExp(escape(oldRel)), /push|move/i]
+                : [/doc 5/, /doc 6/, new RegExp(escape(oldRel)), /push it first/],
         });
     }
 
@@ -572,7 +585,7 @@ function oddSourceCases(): MatrixCase[] {
             tracked: { [kind.oldRel]: { ...tracked(kind, kind.oldBytes), state: { symlinkTo: 'real.md' } } },
             untracked: { 'real.md': kind.editedBytes },
             served: [kind.renamed()],
-            stderr: [new RegExp(`rename ${escape(kind.oldRel)} to ${escape(kind.newRel)}`)],
+            stderr: [new RegExp(`${escape(kind.oldRel)} holds unpublished edits for doc 5`), /push|move/i],
         },
         {
             name: caseName(kind, 'folder', 'source is a dangling symlink, free target', false),
@@ -628,7 +641,182 @@ function sameFileCases(): MatrixCase[] {
             tracked: { [kind.oldRel]: source(kind, 'modified') },
             untracked: { [kind.newRel]: { hardlinkTo: kind.oldRel } },
             served: [kind.renamed()],
-            stderr: [/Page\.md holds unpublished edits for doc 5/, /same file/],
+            stderr: [/Page\.md holds unpublished edits for doc 5/, /page\.md/, /push|move/i],
+        });
+    }
+    return cases;
+}
+
+/** Preserved sources aliased by another doc's target (FR5-C1). */
+function preservedSourceAliasCases(): MatrixCase[] {
+    const cases: MatrixCase[] = [];
+    for (const overwrite of [false, true]) {
+        for (const alias of ['hardlink', 'symlink', 'directory'] as const) {
+            for (const edited of [false, true]) {
+                const kind = edited ? VISUAL_KIND : MEDIA_KIND;
+                const oldRel = alias === 'directory' ? `alias/${kind.oldRel}` : kind.oldRel;
+                const targetRel = alias === 'directory' ? kind.oldRel : `other${path.extname(kind.oldRel)}`;
+                const other = kind.reuser();
+                other.title = targetRel.replace(/\.md$/, '');
+                cases.push({
+                    name: caseName(kind, 'folder', `${edited ? 'edited source' : 'failed download source'} aliased by another doc's target via ${alias}`, overwrite),
+                    outcome: 'c', form: 'folder', overwrite,
+                    tracked: { [oldRel]: source(kind, edited ? 'modified' : 'unmodified') },
+                    ...(alias === 'directory'
+                        ? { directoryAliases: { alias: '.' } }
+                        : { untracked: { [targetRel]: alias === 'hardlink' ? { hardlinkTo: oldRel } : { symlinkTo: oldRel } } }),
+                    served: [edited ? kind.renamed() : kind.renamed('fail'), other],
+                    stderr: [/doc 5/, /doc 6/, new RegExp(escape(oldRel)), new RegExp(escape(kind.newRel)), new RegExp(escape(targetRel))],
+                });
+            }
+        }
+        cases.push({
+            name: caseName(MEDIA_KIND, 'folder', 'absent failed-download source path aliased by another target directory', overwrite),
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: { 'alias/old.png': source(MEDIA_KIND, 'absent') },
+            directoryAliases: { alias: '.' },
+            served: [MEDIA_KIND.renamed('fail'), MEDIA_KIND.reuser()],
+            stderr: [/doc 5/, /doc 6/, /alias\/old\.png/, /new\.png/, /pull again once the download succeeds/i],
+        });
+        cases.push({
+            name: caseName(MEDIA_KIND, 'folder', 'dangling source alias would attach restored tracking to another doc bytes', overwrite),
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: { 'old.png': { ...source(MEDIA_KIND, 'absent'), state: { symlinkTo: 'kept.png' } } },
+            served: [MEDIA_KIND.renamed('fail'), { ...MEDIA_KIND.reuser(), title: 'kept.png' }],
+            stderr: [/doc 5/, /doc 6/, /old\.png/, /kept\.png/, /new\.png/],
+        });
+        cases.push({
+            name: caseName(MEDIA_KIND, 'folder', 'dangling target alias would overwrite another renamed doc replacement', overwrite),
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: { 'old.png': source(MEDIA_KIND, 'unmodified') },
+            untracked: { 'other.png': { symlinkTo: 'new.png' } },
+            served: [MEDIA_KIND.renamed(), { ...MEDIA_KIND.reuser(), title: 'other.png' }],
+            stderr: [/doc 5/, /doc 6/, /new\.png/, /other\.png/, /same file/],
+        });
+        // Single-doc pulls have only one planned target: it can alias its own
+        // source, but cannot contain another doc's planned write target.
+        cases.push({
+            name: caseName(VISUAL_KIND, 'single', 'edited source aliased by its own target via hardlink', overwrite),
+            outcome: 'c', form: 'single', overwrite,
+            tracked: { [VISUAL_KIND.oldRel]: source(VISUAL_KIND, 'modified') },
+            untracked: { [VISUAL_KIND.newRel]: { hardlinkTo: VISUAL_KIND.oldRel } },
+            served: [VISUAL_KIND.renamed()],
+            stderr: [/doc 5/, /page\.md/, /page\.html/, /push|move/i],
+        });
+        cases.push({
+            name: caseName(MEDIA_KIND, 'single', 'failed download source aliased by its own unwritten target', overwrite),
+            outcome: 'b', form: 'single', overwrite,
+            tracked: { [MEDIA_KIND.oldRel]: source(MEDIA_KIND, 'unmodified') },
+            untracked: { [MEDIA_KIND.newRel]: { hardlinkTo: MEDIA_KIND.oldRel } },
+            served: [MEDIA_KIND.renamed('fail')],
+            after: {
+                files: { 'old.png': MEDIA_KIND.oldBytes, 'new.png': MEDIA_KIND.oldBytes },
+                manifest: { 'old.png': entry(5, 7, MEDIA_KIND.oldBytes) },
+            },
+            stderr: [/doc 5 download failed; still tracked as old\.png/],
+        });
+        cases.push({
+            name: caseName(VISUAL_KIND, 'folder', 'two renamed docs write targets that alias the same file', overwrite),
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: {
+                'page.md': source(VISUAL_KIND, 'unmodified'),
+                'other.md': { id: 6, title: 'other', revision: 59, media: false, bytes: REUSER_BYTES.visual },
+            },
+            untracked: { 'page.html': { hardlinkTo: 'page.md' }, 'other.html': { hardlinkTo: 'page.md' } },
+            served: [VISUAL_KIND.renamed(), { id: 6, title: 'other', revision: 60, docType: 'visual', body: Buffer.from('<h1>six</h1>') }],
+            stderr: [/doc 5/, /doc 6/, /page\.html/, /other\.html/, /same file/],
+        });
+        cases.push({
+            name: caseName(VISUAL_KIND, 'folder', 'two renamed docs write absent targets under aliased directories', overwrite),
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: {
+                'page.md': source(VISUAL_KIND, 'unmodified'),
+                'other.md': { id: 6, title: 'other', revision: 59, media: false, bytes: REUSER_BYTES.visual },
+            },
+            directoryAliases: { b: 'a' },
+            untracked: { a: 'dir' },
+            served: [
+                { ...VISUAL_KIND.renamed(), relative: 'a' },
+                { id: 6, title: 'page', revision: 60, docType: 'visual', body: Buffer.from('<h1>six</h1>'), relative: 'b' },
+            ],
+            stderr: [/doc 5/, /doc 6/, /a\/page\.html/, /b\/page\.html/, /same file/],
+        });
+        // Both docs move away successfully. Their old names alias the other's
+        // target, which is allowed: cleanup must preserve the files just written.
+        cases.push({
+            name: caseName(VISUAL_KIND, 'folder', 'two renamed docs alias each other targets via hardlinks', overwrite),
+            outcome: overwrite ? 'a' : 'c', form: 'folder', overwrite,
+            tracked: {
+                'page.md': source(VISUAL_KIND, 'unmodified'),
+                'other.md': { id: 6, title: 'other', revision: 59, media: false, bytes: REUSER_BYTES.visual },
+            },
+            untracked: { 'other.html': { hardlinkTo: 'page.md' }, 'page.html': { hardlinkTo: 'other.md' } },
+            served: [VISUAL_KIND.renamed(), { id: 6, title: 'other', revision: 60, docType: 'visual', body: Buffer.from('<h1>six</h1>') }],
+            after: {
+                files: { 'page.md': Buffer.from('<h1>six</h1>'), 'other.html': Buffer.from('<h1>six</h1>'), 'other.md': newBytesOf(VISUAL_KIND), 'page.html': newBytesOf(VISUAL_KIND) },
+                manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
+            },
+        });
+    }
+    return cases;
+}
+
+/** Case-insensitive allocation prevents aliases even before targets exist. */
+function caseFoldAllocationCases(): MatrixCase[] {
+    const cases: MatrixCase[] = [];
+    const first: ServedDoc = { id: 5, title: 'Page', revision: 8, docType: null, body: Buffer.from('# five v2') };
+    const second: ServedDoc = { id: 6, title: 'page', revision: 60, docType: null, body: Buffer.from('# six') };
+    for (const overwrite of [false, true]) {
+        for (const renamed of [false, true]) {
+            cases.push({
+                name: `folder pull, ${renamed ? 'two renamed' : 'two new'} docs with case-only title differences allocate distinct names, ${overwrite ? '--overwrite' : 'no --overwrite'}`,
+                outcome: 'a', form: 'folder', overwrite,
+                tracked: renamed ? {
+                    'old.md': { ...source(CASE_KIND, 'unmodified'), title: 'old' },
+                    'other.md': { id: 6, title: 'other', revision: 59, media: false, bytes: Buffer.from('# six v1') },
+                } : {},
+                served: [first, second],
+                after: {
+                    files: { 'Page.md': first.body!, 'page-2.md': second.body! },
+                    manifest: { 'Page.md': entry(5, 8, first.body!), 'page-2.md': entry(6, 60, second.body!) },
+                },
+            });
+        }
+        cases.push({
+            name: `single pull, another doc reserves a differently cased path, ${overwrite ? '--overwrite' : 'no --overwrite'}`,
+            outcome: 'a', form: 'single', overwrite,
+            tracked: {
+                'old.md': { ...source(CASE_KIND, 'unmodified'), title: 'old' },
+                'Page.md': { id: 9, title: 'Page', revision: 90, media: false, bytes: Buffer.from('# nine v1') },
+            },
+            served: [{ ...first, title: 'page' }],
+            after: {
+                files: { 'Page.md': Buffer.from('# nine v1'), 'page-2.md': first.body! },
+                manifest: { 'Page.md': entry(9, 90, Buffer.from('# nine v1')), 'page-2.md': entry(5, 8, first.body!) },
+            },
+        });
+        cases.push({
+            name: `folder pull, legacy tracked case aliases refuse before either doc is written, ${overwrite ? '--overwrite' : 'no --overwrite'}`,
+            outcome: 'c', form: 'folder', overwrite,
+            tracked: {
+                'Page.md': source(CASE_KIND, 'unmodified'),
+                'page.md': { id: 6, title: 'page', revision: 59, media: false, bytes: CASE_KIND.oldBytes, state: { hardlinkTo: 'Page.md' } },
+            },
+            served: [first, second],
+            stderr: [/doc 5/, /doc 6/, /Page\.md/, /page\.md/, /same file/],
+        });
+        cases.push({
+            name: `folder pull, case-fold allocation preserves tracked exact paths when listing order changes, ${overwrite ? '--overwrite' : 'no --overwrite'}`,
+            outcome: 'a', form: 'folder', overwrite,
+            tracked: {
+                'Page.md': source(CASE_KIND, 'unmodified'),
+                'page-2.md': { id: 6, title: 'page', revision: 59, media: false, bytes: Buffer.from('# six v1') },
+            },
+            served: [second, first],
+            after: {
+                files: { 'Page.md': first.body!, 'page-2.md': second.body! },
+                manifest: { 'Page.md': entry(5, 8, first.body!), 'page-2.md': entry(6, 60, second.body!) },
+            },
         });
     }
     return cases;
@@ -668,7 +856,7 @@ function failedMediaCases(): MatrixCase[] {
                     }
                     const base = { name: caseName(kind, form, `download fails, ${src} source, ${targetText(target, form)}`, overwrite), form, overwrite, tracked: trackedSeed, untracked, served };
                     if (src === 'modified') {
-                        cases.push({ ...base, outcome: 'c', stderr: [/old\.png holds unpublished edits for doc 5/, /download failed/, /pull again once the download succeeds/i] });
+                        cases.push({ ...base, outcome: 'c', stderr: [/old\.png holds unpublished edits for doc 5/, /download failed/, /push|move/i, /pull again once the download succeeds/i] });
                     } else {
                         cases.push({ ...base, outcome: 'b', after: { files, manifest }, stderr: [/failed to download media for doc 5/, keptMessage] });
                     }
@@ -720,7 +908,7 @@ function failedMediaCases(): MatrixCase[] {
     return cases;
 }
 
-const MATRIX: MatrixCase[] = [...KINDS.flatMap(kindCases), ...oddSourceCases(), ...sameFileCases(), ...failedMediaCases()];
+const MATRIX: MatrixCase[] = [...KINDS.flatMap(kindCases), ...oddSourceCases(), ...sameFileCases(), ...preservedSourceAliasCases(), ...caseFoldAllocationCases(), ...failedMediaCases()];
 
 // ---------------------------------------------------------------------------
 // Running and checking a case
@@ -729,12 +917,19 @@ const MATRIX: MatrixCase[] = [...KINDS.flatMap(kindCases), ...oddSourceCases(), 
 function seed(dest: string, testCase: MatrixCase): { manifestText: string } {
     fs.mkdirSync(dest, { recursive: true });
     const docs: Record<string, object> = {};
+    for (const [rel, target] of Object.entries(testCase.directoryAliases ?? {})) {
+        fs.symlinkSync(target, path.join(dest, rel));
+    }
     for (const [rel, file] of Object.entries(testCase.tracked)) {
         const state = file.state ?? 'file';
         const abs = path.join(dest, rel);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
         if (state === 'file') fs.writeFileSync(abs, file.bytes);
         else if (state === 'dir') fs.mkdirSync(abs);
-        else if (state !== 'absent') fs.symlinkSync(state.symlinkTo, abs);
+        else if (state !== 'absent') {
+            if ('symlinkTo' in state) fs.symlinkSync(state.symlinkTo, abs);
+            else fs.linkSync(path.join(dest, state.hardlinkTo), abs);
+        }
         docs[rel] = { id: file.id, title: file.title, current_revision_id: file.revision, media: file.media, body_sha256: file.hashless ? null : sha256Hex(file.hashOf ?? file.bytes) };
     }
     for (const [rel, content] of Object.entries(testCase.untracked ?? {})) {
@@ -757,26 +952,12 @@ function snapshot(dest: string): Record<string, Entry> {
         const abs = path.join(dest, name);
         const stat = fs.lstatSync(abs);
         if (stat.isSymbolicLink()) out[name] = `symlink:${fs.readlinkSync(abs)}`;
-        else out[name] = stat.isDirectory() ? 'dir' : fs.readFileSync(abs);
+        else if (stat.isDirectory()) {
+            out[name] = 'dir';
+            for (const [rel, content] of Object.entries(snapshot(abs))) out[`${name}/${rel}`] = content;
+        } else out[name] = fs.readFileSync(abs);
     }
     return out;
-}
-
-function seededSnapshot(testCase: MatrixCase): Record<string, Entry> {
-    const out: Record<string, Entry> = {};
-    for (const [rel, file] of Object.entries(testCase.tracked)) {
-        const state = file.state ?? 'file';
-        if (state === 'file') out[rel] = file.bytes;
-        else if (state === 'dir') out[rel] = 'dir';
-        else if (state !== 'absent') out[rel] = `symlink:${state.symlinkTo}`;
-    }
-    for (const [rel, content] of Object.entries(testCase.untracked ?? {})) {
-        if (content === 'dir') out[rel] = 'dir';
-        else if ('hardlinkTo' in content) out[rel] = out[content.hardlinkTo];
-        else if ('symlinkTo' in content) out[rel] = `symlink:${content.symlinkTo}`;
-        else out[rel] = content;
-    }
-    return sortedEntries(out);
 }
 
 function sortedEntries(entries: Record<string, Entry>): Record<string, Entry> {
@@ -805,12 +986,15 @@ describe('doc pull rename matrix (cli#157)', () => {
         const dest = path.join(root, 'out');
         try {
             const { manifestText } = seed(dest, testCase);
+            const before = snapshot(dest);
             served = { form: testCase.form, docs: testCase.served };
 
             const result = await runPull(pullArgs(testCase, dest));
 
             if (testCase.outcome === 'c') {
-                expect(snapshot(dest)).toEqual(seededSnapshot(testCase));
+                expect(snapshot(dest)).toEqual(before);
+                expect(result.stdout).not.toContain('pulled');
+                expect(result.stderr).not.toMatch(/kept .*untracked/);
                 expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
                 expect(result.code).toBe(1);
                 expectStderr(result, testCase);
