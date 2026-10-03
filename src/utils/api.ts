@@ -10,6 +10,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
+import { displayHost } from './host-display';
 import { activeCommandIsMutating } from './mutating-commands';
 import { matchProjectRungs } from './project-ref';
 import {
@@ -18,6 +19,8 @@ import {
     readLastUsedWorkspace,
     writeLastUsedWorkspace,
 } from './workspace-guard';
+
+export { displayHost };
 
 // Backend (solidactions-app PR #128) returns: "Project '<slug>' not found in your active workspace '<workspace-slug>'."
 // We require the literal single-quotes around the slug so plausible future error messages
@@ -345,26 +348,6 @@ export function requireConfig(): Config {
 }
 
 /**
- * Host as shown in user-facing output: a URL with any userinfo stripped
- * (credentials must never reach the terminal), otherwise shown as
- * configured. Shared by every authentication-failure message (cli#156).
- */
-export function displayHost(host: string): string {
-    let shown = host;
-    try {
-        const url = new URL(host);
-        if (url.username || url.password) {
-            url.username = '';
-            url.password = '';
-            shown = url.toString().replace(/\/$/, '');
-        }
-    } catch {
-        // Not a URL: show it as configured.
-    }
-    return shown;
-}
-
-/**
  * Contextual 401 message — names the host being called and where the (now
  * apparently invalid/expired) API key came from, instead of a bare
  * "Authentication failed" that gives no clue which config is at fault.
@@ -633,7 +616,7 @@ export async function applyWorkspaceGuard(
 
     if (options.mutating && config.workspaceId) {
         // Name the host too (cli#124): the same workspace name on two hosts confirms nothing.
-        announce(chalk.gray(`Workspace: ${describeWorkspace(config, sources)} on ${config.host}`));
+        announce(chalk.gray(`Workspace: ${describeWorkspace(config, sources)} on ${displayHost(config.host)}`));
     }
 
     // state.json means "the workspace you last WROTE to" — that is precisely what the write

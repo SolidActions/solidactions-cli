@@ -16,7 +16,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { resolveCrewId } from '../utils/crew';
 
 const RESERVED_KEYS = ['WORKFLOW_INPUT', 'WORKFLOW_INPUT_URL', 'STEPS_TRIGGER_ID', 'TENANT_ID', 'SA_PROXY_URL', 'SA_PROXY_TOKEN', 'WORKFLOW_SLUG', 'PATH', 'HOME'];
@@ -198,7 +198,10 @@ export async function skillRunWithConfig(
             resolved = response.data?.variables ?? {};
             skippedSecrets = response.data?.skipped_secrets ?? [];
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: failed to resolve crew variables: ${e?.response?.data?.message ?? e.message}\n`));
+            const message = e?.response?.status === 401
+                ? authFailedLine(config.host)
+                : `error: failed to resolve crew variables: ${e?.response?.data?.message ?? e.message}`;
+            process.stderr.write(chalk.red(`${message}\n`));
             process.exit(1);
         }
     } else {

@@ -15,7 +15,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import path from 'path';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callCrewsTool } from '../utils/mcp';
 import { execLocally, shellQuoteArg } from './skill-run';
 import { resolveCrewId, resolveRoleCrewPath, crewIdForPath } from '../utils/crew';
@@ -243,7 +243,10 @@ async function execOnHost(
             resolved = response.data?.variables ?? {};
             skippedSecrets = response.data?.skipped_secrets ?? [];
         } catch (e: any) {
-            process.stderr.write(chalk.red(`error: failed to resolve crew variables: ${e?.response?.data?.message ?? e.message}\n`));
+            const message = e?.response?.status === 401
+                ? authFailedLine(config.host)
+                : `error: failed to resolve crew variables: ${e?.response?.data?.message ?? e.message}`;
+            process.stderr.write(chalk.red(`${message}\n`));
             process.exit(1);
         }
     }
