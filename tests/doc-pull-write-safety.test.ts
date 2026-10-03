@@ -572,6 +572,85 @@ describe('doc pull never writes outside the destination or through a link (cli#1
         });
     });
 
+    describe('an existing target that cannot be read is not owned (cli#167)', () => {
+        const LOCAL = Buffer.from('# local bytes in a write-only file');
+        const isRoot = process.getuid?.() === 0; // root reads mode-0200 files, so nothing is unreadable to it
+
+        function manifestJson(): { docs: Record<string, { id: number; body_sha256: string | null }> } {
+            return JSON.parse(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8'));
+        }
+
+        /** A write-only file: the pull can replace it but never read it. */
+        function writeOnly(rel: string): void {
+            fs.writeFileSync(path.join(dest, rel), LOCAL);
+            fs.chmodSync(path.join(dest, rel), 0o200);
+        }
+
+        function bytesAfter(rel: string): Buffer {
+            fs.chmodSync(path.join(dest, rel), 0o600);
+            return fs.readFileSync(path.join(dest, rel));
+        }
+
+        beforeEach(() => {
+            served = [NOTE];
+        });
+
+        it.skipIf(isRoot)('a first pull with -y refuses a write-only untracked file, naming the read error, leaving the bytes and writing no manifest', async () => {
+            writeOnly('Note.md');
+
+            const result = await runPull(root, dest, false);
+
+            expect(result.code).toBe(1);
+            expect(result.stderr).toContain('1 file exists locally but is not tracked:\n  Note.md (cannot be read: EACCES)\n');
+            expect(result.stderr).toContain('Move them aside and pull again, or pass --overwrite to replace them.');
+            expect(result.stdout).not.toContain('pulled');
+            expect(bytesAfter('Note.md')).toEqual(LOCAL);
+            expect(fs.existsSync(path.join(dest, MANIFEST_FILE))).toBe(false);
+        });
+
+        it.skipIf(isRoot)('refuses a tracked entry with no recorded hash over a write-only file, leaving the bytes', async () => {
+            writeOnly('Note.md');
+            const manifest = JSON.parse(manifestOf([{ rel: 'Note.md', doc: NOTE, bytes: NOTE_BYTES }]));
+            manifest.docs['Note.md'].body_sha256 = null;
+            const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+            fs.writeFileSync(path.join(dest, MANIFEST_FILE), manifestText);
+
+            const result = await runPull(root, dest, false);
+
+            expect(result.code).toBe(1);
+            expect(result.stderr).toContain('1 file exists locally but is not tracked:\n  Note.md (cannot be read: EACCES)\n');
+            expect(bytesAfter('Note.md')).toEqual(LOCAL);
+            expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
+        });
+
+        it.skipIf(isRoot)('refuses a rename whose target is a write-only file, leaving the bytes, the old file and the manifest', async () => {
+            const OLD = Buffer.from('# page v1');
+            served = [{ id: 5, title: 'Renamed', revision: 9, body: Buffer.from('# page v2') }];
+            fs.writeFileSync(path.join(dest, 'Page.md'), OLD);
+            writeOnly('Renamed.md');
+            const manifestText = manifestOf([{ rel: 'Page.md', doc: { id: 5, title: 'Page', revision: 8, body: OLD }, bytes: OLD }]);
+            fs.writeFileSync(path.join(dest, MANIFEST_FILE), manifestText);
+
+            const result = await runPull(root, dest, false);
+
+            expect(result.code).toBe(1);
+            expect(result.stderr).toMatch(/Renamed\.md exists locally but is not tracked/);
+            expect(bytesAfter('Renamed.md')).toEqual(LOCAL);
+            expect(fs.readFileSync(path.join(dest, 'Page.md'))).toEqual(OLD);
+            expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
+        });
+
+        it.skipIf(isRoot)('replaces a write-only file under --overwrite', async () => {
+            writeOnly('Note.md');
+
+            const result = await runPull(root, dest, true);
+
+            expect(result.code).toBe(0);
+            expect(bytesAfter('Note.md')).toEqual(NOTE_BYTES);
+            expect(manifestJson().docs['Note.md'].body_sha256).toBe(sha256Hex(NOTE_BYTES));
+        });
+    });
+
     describe('a self-referential symlink', () => {
         it('is refused as a symbolic link when there is no previous manifest', async () => {
             fs.symlinkSync('Note.md', path.join(dest, 'Note.md'));

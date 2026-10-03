@@ -730,6 +730,14 @@ function refuseLink(rel: string, link: string, doc: { id: number; title: string 
     process.exit(1);
 }
 
+/** One line for a path that cannot be resolved (spec §2.3): the ELOOP wording, or the error code and message. Never returns. */
+function explainUnresolvable(label: string, error: unknown): never {
+    const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
+    const reason = code === 'ELOOP' ? 'too many symbolic links (ELOOP). Fix or remove the link and pull again.' : `${code} ${(error as Error).message}.`;
+    process.stderr.write(chalk.red(`error: cannot resolve ${label}: ${reason}\n`));
+    process.exit(1);
+}
+
 /** physicalTargetPath, but a resolution error becomes one line (spec §2.3). A planned target with a link on the way gets the symbolic-link refusal. */
 function resolveOrExplain(destination: string, rel: string, target?: { id: number; title: string }): string {
     const abs = path.resolve(destination, ...rel.split('/'));
@@ -740,10 +748,7 @@ function resolveOrExplain(destination: string, rel: string, target?: { id: numbe
             const link = linkOnTheWay(destination, rel);
             if (link !== null) refuseLink(rel, link, target);
         }
-        const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
-        const reason = code === 'ELOOP' ? 'too many symbolic links (ELOOP). Fix or remove the link and pull again.' : `${code} ${(error as Error).message}.`;
-        process.stderr.write(chalk.red(`error: cannot resolve ${rel}: ${reason}\n`));
-        process.exit(1);
+        explainUnresolvable(rel, error);
     }
 }
 
@@ -770,10 +775,7 @@ function checkPlannedWrites(
     try {
         realDest = physicalTargetPath(path.resolve(destination));
     } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
-        const reason = code === 'ELOOP' ? 'too many symbolic links (ELOOP). Fix or remove the link and pull again.' : `${code} ${(error as Error).message}.`;
-        process.stderr.write(chalk.red(`error: cannot resolve ${destination}: ${reason}\n`));
-        process.exit(1);
+        explainUnresolvable(destination, error);
     }
     // The manifest sidecar is written at the end of every pull: never through a link.
     try {
@@ -783,11 +785,7 @@ function checkPlannedWrites(
             process.exit(1);
         }
     } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
-        if (code !== 'ENOENT') {
-            process.stderr.write(chalk.red(`error: cannot resolve ${DOCS_MANIFEST}: ${code} ${(error as Error).message}.\n`));
-            process.exit(1);
-        }
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') explainUnresolvable(DOCS_MANIFEST, error);
     }
     for (const p of planned) {
         const link = linkOnTheWay(destination, p.relPath);
@@ -813,8 +811,11 @@ function checkPlannedWrites(
             targetStat = fs.statSync(targetAbs);
             if (!targetStat.isFile()) continue;
             current = fs.readFileSync(targetAbs);
-        } catch {
-            continue; // absent or unreadable: nothing to overwrite here
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
+            if (code === 'ENOENT') continue; // absent: nothing to overwrite here
+            untracked.push(`${p.relPath} (cannot be read: ${code})`); // present but unverifiable: not owned
+            continue;
         }
         if (sha256Hex(current) === p.bodySha256) continue;
         const ownSource = renameMoves.find((m) => m.id === p.doc.id)?.sourceIdentity;
@@ -1059,15 +1060,18 @@ async function report(
                 const targetEntry = previousManifest.docs[m.newRel];
                 if (targetEntry !== undefined && targetEntry.body_sha256 != null) continue;
                 const absNew = path.join(destination, ...m.newRel.split('/'));
-                let existing: Buffer;
+                let existing: Buffer | null = null;
+                let unreadable = '';
                 try {
                     if (!fs.statSync(absNew).isFile()) continue;
                     existing = fs.readFileSync(absNew);
-                } catch {
-                    continue;
+                } catch (error) {
+                    const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
+                    if (code === 'ENOENT') continue;
+                    unreadable = ` (cannot be read: ${code})`; // present but unverifiable: not owned
                 }
-                if (sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
-                const state = targetEntry === undefined ? 'exists locally but is not tracked' : `holds local bytes with no recorded hash (tracked for doc ${targetEntry.id})`;
+                if (existing !== null && sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
+                const state = (targetEntry === undefined ? 'exists locally but is not tracked' : `holds local bytes with no recorded hash (tracked for doc ${targetEntry.id})`) + unreadable;
                 process.stderr.write(chalk.red(`error: ${m.newRel} ${state}; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
                 process.stderr.write(chalk.red(`Move ${m.newRel} aside and pull again, or pass --overwrite to replace it.\n`));
                 process.exit(1);

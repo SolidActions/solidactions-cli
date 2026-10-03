@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import '../utils/api';
 import { Config } from '../utils/config';
+import { displayHost } from '../utils/host-display';
 import { fetchWorkspaces, WorkspaceLookupRecord, WorkspaceScope } from '../utils/workspace-lookup';
 import {
     completeLogin,
@@ -169,7 +170,7 @@ export async function deviceLogin(
         ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (e: any) {
         if (e.response?.status === 401) {
-            console.error(chalk.red(`Authentication was saved to ${preflight.targetPath}, but the server rejected it during workspace discovery.`));
+            console.error(chalk.red(`Authentication was saved to ${preflight.targetPath}, but ${displayHost(host)} rejected it during workspace discovery.`));
         } else {
             console.error(chalk.red(
                 `Authentication was saved to ${preflight.targetPath}, but workspace discovery failed: ${e.message}`,
