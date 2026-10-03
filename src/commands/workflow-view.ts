@@ -1,10 +1,10 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, lookupProjectFamilyEnvironments, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { sanitizeDisplayText } from '../utils/source-provenance';
 import { workflowEffectiveState } from '../utils/workflow-state';
-import { projectSlugForState, resolveStateEnvironment } from './state';
+import { projectSlugForState, resolveStateEnvironment, StateEnvironment } from './state';
 
 export interface WorkflowViewOptions {
     env?: string;
@@ -80,14 +80,19 @@ function printAmbiguity(error: any): void {
     console.error('Re-run with an exact slug.');
 }
 
-function printWorkflowViewError(error: any, host: string): void {
+async function printWorkflowViewError(
+    error: any,
+    config: Config,
+    project: string,
+    environment: StateEnvironment,
+): Promise<void> {
     if (!error.response) {
         console.error(chalk.red('Connection failed:'), display(error.message, 'Unknown network error.', 500));
         return;
     }
 
     if (error.response.status === 401) {
-        console.error(chalk.red(authFailedLine(host)));
+        console.error(chalk.red(authFailedLine(config.host)));
         return;
     }
 
@@ -98,6 +103,21 @@ function printWorkflowViewError(error: any, host: string): void {
     if (error.response.status === 409 && errorCode === 'ambiguous_workflow') {
         printAmbiguity(error);
         return;
+    }
+
+    if (error.response.status === 404) {
+        // The workflow route cannot say which environment is missing, so ask
+        // the family lookup; any failure falls through to the server message.
+        try {
+            const family = await lookupProjectFamilyEnvironments(config, project);
+            const environments = family?.environments ?? [];
+            if (environments.length > 0 && !environments.includes(environment)) {
+                console.error(chalk.red(`Project "${display(project)}" has no ${display(environment)} environment (exists in: ${environments.map((e) => display(e)).join(', ')}). Pass -e <env> to target a different environment.`));
+                return;
+            }
+        } catch {
+            // fall through to the server's message
+        }
     }
 
     const fallback = error.response.status === 404
@@ -113,8 +133,9 @@ export async function workflowViewWithConfig(
     config: Config,
 ): Promise<void> {
     let projectSlug: string;
+    let environment: StateEnvironment;
     try {
-        const environment = resolveStateEnvironment(options.env);
+        environment = resolveStateEnvironment(options.env);
         projectSlug = projectSlugForState(project, environment);
     } catch (error: any) {
         console.error(chalk.red(error.message));
@@ -138,7 +159,7 @@ export async function workflowViewWithConfig(
             console.log(line);
         }
     } catch (error: any) {
-        printWorkflowViewError(error, config.host);
+        await printWorkflowViewError(error, config, project, environment);
         process.exit(1);
     }
 }
