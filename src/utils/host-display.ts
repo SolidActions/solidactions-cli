@@ -22,6 +22,24 @@ export function displayHost(host: string): string {
     return shown;
 }
 
+/**
+ * True when a host carries userinfo (`user:pass@`, `user@`). axios turns URL
+ * userinfo into a Basic Authorization header that replaces the CLI's API-key header, so
+ * such a host can never authenticate; config resolution and login refuse it
+ * (cli#195, Peter's ruling on CrewOps ask task-cliahostwithuser-922c).
+ */
+export function hostHasUserinfo(host: string): boolean {
+    try {
+        const url = new URL(host);
+        if (url.host !== '') {
+            return url.username !== '' || url.password !== '';
+        }
+    } catch {
+        // Not a URL `new URL` accepts: look at the authority by hand below.
+    }
+    return /^([a-z][a-z0-9+.-]*:\/\/)?[^/?#]*@/i.test(host);
+}
+
 const INVALID_HOST_PLACEHOLDER = '<invalid host>';
 
 /**

@@ -5,7 +5,7 @@ import path from 'path';
 import * as readline from 'readline';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 import { DatabaseOperationError } from '../utils/database-data-plane';
 import { requestDatabaseRecord } from './database';
@@ -192,6 +192,19 @@ function teachingError(error: unknown): never {
     throw error;
 }
 
+/**
+ * Throw the host-naming 401 for a 401 response, in either export call
+ * (cli#186). A non-string, blank or whitespace-only server code becomes
+ * 'unauthenticated', the way safeDatabaseRequestError trims it.
+ */
+function throwIfUnauthenticated(error: any, config: Config): void {
+    if (error?.response?.status !== 401) {
+        return;
+    }
+    const candidate = typeof error.response.data?.code === 'string' ? error.response.data.code.trim() : '';
+    throw new ExportCommandError(candidate.length > 0 ? candidate : 'unauthenticated', authFailedLine(config.host), 401);
+}
+
 async function operation<T>(config: Config, body: Record<string, unknown>): Promise<T> {
     try {
         const response = await axios.post(`${config.host}/api/v1/databases`, body, {
@@ -200,6 +213,7 @@ async function operation<T>(config: Config, body: Record<string, unknown>): Prom
         });
         return applyRetryAfter(response.data as T, response.headers['retry-after']);
     } catch (error: any) {
+        throwIfUnauthenticated(error, config);
         const response = error?.response;
         const code = typeof response?.data?.code === 'string' ? response.data.code : 'upstream_unavailable';
         const message = typeof response?.data?.message === 'string' ? response.data.message : 'Database request failed.';
@@ -218,6 +232,7 @@ async function startExport(config: Config, name: string, tables: string[] | unde
         }, { headers: getApiHeaders(config, 'application/json'), timeout: 30_000 });
         return stableMetadata(applyRetryAfter(response.data, response.headers['retry-after']));
     } catch (error: any) {
+        throwIfUnauthenticated(error, config);
         const data = error?.response?.data;
         const code = typeof data?.code === 'string' ? data.code : 'upstream_unavailable';
         const message = typeof data?.message === 'string' ? data.message : 'Database request failed.';

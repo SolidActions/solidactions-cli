@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Must stay first: it edits DEBUG before any dependency can load `debug`, and refuses a network NODE_DEBUG (cli#194).
+import './utils/debug-guard';
 import chalk from 'chalk';
 import { Command, Option } from 'commander';
 import { deploy } from './commands/deploy';

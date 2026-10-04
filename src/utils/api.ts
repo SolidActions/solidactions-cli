@@ -2,7 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import path from 'path';
 import prompts from 'prompts';
-import { Config, ResolvedConfig, credentialConflictMessage, readConfigFile, resolveConfig, writeConfigFile, writeWorkspaceToFile, getGlobalConfigPath } from './config';
+import { Config, ResolvedConfig, credentialConflictMessage, readConfigFile, resolveConfig, userinfoHostMessage, writeConfigFile, writeWorkspaceToFile, getGlobalConfigPath } from './config';
 import {
     formatWorkspaceWithOrg,
     resolveWorkspaceInput,
@@ -10,7 +10,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceSelectionDependencies,
 } from './workspace-lookup';
-import { displayHost } from './host-display';
+import { displayHost, hostHasUserinfo } from './host-display';
 import { activeCommandIsMutating } from './mutating-commands';
 import { matchProjectRungs } from './project-ref';
 import {
@@ -334,6 +334,10 @@ export function requireResolvedConfig(): ResolvedConfig {
     const resolved = resolveConfig();
     if (resolved?.credentialConflict) {
         console.error(chalk.red(credentialConflictMessage(resolved.credentialConflict)));
+        process.exit(1);
+    }
+    if (resolved && hostHasUserinfo(resolved.config.host)) {
+        console.error(chalk.red(userinfoHostMessage(resolved.config.host, resolved.sources.host)));
         process.exit(1);
     }
     if (!resolved || !resolved.config.apiKey) {

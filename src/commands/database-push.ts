@@ -7,7 +7,7 @@ import { pathToFileURL } from 'url';
 import { createClient } from '@libsql/client';
 import { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
-import { DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, DatabaseOperationError, DatabaseRequestDependencies, requestDatabaseOperation } from '../utils/database-data-plane';
+import { DEFAULT_DATABASE_CONTROL_PLANE_TIMEOUT_MS, DatabaseOperationError, DatabaseRequestDependencies, preserveAuthFailure, requestDatabaseOperation } from '../utils/database-data-plane';
 import { refuseIfAnalytical } from './database';
 
 const MAX_BYTES = 20_000_000_000;
@@ -296,7 +296,14 @@ export async function databasePushWithConfig(name: string, file: string, options
             clearInterval(renewalTimer);
             await renewing;
         }
-        if (renewalFailure) throw new DatabaseOperationError('upstream_unavailable', 'The database upload lease could not be renewed; the source database was not changed.');
+        if (renewalFailure) {
+            throw preserveAuthFailure(
+                renewalFailure,
+                'The database upload lease could not be renewed; the source database was not changed.',
+                'upstream_unavailable',
+                'The database upload lease could not be renewed; the source database was not changed.',
+            );
+        }
         if (uploaded.status < 200 || uploaded.status > 299) {
             if (uploaded.status === 413) throw new DatabaseOperationError('bulk_load_too_large', 'The upstream database service rejected the upload size; the source database was not changed.');
             throw new DatabaseOperationError('upstream_unavailable', 'Candidate upload failed. The upstream response was hidden to protect credentials; the source database was not changed.');
@@ -330,10 +337,8 @@ export async function databasePushWithConfig(name: string, file: string, options
             }
         }
         if (operationId && promoteAccepted && !terminalObserved) {
-            throw new DatabaseOperationError(
-                'upstream_unavailable',
-                `Promotion was accepted, but status could not be confirmed. Operation ${operationId} remains active; retry with idempotency key ${key}.`,
-            );
+            const stateLine = `Promotion was accepted, but status could not be confirmed. Operation ${operationId} remains active; retry with idempotency key ${key}.`;
+            throw preserveAuthFailure(error, stateLine, 'upstream_unavailable', stateLine);
         }
         throw error;
     } finally {

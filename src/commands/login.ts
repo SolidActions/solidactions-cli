@@ -8,6 +8,7 @@ import {
     credentialConflictMessage,
     normalizeHost,
     resolveConfig,
+    userinfoHostMessage,
     writeConfigFile,
     removeConfigFile,
     findLocalConfigPath,
@@ -29,7 +30,7 @@ import {
     WorkspaceLookupRecord,
     WorkspaceScope,
 } from '../utils/workspace-lookup';
-import { displayHost } from '../utils/host-display';
+import { displayHost, hostHasUserinfo } from '../utils/host-display';
 
 export { selectWorkspaceInteractively } from '../utils/workspace-lookup';
 
@@ -122,6 +123,12 @@ export class LoginHostInvalidError extends Error {
     }
 }
 
+export class LoginHostUserinfoError extends Error {
+    constructor(public label: string, public host: string) {
+        super(`${label} "${displayHost(host)}" contains a username/password; remove "user:pass@" — the CLI authenticates with your API key.`);
+    }
+}
+
 export function resolveLoginHost(
     options: { dev?: boolean; host?: string },
     env: NodeJS.ProcessEnv = process.env,
@@ -134,9 +141,15 @@ export function resolveLoginHost(
         return value;
     };
     const rawEnv = env.SOLIDACTIONS_HOST;
-    const envHost = rawEnv !== undefined && rawEnv.trim() !== '' ? usable(rawEnv, 'SOLIDACTIONS_HOST') : undefined;
+    const noUserinfo = (host: string, label: string): string => {
+        if (hostHasUserinfo(host)) throw new LoginHostUserinfoError(label, host);
+        return host;
+    };
+    const envHost = rawEnv !== undefined && rawEnv.trim() !== ''
+        ? noUserinfo(usable(rawEnv, 'SOLIDACTIONS_HOST'), 'SOLIDACTIONS_HOST')
+        : undefined;
     const explicitHostFlag = (raw: string) => {
-        const host = usable(raw, '--host');
+        const host = noUserinfo(usable(raw, '--host'), '--host');
         return { host, flag: `--host ${displayHost(host)}` };
     };
     const explicit = options.host !== undefined
@@ -166,6 +179,10 @@ export function resolveLoginHostOrExit(options: { dev?: boolean; host?: string }
             process.exit(1);
         }
         if (error instanceof LoginHostInvalidError) {
+            console.error(chalk.red(`error: ${error.message}`));
+            process.exit(1);
+        }
+        if (error instanceof LoginHostUserinfoError) {
             console.error(chalk.red(`error: ${error.message}`));
             process.exit(1);
         }
@@ -587,6 +604,10 @@ export function whoami() {
     if (resolved?.credentialConflict) {
         // stderr, like requireResolvedConfig (PM ruling 7).
         console.error(chalk.red(credentialConflictMessage(resolved.credentialConflict)));
+        process.exit(1);
+    }
+    if (resolved && hostHasUserinfo(resolved.config.host)) {
+        console.error(chalk.red(userinfoHostMessage(resolved.config.host, resolved.sources.host)));
         process.exit(1);
     }
     if (!resolved || !resolved.config.apiKey) {

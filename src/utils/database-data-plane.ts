@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { augmentTokenMissingAbilityMessage, getApiHeaders } from './api';
+import { augmentTokenMissingAbilityMessage, authFailedLine, getApiHeaders } from './api';
 import { Config } from './config';
 import { loadDatabaseClientBeforeMint } from './database-client-support';
 
@@ -132,7 +132,7 @@ export class DatabaseOperationError extends Error {
     }
 }
 
-export function safeDatabaseRequestError(error: unknown): DatabaseOperationError {
+export function safeDatabaseRequestError(error: unknown, host: string): DatabaseOperationError {
     const augmented = augmentTokenMissingAbilityMessage(error);
     const response = (augmented as any)?.response;
     const status = typeof response?.status === 'number' ? response.status : undefined;
@@ -140,6 +140,10 @@ export function safeDatabaseRequestError(error: unknown): DatabaseOperationError
         ? response.data.code.trim()
         : '';
     const stableCode = codeCandidate.length > 0 ? codeCandidate : null;
+    if (status === 401) {
+        // The one-line, host-naming 401 every command prints (cli#186).
+        return new DatabaseOperationError(stableCode ?? 'unauthenticated', authFailedLine(host), 401);
+    }
     const code = stableCode ?? 'upstream_unavailable';
     const appMessage = stableCode !== null
         && typeof response?.data?.message === 'string'
@@ -154,6 +158,21 @@ export function safeDatabaseRequestError(error: unknown): DatabaseOperationError
         : undefined;
 
     return new DatabaseOperationError(code, message, status, sizeLimitBytes);
+}
+
+/**
+ * A wrapper that adds operational state disclosure must not lose a 401's
+ * host line and status (cli#186). When the underlying failure is a 401 (a
+ * DatabaseOperationError whose message is already the shared host line),
+ * the surfaced error keeps its code and status and starts with that line,
+ * followed by the disclosure on a second line. Any other failure keeps the
+ * wrapper's existing error exactly.
+ */
+export function preserveAuthFailure(error: unknown, disclosure: string, fallbackCode: string, fallbackMessage: string): DatabaseOperationError {
+    if (error instanceof DatabaseOperationError && error.status === 401) {
+        return new DatabaseOperationError(error.code, `${error.message}\n${disclosure}`, 401);
+    }
+    return new DatabaseOperationError(fallbackCode, fallbackMessage);
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
@@ -247,7 +266,7 @@ export async function requestDatabaseOperation<T>(
 
         return response.data as T;
     } catch (error) {
-        throw safeDatabaseRequestError(error);
+        throw safeDatabaseRequestError(error, config.host);
     }
 }
 
@@ -283,7 +302,7 @@ export async function requestDatabaseDumpStream(
 
         return response.data;
     } catch (error) {
-        throw safeDatabaseRequestError(error);
+        throw safeDatabaseRequestError(error, config.host);
     }
 }
 

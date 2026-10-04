@@ -281,6 +281,7 @@ Workspace: <name> — organization <org> (<workspaceId>)
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
 - `login` uses `SOLIDACTIONS_HOST` when it is set.
+- A host with a username and password in it (`http://user:pass@host`) is refused: the CLI authenticates with your API key.
 - An agent that should be credited as itself in SolidActions (for example, docs it pushes are recorded as Agent) logs the CLI in with its own agent token, not a person's key.
 
 In interactive shells, `login` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
@@ -295,7 +296,7 @@ If the target config file already exists and its contents would change, `login` 
 
 ### Debugging resolution
 
-Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration and per-field sources to stderr before the command runs. `solidactions whoami` also shows this information.
+Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration and per-field sources to stderr before the command runs. `solidactions whoami` also shows this information. Node's generic `DEBUG` variable never prints your API key: the CLI turns off the HTTP library's `follow-redirects` debug output, which would dump request headers. The CLI refuses to run when `NODE_DEBUG` turns on Node's network debug output (`http`, `https`, `http2`, `net`, `tls`), which would print them too.
 
 ### Use case: multiple AI agents in parallel
 

@@ -144,16 +144,15 @@ function expectedAuthLine(): string {
 }
 
 /**
- * Every 401 line in stderr names the bare host: the shared auth line with
- * userinfo stripped. Scoped to 401 lines only — the successful workspace
- * announcement is FILE cli#163 and is not asserted here.
+ * Every 401 line in stderr names the bare host via the shared auth line.
+ * Scoped to 401 lines only — the successful workspace announcement is
+ * FILE cli#163 and is not asserted here.
  */
 function expectAuthLineHostSafe(stderr: string): void {
     const authLines = stderr.split('\n').filter((line) => line.includes('Authentication failed against'));
     expect(authLines.length).toBeGreaterThan(0);
     for (const line of authLines) {
         expect(line).toContain(`Authentication failed against http://127.0.0.1:${port}`);
-        expect(line).not.toContain('user:secret@');
     }
 }
 
@@ -197,10 +196,10 @@ describe('early and secondary 401s name the host', () => {
 
     it('crew env push names the host when the write rejects the key after a successful read', async () => {
         crewLookupSucceeds = true;
-        // Userinfo in the configured host must never reach the 401 line.
+        // The 401 line names the bare host via the shared auth line.
         // (The pre-existing successful workspace announcement still prints the
         // raw host — FILE cli#163, not asserted here.)
-        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-crew-push-401-'));
         fs.writeFileSync(path.join(dir, 'push.env'), 'FOO=fine\n');
 
@@ -211,10 +210,10 @@ describe('early and secondary 401s name the host', () => {
     });
 
     it('deploy names the host when the upload rejects the key after a successful precheck', async () => {
-        // Userinfo in the configured host must never reach the 401 line.
+        // The 401 line names the bare host via the shared auth line.
         // (The pre-existing successful workspace announcement still prints the
         // raw host — FILE cli#163, not asserted here.)
-        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-deploy-upload-401-'));
         fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'dep-app', version: '1.0.0', dependencies: { '@solidactions/sdk': '^1.0.0' } }));
         fs.writeFileSync(path.join(dir, 'solidactions.yaml'), 'project: dep-app\nworkflows: []\n');
@@ -226,10 +225,10 @@ describe('early and secondary 401s name the host', () => {
     });
 
     it('doc upload --replace <path> names the host when the by-path lookup rejects the key', async () => {
-        // Userinfo in the configured host must never reach the 401 line.
+        // The 401 line names the bare host via the shared auth line.
         // (The pre-existing successful workspace announcement still prints the
         // raw host — FILE cli#163, not asserted here.)
-        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key', workspaceId: 'workspace-1' });
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-doc-upload-401-'));
         fs.writeFileSync(path.join(dir, 'hero.png'), Buffer.from([1, 2, 3, 4]));
 

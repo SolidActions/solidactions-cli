@@ -22,8 +22,9 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
+import { escapeJsonDisplayText, sanitizeDisplayText } from '../utils/source-provenance';
 import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
 // Re-exported for backward compatibility: tests and doc-push import these from here.
@@ -76,6 +77,23 @@ export function sanitizeSegment(name: string): string {
  */
 export function sanitizeTitle(title: string): string {
     return sanitizeSegment(title);
+}
+
+/** Server-derived text (a title, code, message, or a path built from titles and folder names) as printed (cli#189). Display only. */
+function shown(value: unknown): string {
+    return sanitizeDisplayText(value, 1024) ?? '(untitled)';
+}
+
+/**
+ * Command error boundary (cli#189): an escaping error — a filesystem throw
+ * embedding a server-derived path, or a server-bearing exception like
+ * `McpRpcError` — prints through shown() like every other server-derived
+ * message. Keeps the diagnostic meaning; exits 1, as the top-level handler
+ * would.
+ */
+function reportWriteError(error: unknown): never {
+    process.stderr.write(chalk.red(`error: ${shown(error instanceof Error ? error.message : String(error))}\n`));
+    process.exit(1);
 }
 
 /** Row collected during the BFS list walk, before bodies are fetched. */
@@ -132,17 +150,22 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
         return { isMedia: false };
     }
 
+    if (confirm.status === 401) {
+        process.stderr.write(chalk.red(authFailedLine(config.host)) + '\n');
+        process.exit(1);
+    }
+
     if (confirm.status !== 200) {
         const code = confirm.data?.code ?? 'unknown_error';
         const message = confirm.data?.message ?? 'media confirm request failed';
-        process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
+        process.stderr.write(chalk.red(`error: ${shown(code)}: ${shown(message)}\n`));
         process.exit(1);
     }
 
     const { url, mime } = confirm.data;
     const download = await axios.get(url, { responseType: 'arraybuffer', validateStatus: () => true });
     if (download.status !== 200) {
-        return { isMedia: true, mime, bytes: null, warning: `warn: failed to download media for doc ${doc.id} (${doc.title}): HTTP ${download.status}` };
+        return { isMedia: true, mime, bytes: null, warning: `warn: failed to download media for doc ${doc.id} (${shown(doc.title)}): HTTP ${download.status}` };
     }
 
     return { isMedia: true, mime, bytes: Buffer.from(download.data) };
@@ -249,7 +272,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
         if (!result.ok) {
             const code = result.data?.code ?? 'unknown_error';
             const message = result.data?.message ?? 'MCP returned an error with no message';
-            process.stderr.write(chalk.red(`error: ${code}: ${message}\n`));
+            process.stderr.write(chalk.red(`error: ${shown(code)}: ${shown(message)}\n`));
             process.exit(1);
         }
 
@@ -261,7 +284,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
             seenIds.add(row.id);
 
             if (row.status !== BULK_READ_OK_STATUS) {
-                warnings.push(`warn: skipping doc ${row.id} (${original.title}): bulk_read returned status "${row.status ?? 'unknown'}"`);
+                warnings.push(`warn: skipping doc ${row.id} (${shown(original.title)}): bulk_read returned status "${shown(row.status ?? 'unknown')}"`);
                 continue;
             }
 
@@ -275,7 +298,7 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
 
         for (const requested of chunk) {
             if (!seenIds.has(requested.id)) {
-                warnings.push(`warn: skipping doc ${requested.id} (${requested.title}): missing from bulk_read results`);
+                warnings.push(`warn: skipping doc ${requested.id} (${shown(requested.title)}): missing from bulk_read results`);
             }
         }
     }
@@ -307,7 +330,7 @@ async function backfillDocTypes(config: Config, fetched: FetchedDoc[]): Promise<
         // valid untyped doc, not a failure — warn only when the type could
         // not be read at all.
         if (!readOk) {
-            warnings.push(`warn: could not read the type of doc ${doc.id} (${doc.title}); writing it as .md`);
+            warnings.push(`warn: could not read the type of doc ${doc.id} (${shown(doc.title)}); writing it as .md`);
         }
         doc.docType = slug;
         doc.docTypeKnown = true;
@@ -536,8 +559,8 @@ function refuseManifestClobber(previousManifest: DocsManifest | null, resolvedFo
     if (previousManifest === null || previousManifest.folder_path === resolvedFolder || options.overwrite) {
         return;
     }
-    process.stderr.write(chalk.red(`error: "${destination}" already tracks "${previousManifest.folder_path}".\n`));
-    process.stderr.write(chalk.red(`Pulling "${argument}" here would replace its manifest, and local edits to the\n`));
+    process.stderr.write(chalk.red(`error: "${shown(destination)}" already tracks "${shown(previousManifest.folder_path)}".\n`));
+    process.stderr.write(chalk.red(`Pulling "${shown(argument)}" here would replace its manifest, and local edits to the\n`));
     process.stderr.write(chalk.red('previously tracked files would no longer be protected from being overwritten.\n'));
     process.stderr.write(chalk.red('Pull into a different directory, or pass --overwrite to replace the manifest.\n'));
     process.exit(1);
@@ -568,13 +591,13 @@ export async function docPullWithConfig(
     // doc still exists remotely) from an edited orphan (kept + warned, no flag needed).
     if (fs.existsSync(destination)) {
         if (!fs.statSync(destination).isDirectory()) {
-            process.stderr.write(chalk.red(`error: destination "${destination}" exists and is not a directory.\n`));
+            process.stderr.write(chalk.red(`error: destination "${shown(destination)}" exists and is not a directory.\n`));
             process.exit(1);
         }
 
         const entries = fs.readdirSync(destination);
         if (entries.length > 0 && !options.yes && !options.overwrite) {
-            console.log(chalk.yellow(`Destination "${destination}" is not empty (${entries.length} items).`));
+            console.log(chalk.yellow(`Destination "${shown(destination)}" is not empty (${entries.length} items).`));
             console.log(chalk.yellow("Pulling overwrites tracked files; local files the folder doesn't track are refused unless --overwrite."));
             const response = await prompts({
                 type: 'confirm',
@@ -610,8 +633,8 @@ export async function docPullWithConfig(
         if (!readResult.ok) {
             const readCode = readResult.data?.code ?? 'unknown_error';
             const readMessage = readResult.data?.message ?? 'MCP returned an error with no message';
-            process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
-            process.stderr.write(chalk.red(`error: ${readCode}: ${readMessage}\n`));
+            process.stderr.write(chalk.red(`error: ${shown(listResult.code)}: ${shown(listResult.message)}\n`));
+            process.stderr.write(chalk.red(`error: ${shown(readCode)}: ${shown(readMessage)}\n`));
             process.exit(1);
         }
 
@@ -635,7 +658,7 @@ export async function docPullWithConfig(
         await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback);
         return;
     } else {
-        process.stderr.write(chalk.red(`error: ${listResult.code}: ${listResult.message}\n`));
+        process.stderr.write(chalk.red(`error: ${shown(listResult.code)}: ${shown(listResult.message)}\n`));
         process.exit(1);
         return;
     }
@@ -724,8 +747,8 @@ function linkOnTheWay(destination: string, rel: string): string | null {
 }
 
 function refuseLink(rel: string, link: string, doc: { id: number; title: string }): never {
-    const where = link === rel ? '' : ` (or sits under one: ${link})`;
-    process.stderr.write(chalk.red(`error: ${rel} is a symbolic link${where}; this pull would write doc ${doc.id} ("${doc.title}") through it.\n`));
+    const where = link === rel ? '' : ` (or sits under one: ${shown(link)})`;
+    process.stderr.write(chalk.red(`error: ${shown(rel)} is a symbolic link${where}; this pull would write doc ${doc.id} ("${shown(doc.title)}") through it.\n`));
     process.stderr.write(chalk.red('Replace it with a regular file or folder and pull again.\n'));
     process.exit(1);
 }
@@ -734,7 +757,7 @@ function refuseLink(rel: string, link: string, doc: { id: number; title: string 
 function explainUnresolvable(label: string, error: unknown): never {
     const code = (error as NodeJS.ErrnoException).code ?? 'ERROR';
     const reason = code === 'ELOOP' ? 'too many symbolic links (ELOOP). Fix or remove the link and pull again.' : `${code} ${(error as Error).message}.`;
-    process.stderr.write(chalk.red(`error: cannot resolve ${label}: ${reason}\n`));
+    process.stderr.write(chalk.red(`error: cannot resolve ${shown(label)}: ${shown(reason)}\n`));
     process.exit(1);
 }
 
@@ -793,7 +816,7 @@ function checkPlannedWrites(
         const physical = resolveOrExplain(destination, p.relPath, p.doc);
         // Belt and braces behind linkOnTheWay, which refuses every link first; kept in case the physical path ever diverges without one.
         if (physical !== realDest && !physical.startsWith(realDest + path.sep)) {
-            process.stderr.write(chalk.red(`error: ${p.relPath} resolves outside the destination (${physical}); this pull would write doc ${p.doc.id} ("${p.doc.title}") there.\n`));
+            process.stderr.write(chalk.red(`error: ${shown(p.relPath)} resolves outside the destination (${shown(physical)}); this pull would write doc ${p.doc.id} ("${shown(p.doc.title)}") there.\n`));
             process.exit(1);
         }
     }
@@ -825,7 +848,7 @@ function checkPlannedWrites(
     if (untracked.length > 0) {
         const one = untracked.length === 1;
         process.stderr.write(chalk.red(`${untracked.length} ${one ? 'file exists' : 'files exist'} locally but ${one ? 'is' : 'are'} not tracked:\n`));
-        for (const rel of untracked) process.stderr.write(chalk.red(`  ${rel}\n`));
+        for (const rel of untracked) process.stderr.write(chalk.red(`  ${shown(rel)}\n`));
         process.stderr.write(chalk.red('Move them aside and pull again, or pass --overwrite to replace them.\n'));
         process.exit(1);
     }
@@ -981,8 +1004,8 @@ async function report(
             const taker = plannedTargetForSource(m);
             if (!taker) continue;
             const oldTitle = previousManifest.docs[m.oldRel]?.title ?? `#${m.id}`;
-            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${oldTitle}", now written as ${m.newRel}), but this pull would write doc ${taker.doc.id} ("${taker.doc.title}") to ${taker.relPath}, the same file.\n`));
-            process.stderr.write(chalk.red(`Move or rename the edited ${m.oldRel} (or push it first) and pull again.\n`));
+            process.stderr.write(chalk.red(`error: ${shown(m.oldRel)} holds unpublished edits for doc ${m.id} ("${shown(oldTitle)}", now written as ${shown(m.newRel)}), but this pull would write doc ${taker.doc.id} ("${shown(taker.doc.title)}") to ${shown(taker.relPath)}, the same file.\n`));
+            process.stderr.write(chalk.red(`Move or rename the edited ${shown(m.oldRel)} (or push it first) and pull again.\n`));
             process.exit(1);
         }
         // A rename whose replacement will not be written keeps its old file and
@@ -993,7 +1016,7 @@ async function report(
             if (m.replacementWritten) continue;
             const taker = plannedTargetForSource(m);
             if (!taker) continue;
-            process.stderr.write(chalk.red(`error: doc ${m.id} ("${m.title}") failed to download to ${m.newRel}, so ${m.oldRel} must keep its previous file and tracking, but this pull would put doc ${taker.doc.id} ("${taker.doc.title}") at ${taker.relPath}, the same file.\n`));
+            process.stderr.write(chalk.red(`error: doc ${m.id} ("${shown(m.title)}") failed to download to ${shown(m.newRel)}, so ${shown(m.oldRel)} must keep its previous file and tracking, but this pull would put doc ${taker.doc.id} ("${shown(taker.doc.title)}") at ${shown(taker.relPath)}, the same file.\n`));
             process.stderr.write(chalk.red('Nothing was written. Pull again once the download succeeds.\n'));
             process.exit(1);
         }
@@ -1001,15 +1024,15 @@ async function report(
         // and must not lose its tracking: refuse, with or without --overwrite.
         for (const m of renameMoves) {
             if (m.replacementWritten || !m.modified) continue;
-            process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id}, which is now ${m.newRel}, but its download failed.\n`));
-            process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside), then pull again once the download succeeds.\n`));
+            process.stderr.write(chalk.red(`error: ${shown(m.oldRel)} holds unpublished edits for doc ${m.id}, which is now ${shown(m.newRel)}, but its download failed.\n`));
+            process.stderr.write(chalk.red(`Nothing was written. Push ${shown(m.oldRel)} first (or move it aside), then pull again once the download succeeds.\n`));
             process.exit(1);
         }
         const blocked = renameMoves.filter((m) => m.modified);
         if (blocked.length > 0) {
             for (const m of blocked) {
-                process.stderr.write(chalk.red(`error: ${m.oldRel} holds unpublished edits for doc ${m.id} ("${m.title}"), which is now written as ${m.newRel}.\n`));
-                process.stderr.write(chalk.red(`Nothing was written. Push ${m.oldRel} first (or move it aside) and pull again.\n`));
+                process.stderr.write(chalk.red(`error: ${shown(m.oldRel)} holds unpublished edits for doc ${m.id} ("${shown(m.title)}"), which is now written as ${shown(m.newRel)}.\n`));
+                process.stderr.write(chalk.red(`Nothing was written. Push ${shown(m.oldRel)} first (or move it aside) and pull again.\n`));
             }
             process.exit(1);
         }
@@ -1026,7 +1049,7 @@ async function report(
             const foldedPaths = new Set(writes.map((p) => p.relPath.toLowerCase()));
             if (!writes.some((p) => renamedIds.has(p.doc.id)) && foldedPaths.size === writes.length) continue;
             const [first, second] = writes;
-            process.stderr.write(chalk.red(`error: ${first.relPath} (doc ${first.doc.id}) and ${second.relPath} (doc ${second.doc.id}) are the same file on this filesystem; this pull would write different docs through those names.\n`));
+            process.stderr.write(chalk.red(`error: ${shown(first.relPath)} (doc ${first.doc.id}) and ${shown(second.relPath)} (doc ${second.doc.id}) are the same file on this filesystem; this pull would write different docs through those names.\n`));
             process.stderr.write(chalk.red('Nothing was written. Move the aliased files apart and pull again.\n'));
             process.exit(1);
         }
@@ -1042,8 +1065,8 @@ async function report(
                 isLink = false;
             }
             if (!isLink) continue;
-            process.stderr.write(chalk.red(`error: ${m.newRel} is a symbolic link; this pull would write doc ${m.id} ("${m.title}", renamed from ${m.oldRel}) through it.\n`));
-            process.stderr.write(chalk.red(`Replace ${m.newRel} with a regular file (or remove it) and pull again.\n`));
+            process.stderr.write(chalk.red(`error: ${shown(m.newRel)} is a symbolic link; this pull would write doc ${m.id} ("${shown(m.title)}", renamed from ${shown(m.oldRel)}) through it.\n`));
+            process.stderr.write(chalk.red(`Replace ${shown(m.newRel)} with a regular file (or remove it) and pull again.\n`));
             process.exit(1);
         }
         // A rename target holding an untracked local file (not in the previous
@@ -1072,8 +1095,8 @@ async function report(
                 }
                 if (existing !== null && sha256Hex(existing) === plannedPaths.get(m.newRel)?.bodySha256) continue;
                 const state = (targetEntry === undefined ? 'exists locally but is not tracked' : `holds local bytes with no recorded hash (tracked for doc ${targetEntry.id})`) + unreadable;
-                process.stderr.write(chalk.red(`error: ${m.newRel} ${state}; this pull would overwrite it with doc ${m.id} ("${m.title}", renamed from ${m.oldRel}).\n`));
-                process.stderr.write(chalk.red(`Move ${m.newRel} aside and pull again, or pass --overwrite to replace it.\n`));
+                process.stderr.write(chalk.red(`error: ${shown(m.newRel)} ${state}; this pull would overwrite it with doc ${m.id} ("${shown(m.title)}", renamed from ${shown(m.oldRel)}).\n`));
+                process.stderr.write(chalk.red(`Move ${shown(m.newRel)} aside and pull again, or pass --overwrite to replace it.\n`));
                 process.exit(1);
             }
         }
@@ -1099,7 +1122,7 @@ async function report(
             const noun = conflicts.length === 1 ? 'file has' : 'files have';
             process.stderr.write(chalk.red(`${conflicts.length} ${noun} unpushed local changes:\n`));
             for (const file of conflicts) {
-                process.stderr.write(chalk.red(`  ${file}\n`));
+                process.stderr.write(chalk.red(`  ${shown(file)}\n`));
             }
             process.stderr.write(chalk.red('push your changes first, or pass --overwrite to discard them.\n'));
             process.exit(1);
@@ -1112,11 +1135,14 @@ async function report(
     for (const p of planned) {
         const targetAbs = path.join(destination, ...p.relPath.split('/'));
         if (fs.existsSync(targetAbs) && !fs.statSync(targetAbs).isFile()) {
-            process.stderr.write(chalk.red(`error: "${p.relPath}" exists and is not a regular file — cannot write doc ${p.doc.id} (${p.doc.title}).\n`));
+            process.stderr.write(chalk.red(`error: "${shown(p.relPath)}" exists and is not a regular file — cannot write doc ${p.doc.id} (${shown(p.doc.title)}).\n`));
             process.exit(1);
         }
     }
 
+    // Every throw below can carry a server-derived path (commitDocs writes
+    // title-named files): the command boundary in `docPull` prints it
+    // sanitised.
     fs.mkdirSync(destination, { recursive: true });
     const destPrefix = path.resolve(destination) + path.sep;
     const realDest = fs.realpathSync(destination);
@@ -1139,7 +1165,7 @@ async function report(
         }
         if (!holdsLocalFile) continue;
         delete manifestDocs[p.relPath];
-        process.stderr.write(chalk.yellow(`! doc ${p.doc.id} ("${p.doc.title}") failed to download and ${p.relPath} holds a local file; not tracking it — pull again later\n`));
+        process.stderr.write(chalk.yellow(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later\n`));
     }
 
     // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
@@ -1180,9 +1206,9 @@ async function report(
                 manifestDocs[m.oldRel] = oldEntry;
             }
             if (m.sourcePresent) {
-                process.stderr.write(chalk.yellow(`! kept ${m.oldRel} — doc ${m.id} download failed; still tracked as ${m.oldRel}\n`));
+                process.stderr.write(chalk.yellow(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}\n`));
             } else {
-                process.stderr.write(chalk.yellow(`! doc ${m.id} download failed; still tracked as ${m.oldRel}, which is not present locally\n`));
+                process.stderr.write(chalk.yellow(`! doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}, which is not present locally\n`));
             }
             continue;
         }
@@ -1202,7 +1228,7 @@ async function report(
             }
             const writtenPath = oldIdentity === null ? undefined : writtenPathByIdentity.get(oldIdentity);
             if (writtenPath !== undefined) {
-                process.stderr.write(chalk.yellow(`! kept ${m.oldRel}: it is the same file as ${writtenPath} (a link); the extra name is not tracked — remove it yourself if you don't need it\n`));
+                process.stderr.write(chalk.yellow(`! kept ${shown(m.oldRel)}: it is the same file as ${shown(writtenPath)} (a link); the extra name is not tracked — remove it yourself if you don't need it\n`));
             }
         }
         if (!isSafeToRemoveTrackedFile(absOld, destPrefix, realDest, writtenIdentities)) continue;
@@ -1244,7 +1270,7 @@ async function report(
         if (usedSingleDocFallback) {
             process.stderr.write(chalk.yellow("deletions not propagated: single-doc pull cannot speak for a folder's contents\n"));
         } else if (previousManifest.folder_path !== folderPath) {
-            process.stderr.write(chalk.yellow(`deletions not propagated: this directory tracks "${previousManifest.folder_path}", not "${folderPath}"\n`));
+            process.stderr.write(chalk.yellow(`deletions not propagated: this directory tracks "${shown(previousManifest.folder_path)}", not "${shown(folderPath)}"\n`));
         }
     }
 
@@ -1282,19 +1308,19 @@ async function report(
     }
 
     if (options.json) {
-        console.log(JSON.stringify({ manifest, files, removed, kept_modified: keptModified }));
+        console.log(escapeJsonDisplayText(JSON.stringify({ manifest, files, removed, kept_modified: keptModified })));
         process.exit(0);
     }
 
-    console.log(chalk.green(`pulled ${files.length} doc${files.length === 1 ? '' : 's'} → ${destination}`));
+    console.log(chalk.green(`pulled ${files.length} doc${files.length === 1 ? '' : 's'} → ${shown(destination)}`));
     for (const file of files) {
-        console.log(chalk.gray(`  ${file.path}`));
+        console.log(chalk.gray(`  ${shown(file.path)}`));
     }
     for (const file of removed) {
-        console.log(chalk.gray(`- removed (deleted remotely): ${file}`));
+        console.log(chalk.gray(`- removed (deleted remotely): ${shown(file)}`));
     }
     for (const file of keptModified) {
-        process.stderr.write(chalk.yellow(`! kept ${file} — deleted remotely but modified locally\n`));
+        process.stderr.write(chalk.yellow(`! kept ${shown(file)} — deleted remotely but modified locally\n`));
         if (keptModifiedMedia.has(file)) {
             process.stderr.write(chalk.yellow('  (it is now untracked; use `solidactions doc upload` to re-create it)\n'));
         } else {
@@ -1306,8 +1332,18 @@ async function report(
 
 /**
  * Entry point called from index.ts.
+ *
+ * Command-level error boundary (cli#189): any error escaping the command's
+ * work — a server-bearing exception like `McpRpcError` as well as a
+ * filesystem throw — prints one sanitised red `error: ` line and exits 1.
+ * The command's own `process.exit` calls terminate the process and never
+ * reach this catch.
  */
 export async function docPull(folder: string, dest: string | undefined, options: DocPullOptions): Promise<void> {
-    const config = await requireConfigWithWorkspace();
-    await docPullWithConfig(folder, dest, options, config);
+    try {
+        const config = await requireConfigWithWorkspace();
+        await docPullWithConfig(folder, dest, options, config);
+    } catch (error) {
+        reportWriteError(error);
+    }
 }

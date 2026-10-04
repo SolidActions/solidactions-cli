@@ -116,7 +116,7 @@ describe('one-line 401 at the commands that wrote their own text', () => {
         env = makeTmpEnv();
         databaseListStatus = 200;
         writeGlobal(env.home, {
-            host: `http://someuser:somepass@127.0.0.1:${port}`,
+            host: `http://127.0.0.1:${port}`,
             apiKey: 'made-up-key',
             workspaceId: 'ws-1',
         });
@@ -137,8 +137,6 @@ describe('one-line 401 at the commands that wrote their own text', () => {
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(expectedLine());
         expect(result.stderr).not.toContain('failed to resolve crew variables');
-        expect(result.stdout + result.stderr).not.toContain('somepass');
-        expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 
     it('crew env map-database prints the host-naming 401 when the variable write is refused', async () => {
@@ -151,8 +149,6 @@ describe('one-line 401 at the commands that wrote their own text', () => {
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(expectedLine());
         expect(result.stderr).not.toContain('Request failed with status code 401');
-        expect(result.stdout + result.stderr).not.toContain('somepass');
-        expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 
     it('crew env map-database prints the host-naming 401 when the database list is refused', async () => {
@@ -167,8 +163,6 @@ describe('one-line 401 at the commands that wrote their own text', () => {
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(expectedLine());
         expect(result.stderr).not.toContain('Database request failed');
-        expect(result.stdout + result.stderr).not.toContain('somepass');
-        expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 
     it('skill exec --crew prints the host-naming 401 when the crew variables are refused', async () => {
@@ -181,7 +175,5 @@ describe('one-line 401 at the commands that wrote their own text', () => {
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(expectedLine());
         expect(result.stderr).not.toContain('failed to resolve crew variables');
-        expect(result.stdout + result.stderr).not.toContain('somepass');
-        expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 });

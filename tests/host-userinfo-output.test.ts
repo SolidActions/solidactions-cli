@@ -99,25 +99,26 @@ describe('a host with userinfo never reaches the terminal (cli#163)', () => {
     });
     afterEach(() => env.cleanup());
 
-    it('whoami shows the host without userinfo', async () => {
+    it('whoami refuses a host with userinfo', async () => {
         const result = await runCli(['whoami'], env.home, env.cwd);
 
-        expect(result.status).toBe(0);
-        const hostLine = result.stdout.split('\n').find((line) => line.includes('Host:')) ?? '';
-        expect(hostLine).toContain(shownHost());
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`error: the host "${shownHost()}"`);
+        expect(result.stderr).toContain('contains a username/password');
         expect(result.stdout + result.stderr).not.toContain('somepass');
         expect(result.stdout + result.stderr).not.toContain('someuser');
     });
 
-    it('the mutation banner names the host without userinfo', async () => {
+    it('the mutation path refuses a host with userinfo', async () => {
         const result = await runCli(
             ['env', 'set', 'foo', 'K', 'v', '-e', 'production', '--yes'],
             env.home,
             env.cwd,
         );
 
-        expect(result.status).toBe(0);
-        expect(result.stderr + result.stdout).toContain(`on ${shownHost()}`);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`error: the host "${shownHost()}"`);
+        expect(result.stderr).toContain('contains a username/password');
         expect(result.stdout + result.stderr).not.toContain('somepass');
         expect(result.stdout + result.stderr).not.toContain('someuser');
     });
@@ -125,7 +126,7 @@ describe('a host with userinfo never reaches the terminal (cli#163)', () => {
     it('the SOLIDACTIONS_DEBUG dump shows the host without userinfo', async () => {
         const result = await runCli(['whoami'], env.home, env.cwd, { SOLIDACTIONS_DEBUG: '1' });
 
-        expect(result.status).toBe(0);
+        expect(result.status).toBe(1);
         const debugLine = result.stderr.split('\n').find((line) => line.includes('host:')) ?? '';
         expect(debugLine).toContain(shownHost());
         expect(result.stdout + result.stderr).not.toContain('somepass');
@@ -148,11 +149,12 @@ describe('a malformed host with userinfo never reaches the terminal (cli#163)', 
     });
     afterEach(() => env.cleanup());
 
-    it('whoami shows the host without userinfo', async () => {
+    it('whoami refuses a malformed host with userinfo', async () => {
         const result = await runCli(['whoami'], env.home, env.cwd);
 
-        const hostLine = result.stdout.split('\n').find((line) => line.includes('Host:')) ?? '';
-        expect(hostLine).toContain('http://localhost:invalid-port');
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('error: the host "http://localhost:invalid-port"');
+        expect(result.stderr).toContain('contains a username/password');
         expect(result.stdout + result.stderr).not.toContain('somepass');
         expect(result.stdout + result.stderr).not.toContain('someuser');
     });
@@ -160,6 +162,7 @@ describe('a malformed host with userinfo never reaches the terminal (cli#163)', 
     it('the SOLIDACTIONS_DEBUG dump shows the host without userinfo', async () => {
         const result = await runCli(['whoami'], env.home, env.cwd, { SOLIDACTIONS_DEBUG: '1' });
 
+        expect(result.status).toBe(1);
         const debugLine = result.stderr.split('\n').find((line) => line.includes('host:')) ?? '';
         expect(debugLine).toContain('http://localhost:invalid-port');
         expect(result.stdout + result.stderr).not.toContain('somepass');

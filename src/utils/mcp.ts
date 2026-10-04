@@ -6,11 +6,12 @@
  * (confirmed live).
  */
 
+import chalk from 'chalk';
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { Config } from './config';
-import { getApiHeaders } from './api';
+import { authFailedLine, getApiHeaders } from './api';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../../package.json');
@@ -121,6 +122,12 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
         await new Promise<void>((resolve) => setTimeout(resolve, waitSec * 1000));
     }
 
+    if (last.status === 401) {
+        // One transport-level 401 branch for every MCP caller (cli#184): the host
+        // line every other command prints, never the raw body.
+        process.stderr.write(chalk.red(authFailedLine(config.host)) + '\n');
+        process.exit(1);
+    }
     if (last.status === 404) {
         throw new Error(`MCP request failed: ${parsed.host} has no ${endpointPath} endpoint — the server may be older or newer than this CLI (${CLI_VERSION}). Raw: HTTP 404 ${last.raw}`);
     }
