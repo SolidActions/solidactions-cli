@@ -24,7 +24,7 @@ export function displayHost(host: string): string {
 
 /**
  * True when a host carries userinfo (`user:pass@`, `user@`). axios turns URL
- * userinfo into a Basic Authorization header that replaces the Bearer [REDACTED], so
+ * userinfo into a Basic Authorization header that replaces the CLI's API-key header, so
  * such a host can never authenticate; config resolution and login refuse it
  * (cli#195, Peter's ruling on CrewOps ask task-cliahostwithuser-922c).
  */

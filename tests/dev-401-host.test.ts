@@ -177,5 +177,9 @@ describe('dev names the host on a 401', () => {
 
         expect(result.stderr).toContain('failed to fetch platform vars');
         expect(result.stderr).toContain("staging/dev environments require a paid plan");
+        // The run continues after the warning, as before: exit 0 with the workflow's output.
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('✓ completed');
+        expect(result.stdout).toContain('Output:');
     }, 150_000);
 });

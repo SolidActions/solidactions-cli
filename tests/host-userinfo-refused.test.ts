@@ -243,12 +243,13 @@ describe('a host with userinfo is refused (cli#195)', () => {
     });
 
     it('refuses a username-only host', async () => {
-        writeGlobal(env.home, { host: `http://user@127.0.0.1:${port}`, apiKey: 'sk-test-x', workspaceId: 'ws-1' });
+        writeGlobal(env.home, { host: `http://${UNAME}@127.0.0.1:${port}`, apiKey: 'sk-test-x', workspaceId: 'ws-1' });
 
         const result = await runCli(['project', 'list'], env.home, env.cwd);
 
         expect(result.status).toBe(1);
         expect(result.stderr).toContain('contains a username/password');
+        expectNoSecrets(result);
         expect(requests).toEqual([]);
     });
 

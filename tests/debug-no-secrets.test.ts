@@ -15,7 +15,7 @@ import { makeTmpEnv, writeGlobal } from './helpers';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 
-const API_KEY = 'sk-test-9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c';
+const API_KEY = 'sk-test-DEBUGLEAK-0123456789';
 const USERINFO_PASSWORD = 'pw-DEBUGLEAK';
 const BASIC_AUTH = Buffer.from(`user:${USERINFO_PASSWORD}`).toString('base64');
 // Every secret that must never appear in stdout or stderr.
@@ -74,7 +74,7 @@ interface CliResult {
 
 function runCli(args: string[], home: string, cwd: string, extraEnv: Record<string, string>): Promise<CliResult> {
     return new Promise((resolve, reject) => {
-        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home, NO_COLOR: '1', ...extraEnv };
+        const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home, NO_COLOR: '1' };
         delete childEnv.SOLIDACTIONS_HOST;
         delete childEnv.SOLIDACTIONS_API_KEY;
         delete childEnv.SOLIDACTIONS_WORKSPACE_ID;

@@ -10,7 +10,6 @@
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
-import * as os from 'os';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpEnv, writeGlobal } from './helpers';

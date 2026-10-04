@@ -141,12 +141,46 @@ function isStringLiteral(text: string): boolean {
     return (/^'[^']*'$/.test(text) || /^"[^"]*"$/.test(text));
 }
 
+/** True when the whole trimmed expression is one balanced `shown(...)` call. */
+function isShownCall(expr: string): boolean {
+    if (!expr.startsWith('shown(') || !expr.endsWith(')')) {
+        return false;
+    }
+    let depth = 0;
+    let quote: string | null = null;
+    for (let i = 0; i < expr.length; i++) {
+        const ch = expr[i];
+        if (quote !== null) {
+            if (ch === '\\') {
+                i += 1;
+            } else if (ch === quote) {
+                quote = null;
+            }
+            continue;
+        }
+        if (ch === "'" || ch === '"' || ch === '`') {
+            quote = ch;
+        } else if (ch === '(') {
+            depth += 1;
+        } else if (ch === ')') {
+            depth -= 1;
+            if (depth === 0) {
+                return i === expr.length - 1;
+            }
+        }
+    }
+    return false;
+}
+
+/** A plain property chain ending in `.id` or `.length` (optional chaining allowed). */
+const PLAIN_ID_CHAIN = /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\.(id|length)$/;
+
 function isAllowed(expr: string): boolean {
     const trimmed = expr.trim();
-    if (trimmed.startsWith('shown(')) {
+    if (isShownCall(trimmed)) {
         return true;
     }
-    if (trimmed.endsWith('.id') || trimmed.endsWith('.length')) {
+    if (PLAIN_ID_CHAIN.test(trimmed)) {
         return true;
     }
     const branches = ternaryBranches(trimmed);
@@ -175,6 +209,18 @@ function checkSource(source: string): string[] {
 describe('doc-pull display guard', () => {
     it('reports a bare title interpolation', () => {
         expect(checkSource('process.stderr.write(`x ${doc.title}`);')).toEqual(['1: doc.title']);
+    });
+
+    it('reports a shown() call with trailing content', () => {
+        expect(checkSource('process.stderr.write(`x ${shown(a) + b}`);')).toEqual(['1: shown(a) + b']);
+    });
+
+    it('reports a call result ending in .id', () => {
+        expect(checkSource('process.stderr.write(`x ${f(x).id}`);')).toEqual(['1: f(x).id']);
+    });
+
+    it('accepts a whole shown() call and a plain .id chain', () => {
+        expect(checkSource('process.stderr.write(`x ${shown(doc.title)} and ${p.doc.id}`);')).toEqual([]);
     });
 
     it('every printed interpolation in doc-pull.ts is shown(), numeric, a literal ternary, or allowlisted', () => {

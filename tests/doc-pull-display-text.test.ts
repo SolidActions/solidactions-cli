@@ -290,7 +290,9 @@ describe('doc pull sanitises server-derived display text', () => {
 
         expect(result.status).toBe(1);
         const errorLines = result.stderr.split('\n').filter((line) => line.startsWith('error:'));
-        expect(errorLines.length).toBeGreaterThan(0);
+        // Exactly one: only the list error prints (code 'bad' is not
+        // 'folder_path_not_found', so the read_doc fallback never runs).
+        expect(errorLines.length).toBe(1);
         for (const line of errorLines) {
             expect(line).toBe('error: bad: Osc]0;pwnedY');
         }
