@@ -160,6 +160,21 @@ export function safeDatabaseRequestError(error: unknown, host: string): Database
     return new DatabaseOperationError(code, message, status, sizeLimitBytes);
 }
 
+/**
+ * A wrapper that adds operational state disclosure must not lose a 401's
+ * host line and status (cli#186). When the underlying failure is a 401 (a
+ * DatabaseOperationError whose message is already the shared host line),
+ * the surfaced error keeps its code and status and starts with that line,
+ * followed by the disclosure on a second line. Any other failure keeps the
+ * wrapper's existing error exactly.
+ */
+export function preserveAuthFailure(error: unknown, disclosure: string, fallbackCode: string, fallbackMessage: string): DatabaseOperationError {
+    if (error instanceof DatabaseOperationError && error.status === 401) {
+        return new DatabaseOperationError(error.code, `${error.message}\n${disclosure}`, 401);
+    }
+    return new DatabaseOperationError(fallbackCode, fallbackMessage);
+}
+
 function positiveTimeout(value: number | undefined, fallback: number): number {
     return typeof value === 'number' && Number.isFinite(value) && value > 0
         ? value

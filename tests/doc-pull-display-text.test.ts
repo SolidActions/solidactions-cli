@@ -281,6 +281,48 @@ describe('doc pull sanitises server-derived display text', () => {
         expect(filesUnder(out).map((file) => path.basename(file))).toEqual(['.solidactions-docs.json']);
     });
 
+    it('sanitises a real filesystem write failure naming a server-titled file', async () => {
+        const evilTitle = 'ReadOnly\x9b2J\u202eX';
+        docsByParent = { Root: [{ id: 7, title: evilTitle }] };
+        bulkRows = [{
+            index: 0, status: 'found', id: 7, title: evilTitle, folder_path: 'Root',
+            current_revision_id: 9, properties: {}, body: '# new',
+        }];
+        const out = path.join(env.cwd, 'out');
+        fs.mkdirSync(out, { recursive: true });
+        fs.chmodSync(out, 0o555);
+        try {
+            const result = await runCli(['doc', 'pull', 'Root', out, '--overwrite'], env.home, env.cwd);
+
+            expect(result.status).toBe(1);
+            expect(result.stderr).toContain('error:');
+            expectNoBanned(result.stdout);
+            expectNoBanned(result.stderr);
+        } finally {
+            fs.chmodSync(out, 0o755);
+        }
+    });
+
+    it('escapes display-formatting characters in --json output while parsing back exact names', async () => {
+        foldersByParent = { Root: [{ id: 100, name: G }] };
+        docsByParent = { [`Root/${G}`]: [{ id: 7, title: T }] };
+        bulkRows = [{
+            index: 0, status: 'found', id: 7, title: T, folder_path: `Root/${G}`,
+            current_revision_id: 9, properties: {}, body: '# Hi',
+        }];
+        const out = path.join(env.cwd, 'out');
+
+        const result = await runCli(['doc', 'pull', 'Root', out, '--json'], env.home, env.cwd);
+
+        expect(result.status).toBe(0);
+        expectNoBanned(result.stdout);
+        const parsed = JSON.parse(result.stdout);
+        const relPath = `${G}/${T_FILE}`;
+        expect(Object.keys(parsed.manifest.docs)).toContain(relPath);
+        expect(parsed.manifest.docs[relPath].title).toBe(T);
+        expect(fs.existsSync(path.join(out, G, T_FILE))).toBe(true);
+    });
+
     it('sanitises the tool code and message on a root list failure', async () => {
         mcpIsError = true;
         mcpErrorBody = { code: 'bad\x9b', message: 'Osc\x1b]0;pwned\x07Y' };

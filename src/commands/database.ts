@@ -20,6 +20,7 @@ import {
     formatDatabaseTableValue,
     normalizeDatabaseValue,
     isDatabaseCredentialAuthFailure,
+    preserveAuthFailure,
     runDatabaseClientOperationWithDeadline,
     requestDatabaseAccess,
     requestDatabaseDumpStream,
@@ -1290,6 +1291,10 @@ export async function databaseCreateWithConfig(
                 );
             }
         } catch (error) {
+            if (error instanceof DatabaseOperationError && error.status === 401) {
+                const stateLine = `Database "${data.database.name}" was created, but its SQL import failed. The database remains in place.`;
+                throw preserveAuthFailure(error, stateLine, 'import_failed', stateLine);
+            }
             const safeGuidance = error instanceof DatabaseOperationError
                 && error.code === 'import_failed'
                 && error.message.includes('Resume with:')

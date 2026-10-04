@@ -13,7 +13,10 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
+import { pathToFileURL } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createClient } from '@libsql/client';
+import { DatabaseOperationError, preserveAuthFailure } from '../src/utils/database-data-plane';
 import { makeTmpEnv, writeGlobal } from './helpers';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
@@ -43,6 +46,10 @@ beforeAll(async () => {
                 response.writeHead(status, { 'Content-Type': 'application/json' });
                 response.end(JSON.stringify(payload));
             };
+            if (request.method === 'POST' && request.url === '/upload') {
+                json(200, {});
+                return;
+            }
             if (request.method === 'POST' && request.url === '/api/v1/databases') {
                 let operation: string = '';
                 try {
@@ -120,6 +127,19 @@ function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
 
 function unauthorized(): { status: number; body: object } {
     return { status: 401, body: { code: 'unauthenticated', message: 'RAW-401' } };
+}
+
+/** A minimal real SQLite file, built with the same libsql tooling the push tests use. */
+async function writePushFixture(dir: string): Promise<string> {
+    const file = path.join(dir, 'source.db');
+    const client = createClient({ url: pathToFileURL(file).href });
+    try {
+        await client.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)');
+        await client.execute("INSERT INTO t (value) VALUES ('row')");
+    } finally {
+        await client.close();
+    }
+    return file;
 }
 
 describe('database commands name the host on a 401', () => {
@@ -221,6 +241,64 @@ describe('database commands name the host on a 401', () => {
         expect(seenOperations).toContain('export_status');
     });
 
+    it('database push names the host when promotion status is refused after an accepted promotion', async () => {
+        showKind = 'libsql';
+        const operationId = '22222222-2222-4222-8222-222222222222';
+        answers = {
+            bulk_load_prepare: {
+                status: 200,
+                body: {
+                    operation: { id: operationId, phase: 'uploading' },
+                    upload: { url: `http://127.0.0.1:${port}/upload`, token: 'upload-token-401' },
+                },
+            },
+            bulk_load_promote: { status: 200, body: { operation: { id: operationId, phase: 'validating' } } },
+            bulk_load_status: { status: 401, body: { code: 'unauthenticated', message: 'RAW-401' } },
+        };
+        const source = await writePushFixture(env.cwd);
+
+        const result = await runCli(['database', 'push', 'main', source, '--yes'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(expectedLine());
+        expect(result.stderr).toContain('Promotion was accepted, but status could not be confirmed');
+        expect(result.stderr).toContain('remains active');
+        expect(result.stderr.indexOf(expectedLine())).toBeLessThan(result.stderr.indexOf('Promotion was accepted'));
+        expect(result.stderr).not.toContain('RAW-401');
+        expect(seenOperations).toContain('bulk_load_status');
+    });
+
+    it('database create --from names the host when the import credential mint is refused', async () => {
+        answers = {
+            create: {
+                status: 200,
+                body: { database: { name: 'main', kind: 'libsql', status: 'ready', size_bytes: 0, deleted_at: null, purge_at: null } },
+            },
+            access: { status: 401, body: { code: 'unauthenticated', message: 'RAW-401' } },
+        };
+        fs.writeFileSync(path.join(env.cwd, 'import.sql'), 'CREATE TABLE t (id INTEGER PRIMARY KEY);\nINSERT INTO t (id) VALUES (1);\n');
+
+        const result = await runCli(['database', 'create', 'main', '--from', 'import.sql'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(expectedLine());
+        expect(result.stderr).toContain('remains in place');
+        expect(result.stderr.indexOf(expectedLine())).toBeLessThan(result.stderr.indexOf('remains in place'));
+        expect(result.stderr).not.toContain('RAW-401');
+        expect(seenOperations).toContain('access');
+    });
+
+    it('database export names the host when the server code is blank', async () => {
+        answers = { export: { status: 401, body: { code: '  ', message: 'RAW-401' } } };
+
+        const result = await runCli(['database', 'export', 'main', '--no-wait'], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(expectedLine());
+        expect(result.stderr).not.toContain('RAW-401');
+        expect(seenOperations).toContain('export');
+    });
+
     it('a 403 keeps the server text and no host-naming 401 line', async () => {
         answers = { list: { status: 403, body: { code: 'forbidden', message: 'Not allowed here.' } } };
 
@@ -230,5 +308,40 @@ describe('database commands name the host on a 401', () => {
         expect(result.stderr).toContain('Not allowed here.');
         expect(result.stderr).not.toContain('Authentication failed');
         expect(seenOperations).toContain('list');
+    });
+});
+
+describe('push lease-renewal 401 mapping', () => {
+    // The 5-minute renewal interval cannot fire inside a spawned CLI run, so
+    // the renewal wrapper's 401 mapping is pinned directly: real
+    // DatabaseOperationError values through the shared helper, no mocks.
+    const disclosure = 'The database upload lease could not be renewed; the source database was not changed.';
+
+    it('keeps the host line, code and 401 status ahead of the lease disclosure', () => {
+        const underlying = new DatabaseOperationError('unauthenticated', 'host-line', 401);
+
+        const surfaced = preserveAuthFailure(underlying, disclosure, 'upstream_unavailable', disclosure);
+
+        expect(surfaced.status).toBe(401);
+        expect(surfaced.code).toBe('unauthenticated');
+        expect(surfaced.message).toBe(`host-line\n${disclosure}`);
+    });
+
+    it('keeps any other failure exactly as the wrapper reports it today', () => {
+        const underlying = new DatabaseOperationError('bulk_load_conflict', 'The bulk-load replay returned a different operation.');
+
+        const surfaced = preserveAuthFailure(underlying, disclosure, 'upstream_unavailable', disclosure);
+
+        expect(surfaced.status).toBeUndefined();
+        expect(surfaced.code).toBe('upstream_unavailable');
+        expect(surfaced.message).toBe(disclosure);
+    });
+
+    it('ignores non-operation errors the same way', () => {
+        const surfaced = preserveAuthFailure(new Error('boom'), disclosure, 'upstream_unavailable', disclosure);
+
+        expect(surfaced.status).toBeUndefined();
+        expect(surfaced.code).toBe('upstream_unavailable');
+        expect(surfaced.message).toBe(disclosure);
     });
 });

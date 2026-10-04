@@ -24,7 +24,7 @@ import prompts from 'prompts';
 import { Config } from '../utils/config';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
-import { sanitizeDisplayText } from '../utils/source-provenance';
+import { escapeJsonDisplayText, sanitizeDisplayText } from '../utils/source-provenance';
 import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
 // Re-exported for backward compatibility: tests and doc-push import these from here.
@@ -82,6 +82,17 @@ export function sanitizeTitle(title: string): string {
 /** Server-derived text (a title, code, message, or a path built from titles and folder names) as printed (cli#189). Display only. */
 function shown(value: unknown): string {
     return sanitizeDisplayText(value, 1024) ?? '(untitled)';
+}
+
+/**
+ * Write-phase error boundary (cli#189): a filesystem throw here embeds a
+ * path built from server titles/folder names, so it prints through shown()
+ * like every other server-derived message. Keeps the code and path meaning;
+ * exits 1, as the top-level handler would.
+ */
+function reportWriteError(error: unknown): never {
+    process.stderr.write(chalk.red(`error: ${shown(error instanceof Error ? error.message : String(error))}\n`));
+    process.exit(1);
 }
 
 /** Row collected during the BFS list walk, before bodies are fetched. */
@@ -1128,10 +1139,20 @@ async function report(
         }
     }
 
-    fs.mkdirSync(destination, { recursive: true });
-    const destPrefix = path.resolve(destination) + path.sep;
-    const realDest = fs.realpathSync(destination);
-    const { manifestDocs, files } = commitDocs(destination, planned);
+    // Every throw below can carry a server-derived path (commitDocs writes
+    // title-named files): the write-phase boundary prints it sanitised.
+    let destPrefix: string;
+    let realDest: string;
+    let manifestDocs: DocsManifest['docs'];
+    let files: Array<{ path: string; action: 'written' }>;
+    try {
+        fs.mkdirSync(destination, { recursive: true });
+        destPrefix = path.resolve(destination) + path.sep;
+        realDest = fs.realpathSync(destination);
+        ({ manifestDocs, files } = commitDocs(destination, planned));
+    } catch (error) {
+        reportWriteError(error);
+    }
 
     // cli#167: a media doc whose download failed must not be tracked over a
     // local file the previous manifest does not track, with a hash, for that
@@ -1233,7 +1254,11 @@ async function report(
         Object.assign(docs, manifestDocs);
     }
     const manifest: DocsManifest = { folder_path: folderPath, docs };
-    writeManifest(destination, manifest);
+    try {
+        writeManifest(destination, manifest);
+    } catch (error) {
+        reportWriteError(error);
+    }
 
     for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));
@@ -1293,7 +1318,7 @@ async function report(
     }
 
     if (options.json) {
-        console.log(JSON.stringify({ manifest, files, removed, kept_modified: keptModified }));
+        console.log(escapeJsonDisplayText(JSON.stringify({ manifest, files, removed, kept_modified: keptModified })));
         process.exit(0);
     }
 
