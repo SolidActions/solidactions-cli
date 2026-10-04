@@ -174,17 +174,15 @@ describe('API failures print one line', () => {
         ]);
     });
 
-    it('workspace bootstrap: a 401 on the workspace fetch strips userinfo from the host', async () => {
+    it('workspace bootstrap: a 401 on the workspace fetch prints the one-line explanation', async () => {
         respondWith = { status: 401, body: { message: 'Unauthenticated.' } };
         // No workspace pin, so the CLI fetches /api/v1/workspaces before the
         // command runs and fails there with the contextual 401 message.
-        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key' });
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key' });
 
         const result = await runCli(['run', 'list'], env.home, env.cwd);
 
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(`Authentication failed against http://127.0.0.1:${port}`);
-        expect(result.stderr).not.toContain('user:secret@');
-        expect(result.stderr).not.toContain('secret');
     });
 });

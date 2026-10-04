@@ -89,13 +89,14 @@ describe('-w <workspace> with a rejected key', () => {
         expect(result.stdout + result.stderr).not.toContain('Failed to list workspaces');
     });
 
-    it('never prints the userinfo of the host', async () => {
+    it('refuses a host with userinfo and never prints it', async () => {
         writeGlobal(env.home, { host: `http://someuser:somepass@127.0.0.1:${port}`, apiKey: 'made-up-key' });
 
         const result = await runCli(['-w', 'some-workspace', 'project', 'list'], env.home, env.cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain(`Authentication failed against http://127.0.0.1:${port}.`);
+        expect(result.stderr).toContain(`error: the host "http://127.0.0.1:${port}"`);
+        expect(result.stderr).toContain('contains a username/password');
         expect(result.stdout + result.stderr).not.toContain('somepass');
         expect(result.stdout + result.stderr).not.toContain('someuser');
     });

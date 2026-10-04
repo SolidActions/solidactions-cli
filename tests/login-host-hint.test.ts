@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     LoginHostConflictError,
     LoginHostInvalidError,
+    LoginHostUserinfoError,
     loginHostLines,
     resolveLoginHost,
 } from '../src/commands/login';
@@ -76,6 +77,38 @@ describe('resolveLoginHost', () => {
     it('treats whitespace-only SOLIDACTIONS_HOST as absent (cloud default)', () => {
         expect(resolveLoginHost({}, { SOLIDACTIONS_HOST: '  ' }))
             .toEqual({ host: 'https://app.solidactions.com', isDefault: true });
+    });
+
+    it('refuses a SOLIDACTIONS_HOST with userinfo, naming the stripped host', () => {
+        let caught: unknown;
+        try {
+            resolveLoginHost({}, { SOLIDACTIONS_HOST: 'http://u:p@h:1' });
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(LoginHostUserinfoError);
+        expect((caught as LoginHostUserinfoError).message).toContain('http://h:1');
+        expect((caught as LoginHostUserinfoError).message).not.toContain('u:p');
+    });
+
+    it('refuses a --host with a username only', () => {
+        expect(() => resolveLoginHost({ host: 'http://u@h:1' }, {}))
+            .toThrow(LoginHostUserinfoError);
+    });
+
+    it('refuses a --host with userinfo before the env disagreement', () => {
+        expect(() => resolveLoginHost({ host: 'http://u:p@h:1' }, { SOLIDACTIONS_HOST: 'https://other' }))
+            .toThrow(LoginHostUserinfoError);
+    });
+
+    it('refuses env userinfo even with --dev', () => {
+        expect(() => resolveLoginHost({ dev: true }, { SOLIDACTIONS_HOST: 'http://u:p@h:1' }))
+            .toThrow(LoginHostUserinfoError);
+    });
+
+    it('accepts a plain localhost host', () => {
+        expect(resolveLoginHost({ host: 'http://localhost:8000' }, {}))
+            .toEqual({ host: 'http://localhost:8000', isDefault: false });
     });
 });
 

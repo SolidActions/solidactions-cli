@@ -281,6 +281,7 @@ Workspace: <name> — organization <org> (<workspaceId>)
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
 - `login` uses `SOLIDACTIONS_HOST` when it is set.
+- A host with a username and password in it (`http://user:pass@host`) is refused: the CLI authenticates with your API key.
 - An agent that should be credited as itself in SolidActions (for example, docs it pushes are recorded as Agent) logs the CLI in with its own agent token, not a person's key.
 
 In interactive shells, `login` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.

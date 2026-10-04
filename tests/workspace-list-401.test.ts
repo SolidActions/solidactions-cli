@@ -84,9 +84,9 @@ describe('workspace list failures', () => {
     });
     afterEach(() => env.cleanup());
 
-    it('a 401 prints the host line without userinfo and exits 1', async () => {
+    it('a 401 prints the host line and exits 1', async () => {
         respondWith = { status: 401, body: { message: 'Unauthenticated.' } };
-        writeGlobal(env.home, { host: `http://user:secret@127.0.0.1:${port}`, apiKey: 'test-key' });
+        writeGlobal(env.home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-key' });
 
         const result = await runCli(['workspace', 'list'], env.home, env.cwd);
 
@@ -94,7 +94,6 @@ describe('workspace list failures', () => {
         expect(failureLines(result.stderr)).toEqual([
             `Authentication failed against http://127.0.0.1:${port}. Run "solidactions login --global" to re-configure.`,
         ]);
-        expect(result.stderr).not.toContain('secret');
         expect(result.stdout).not.toContain('Your workspaces');
     });
 

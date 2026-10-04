@@ -54,6 +54,11 @@ function describeSource(source: ConfigSource, envVar: string): string {
     return source === 'env' ? `$${envVar}` : String(source);
 }
 
+/** The refusal for a resolved host that carries userinfo (cli#195). Never includes the userinfo. */
+export function userinfoHostMessage(host: string, source: ConfigSource): string {
+    return `error: the host "${displayHost(host)}" (from ${describeSource(source, 'SOLIDACTIONS_HOST')}) contains a username/password; remove "user:pass@" — the CLI authenticates with your API key.`;
+}
+
 /** The refusal shown when a key would be sent to a host it was not configured with. Never includes the key. */
 export function credentialConflictMessage(conflict: CredentialConflict): string {
     if (conflict.keySource === 'env') {
