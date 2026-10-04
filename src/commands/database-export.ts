@@ -5,7 +5,7 @@ import path from 'path';
 import * as readline from 'readline';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 import { DatabaseOperationError } from '../utils/database-data-plane';
 import { requestDatabaseRecord } from './database';
@@ -200,6 +200,10 @@ async function operation<T>(config: Config, body: Record<string, unknown>): Prom
         });
         return applyRetryAfter(response.data as T, response.headers['retry-after']);
     } catch (error: any) {
+        if (error?.response?.status === 401) {
+            const code = typeof error.response.data?.code === 'string' ? error.response.data.code : 'unauthenticated';
+            throw new ExportCommandError(code, authFailedLine(config.host), 401);
+        }
         const response = error?.response;
         const code = typeof response?.data?.code === 'string' ? response.data.code : 'upstream_unavailable';
         const message = typeof response?.data?.message === 'string' ? response.data.message : 'Database request failed.';
@@ -218,6 +222,10 @@ async function startExport(config: Config, name: string, tables: string[] | unde
         }, { headers: getApiHeaders(config, 'application/json'), timeout: 30_000 });
         return stableMetadata(applyRetryAfter(response.data, response.headers['retry-after']));
     } catch (error: any) {
+        if (error?.response?.status === 401) {
+            const code = typeof error.response.data?.code === 'string' ? error.response.data.code : 'unauthenticated';
+            throw new ExportCommandError(code, authFailedLine(config.host), 401);
+        }
         const data = error?.response?.data;
         const code = typeof data?.code === 'string' ? data.code : 'upstream_unavailable';
         const message = typeof data?.message === 'string' ? data.message : 'Database request failed.';
