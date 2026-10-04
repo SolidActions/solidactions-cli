@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { SolidActionsConfig } from '../utils/env';
+import { authFailedLine } from '../utils/api';
 import { Config, findLocalConfigPath, getGlobalConfigPath } from '../utils/config';
 
 // ---------------------------------------------------------------------------
@@ -113,6 +114,8 @@ export type DevVarValue =
 export interface SaApiClient {
     /** Project slug (e.g. "my-project") */
     projectSlug: string;
+    /** The API host, for the 401 line (cli#187). */
+    host?: string;
     /** Fetch declared variable-mappings for the given env from the SA API. */
     fetchVarsAndConnections(env: string): Promise<PlatformVar[]>;
     /**
@@ -150,6 +153,7 @@ const WRITE_AUTHORITY_REFUSAL_CODES = new Set([
 export function buildSaApiClient(config: Config, projectSlug: string): SaApiClient {
     const client: SaApiClient = {
         projectSlug,
+        host: config.host,
         revealDenied: false,
         async fetchVarsAndConnections(_env: string): Promise<PlatformVar[]> {
             const axios = (await import('axios')).default;
@@ -576,6 +580,17 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         stderrLines.push(msg);
     }
 
+    const isUnauthenticated = (e: any) => e?.response?.status === 401 || e?.status === 401;
+    const authFailed = (): RunDevResult => ({
+        stdout: stdoutLines.join('\n'),
+        stderr: stderrLines.join('\n'),
+        result: {
+            status: 'failed',
+            phase: 'auth',
+            error: { name: 'AuthenticationError', message: authFailedLine(apiClient?.host ?? 'the configured host') },
+        },
+    });
+
     // 1. Determine the API client (only when an env was requested). With no
     //    --env, we run fully locally: NO platform fetch, ctx.vars starts empty.
     let apiClient: SaApiClient | undefined;
@@ -603,6 +618,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         try {
             platformVars = await apiClient.fetchVarsAndConnections(opts.env);
         } catch (e: any) {
+            if (isUnauthenticated(e)) return authFailed();
             let msg = `failed to fetch platform vars: ${e?.message ?? e}`;
             if (e?.response?.status === 404 && opts.env !== 'production') {
                 msg += `\nThe '${opts.env}' environment project doesn't exist — staging/dev environments require a paid plan. On the free plan, use --env production.`;
@@ -697,6 +713,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
                 err(`${pv.env_name}: database '${dbName}' resolved READ-ONLY — writes (including drizzle-kit migrations) will fail.`);
             }
         } catch (e: any) {
+            if (isUnauthenticated(e)) return authFailed();
             err(`${pv.env_name}: failed to resolve database '${dbName}': ${e?.message ?? e}`);
         }
     }
@@ -1071,6 +1088,11 @@ export async function dev(file: string, options: DevOptions): Promise<void> {
     }
     if (r.status === 'cancelled') {
         console.log(chalk.yellow('Workflow cancelled'));
+        process.exit(1);
+    }
+
+    if (r.status === 'failed' && r.phase === 'auth') {
+        console.error(chalk.red(r.error.message));
         process.exit(1);
     }
 
