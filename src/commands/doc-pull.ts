@@ -85,10 +85,11 @@ function shown(value: unknown): string {
 }
 
 /**
- * Write-phase error boundary (cli#189): a filesystem throw here embeds a
- * path built from server titles/folder names, so it prints through shown()
- * like every other server-derived message. Keeps the code and path meaning;
- * exits 1, as the top-level handler would.
+ * Command error boundary (cli#189): an escaping error — a filesystem throw
+ * embedding a server-derived path, or a server-bearing exception like
+ * `McpRpcError` — prints through shown() like every other server-derived
+ * message. Keeps the diagnostic meaning; exits 1, as the top-level handler
+ * would.
  */
 function reportWriteError(error: unknown): never {
     process.stderr.write(chalk.red(`error: ${shown(error instanceof Error ? error.message : String(error))}\n`));
@@ -1140,19 +1141,12 @@ async function report(
     }
 
     // Every throw below can carry a server-derived path (commitDocs writes
-    // title-named files): the write-phase boundary prints it sanitised.
-    let destPrefix: string;
-    let realDest: string;
-    let manifestDocs: DocsManifest['docs'];
-    let files: Array<{ path: string; action: 'written' }>;
-    try {
-        fs.mkdirSync(destination, { recursive: true });
-        destPrefix = path.resolve(destination) + path.sep;
-        realDest = fs.realpathSync(destination);
-        ({ manifestDocs, files } = commitDocs(destination, planned));
-    } catch (error) {
-        reportWriteError(error);
-    }
+    // title-named files): the command boundary in `docPull` prints it
+    // sanitised.
+    fs.mkdirSync(destination, { recursive: true });
+    const destPrefix = path.resolve(destination) + path.sep;
+    const realDest = fs.realpathSync(destination);
+    const { manifestDocs, files } = commitDocs(destination, planned);
 
     // cli#167: a media doc whose download failed must not be tracked over a
     // local file the previous manifest does not track, with a hash, for that
@@ -1254,11 +1248,7 @@ async function report(
         Object.assign(docs, manifestDocs);
     }
     const manifest: DocsManifest = { folder_path: folderPath, docs };
-    try {
-        writeManifest(destination, manifest);
-    } catch (error) {
-        reportWriteError(error);
-    }
+    writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));
@@ -1342,8 +1332,18 @@ async function report(
 
 /**
  * Entry point called from index.ts.
+ *
+ * Command-level error boundary (cli#189): any error escaping the command's
+ * work — a server-bearing exception like `McpRpcError` as well as a
+ * filesystem throw — prints one sanitised red `error: ` line and exits 1.
+ * The command's own `process.exit` calls terminate the process and never
+ * reach this catch.
  */
 export async function docPull(folder: string, dest: string | undefined, options: DocPullOptions): Promise<void> {
-    const config = await requireConfigWithWorkspace();
-    await docPullWithConfig(folder, dest, options, config);
+    try {
+        const config = await requireConfigWithWorkspace();
+        await docPullWithConfig(folder, dest, options, config);
+    } catch (error) {
+        reportWriteError(error);
+    }
 }

@@ -33,6 +33,8 @@ let docsByParent: Record<string, Array<{ id: number; title: string }>> = {};
 let bulkRows: Array<Record<string, unknown>> = [];
 let mcpIsError = false;
 let mcpErrorBody: object = {};
+// A valid HTTP-200 JSON-RPC error envelope for the folder list (cli#189 I4).
+let listRpcError: object | null = null;
 // Per-test media answers.
 let confirmStatus = 200;
 let confirmBody: object = {};
@@ -74,6 +76,10 @@ beforeAll(async () => {
                 }
                 if (args.action === 'bulk_read') {
                     json(200, mcpSuccess({ results: bulkRows }));
+                    return;
+                }
+                if (listRpcError !== null) {
+                    json(200, { jsonrpc: '2.0', id: 1, error: listRpcError });
                     return;
                 }
                 const folderPath = typeof args.folder_path === 'string' ? args.folder_path : '';
@@ -179,6 +185,7 @@ describe('doc pull sanitises server-derived display text', () => {
         bulkRows = [];
         mcpIsError = false;
         mcpErrorBody = {};
+        listRpcError = null;
         confirmStatus = 200;
         confirmBody = {};
         blobStatus = 200;
@@ -321,6 +328,21 @@ describe('doc pull sanitises server-derived display text', () => {
         expect(Object.keys(parsed.manifest.docs)).toContain(relPath);
         expect(parsed.manifest.docs[relPath].title).toBe(T);
         expect(fs.existsSync(path.join(out, G, T_FILE))).toBe(true);
+    });
+
+    it('sanitises a valid JSON-RPC error envelope on the folder list', async () => {
+        listRpcError = { code: -32000, message: 'RPC_FAILURE\x1b[31mRED\x9b2J\u202eTITLE' };
+        const out = path.join(env.cwd, 'out');
+
+        const result = await runCli(['doc', 'pull', 'Root', out], env.home, env.cwd);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('error:');
+        // Diagnostic meaning kept: the MCP tool and the server text, sanitised.
+        expect(result.stderr).toContain('MCP docs_read: RPC_FAILURE[31mRED2JTITLE');
+        expect(fs.existsSync(out)).toBe(false);
+        expectNoBanned(result.stdout);
+        expectNoBanned(result.stderr);
     });
 
     it('sanitises the tool code and message on a root list failure', async () => {

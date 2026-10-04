@@ -105,9 +105,13 @@ function runDevCli(args: string[], home: string, cwd: string): Promise<CliResult
     });
 }
 
+/** Project roots created outside the cleaned test tree; removed in afterEach. */
+const projectRoots: string[] = [];
+
 /** A temp project folder: solidactions.yaml, package.json, symlinked node_modules, entry, local config. */
 function makeProject(entryFixture: string): { root: string; entry: string } {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-dev-401-'));
+    projectRoots.push(root);
     fs.writeFileSync(path.join(root, 'solidactions.yaml'), 'project: my-proj\n');
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'my-proj', type: 'module' }) + '\n');
     fs.symlinkSync(path.resolve(__dirname, '../node_modules'), path.join(root, 'node_modules'), 'dir');
@@ -133,7 +137,12 @@ describe('dev names the host on a 401', () => {
         databasesStatus = 200;
         databasesBody = {};
     });
-    afterEach(() => env.cleanup());
+    afterEach(() => {
+        for (const root of projectRoots.splice(0)) {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+        env.cleanup();
+    });
 
     it('names the host when the platform-vars fetch is refused', async () => {
         mappingsStatus = 401;
