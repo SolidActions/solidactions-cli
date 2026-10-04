@@ -19,7 +19,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import chalk from 'chalk';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { DOCS_MANIFEST, DocsManifest, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
@@ -624,6 +624,10 @@ export async function docPushWithConfig(
                 // (doc exists but isn't a media doc) and is not handled here.
                 trackedMissing.push({ file: relPath, id: entry.id });
                 continue;
+            }
+            if (status === 401) {
+                process.stderr.write(chalk.red(authFailedLine(config.host)) + '\n');
+                process.exit(1);
             }
             process.stderr.write(chalk.red(`error: ${relPath}: ${data?.message ?? error.message}\n`));
             process.exit(1);

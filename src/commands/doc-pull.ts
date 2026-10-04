@@ -22,7 +22,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { Config } from '../utils/config';
-import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 
@@ -130,6 +130,11 @@ async function resolveMedia(config: Config, doc: FetchedDoc): Promise<MediaResol
 
     if (confirm.status === 404 && confirm.data?.code === 'media_not_found') {
         return { isMedia: false };
+    }
+
+    if (confirm.status === 401) {
+        process.stderr.write(chalk.red(authFailedLine(config.host)) + '\n');
+        process.exit(1);
     }
 
     if (confirm.status !== 200) {

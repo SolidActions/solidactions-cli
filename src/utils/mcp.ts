@@ -125,7 +125,7 @@ async function postMcpTool(config: Config, endpointPath: string, toolName: strin
     if (last.status === 401) {
         // One transport-level 401 branch for every MCP caller (cli#184): the host
         // line every other command prints, never the raw body.
-        process.stderr.write(`${chalk.red(authFailedLine(config.host))}\n`);
+        process.stderr.write(chalk.red(authFailedLine(config.host)) + '\n');
         process.exit(1);
     }
     if (last.status === 404) {
