@@ -280,6 +280,8 @@ Workspace: <name> — organization <org> (<workspaceId>)
 - `--local` — write config to `./.solidactions/config.json` in the current folder.
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
+- `login` uses `SOLIDACTIONS_HOST` when it is set.
+- An agent that should be credited as itself in SolidActions (for example, docs it pushes are recorded as Agent) logs the CLI in with its own agent token, not a person's key.
 
 In interactive shells, `login` without `--local`/`--global` prompts for a location. In non-interactive contexts, one of the flags is required.
 
@@ -517,6 +519,8 @@ solidactions doc upload logo-v2.png --replace marketing/logo.png
 **`doc pull` propagates deletions, within limits.** A file is removed locally only when its doc was deleted on the server *and* the file's bytes still match what the last pull gave it (the manifest's `body_sha256`) — anything you've edited locally is kept, with a warning that it's now untracked (re-create a markdown doc with `doc push`, a media doc with `doc upload`). Deletions only propagate when the destination's existing manifest `folder_path` matches the folder you're pulling (so pulling a different folder into a directory holding an old manifest deletes nothing), and never on the single-doc pull path; a single-doc pull (`doc pull <folder>/<doc>`) records the doc's folder as the manifest's `folder_path` and, in a directory that already tracks that folder, adds or updates just that one entry; when propagation is skipped for either reason, `pull` says so. Nothing outside the destination directory is removed: every candidate path is resolved physically (so a symlinked subdirectory cannot lead the delete outside), and a file the same pull just wrote is never deleted, even if a case-only rename makes it look orphaned on a case-insensitive filesystem.
 
 **`doc pull --overwrite` is destructive.** If a manifest-tracked file still exists on the server *and* your local copy no longer matches the `body_sha256` recorded at the last pull (i.e. you've edited it and haven't pushed yet), a plain `doc pull` — even with `-y`/`--yes` — refuses with exit 1, naming every modified file, rather than silently discarding your edits. Nothing is written before that refusal. `-y`/`--yes` only bypasses the generic "destination is not empty" prompt; it does not cover locally-modified tracked files. Pass `--overwrite` to discard those local changes and re-pull server content anyway (it also implies `--yes`).
+
+**`doc pull` never writes through a link or over bytes it does not own.** It refuses before writing anything when a target is a symbolic link, sits under a linked folder inside the destination, or resolves outside it, with or without `--overwrite`. A local file the destination does not track (or tracks without a recorded hash) is replaced only with `--overwrite`; `-y` only answers the confirmation. A file that already holds exactly the server's bytes is simply adopted. A media doc whose download fails is not tracked over a local file.
 
 You do **not** need `--overwrite` to keep an edited file whose doc was deleted on the server — that case is handled by deletion propagation above, on the default path, and the file is kept with a warning.
 

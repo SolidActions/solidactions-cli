@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import readline from 'readline';
+import { authFailedLine, formatApiFailure } from './api';
 import { Config } from './config';
 
 export interface WorkspaceLookupRecord {
@@ -362,7 +363,14 @@ export async function resolveWorkspaceInput(
     try {
         ({ workspaces, scope } = await fetchWorkspaces(config));
     } catch (error: any) {
-        console.error(chalk.red('Failed to list workspaces:'), error.response?.data?.message || error.message);
+        const status = error.response?.status;
+        if (status === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else if (status) {
+            console.error(chalk.red(formatApiFailure(status, error.response.data)));
+        } else {
+            console.error(chalk.red(`Connection failed: ${error.message}`));
+        }
         process.exit(1);
     }
     const result = classifyWorkspaceInput(input, workspaces);

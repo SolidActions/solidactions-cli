@@ -1,6 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { authFailedLine, formatValidationError, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { resolveCrewId } from '../utils/crew';
 import { requestDatabaseOperation } from '../utils/database-data-plane';
 import { envNameError, isReservedEnvName, isValidEnvName, reservedEnvNameError } from '../utils/env';
@@ -69,7 +69,9 @@ export async function crewEnvMapDatabase(
         console.log(chalk.green(`Database "${database.name}" mapped to "${key}" for crew "${crew.name}".`));
         console.log(chalk.yellow(CREW_DATABASE_SCOPE_WARNING));
     } catch (error: any) {
-        if (error.response?.status === 422) {
+        if ((error.response?.status ?? error.status) === 401) {
+            console.error(chalk.red(authFailedLine(config.host)));
+        } else if (error.response?.status === 422) {
             console.error(chalk.red(formatValidationError(error.response.data)));
         } else if (typeof error.message === 'string') {
             console.error(chalk.red(error.message));

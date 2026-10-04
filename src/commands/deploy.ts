@@ -8,6 +8,7 @@ import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
+import { displayHost } from '../utils/host-display';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
@@ -744,7 +745,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
-                process.stderr.write(`[deploy-debug] POST ${config.host}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
+                process.stderr.write(`[deploy-debug] POST ${displayHost(config.host)}/api/v1/projects/${projectSlug}/deploy (workspace=${config.workspaceId ?? '(none)'})\n`);
             }
 
             const deployResponse = await axios.post(`${config.host}/api/v1/projects/${projectSlug}/deploy`, form, {
@@ -770,7 +771,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             console.log(chalk.green('Deployment successfully queued!'));
             console.log(chalk.yellow('Waiting for build to complete...\n'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
-                process.stderr.write(`[deploy-debug] poll URL = ${config.host}/api/v1/projects/${projectSlug} (workspace=${config.workspaceId ?? '(none)'})\n`);
+                process.stderr.write(`[deploy-debug] poll URL = ${displayHost(config.host)}/api/v1/projects/${projectSlug} (workspace=${config.workspaceId ?? '(none)'})\n`);
             }
 
             // Poll for completion

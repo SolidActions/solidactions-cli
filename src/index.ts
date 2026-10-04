@@ -80,6 +80,7 @@ import {
 import { databasePush } from './commands/database-push';
 import { databaseExport } from './commands/database-export';
 import { setCliWorkspaceOverride } from './utils/config';
+import { displayHost } from './utils/host-display';
 import { setActiveCommandPath } from './utils/mutating-commands';
 import { emitAgentFreshnessNudges } from './utils/agent-freshness';
 
@@ -100,7 +101,7 @@ if (process.env.SOLIDACTIONS_DEBUG === '1') {
             return `(from ${src})`;
         };
         process.stderr.write('[SOLIDACTIONS_DEBUG] resolved configuration:\n');
-        process.stderr.write(`  host:        ${resolved.config.host} ${fmt(resolved.sources.host)}\n`);
+        process.stderr.write(`  host:        ${displayHost(resolved.config.host)} ${fmt(resolved.sources.host)}\n`);
         process.stderr.write(`  apiKey:      <redacted> ${fmt(resolved.sources.apiKey)}\n`);
         process.stderr.write(`  workspaceId: ${resolved.config.workspaceId ?? ''} ${fmt(resolved.sources.workspaceId)}\n`);
         process.stderr.write(`  activePath:  ${resolved.activePath}\n`);

@@ -2,6 +2,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { displayHost } from './host-display';
 
 export interface Config {
     host: string;
@@ -59,10 +60,10 @@ export function credentialConflictMessage(conflict: CredentialConflict): string 
         // An env key with no SOLIDACTIONS_HOST may only go to the global config's host or the
         // default host — never to a host a folder's config names (PM rulings 1 and 10).
         const globalNote = conflict.otherHost !== undefined
-            ? ` (the global config names ${conflict.otherHost})`
+            ? ` (the global config names ${displayHost(conflict.otherHost)})`
             : '';
         return [
-            `Refusing to send the API key from $SOLIDACTIONS_API_KEY to ${conflict.host} (host from ${describeSource(conflict.hostSource, 'SOLIDACTIONS_HOST')}): without SOLIDACTIONS_HOST, a key from the environment only goes to the host in the global config or the default host ${DEFAULT_HOST}${globalNote}.`,
+            `Refusing to send the API key from $SOLIDACTIONS_API_KEY to ${displayHost(conflict.host)} (host from ${describeSource(conflict.hostSource, 'SOLIDACTIONS_HOST')}): without SOLIDACTIONS_HOST, a key from the environment only goes to the host in the global config or the default host ${DEFAULT_HOST}${globalNote}.`,
             'Fix: set SOLIDACTIONS_HOST to the host that key belongs to.',
         ].join('\n');
     }
@@ -71,12 +72,12 @@ export function credentialConflictMessage(conflict: CredentialConflict): string 
     const keyHome = conflict.keyHost ?? 'no host (that config sets none)';
     const fixes = conflict.hostSource === 'env'
         ? ['unset SOLIDACTIONS_HOST', 'or set SOLIDACTIONS_API_KEY to a key for that host as well']
-        : [`run \`solidactions login --local --host ${conflict.host}\` in this folder to store a key for ${conflict.host}`, `or remove "host" from ${hostFrom}`];
+        : [`run \`solidactions login --local --host ${displayHost(conflict.host)}\` in this folder to store a key for ${displayHost(conflict.host)}`, `or remove "host" from ${hostFrom}`];
     if (conflict.keyHost === undefined) {
         fixes.push(`or add "host" to ${keyFrom}`);
     }
     return [
-        `Refusing to send the API key from ${keyFrom} to ${conflict.host} (host from ${hostFrom}): that key is configured for ${keyHome}.`,
+        `Refusing to send the API key from ${keyFrom} to ${displayHost(conflict.host)} (host from ${hostFrom}): that key is configured for ${displayHost(keyHome)}.`,
         `Fix: ${fixes.join(', ')}.`,
     ].join('\n');
 }

@@ -756,6 +756,9 @@ function preservedSourceAliasCases(): MatrixCase[] {
                 files: { 'page.md': Buffer.from('<h1>six</h1>'), 'other.html': Buffer.from('<h1>six</h1>'), 'other.md': newBytesOf(VISUAL_KIND), 'page.html': newBytesOf(VISUAL_KIND) },
                 manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
             },
+            // cli#167 M2: both old paths alias a file this pull wrote, so
+            // cleanup keeps them with a warning naming the written path.
+            ...(overwrite ? { stderr: [/! kept page\.md: it is the same file as other\.html \(a link\)/, /! kept other\.md: it is the same file as page\.html \(a link\)/] } : {}),
         });
     }
     return cases;
