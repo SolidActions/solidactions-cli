@@ -295,7 +295,7 @@ If the target config file already exists and its contents would change, `login` 
 
 ### Debugging resolution
 
-Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration and per-field sources to stderr before the command runs. `solidactions whoami` also shows this information.
+Set `SOLIDACTIONS_DEBUG=1` on any command to print the resolved configuration and per-field sources to stderr before the command runs. `solidactions whoami` also shows this information. Node's generic `DEBUG` variable never prints your API key: the CLI turns off the HTTP library's `follow-redirects` debug output, which would dump request headers. The CLI refuses to run when `NODE_DEBUG` turns on Node's network debug output (`http`, `https`, `http2`, `net`, `tls`), which would print them too.
 
 ### Use case: multiple AI agents in parallel
 
