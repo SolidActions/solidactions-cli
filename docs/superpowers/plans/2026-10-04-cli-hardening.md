@@ -18,6 +18,10 @@
 
 **Plan review:** Sol (task-planreviewcli-d79e) REQUEST CHANGES b8e62e5. The PM's rulings 1-6 (plan card task-planclihardening-b6e8, also on cli#194) are folded into this revision, cited as "C1/I<n>/m<n>". The `NODE_DEBUG` choice (refuse) is recorded on cli#194 (issuecomment-5981138866).
 
+**Mandatory build rulings 7-8** (PM, build card task-buildcli-58ef, from Sol's plan re-check task-planrecheckcli-8b4b). They are folded into Task 2 below:
+- 7 (N1): Task 2's negative assertions check the configured username and password **values** (`uname-SECRET`, `pw-SECRET`), never the literal text `user:`. The refusal line keeps its literal `remove "user:pass@"` guidance.
+- 8 (N2): `tests/workspace-override-401.test.ts` is in Task 2's Files. Its userinfo case asserts the refusal; its 401 case already uses a userinfo-free host.
+
 **Card rule (I5, for the manager):** every developer card carries this plan's **Global Constraints** section verbatim, the spec path, and its own task text. Each task below states its own expected lines and does not refer to another task's text.
 
 ## Global Constraints
@@ -203,6 +207,7 @@ Expected: PASS.
 - Modify: `tests/workspace-list-401.test.ts` (move its 401 case to a userinfo-free host; I2)
 - Modify: `tests/one-line-401-sites.test.ts` (move all its cases to a userinfo-free host; I2)
 - Modify: `tests/host-userinfo-output.test.ts` (cases that ran a command against a userinfo host now assert the refusal)
+- Modify: `tests/workspace-override-401.test.ts` (its userinfo case asserts the refusal; ruling 8)
 - Modify: `README.md` (`### \`solidactions login\` flags` only). Task 1 also edits README.md, in the `SOLIDACTIONS_DEBUG` paragraph.
 
 **Interfaces:**
@@ -223,27 +228,29 @@ Expected: PASS.
   - Pure `hostHasUserinfo`:
     - false: `http://127.0.0.1:8002`, `http://localhost:8000`, `https://app.solidactions.com`, `localhost:8000`, `http://h/path@x` (the `@` is in the path, not the authority).
     - true: `http://u:p@h`, `http://u@h`, `http://u:p@h:bad-port`, `u:secret@host`.
+  - Every spawned case below that configures userinfo also asserts that stdout and stderr contain neither `pw-SECRET` nor `uname-SECRET` (ruling 7).
   - Spawned. The server records every request and answers `GET /api/v1/projects` 200 `{ "data": [] }`, `GET /api/v1/workspaces` 200 with one workspace (copy the body from `tests/workspace-list-401.test.ts`), and `POST /mcp` 200 with an empty folder (`{ jsonrpc: '2.0', id: 1, result: { isError: false, content: [{ type: 'text', text: '{"folders":[],"docs":[]}' }] } }`).
-    1. Global config host `http://user:pw-SECRET@127.0.0.1:<port>` (with `apiKey` and `workspaceId`), `project list`: exit 1. Stderr has the config-resolution line, containing `(from ` and the config path. Stderr and stdout have no `pw-SECRET` and no `user:`. The server saw **0** requests.
+    1. Global config host `http://uname-SECRET:pw-SECRET@127.0.0.1:<port>` (with `apiKey` and `workspaceId`), `project list`: exit 1. Stderr has the config-resolution line, containing `(from ` and the config path. Stderr and stdout contain neither `pw-SECRET` nor `uname-SECRET` (ruling 7: check the values, never the literal `user:`, which the refusal's own guidance contains). The server saw **0** requests.
     2. The same config, `doc pull Some/Folder <tmp>/out` (MCP path): exit 1, the same line, 0 requests, `<tmp>/out` not created.
     3. The same config, `whoami`: exit 1, the same line, no `pw-SECRET`.
-    4. **Project-local config:** the global config has a plain host; `writeLocal(cwd, { host: 'http://user:pw-SECRET@127.0.0.1:<port>', apiKey: 'sk-test-x', workspaceId: 'ws-1' })`, `project list` run in that cwd: exit 1, the line names the local config file as the source, 0 requests.
-    5. No config file, env `SOLIDACTIONS_HOST=http://user:pw-SECRET@127.0.0.1:<port>` and `SOLIDACTIONS_API_KEY=sk-test-x` (and `SOLIDACTIONS_WORKSPACE_ID=ws-1`), `project list`: exit 1, the line contains `(from $SOLIDACTIONS_HOST)`, 0 requests.
+    4. **Project-local config:** the global config has a plain host; `writeLocal(cwd, { host: 'http://uname-SECRET:pw-SECRET@127.0.0.1:<port>', apiKey: 'sk-test-x', workspaceId: 'ws-1' })`, `project list` run in that cwd: exit 1, the line names the local config file as the source, 0 requests.
+    5. No config file, env `SOLIDACTIONS_HOST=http://uname-SECRET:pw-SECRET@127.0.0.1:<port>` and `SOLIDACTIONS_API_KEY=sk-test-x` (and `SOLIDACTIONS_WORKSPACE_ID=ws-1`), `project list`: exit 1, the line contains `(from $SOLIDACTIONS_HOST)`, 0 requests.
     6. Username only: global config host `http://user@127.0.0.1:<port>`, `project list`: exit 1, 0 requests.
-    7. `login --stdin --global --host http://user:pw-SECRET@127.0.0.1:<port>`, key `sk-test-x` on stdin: exit 1, stderr has the login flag line, 0 requests, no `<HOME>/.solidactions/config.json` written.
-    8. `login --stdin --global` with env `SOLIDACTIONS_HOST=http://user:pw-SECRET@127.0.0.1:<port>`: exit 1, the login env line, 0 requests, no config written.
-    9. `login --stdin --global --dev` with env `SOLIDACTIONS_HOST=http://user:pw-SECRET@127.0.0.1:<port>`: exit 1, the login env line (the userinfo refusal comes before the `--dev` disagreement), 0 requests.
+    7. `login --stdin --global --host http://uname-SECRET:pw-SECRET@127.0.0.1:<port>`, key `sk-test-x` on stdin: exit 1, stderr has the login flag line, 0 requests, no `<HOME>/.solidactions/config.json` written.
+    8. `login --stdin --global` with env `SOLIDACTIONS_HOST=http://uname-SECRET:pw-SECRET@127.0.0.1:<port>`: exit 1, the login env line, 0 requests, no config written.
+    9. `login --stdin --global --dev` with env `SOLIDACTIONS_HOST=http://uname-SECRET:pw-SECRET@127.0.0.1:<port>`: exit 1, the login env line (the userinfo refusal comes before the `--dev` disagreement), 0 requests.
     10. `login --device --global` with the same env: exit 1, the login env line, 0 requests.
     11. Control: global config host `http://127.0.0.1:<port>` (no userinfo), `project list`: exit 0 and the server saw `GET /api/v1/projects`.
 
-- [ ] **Step 2: Migrate the three older tests (I2).**
+- [ ] **Step 2: Migrate the four older tests (I2, ruling 8).**
   - `tests/workspace-list-401.test.ts`, the case "a 401 prints the host line without userinfo and exits 1" (~87-99): write the global config with host `http://127.0.0.1:${port}` (no userinfo). Rename it "a 401 prints the host line and exits 1". Keep its expected line exactly: `Authentication failed against http://127.0.0.1:${port}. Run "solidactions login --global" to re-configure.` Drop the `not.toContain('secret')` assertion, since the userinfo refusal is covered by `tests/host-userinfo-refused.test.ts`.
   - `tests/one-line-401-sites.test.ts`, its `beforeEach` (~116-122): host `http://127.0.0.1:${port}`. Keep every case's 401 assertions (`expectedLine()`). Drop the `someuser`/`somepass` assertions only where they now say nothing.
   - `tests/host-userinfo-output.test.ts`: in both `describe` blocks (`http://someuser:somepass@127.0.0.1:<port>` and the malformed `http://someuser:somepass@localhost:invalid-port`):
     - the `whoami` and mutation-banner cases now expect exit 1, and stderr containing `error: the host "<shownHost()>"` and `contains a username/password`, still with no `someuser` and no `somepass`;
     - the `SOLIDACTIONS_DEBUG` dump case still expects the dump's `host:` line to show `shownHost()` (the dump runs before the command). It now expects exit 1, and still no `someuser`/`somepass`.
     - Name each changed case in the report.
-  - These three files must be green at the end of this task (Step 6).
+  - `tests/workspace-override-401.test.ts` (ruling 8): its first case ("prints the one-line 401 naming the host…", ~80-90) already uses `http://127.0.0.1:${port}`; keep it unchanged. Its second case "never prints the userinfo of the host" (~92-101), with host `http://someuser:somepass@127.0.0.1:${port}`, now expects exit 1, stderr containing `error: the host "http://127.0.0.1:${port}"` and `contains a username/password`, and still no `someuser` and no `somepass`. Rename it "refuses a host with userinfo and never prints it".
+  - These four files must be green at the end of this task (Step 7).
 
 - [ ] **Step 3: Run the new tests and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/host-userinfo-refused.test.ts 2>&1 | tee .superpowers/sdd/2026-10-04-cli-hardening/task-2-red.log`
@@ -338,8 +345,8 @@ In `resolveLoginHostOrExit`, add a third branch:
 - [ ] **Step 6: README.** Under `### \`solidactions login\` flags`, add one bullet. Do not name `--host`, which stays hidden (app#994): "A host with a username and password in it (`http://user:pass@host`) is refused: the CLI authenticates with your API key."
 
 - [ ] **Step 7: Run GREEN and the neighbours.**
-Run: `npm run build && npx vitest run --project unit tests/host-userinfo-refused.test.ts tests/login-host-hint.test.ts tests/workspace-list-401.test.ts tests/one-line-401-sites.test.ts tests/host-userinfo-output.test.ts 2>&1 | tee .superpowers/sdd/2026-10-04-cli-hardening/task-2-green.log`
-Then: `npx vitest run --project unit tests/debug-no-secrets.test.ts tests/host-display-guard.test.ts tests/login-env-host.test.ts tests/workspace-override-401.test.ts tests/readme-contract.test.ts 2>&1 | tee .superpowers/sdd/2026-10-04-cli-hardening/task-2-neighbours.log`
+Run: `npm run build && npx vitest run --project unit tests/host-userinfo-refused.test.ts tests/login-host-hint.test.ts tests/workspace-list-401.test.ts tests/one-line-401-sites.test.ts tests/host-userinfo-output.test.ts tests/workspace-override-401.test.ts 2>&1 | tee .superpowers/sdd/2026-10-04-cli-hardening/task-2-green.log`
+Then: `npx vitest run --project unit tests/debug-no-secrets.test.ts tests/host-display-guard.test.ts tests/login-env-host.test.ts tests/readme-contract.test.ts 2>&1 | tee .superpowers/sdd/2026-10-04-cli-hardening/task-2-neighbours.log`
 Expected: PASS. A neighbour that configures a userinfo host and now refuses is a finding: stop and report it with the test name, do not edit it.
 
 - [ ] **Step 8: Report (do not commit).** List every changed path, each run with its counts and log path, each migrated case by name, and anything you had to stop on.
