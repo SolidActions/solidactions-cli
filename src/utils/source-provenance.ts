@@ -36,7 +36,7 @@ export interface DeployAcceptance {
 
 type Environment = Record<string, string | undefined>;
 
-const DISPLAY_FORMATTING = /[\x00-\x1f\x7f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+const DISPLAY_FORMATTING = /[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
 const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
 const STRICT_ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
