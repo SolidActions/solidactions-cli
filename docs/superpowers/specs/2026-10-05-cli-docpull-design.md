@@ -3,100 +3,93 @@
 **Wave:** cli-docpull (CrewOps wave card task-waveclidocpull-da80, run seq:sa-wave-cli:f1b70309), branch `wave/2026-10-05-cli-docpull`, cut from main at bd7efc5 (wave cli-hardening merged).
 **Issues:** cli#168, cli#183, cli#190, cli#188, cli#191, cli#176, cli#182. Peter approved the wave in CrewOps ask task-starttheclidoc-01c7 ("approved", built mainly on Muse), recorded on each issue.
 **Plan:** `docs/superpowers/plans/2026-10-05-cli-docpull.md`.
+**Ruling 12:** after final reviews 1 and 2 found the same two families of Criticals (rollback and staging that move or delete what they did not write; a manifest re-derived from surviving entries), the PM adopted the design review by the Fable seat (`design-review-fable.md`) as ruling 12. §1 is rewritten to it; the staging folder, the claim, leftover recovery and rollback no longer exist.
 **Plan reviews:** Sol re-check 2 (task-planrecheck2cli-d0bc, REQUEST CHANGES 7d9a0f4) gave the mandatory build rulings 8-10 (build card task-buildclidocpull-c955), folded in below. Earlier: Sol (task-planreviewcli-d807) REQUEST CHANGES d5474a7; PM rulings 1-6 (plan card task-planclidocpull-948e). Sol's re-check (task-planrecheckcli-48d5) REQUEST CHANGES 0a92aa3; PM ruling 7 (plan-check card task-plancheckcli-f9a4) simplified §1. Both are folded in below.
 
 Each issue lists acceptable fixes; this spec picks one per issue. Cited later as "spec §N". Every message below is printed through doc-pull.ts's `shown()` display sanitiser (wave cli-hardening, cli#189), and `tests/doc-pull-display-guard.test.ts` keeps that true.
 
-## 1. An ordered commit with a staging folder (cli#168, cli#188, cli#182)
+## 1. Stop on the first error and record exactly what was written (cli#168, cli#188, cli#182)
 
-`commitDocs` (src/commands/doc-pull.ts) today does `mkdirSync(recursive)` and `writeFileSync` on each target in turn, then rename cleanup, then the manifest. A failure part-way leaves changed files behind the old manifest. A hard-linked target is written in place (cli#188). A link planted after wave cli-safety's checks is followed (cli#182).
+`commitDocs` (src/commands/doc-pull.ts) used to do `mkdirSync(recursive)` and `writeFileSync` on each target in turn, then rename cleanup, then the manifest. A failure part-way left changed files behind the old manifest. A hard-linked target was written in place (cli#188). A link planted after wave cli-safety's checks was followed (cli#182).
 
-This is the design of **PM ruling 7** (plan-check card task-plancheckcli-f9a4), which replaced the journal design. Recorded on cli#168 (issuecomment-6008646035). The module `src/utils/doc-pull-writes.ts` does the file work and throws; doc-pull.ts prints every message.
+**This section is the design of PM ruling 12** (recorded on cli#168 and on build card task-buildclidocpull-c955), which adopts the design review by the Fable seat (`design-review-fable.md`) in full. It supersedes ruling 1's rollback, ruling 7's staging folder, and ruling 11's option A for the overlap case. cli#168's own alternative wording is the guarantee: "stop on the first error and record exactly what was written". The module `src/utils/doc-pull-writes.ts` does the file work and returns or throws; doc-pull.ts prints every message.
 
 ### 1.1 The guarantee (what the README says)
 
-- **In-process failures leave the previous state.** Any error while a pull writes leaves the previous files and the previous manifest, and the pull exits 1 with one line. That covers a write, a rename, the manifest temp or the manifest rename, and a target that changed after the checks.
-- **A hard kill leaves the old manifest.** If the process is killed while files are being renamed into place, some files may already hold the new bytes while the manifest is still the old one. Tracked files are always re-verified by hash, so the next pull sees those files as differing from the manifest. It never overwrites them silently. The next pull also finds the leftover staging folder and cleans it up (§1.4).
-- **No power-loss durability is claimed.** The CLI does not `fsync`. After a power loss the files are in whatever state the OS persisted.
+- **A failure stops the pull and the manifest records exactly what was written.** Any error while a pull writes (a write, a rename, a target that changed after the checks, a folder where a doc goes) stops the loop at that file. The files before it stay written and are recorded in the manifest with their own hashes; the failing file and the ones after it keep their bytes and their earlier entries. The pull exits 1 with one line saying how many files were updated. Nothing is rolled back, and the next pull completes the job (rule 5 below).
+- **A hard kill leaves the old manifest and the lock.** If the process is killed while files are being written, some files may already hold the new bytes while the manifest is still the old one, and the lock file is still there. Tracked files are always re-verified by hash, and the next pull (once the lock is deleted, §1.4) adopts a file that already holds the bytes it would write instead of calling it a local edit.
+- **No power-loss durability is claimed.** The CLI does not `fsync`.
+
+**The five build rules** (binding on every doc pull change; ruling 12):
+
+1. The pull never deletes, moves or restores a file or folder it did not create in this run. There is no `rm`, `rmdir` or `rename` on a path derived from a listing or a name pattern. The only removals are the pre-existing, manifest-owned rename cleanup and deletion propagation, this run's own temp file, and this run's own lock file.
+2. The destination holds exactly two internal entries: the manifest and its `.lock`. Those names, and the `.sa-write-` temp-file prefix, are reserved under `nameKey` at every level.
+3. The manifest is a pure function of (previous manifest, per-doc outcomes, single-doc flag). The outcomes are `placed(hash)`, `kept-previous`, `dropped(reason)` and `refused(reason)`. The single-doc merge keeps only previous entries whose doc ids are NOT in the outcome set, so an explicit drop is never undone.
+4. INV-C is a runtime gate just before the manifest is written: the pull refuses (exit 1, reporting what was placed, the manifest unchanged) on any `nameKey` collision between two paths of the final manifest, or on any hash this run records for bytes it did not just write or just hash.
+5. A file whose bytes already equal what the pull would write is never a conflict, tracked or untracked, so the next pull heals any interrupted state.
 
 ### 1.2 The three invariants (one sweep test each)
 
 - **INV-A, never outside the destination.** No byte outside the destination changes, whether through a hard link to a tracked file or through a symbolic link at the final path component, planted before or after the checks. This is qualified by the directory-component race in §1.6.
-- **INV-B, no clobber.** A file the pull does not own is never replaced without `--overwrite`, neither at wave cli-safety's preflight nor at the moment of each rename. A file created or changed after the preflight is not owned.
-- **INV-C, honest manifest.** Every manifest doc pull writes records, for each entry with a hash, exactly the bytes that pull left at that path. An in-process failure writes no manifest. The sweep's assertion (ruling 10): every hash matches the file on disk, or the file is listed as refused with its reason.
+- **INV-B, no clobber.** A file the pull does not own is never replaced without `--overwrite`, neither at wave cli-safety's preflight nor at the moment of each rename. A file created or changed after the preflight is not owned. A folder where a doc goes is never moved or deleted, even with `--overwrite` (ruling 9).
+- **INV-C, honest manifest.** Every hash this pull records matches the file at that path; on a failure the manifest records exactly the files placed. The sweep's assertion: every hash matches the file on disk, or the file is listed as refused (a changed-after-the-check or folder line), or it is a target a failed manifest write left under the old manifest.
 
 ### 1.3 Order
 
-1. **Claim, then leftover check** (§1.4): this runs before anything else in an existing destination, and in a new destination right after it is created. The pull creates its own staging folder `<destination>/.solidactions-pull-<pid>/` first (a non-recursive `mkdirSync`, mode `0o700`), and only then looks at every other `.solidactions-pull-*` entry. The claimed folder is empty and ignored by the "not empty" check, the planned-writes checks and `doc push` (which skips dot entries), and it is removed on every way out before the commit takes it over: a refusal, an error, a "no" at the prompt.
+1. **Lock** (§1.4): taken before anything reads the destination. An existing destination is locked first; a destination this pull creates is locked right after it is created, and the pull then checks that no manifest appeared meanwhile.
 2. **Preflight and plan:** wave cli-safety's checks, unchanged. New:
-   - `report()` computes the **final manifest** (every entry, including the failed-download, rename-keep and single-doc merge rules) before any write. Rename cleanup and deletion propagation are computed then, but run only after publication (step 6).
-   - Each target's **authorized state** is the state the checks themselves saw, carried into the commit: `absent`, `sha256:<hex of the bytes the check read>` (a file the checks allowed the pull to replace), or `any` when `--overwrite` is given. Every check that reads a target (the unpushed-local-changes check, the untracked-file check, the rename-target check) records what it read; nothing reads the target again to authorize it, and the first thing recorded stands. A target no check saw is authorized as `absent`, so anything found there is refused. A later snapshot never widens it.
-   - **Names.** The allocator never gives a doc file or a folder segment the manifest's name (`.solidactions-docs.json`) or a name starting with `.solidactions-pull-`, compared NFC-normalised and case-folded, at any level. Such a name takes a leading `_` (`_.solidactions-docs.json`, `_.solidactions-pull-7/`), then the usual `-N` suffix if that is taken. Names are compared the same way (NFC, case-folded) for collisions, for file names and for folder segments, so two docs (or folders) that differ only by case or Unicode normalisation get distinct names on every filesystem. Two planned writes whose paths still compare equal that way (possible only through a legacy tracked path) are refused before anything is staged: `error: <a> (doc <id>) and <b> (doc <id>) would be the same file on a case-insensitive or Unicode-normalising filesystem; this pull would write different docs through those names.` and `Nothing was written. Rename one of the docs on the server and pull again.`
-3. **Stage:** inside the folder claimed in step 1, create `new/`. If something already holds the claim's name (a leftover of an earlier process that had this pid) it is classified and cleaned with the other leftovers first (§1.4). Then write each doc with bytes (a media doc whose download failed has none) to `new/<n>` inside it, `n` a counter, opened with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` (`fs.constants.O_NOFOLLOW ?? 0`). Then write the new manifest to `manifest.tmp` there.
-4. **Commit**, for each staged doc in plan order:
-   1. **Directories:** walk the target's `dirRel` one component at a time from the destination. A missing component is created (non-recursive) and recorded. Every component must `lstat` as a real directory, never a link; otherwise `LinkOnTheWayError`. The destination itself is not checked (wave cli-safety allows a symlinked destination).
-   2. **Re-check (INV-B):** `lstat` the target. `absent` requires no entry at the name. `sha256` requires a regular file with exactly those bytes. `any` always passes. A mismatch is a publication refusal.
-   3. **Backup:** if a file or a link is at the target (ruling 9: a folder or any other entry type is refused with `UnsupportedTargetError` before the authorization check, even under `--overwrite`, and is never moved or deleted), `rename(target, <staging>/backup/<relPath>)`, creating the backup's parent folders inside the staging folder. The backup is decided now, at commit time, so a target created late under `--overwrite` is backed up too.
-   4. **Mode:** if the backup is a regular file, `chmod` the staged file to its permission bits.
-   5. **Rename:** `rename(<staging>/new/<n>, target)`. A rename replaces the directory entry. A hard link's other names keep their old inode and bytes (cli#188), and a link at the final name is replaced, not followed (cli#182).
-5. **Publish:** `rename(<staging>/manifest.tmp, .solidactions-docs.json)`.
-6. **Finalize:** remove the staging folder, backups included. A failure to remove it prints `! could not remove <staging rel>: <message> — it holds the previous copies of the files this pull replaced; delete it yourself` and the pull still exits 0. Then rename cleanup and deletion propagation run as today, after publication.
+   - Each target's **authorized state** is the state the checks themselves saw, carried into the write loop: `absent`, `sha256:<hex of the bytes the check read>` (a file the checks allowed the pull to replace), or `any` when `--overwrite` is given. Every check that reads a target (the unpushed-local-changes check, the untracked-file check, the rename-target check) records what it read; nothing reads the target again to authorize it, and the first thing recorded stands. A target no check saw is authorized as `absent`, so anything found there is refused. A later snapshot never widens it.
+   - **Rule 5.** A tracked file whose bytes differ from its recorded hash is an unpushed local change, except when its current bytes are exactly the bytes this pull would write: that is not a conflict (the untracked-file check already adopted such a file).
+   - **Names.** The allocator never gives a doc file or a folder segment the manifest's name (`.solidactions-docs.json`), the lock's name (`.solidactions-docs.json.lock`), or a name starting with `.sa-write-`, compared NFC-normalised and case-folded, at any level. Such a name takes a leading `_` (`_.solidactions-docs.json.lock`), then the usual `-N` suffix if that is taken. Names are compared the same way (NFC, case-folded) for collisions, for file names and for folder segments, so two docs (or folders) that differ only by case or Unicode normalisation get distinct names on every filesystem. Two planned writes whose paths still compare equal that way (possible only through a legacy tracked path) are refused before anything is written: `error: <a> (doc <id>) and <b> (doc <id>) would be the same file on a case-insensitive or Unicode-normalising filesystem; this pull would write different docs through those names.` and `Nothing was written. Rename one of the docs on the server and pull again.` Names that were reserved by the retired staging design (`.solidactions-pull-*`) are ordinary names now.
+3. **Write loop,** for each doc that has bytes (a media doc whose download failed has none), in plan order, stopping at the first error or refusal:
+   1. **Directories:** walk the target's `dirRel` one component at a time from the destination. A missing component is created (non-recursive). Every component must `lstat` as a real directory, never a link; otherwise `LinkOnTheWayError`. The destination itself is not checked (wave cli-safety allows a symlinked destination).
+   2. **Temp file:** write the bytes to a sibling `.sa-write-<pid>-<random>.tmp`, opened with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` (`fs.constants.O_NOFOLLOW ?? 0`).
+   3. **Re-check (INV-B),** just before the rename: `lstat` the target. A folder or any entry that is neither a file nor a link stops the loop (`UnsupportedTargetError`), whatever the authorization. Otherwise `absent` requires no entry at the name, `sha256` requires a regular file with exactly those bytes, `any` always passes. A mismatch is a publication refusal and stops the loop. The temp file is removed.
+   4. **Mode:** if the target is a regular file, `chmod` the temp file to its permission bits.
+   5. **Rename:** `rename(temp, target)`. A rename replaces the directory entry. A hard link's other names keep their old inode and bytes (cli#188), and a link at the final name is replaced, not followed (cli#182). A rename that fails removes the temp file and stops the loop.
+4. **Outcomes, gate, manifest.** After the loop, or after the first error or refusal, the pull settles one outcome per planned doc and writes the manifest once, through `writeManifest` (itself a temp file and a rename):
+   - `placed(hash)`: the doc's file was written (the hash is of the bytes written); also a doc tracked with no bytes after a failed download that has no local file at its path.
+   - `kept-previous`: the earlier entry stays: a failed download at a path the previous manifest tracked for the same doc (cli#183) when the file there is still the one the entry names, another doc's entry kept at a path a failed download found its file at (cli#190), a renamed doc whose download failed (its old path keeps its file and entry).
+   - `dropped`: no entry: a failed download over a local file that is not the entry's.
+   - `refused`: the doc was not written (the pull stopped at it or before it): its earlier entry is carried unchanged, or none if it had none.
+   
+   The manifest is built from these (rule 3). A single-doc pull, or a pull that stopped, also keeps every earlier entry whose doc has no outcome: a pull that stopped never ran deletion propagation, so a doc deleted on the server stays tracked for the next pull to propagate. A stopped pull also keeps a renamed doc's old-path entry beside the new one, since the old file is still there. Immediately before the write, the **INV-C gate** (rule 4) refuses on a `nameKey` collision between any two paths of the final manifest (this covers earlier entries carried over) or on a hash this run's outcomes record that is not the hash of the file at that path (a file this pull wrote that cannot be read back is checked against the bytes it wrote; a kept entry whose file is missing stays).
+5. **After a successful pull:** warnings, rename cleanup (each unmodified old twin of a renamed doc is removed now that the new file is written, never one this pull just wrote for another doc), deletion propagation, and the summary, as before. A pull that stopped runs none of these: nothing is deleted.
 
 All renames stay inside the destination. A destination subfolder on a different filesystem makes a rename fail with `EXDEV`, which is an ordinary in-process failure.
 
-### 1.4 Leftovers from a killed pull, and overlapping pulls
+### 1.4 The lock, and overlapping pulls
 
-After claiming its own staging folder (§1.3 step 1), and before the "not empty" check, `doc pull` looks at every other entry named `.solidactions-pull-<digits>` in the destination root. **It classifies all of them first and changes none until every one is classified**; only then does it clean up the dead ones:
-- **A real directory whose pid is a running process** (`process.kill(pid, 0)` succeeds or fails with `EPERM`, the pid is at least 1, and it is not this process): another pull is running there. Refuse, changing nothing (the pull removes only its own new, empty staging folder):
-  `error: another doc pull (pid <pid>) may be writing to <destination> (folder <name>); wait for it to finish, or delete that folder if no doc pull is running.`
-  A pid below 1 is never "running" (`kill(0, 0)` would signal the caller's own process group). A reused pid is still read as running; reliable liveness is cli#202.
-- **Anything else with that name that is not a folder doc pull created** refuses the same way, changing nothing: a link, a file, or a real folder with anything at its top level other than `new/` (a folder), `backup/` (a folder) and `manifest.tmp` (a file). A real folder with other contents is never deleted, whatever its pid:
-  `error: <destination>/<name> is not a folder doc pull created; remove it and pull again.`
-- **A real directory in doc pull's own layout whose pid is not running:** clean it up. Walk `backup/` without following links. Every path is derived from the walk, never from stored text, and checked to be inside the destination with real-directory parents (the `ensureRealDirs` check). For each backup at `backup/<rel>`:
-  - **target absent:** `rename(backup, target)` (restored);
-  - **target present with the same bytes:** drop the backup;
-  - **target present with different bytes** (the killed pull's new version, or a later edit): change nothing for that file, and count it.
+The destination holds one internal file besides the manifest: `<destination>/.solidactions-docs.json.lock`, created with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` and holding this pid. If any entry is already there (a file, a link, a folder), the pull refuses and changes nothing:
+`error: <destination>/.solidactions-docs.json.lock exists: another doc pull may be writing to <destination>. If none is running, delete that file and pull again.`
 
-  Then:
-  - **no differing targets:** remove the folder and print `! cleaned up after an interrupted doc pull in <destination> (restored <n> file(s))`, and the pull continues;
-  - **otherwise:** keep the folder and refuse:
-    `error: an interrupted doc pull left saved copies in <destination>/<name>; <k> file(s) differ from their saved copies (first: <rel>), so neither was changed. Keep the versions you want, delete that folder, and pull again.`
+- **It is never auto-removed and never liveness-tested.** A lock is removed only by the pull that created it, and only while it is still a regular file holding that pid. There is no scan, no pid check and no recovery protocol. cli#202 (reliable pid liveness) is obsolete.
+- **When it is taken.** For an existing destination, before the manifest is read, so the plan is built on a manifest no other pull can change while this one runs. For a destination this pull creates, right after creating it; the pull then checks that no manifest appeared in the meantime, and if one did it refuses: `error: another doc pull wrote to <destination> while this one was running — nothing was changed. Pull again.` In every case the plan is built on the manifest read under the lock, or the pull refuses before any write.
+- **When it is released.** After the manifest is written, and on every exit path reachable in-process: success, a refusal, an error, a "no" at the prompt (a `process.exit` runs the exit listener), and an interrupt (`SIGINT` exits 130 and `SIGTERM` 143, through the same listener). It is held while the prompt waits. A `SIGKILL` leaves it, and the lock line tells the user what to do.
+- The lock is ignored by the "not empty" check, so a destination holding only the lock counts as empty.
+- If the lock cannot be created for another reason, the line is `error: cannot write .solidactions-docs.json.lock: <message> — nothing was changed.`, or `error: cannot read <destination>: <message>` when the destination cannot be listed (cli#191).
 
-Two pulls that start together each claim a folder, and each then sees the other's: both refuse. That is the intended safe outcome, never two publications; run the pull again. A pull that starts while another one is already fetching sees its claimed folder and refuses the same way, so no two pulls can publish into one destination at once, and no pull merges its result into a manifest that another pull is about to replace.
+### 1.5 Failure lines
 
-Any other error while cleaning up (not the destination listing itself failing) prints `error: could not clean up after an interrupted doc pull in <destination>: <message>` and changes nothing further. Only the destination listing's own failure prints `error: cannot read <destination>: <message>` (cli#191).
+Every value goes through `shown()`; `<N>` is the number of files written before the stop and `<M>` the number planned (docs with bytes to write). All exit 1.
 
-A file the killed pull created new, with no backup, is not removed. With the old manifest it is an untracked file. Wave cli-safety's rules then handle it: the next pull adopts it if the bytes match, and otherwise refuses without `--overwrite`.
+- A write error at doc `<rel>`: `error: cannot write <rel>: <message> — <N> of <M> files were updated and are tracked; pull again.`
+- A target that changed after the checks: `error: <rel> changed after doc pull checked it — <N> of <M> files were updated and are tracked. Pull again, or pass --overwrite to replace it.`
+- A folder at a target (ruling 9): `error: <rel> is a folder (doc pull writes a file there) — <N> of <M> files were updated and are tracked. Move it aside and pull again.`
+- A link on the way: wave cli-safety's `refuseLink`, as before.
+- The INV-C gate: `error: doc pull stopped before recording a manifest that would not match the files (<rel>: <reason>) — <N> of <M> files were updated; the manifest was not changed.` The next pull adopts the placed files (rule 5).
+- The manifest itself could not be written: `error: cannot write .solidactions-docs.json: <message> — <N> of <M> files were updated; the manifest was not changed.` When a stop and a manifest failure happen together, this line is printed first and the stop's line follows without its "tracked" tail.
+- The lock lines are in §1.4.
 
-### 1.5 In-process failure: roll back
-
-Any error in steps 3-5, or a publication refusal, rolls back in reverse:
-- every target already renamed into place gets its backup renamed back; with no backup it is unlinked. **Only if the entry at the target is still the one this pull placed** (the same device and inode as the staged file that was renamed in, read just before that rename). A file moved aside whose replacement was never placed must find the target still vacant. If something else is there, rollback leaves both the entry at the target and the saved copy alone, keeps the staging folder, and reports it as a restore failure (below);
-- every directory this pull created is removed (newest first, only if empty);
-- the staging folder is removed;
-- the previous manifest was never touched.
-
-doc-pull.ts prints one line and exits 1:
-- an error: `error: cannot write <rel>: <error message> — nothing was changed.`, where `<rel>` is the doc path, or `.solidactions-docs.json` for the manifest temp or rename;
-- a publication refusal: `error: <rel> changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.`;
-- a `LinkOnTheWayError`: wave cli-safety's link refusal (`refuseLink`);
-- a folder at a target (ruling 9): `error: <rel> is a folder now (doc pull writes a file there) — nothing was changed. Move it aside and pull again.`
-
-**Ruling 8:** every reverse step runs the forward path's parent checks (`ensureRealDirs`) on both ends: the target's parents in the destination, and the backup's parents in the staging folder. That covers putting a backup back, removing a new file, removing a created folder, and leftover cleanup. Leftover cleanup also requires `backup/` itself to be a real folder. A failed check is a restore failure (the staging folder is kept), never a write through a link.
-
-If a rollback step itself fails, the staging folder (with its backups) is **kept**. The line ends with the one that is true, instead of `— nothing was changed.`, and the next pull's leftover check (§1.4) picks it up:
-- a backup that could not be put back: `— could not restore <rel> (<message>); its previous copy is in <staging rel>/backup/<rel>.` (the saved copy is there);
-- a new file this pull created that could not be removed, or was left alone because it is no longer the file this pull placed: `— could not remove <rel> (<message>); this pull created it, so it has no previous copy.`;
-- a folder this pull created that could not be removed: `— could not remove the folder <rel> (<message>); this pull created it.`
-
-Every removal of the staging folder (rollback, a failed staging step, finalize) first checks that it is still a real folder; a link that has replaced it is left alone.
+With `<N>` = 0 the same lines apply (`0 of <M> files were updated`).
 
 ### 1.6 Limits (documented, not closed)
 
-- Node has no `openat`. A directory component swapped for a link between the step-4 directory walk and the rename can still redirect the rename. This is a local race in the user's own folder (cli#182 says so). The final component, which the issue names, is closed against a link: a rename replaces the entry and never follows it.
-- **The final-component window.** Between a check (the preflight's read, or the step-4.2 re-check) and the rename that follows it, a file that the user's own tools create or change at the target is not seen. This is the same local-race class as the directory-component race, in the user's own folder, and it is not closed: closing it needs a non-replacing publish (`link()`), which `exFAT` and network shares do not offer. What is closed is the part the pull controls: the authorized state is what the checks saw, not a fresh read (§1.3 step 2), and rollback never puts a backup over, or unlinks, a file this pull did not place (§1.5). Rename cleanup and deletion propagation, which hash a file and then remove it, keep that same window (cli#204).
+- Node has no `openat`. A directory component swapped for a link between the write loop's directory walk and the rename can still redirect the rename. This is a local race in the user's own folder (cli#182 says so). The final component, which the issue names, is closed against a link: a rename replaces the entry and never follows it.
+- **The final-component window.** Between a check (the preflight's read, or the write loop's re-check) and the rename that follows it, a file that the user's own tools create or change at the target is not seen. This is the same local-race class as the directory-component race, in the user's own folder, and it is not closed: closing it needs a non-replacing publish (`link()`), which `exFAT` and network shares do not offer. What is closed is the part the pull controls: the authorized state is what the checks saw, not a fresh read (§1.3 step 2), and the pull never deletes or restores anything it did not create (rule 1). Rename cleanup and deletion propagation, which hash a file and then remove it, keep that same window (cli#204).
+- **A SIGKILL leaves the lock file** (and any files already placed, under the old manifest). Delete the lock and pull again (§1.4).
 - No power-loss durability (§1.1).
-- A case-insensitive or normalising filesystem (macOS, Windows) can make two names one entry. That is tested where the filesystem allows; CI's unit tests run on Linux, so those tests skip there with a stated reason (§1.7).
+- A case-insensitive or normalising filesystem (macOS, Windows) can make two names one entry. That is tested where the filesystem allows; CI's unit tests run on Linux, so those tests skip there with a stated reason (§1.7). The `nameKey` checks of the INV-C gate are pure string logic and run on Linux.
 
 ### 1.7 Platform-sensitive cases
 
@@ -105,26 +98,24 @@ The tests detect a case-insensitive filesystem at runtime (create `aB`, check th
 ### 1.8 Test-only injected failures
 
 These are inert unless `SOLIDACTIONS_TEST_HOOKS=1`. `SOLIDACTIONS_DOC_PULL_TEST_FAULT` selects one or more, comma-separated:
-- `fail-rename:<n>`: the n-th doc rename (step 4.5) throws an `EIO` error instead of renaming;
-- `fail-manifest-temp`: writing `manifest.tmp` throws `EIO`;
-- `fail-manifest-rename`: step 5 throws `EIO`;
-- `fail-restore:<n>`: during rollback, restoring the n-th backup throws `EIO` (the kept-folder path);
-- `kill-after-renames:<n>`: `process.kill(process.pid, 'SIGKILL')` after the n-th doc rename (for §1.4's tests);
-- `create-after-checks:<rel>`: write a file `RACE` at `<rel>` (creating its folders) right after the preflight's checks, before anything is staged (INV-B: the authorized state is the one the checks saw);
-- `create-before-commit:<rel>`: write a file `RACE` at `<rel>` after staging (INV-B);
-- `replace-before-rollback:<rel>`: before rollback, move the file at `<rel>` aside to `<rel>.aside` (if there is one) and write a new file `LATER` there (§1.5's identity check);
-- `link-before-commit:<rel>><abs target>`: create a symlink at `<rel>` to `<abs target>` after staging (INV-A/B);
-- `mkdir-before-commit:<rel>`: create a folder at `<rel>` holding `user.txt` after staging (ruling 9);
-- `swap-before-rollback:<dirRel>><abs folder>`: before rollback, rename `<dirRel>` aside and put a symlink to `<abs folder>` in its place (ruling 8).
+- `fail-rename:<n>`: the n-th doc's write (step 3.5) throws an `EIO` error just before its rename, so its temp file is removed;
+- `fail-manifest-temp`: the manifest write throws `EIO` before its temp file is created;
+- `fail-manifest-rename`: the manifest write throws `EIO` just before its rename (its temp file is removed);
+- `kill-after-renames:<n>`: `process.kill(process.pid, 'SIGKILL')` after the n-th doc is written (for §1.4's killed-pull tests);
+- `create-after-checks:<rel>`: write a file `RACE` at `<rel>` (creating its folders) right after the preflight's checks (INV-B: the authorized state is the one the checks saw);
+- `create-before-commit:<rel>`: write a file `RACE` at `<rel>` just before the write loop starts (INV-B);
+- `link-before-commit:<rel>><abs target>`: create a symlink at `<rel>` to `<abs target>` just before the write loop starts (INV-A/B);
+- `change-after-writes:<rel>`: write `CHANGED` to the file at `<rel>` right after the write loop, before the INV-C gate (rule 4);
+- `mkdir-before-commit:<rel>`: create a folder at `<rel>` holding `user.txt` just before the write loop starts (ruling 9).
 
-PM ruling 7 sanctions injected failures for the in-process failure points. The code documents these as test-only; the README does not.
+PM ruling 7 sanctions injected failures for the in-process failure points. The code documents these as test-only; the README does not. The hooks that only served rollback and leftovers (`fail-restore`, `replace-before-rollback`, `swap-before-rollback`) are gone with them.
 
 ### 1.9 Manifest helper and README
 
-- `writeManifest` (src/utils/docs-manifest.ts, used by `doc push`) writes through a temp file and a rename (`writeFileAtomic`, temp next to the target), so it is never half-written. `doc pull` itself publishes through §1.3 step 5.
+- `writeManifest` (src/utils/docs-manifest.ts, used by `doc push` and now by `doc pull`) writes through a temp file and a rename (`writeFileAtomic`, temp next to the target), so it is never half-written. It takes an optional step that runs just before the rename, which is how `fail-manifest-rename` reaches it.
 - The README's `### doc` section states §1.1 plainly:
-  - in-process failures leave everything as it was;
-  - a killed pull leaves the old manifest, and the next pull cleans up its `.solidactions-pull-*` folder or tells you what to resolve;
+  - a failure stops the pull, the files written before it stay and are recorded in the manifest, and the next pull completes the job;
+  - a killed pull leaves the old manifest and its lock file; delete the lock and pull again;
   - no power-loss guarantee.
 
 ## 2. A failed download keeps the tracking it had (cli#183, cli#190)

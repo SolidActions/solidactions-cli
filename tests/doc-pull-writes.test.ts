@@ -1,46 +1,37 @@
 /**
- * The staging-folder commit module behind `doc pull` (cli#168, cli#188, cli#182; spec §1).
+ * The write module behind `doc pull` (cli#168, cli#188, cli#182; spec §1, PM ruling 12): the ordered write loop that
+ * stops at the first error, the atomic file write, the directory walk, the destination lock and the reserved names.
  *
- * Every case works directly on real temp directories: files are staged, committed, rolled back
- * and cleaned up with the real module and the real filesystem. Failures are injected through the
- * module's own test-only switch (`SOLIDACTIONS_TEST_HOOKS=1` plus `SOLIDACTIONS_DOC_PULL_TEST_FAULT`),
- * handed in as an env object, never by replacing any module or filesystem call.
+ * Every case works directly on real temp directories with the real module and the real filesystem. Failures are
+ * injected through the module's own test-only switch (`SOLIDACTIONS_TEST_HOOKS=1` plus
+ * `SOLIDACTIONS_DOC_PULL_TEST_FAULT`), handed in as an env object, never by replacing any module or filesystem call.
  */
-import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-    AnotherPullRunningError,
+    acquireLock,
     type Authorized,
-    ChangedSincePlacedError,
-    claimStaging,
-    cleanupLeftovers,
-    commitAll,
-    DestinationUnreadableError,
     ensureRealDirs,
     faultsFromEnv,
-    finalizeCommit,
-    ForeignStagingEntryError,
     isReservedName,
-    LeftoverDiffersError,
     LinkOnTheWayError,
+    LockHeldError,
+    lockNameFor,
     nameKey,
     type PlannedWrite,
     PublicationRefusedError,
-    releaseStaging,
-    rollbackAll,
-    STAGING_PREFIX,
-    stageAll,
+    releaseLock,
     UnsupportedTargetError,
     WriteStepError,
+    writeAll,
     writeFileAtomic,
 } from '../src/utils/doc-pull-writes';
 
 const M = '.solidactions-docs.json';
-const MANIFEST_BYTES = '{"v":2}\n';
+const LOCK = '.solidactions-docs.json.lock';
 const none = faultsFromEnv({});
 const hooks = (fault: string) => faultsFromEnv({ SOLIDACTIONS_TEST_HOOKS: '1', SOLIDACTIONS_DOC_PULL_TEST_FAULT: fault });
 
@@ -57,7 +48,7 @@ afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
 });
 
-/** The state a check that read `targetAbs` right now would have recorded (what doc pull's preflight hands the commit). */
+/** The state a check that read `targetAbs` right now would have recorded (what doc pull's preflight hands the write loop). */
 function authorizedStateOf(targetAbs: string, overwrite: boolean): Authorized {
     if (overwrite) return { kind: 'any' };
     if (!fs.existsSync(targetAbs)) return { kind: 'absent' };
@@ -78,64 +69,20 @@ function read(...parts: string[]): string {
     return fs.readFileSync(path.join(...parts), 'utf8');
 }
 
-function go(writes: PlannedWrite[], faults = none) {
-    const commit = stageAll(dest, M, writes, MANIFEST_BYTES, faults);
-    commitAll(commit, faults);
-    return finalizeCommit(commit);
+/** Every entry under `dir` (dot-entries included), '/'-joined and sorted. */
+function listing(dir: string): string[] {
+    return fs.readdirSync(dir, { recursive: true }).map((entry) => String(entry).split(path.sep).join('/')).sort();
 }
 
-function stagingFolders(): string[] {
-    return fs
-        .readdirSync(dest, { recursive: true })
-        .map(String)
-        .filter((entry) => path.basename(entry).startsWith(STAGING_PREFIX));
-}
+describe('writeAll', () => {
+    it('writes every target in order, creates missing folders, and leaves nothing but the targets behind', () => {
+        const result = writeAll(dest, [w('a.md', 'AAA', { kind: 'absent' }), w('x/y/b.md', 'BBB', { kind: 'absent' })], none);
 
-function captureError(fn: () => void): unknown {
-    try {
-        fn();
-    } catch (error) {
-        return error;
-    }
-    return null;
-}
-
-/** A pid nothing is running as, so a hand-made staging folder looks like a killed pull's. */
-function deadPid(): number {
-    for (let pid = 900000; pid < 1000000; pid++) {
-        try {
-            process.kill(pid, 0);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
-        }
-    }
-    throw new Error('no free pid found');
-}
-
-describe('stageAll + commitAll + finalizeCommit', () => {
-    it('writes every target and the manifest, creates missing folders, and leaves no staging folder behind', () => {
-        const result = go([w('a.md', 'AAA', { kind: 'absent' }), w('x/y/b.md', 'BBB', { kind: 'absent' })]);
-
-        expect(result).toBeNull();
+        expect(result.stop).toBeNull();
+        expect(result.placed.map((write) => write.relPath)).toEqual(['a.md', 'x/y/b.md']);
         expect(read(dest, 'a.md')).toBe('AAA');
         expect(read(dest, 'x', 'y', 'b.md')).toBe('BBB');
-        expect(read(dest, M)).toBe(MANIFEST_BYTES);
-        expect(stagingFolders()).toEqual([]);
-    });
-
-    it('stages every file and the manifest inside the staging folder without touching any target', () => {
-        const writes = [w('a.md', 'AAA', { kind: 'absent' }), w('x/b.md', 'BBB', { kind: 'absent' })];
-
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, none);
-
-        const staging = path.join(dest, `${STAGING_PREFIX}${process.pid}`);
-        expect(commit.stagingAbs).toBe(staging);
-        expect(read(staging, 'new', '0')).toBe('AAA');
-        expect(read(staging, 'new', '1')).toBe('BBB');
-        expect(read(staging, 'manifest.tmp')).toBe(MANIFEST_BYTES);
-        expect(fs.existsSync(path.join(dest, 'a.md'))).toBe(false);
-        expect(fs.existsSync(path.join(dest, 'x'))).toBe(false);
-        expect(fs.existsSync(path.join(dest, M))).toBe(false);
+        expect(listing(dest)).toEqual(['a.md', 'x', 'x/y', 'x/y/b.md']);
     });
 
     it('replaces a tracked file whose bytes still match the authorized checksum', () => {
@@ -143,89 +90,89 @@ describe('stageAll + commitAll + finalizeCommit', () => {
         const authorized = authorizedStateOf(path.join(dest, 'a.md'), false);
         expect(authorized.kind).toBe('sha256');
 
-        const result = go([w('a.md', 'NEW', authorized)]);
+        const result = writeAll(dest, [w('a.md', 'NEW', authorized)], none);
 
-        expect(result).toBeNull();
+        expect(result.stop).toBeNull();
         expect(read(dest, 'a.md')).toBe('NEW');
     });
 
-    it('refuses to walk through a symbolic link on the way to a target folder and creates nothing behind it', () => {
-        const outside = path.join(root, 'outside');
-        fs.mkdirSync(outside);
-        fs.symlinkSync(outside, path.join(dest, 'x'));
+    it('stops at the first failing write: the files before it stay written, it and the later ones are not, and no temp file is left', () => {
+        put(path.join(dest, 'b.md'), 'B1');
+        put(path.join(dest, 'c.md'), 'C1');
+        const writes = [
+            w('a.md', 'A2', { kind: 'absent' }),
+            w('b.md', 'B2', authorizedStateOf(path.join(dest, 'b.md'), false)),
+            w('c.md', 'C2', authorizedStateOf(path.join(dest, 'c.md'), false)),
+        ];
 
-        const error = captureError(() => ensureRealDirs(dest, 'x/y', []));
+        const result = writeAll(dest, writes, hooks('fail-rename:2'));
 
-        expect(error).toBeInstanceOf(LinkOnTheWayError);
-        expect((error as LinkOnTheWayError).component).toBe('x');
-        expect(fs.readdirSync(outside)).toEqual([]);
+        expect(result.placed.map((write) => write.relPath)).toEqual(['a.md']);
+        expect(result.stop?.write.relPath).toBe('b.md');
+        expect(result.stop?.error).toBeInstanceOf(WriteStepError);
+        expect((result.stop?.error as WriteStepError).relPath).toBe('b.md');
+        expect((result.stop?.error as Error).message).toMatch(/EIO: i\/o error, rename \(test hook\)/);
+        expect(read(dest, 'a.md')).toBe('A2');
+        expect(read(dest, 'b.md')).toBe('B1');
+        expect(read(dest, 'c.md')).toBe('C1');
+        expect(listing(dest)).toEqual(['a.md', 'b.md', 'c.md']);
     });
 
-    it('refuses a file that appeared after the check (absent authorization), and rollback leaves the late file and removes the staging folder', () => {
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'absent' })], MANIFEST_BYTES, none);
-        fs.writeFileSync(path.join(dest, 'n.md'), 'LATE');
+    it('refuses a file that appeared after the check (absent authorization), keeps the late file, and writes nothing after it', () => {
+        const faults = hooks('create-before-commit:n.md');
 
-        const error = captureError(() => commitAll(commit, none));
-        const rollback = rollbackAll(commit, none);
+        const result = writeAll(dest, [w('n.md', 'NEW', { kind: 'absent' }), w('m.md', 'MMM', { kind: 'absent' })], faults);
 
-        expect(error).toBeInstanceOf(PublicationRefusedError);
-        expect((error as PublicationRefusedError).relPath).toBe('n.md');
-        expect(rollback.restoreFailure).toBeNull();
-        expect(read(dest, 'n.md')).toBe('LATE');
-        expect(stagingFolders()).toEqual([]);
+        expect(result.placed).toEqual([]);
+        expect(result.stop?.error).toBeInstanceOf(PublicationRefusedError);
+        expect((result.stop?.error as PublicationRefusedError).relPath).toBe('n.md');
+        expect(read(dest, 'n.md')).toBe('RACE');
+        expect(listing(dest)).toEqual(['n.md']);
     });
 
-    it('replaces a late file when the write is authorized as any (overwrite), keeping the late file as a backup until the commit ends', () => {
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'any' })], MANIFEST_BYTES, none);
-        fs.writeFileSync(path.join(dest, 'n.md'), 'LATE');
+    it('refuses a tracked file whose bytes changed after the check, keeps the change, and does not touch the files before it', () => {
+        put(path.join(dest, 'b.md'), 'B1');
+        const authorized = authorizedStateOf(path.join(dest, 'b.md'), false);
+        fs.writeFileSync(path.join(dest, 'b.md'), 'EDITED LATER');
 
-        commitAll(commit, none);
+        const result = writeAll(dest, [w('a.md', 'A2', { kind: 'absent' }), w('b.md', 'B2', authorized)], none);
 
-        expect(read(dest, 'n.md')).toBe('STAGED');
-        expect(read(commit.stagingAbs, 'backup', 'n.md')).toBe('LATE');
-        expect(finalizeCommit(commit)).toBeNull();
+        expect(result.placed.map((write) => write.relPath)).toEqual(['a.md']);
+        expect(result.stop?.error).toBeInstanceOf(PublicationRefusedError);
+        expect(read(dest, 'b.md')).toBe('EDITED LATER');
+        expect(read(dest, 'a.md')).toBe('A2');
     });
 
-    it('restores a late file to its late bytes when a later rename fails after an overwrite replaced it', () => {
-        const faults = hooks('fail-rename:2');
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'any' }), w('m.md', 'MMM', { kind: 'absent' })], MANIFEST_BYTES, faults);
-        fs.writeFileSync(path.join(dest, 'n.md'), 'LATE');
+    it('replaces a late file when the write is authorized as any (overwrite)', () => {
+        const faults = hooks('create-before-commit:n.md');
 
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
+        const result = writeAll(dest, [w('n.md', 'NEW', { kind: 'any' })], faults);
 
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe('m.md');
-        expect(rollback.restoreFailure).toBeNull();
-        expect(read(dest, 'n.md')).toBe('LATE');
-        expect(fs.existsSync(path.join(dest, 'm.md'))).toBe(false);
-        expect(stagingFolders()).toEqual([]);
+        expect(result.stop).toBeNull();
+        expect(read(dest, 'n.md')).toBe('NEW');
+        expect(listing(dest)).toEqual(['n.md']);
     });
 
     it('refuses a symbolic link that appeared after the check (absent authorization) and never touches the file it points at', () => {
         fs.writeFileSync(path.join(root, 'outside.txt'), 'OUTSIDE');
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'absent' })], MANIFEST_BYTES, none);
-        fs.symlinkSync(path.join(root, 'outside.txt'), path.join(dest, 'n.md'));
+        const faults = hooks(`link-before-commit:n.md>${path.join(root, 'outside.txt')}`);
 
-        const error = captureError(() => commitAll(commit, none));
-        const rollback = rollbackAll(commit, none);
+        const result = writeAll(dest, [w('n.md', 'NEW', { kind: 'absent' })], faults);
 
-        expect(error).toBeInstanceOf(PublicationRefusedError);
-        expect(rollback.restoreFailure).toBeNull();
+        expect(result.stop?.error).toBeInstanceOf(PublicationRefusedError);
         expect(fs.lstatSync(path.join(dest, 'n.md')).isSymbolicLink()).toBe(true);
         expect(read(root, 'outside.txt')).toBe('OUTSIDE');
     });
 
     it('replaces a late symbolic link with a regular file under overwrite, without writing through the link', () => {
         fs.writeFileSync(path.join(root, 'outside.txt'), 'OUTSIDE');
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'any' })], MANIFEST_BYTES, none);
-        fs.symlinkSync(path.join(root, 'outside.txt'), path.join(dest, 'n.md'));
+        const faults = hooks(`link-before-commit:n.md>${path.join(root, 'outside.txt')}`);
 
-        commitAll(commit, none);
-        finalizeCommit(commit);
+        const result = writeAll(dest, [w('n.md', 'NEW', { kind: 'any' })], faults);
 
+        expect(result.stop).toBeNull();
         expect(fs.lstatSync(path.join(dest, 'n.md')).isFile()).toBe(true);
-        expect(read(dest, 'n.md')).toBe('STAGED');
+        expect(read(dest, 'n.md')).toBe('NEW');
         expect(read(root, 'outside.txt')).toBe('OUTSIDE');
     });
 
@@ -233,108 +180,21 @@ describe('stageAll + commitAll + finalizeCommit', () => {
         put(path.join(dest, 'a.md'), 'OLD');
         fs.linkSync(path.join(dest, 'a.md'), path.join(root, 'other.txt'));
         const authorized = authorizedStateOf(path.join(dest, 'a.md'), false);
+        const oldInode = fs.statSync(path.join(root, 'other.txt')).ino;
 
-        go([w('a.md', 'NEW', authorized)]);
+        writeAll(dest, [w('a.md', 'NEW', authorized)], none);
 
         expect(read(dest, 'a.md')).toBe('NEW');
+        expect(fs.statSync(path.join(dest, 'a.md')).ino).not.toBe(oldInode);
         expect(read(root, 'other.txt')).toBe('OLD');
-    });
-
-    it('rolls back to the original inodes when a later rename fails, leaving the manifest untouched and no staging folder', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(dest, 'sub', 'b.md'), 'B1');
-        put(path.join(dest, M), 'OLD-MANIFEST');
-        fs.linkSync(path.join(dest, 'a.md'), path.join(root, 'other.txt'));
-        const faults = hooks('fail-rename:2');
-        const writes = [
-            w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)),
-            w('sub/b.md', 'B2', authorizedStateOf(path.join(dest, 'sub', 'b.md'), false)),
-        ];
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, faults);
-
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe('sub/b.md');
-        expect(rollback).toEqual({ restoreFailure: null });
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(fs.statSync(path.join(dest, 'a.md')).ino).toBe(fs.statSync(path.join(root, 'other.txt')).ino);
-        expect(read(dest, 'sub', 'b.md')).toBe('B1');
-        expect(read(dest, M)).toBe('OLD-MANIFEST');
-        expect(stagingFolders()).toEqual([]);
-    });
-
-    it('fails staging when the manifest temp file cannot be written, removing the staging folder and changing no target', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        const faults = hooks('fail-manifest-temp');
-
-        const error = captureError(() => stageAll(dest, M, [w('a.md', 'A2', { kind: 'any' })], MANIFEST_BYTES, faults));
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe(M);
-        expect(stagingFolders()).toEqual([]);
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(fs.existsSync(path.join(dest, M))).toBe(false);
-    });
-
-    it('restores every doc and keeps the old manifest bytes when publishing the manifest fails after all the doc renames', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(dest, 'sub', 'b.md'), 'B1');
-        put(path.join(dest, M), 'OLD-MANIFEST');
-        const faults = hooks('fail-manifest-rename');
-        const writes = [
-            w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)),
-            w('sub/b.md', 'B2', authorizedStateOf(path.join(dest, 'sub', 'b.md'), false)),
-            w('c.md', 'C2', { kind: 'absent' }),
-        ];
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, faults);
-
-        const error = captureError(() => commitAll(commit, faults));
-        expect(read(dest, 'a.md')).toBe('A2');
-        const rollback = rollbackAll(commit, faults);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe(M);
-        expect(rollback.restoreFailure).toBeNull();
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(read(dest, 'sub', 'b.md')).toBe('B1');
-        expect(fs.existsSync(path.join(dest, 'c.md'))).toBe(false);
-        expect(read(dest, M)).toBe('OLD-MANIFEST');
-        expect(stagingFolders()).toEqual([]);
-    });
-
-    it('keeps the staging folder, with the backup it could not restore, when a restore fails; the next cleanup restores it', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(dest, 'sub', 'b.md'), 'B1');
-        const faults = hooks('fail-rename:2,fail-restore:1');
-        const writes = [
-            w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)),
-            w('sub/b.md', 'B2', authorizedStateOf(path.join(dest, 'sub', 'b.md'), false)),
-        ];
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, faults);
-
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(rollback.restoreFailure?.relPath).toBe('sub/b.md');
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(fs.existsSync(path.join(dest, 'sub', 'b.md'))).toBe(false);
-        expect(read(commit.stagingAbs, 'backup', 'sub', 'b.md')).toBe('B1');
-
-        const cleanup = cleanupLeftovers(dest);
-
-        expect(cleanup).toEqual({ restored: ['sub/b.md'], cleaned: 1 });
-        expect(read(dest, 'sub', 'b.md')).toBe('B1');
-        expect(stagingFolders()).toEqual([]);
+        expect(fs.statSync(path.join(root, 'other.txt')).ino).toBe(oldInode);
     });
 
     it('keeps the permission bits of a replaced target', () => {
         put(path.join(dest, 'a.md'), 'OLD');
         fs.chmodSync(path.join(dest, 'a.md'), 0o600);
 
-        go([w('a.md', 'NEW', authorizedStateOf(path.join(dest, 'a.md'), false))]);
+        writeAll(dest, [w('a.md', 'NEW', authorizedStateOf(path.join(dest, 'a.md'), false))], none);
 
         expect(read(dest, 'a.md')).toBe('NEW');
         expect(fs.statSync(path.join(dest, 'a.md')).mode & 0o7777).toBe(0o600);
@@ -343,526 +203,99 @@ describe('stageAll + commitAll + finalizeCommit', () => {
     it('ignores the injected faults unless SOLIDACTIONS_TEST_HOOKS is 1', () => {
         const faults = faultsFromEnv({ SOLIDACTIONS_DOC_PULL_TEST_FAULT: 'fail-rename:1' });
 
-        const result = go([w('a.md', 'AAA', { kind: 'absent' })], faults);
+        const result = writeAll(dest, [w('a.md', 'AAA', { kind: 'absent' })], faults);
 
-        expect(result).toBeNull();
+        expect(result.stop).toBeNull();
         expect(read(dest, 'a.md')).toBe('AAA');
     });
 });
 
 describe('a folder at a target is never moved or deleted (PM ruling 9)', () => {
-    it('refuses a folder that appeared at an overwrite target, keeps its contents, and rolls back a write committed before it', () => {
+    it('stops at a folder that appeared at an overwrite target, keeps its contents, and keeps the files written before it', () => {
         const faults = hooks('mkdir-before-commit:n.md');
-        const commit = stageAll(dest, M, [w('first.md', 'FIRST', { kind: 'absent' }), w('n.md', 'STAGED', { kind: 'any' })], MANIFEST_BYTES, faults);
 
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
+        const result = writeAll(dest, [w('first.md', 'FIRST', { kind: 'absent' }), w('n.md', 'NEW', { kind: 'any' })], faults);
 
-        expect(error).toBeInstanceOf(UnsupportedTargetError);
-        expect((error as UnsupportedTargetError).relPath).toBe('n.md');
-        expect(rollback.restoreFailure).toBeNull();
+        expect(result.placed.map((write) => write.relPath)).toEqual(['first.md']);
+        expect(result.stop?.error).toBeInstanceOf(UnsupportedTargetError);
+        expect((result.stop?.error as UnsupportedTargetError).relPath).toBe('n.md');
         expect(read(dest, 'n.md', 'user.txt')).toBe('USER');
-        expect(fs.existsSync(path.join(dest, 'first.md'))).toBe(false);
-        expect(stagingFolders()).toEqual([]);
+        expect(read(dest, 'first.md')).toBe('FIRST');
+        expect(listing(dest)).toEqual(['first.md', 'n.md', 'n.md/user.txt']);
     });
 
     it('checks the target type before the authorization, so an absent-authorized target that became a folder is also unsupported', () => {
         const faults = hooks('mkdir-before-commit:n.md');
-        const commit = stageAll(dest, M, [w('n.md', 'STAGED', { kind: 'absent' })], MANIFEST_BYTES, faults);
 
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
+        const result = writeAll(dest, [w('n.md', 'NEW', { kind: 'absent' })], faults);
 
-        expect(error).toBeInstanceOf(UnsupportedTargetError);
-        expect(rollback.restoreFailure).toBeNull();
+        expect(result.stop?.error).toBeInstanceOf(UnsupportedTargetError);
         expect(read(dest, 'n.md', 'user.txt')).toBe('USER');
-        expect(stagingFolders()).toEqual([]);
+        expect(listing(dest)).toEqual(['n.md', 'n.md/user.txt']);
     });
 });
 
-describe('rollback re-checks every parent folder (PM ruling 8)', () => {
-    it('never restores through a parent that was swapped for a link, reports it, and keeps the staging folder with the backup', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(dest, 'sub', 'b.md'), 'B1');
-        put(path.join(root, 'outside', 'b.md'), 'OUTSIDE');
-        const faults = hooks(`fail-manifest-rename,swap-before-rollback:sub>${path.join(root, 'outside')}`);
-        const writes = [
-            w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)),
-            w('sub/b.md', 'B2', authorizedStateOf(path.join(dest, 'sub', 'b.md'), false)),
-        ];
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, faults);
+describe('a link on the way to a target (cli#182)', () => {
+    it('stops with the link, creates nothing behind it, and writes nothing outside', () => {
+        const outside = path.join(root, 'outside');
+        fs.mkdirSync(outside);
+        fs.symlinkSync(outside, path.join(dest, 'x'));
 
-        const error = captureError(() => commitAll(commit, faults));
-        const rollback = rollbackAll(commit, faults);
+        const result = writeAll(dest, [w('a.md', 'AAA', { kind: 'absent' }), w('x/y/b.md', 'BBB', { kind: 'absent' })], none);
 
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(read(root, 'outside', 'b.md')).toBe('OUTSIDE');
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['b.md']);
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(rollback.restoreFailure?.relPath).toBe('sub/b.md');
-        expect(rollback.restoreFailure?.error).toBeInstanceOf(LinkOnTheWayError);
-        expect(read(commit.stagingAbs, 'backup', 'sub', 'b.md')).toBe('B1');
+        expect(result.placed.map((write) => write.relPath)).toEqual(['a.md']);
+        expect(result.stop?.error).toBeInstanceOf(LinkOnTheWayError);
+        expect((result.stop?.error as LinkOnTheWayError).component).toBe('x');
+        expect(fs.readdirSync(outside)).toEqual([]);
     });
 
-    it('never removes or adds anything in the folder a created directory was swapped for', () => {
-        fs.mkdirSync(path.join(root, 'outside-empty'));
-        const faults = hooks(`fail-manifest-rename,swap-before-rollback:x>${path.join(root, 'outside-empty')}`);
-        const commit = stageAll(dest, M, [w('x/c.md', 'CCC', { kind: 'absent' })], MANIFEST_BYTES, faults);
+    it('ensureRealDirs refuses a link on the way and creates nothing behind it', () => {
+        const outside = path.join(root, 'outside');
+        fs.mkdirSync(outside);
+        fs.symlinkSync(outside, path.join(dest, 'x'));
 
-        const error = captureError(() => commitAll(commit, faults));
-        rollbackAll(commit, faults);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(fs.existsSync(path.join(root, 'outside-empty'))).toBe(true);
-        expect(fs.readdirSync(path.join(root, 'outside-empty'))).toEqual([]);
-    });
-});
-
-describe('the staging folder is checked from the destination on every forward and reverse step (cli#168, ruling 8)', () => {
-    it('refuses to back up through a link planted at <staging>/backup, so nothing lands outside and the target keeps its bytes', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(dest, 'b.md'), 'B1');
-        put(path.join(root, 'outside', 'a.md'), 'OUTSIDE');
-        const writes = [
-            w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)),
-            w('b.md', 'B2', authorizedStateOf(path.join(dest, 'b.md'), false)),
-        ];
-        const commit = stageAll(dest, M, writes, MANIFEST_BYTES, none);
-        fs.symlinkSync(path.join(root, 'outside'), path.join(commit.stagingAbs, 'backup'));
-
-        const error = captureError(() => commitAll(commit, none));
-        const rollback = rollbackAll(commit, none);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe('a.md');
-        expect(((error as WriteStepError).cause as Error).name).toBe('LinkOnTheWayError');
-        expect(rollback.restoreFailure).toBeNull();
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['a.md']);
-        expect(read(root, 'outside', 'a.md')).toBe('OUTSIDE');
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(read(dest, 'b.md')).toBe('B1');
-        expect(fs.existsSync(path.join(dest, M))).toBe(false);
+        expect(() => ensureRealDirs(dest, 'x/y')).toThrow(LinkOnTheWayError);
+        expect(fs.readdirSync(outside)).toEqual([]);
     });
 
-    it('never restores out of a link that replaced the staging folder, reports the failed restore, and moves nothing in the linked folder', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(root, 'outside', 'backup', 'a.md'), 'OUTSIDE');
-        const faults = hooks('fail-manifest-rename');
-        const commit = stageAll(dest, M, [w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false))], MANIFEST_BYTES, faults);
-        const error = captureError(() => commitAll(commit, faults));
-        fs.renameSync(commit.stagingAbs, `${commit.stagingAbs}.aside`);
-        fs.symlinkSync(path.join(root, 'outside'), commit.stagingAbs);
+    it('ensureRealDirs refuses a file on the way and names it', () => {
+        put(path.join(dest, 'x'), 'A FILE');
 
-        const rollback = rollbackAll(commit, faults);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(rollback.restoreFailure?.relPath).toBe('a.md');
-        expect(rollback.restoreFailure?.error).toBeInstanceOf(LinkOnTheWayError);
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['backup']);
-        expect(read(root, 'outside', 'backup', 'a.md')).toBe('OUTSIDE');
-        expect(read(`${commit.stagingAbs}.aside`, 'backup', 'a.md')).toBe('A1');
-        expect(read(dest, 'a.md')).toBe('A2');
-    });
-
-    it('refuses to publish a doc from a link planted at <staging>/new, and moves nothing out of the linked folder', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        put(path.join(root, 'outside', '0'), 'OUTSIDE');
-        const commit = stageAll(dest, M, [w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false))], MANIFEST_BYTES, none);
-        fs.renameSync(path.join(commit.stagingAbs, 'new'), path.join(commit.stagingAbs, 'new.aside'));
-        fs.symlinkSync(path.join(root, 'outside'), path.join(commit.stagingAbs, 'new'));
-
-        const error = captureError(() => commitAll(commit, none));
-        const rollback = rollbackAll(commit, none);
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe('a.md');
-        expect(rollback.restoreFailure).toBeNull();
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['0']);
-        expect(read(root, 'outside', '0')).toBe('OUTSIDE');
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(fs.existsSync(path.join(commit.stagingAbs, 'backup'))).toBe(false);
-    });
-
-    it('refuses to publish the manifest from a link that replaced the staging folder, and moves nothing out of the linked folder', () => {
-        put(path.join(root, 'outside', 'manifest.tmp'), 'OUTSIDE');
-        const commit = stageAll(dest, M, [], MANIFEST_BYTES, none);
-        fs.renameSync(commit.stagingAbs, `${commit.stagingAbs}.aside`);
-        fs.symlinkSync(path.join(root, 'outside'), commit.stagingAbs);
-
-        const error = captureError(() => commitAll(commit, none));
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect((error as WriteStepError).relPath).toBe(M);
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['manifest.tmp']);
-        expect(fs.existsSync(path.join(dest, M))).toBe(false);
-    });
-
-    it('does not remove the staging path when it is no longer a real folder at finalize, and returns it as the error', () => {
-        put(path.join(root, 'outside', 'keep.txt'), 'KEEP');
-        const commit = stageAll(dest, M, [w('a.md', 'AAA', { kind: 'absent' })], MANIFEST_BYTES, none);
-        commitAll(commit, none);
-        fs.rmSync(commit.stagingAbs, { recursive: true });
-        fs.symlinkSync(path.join(root, 'outside'), commit.stagingAbs);
-
-        const result = finalizeCommit(commit);
-
-        expect(result?.error).toBeInstanceOf(LinkOnTheWayError);
-        expect(fs.lstatSync(commit.stagingAbs).isSymbolicLink()).toBe(true);
-        expect(read(root, 'outside', 'keep.txt')).toBe('KEEP');
-    });
-
-    it('fails staging without removing a pre-existing entry at the staging name', () => {
-        const staging = path.join(dest, `${STAGING_PREFIX}${process.pid}`);
-        put(path.join(staging, 'keep.txt'), 'KEEP');
-
-        const error = captureError(() => stageAll(dest, M, [w('a.md', 'AAA', { kind: 'absent' })], MANIFEST_BYTES, none));
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(read(staging, 'keep.txt')).toBe('KEEP');
-        expect(fs.existsSync(path.join(dest, 'a.md'))).toBe(false);
-    });
-});
-
-describe('cleanupLeftovers', () => {
-    it('does nothing when there is no staging folder', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-
-        expect(cleanupLeftovers(dest)).toEqual({ restored: [], cleaned: 0 });
-        expect(read(dest, 'a.md')).toBe('A1');
-    });
-
-    it('restores a backup whose target is absent, removes the folder, and is safe to run twice', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(folder, 'backup', 'sub', 'b.md'), 'B1');
-
-        const first = cleanupLeftovers(dest);
-        const second = cleanupLeftovers(dest);
-
-        expect(first).toEqual({ restored: ['sub/b.md'], cleaned: 1 });
-        expect(second).toEqual({ restored: [], cleaned: 0 });
-        expect(read(dest, 'sub', 'b.md')).toBe('B1');
-        expect(fs.existsSync(folder)).toBe(false);
-    });
-
-    it('drops a backup whose target already holds identical bytes and removes the folder', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(folder, 'backup', 'a.md'), 'SAME');
-        put(path.join(dest, 'a.md'), 'SAME');
-
-        const result = cleanupLeftovers(dest);
-
-        expect(result).toEqual({ restored: [], cleaned: 1 });
-        expect(read(dest, 'a.md')).toBe('SAME');
-        expect(fs.existsSync(folder)).toBe(false);
-    });
-
-    it('throws when a backup differs from its target, and changes neither the folder nor either file', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(folder, 'backup', 'a.md'), 'SAVED');
-        put(path.join(dest, 'a.md'), 'EDITED');
-
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(LeftoverDiffersError);
-        expect((error as LeftoverDiffersError).differing).toEqual(['a.md']);
-        expect(read(folder, 'backup', 'a.md')).toBe('SAVED');
-        expect(read(dest, 'a.md')).toBe('EDITED');
-    });
-
-    it('throws when the staging folder belongs to a pull that is still running', () => {
-        const child = childProcess.spawn('sleep', ['5'], { stdio: 'ignore' });
-        try {
-            const pid = child.pid as number;
-            fs.mkdirSync(path.join(dest, `${STAGING_PREFIX}${pid}`));
-
-            const error = captureError(() => cleanupLeftovers(dest));
-
-            expect(error).toBeInstanceOf(AnotherPullRunningError);
-            expect((error as AnotherPullRunningError).pid).toBe(pid);
-        } finally {
-            child.kill('SIGKILL');
-        }
-    });
-
-    it('throws when a staging-folder name is a symbolic link', () => {
-        fs.mkdirSync(path.join(root, 'elsewhere'));
-        fs.symlinkSync(path.join(root, 'elsewhere'), path.join(dest, `${STAGING_PREFIX}1`));
-
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(ForeignStagingEntryError);
-        expect((error as ForeignStagingEntryError).entryName).toBe(`${STAGING_PREFIX}1`);
-        expect(fs.readdirSync(path.join(root, 'elsewhere'))).toEqual([]);
-    });
-
-    it('throws and writes nothing outside when the target folder of a backup is now a symbolic link', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(folder, 'backup', 'sub', 'b.md'), 'B1');
-        fs.mkdirSync(path.join(root, 'outside'));
-        fs.symlinkSync(path.join(root, 'outside'), path.join(dest, 'sub'));
-
-        const error = captureError(() => cleanupLeftovers(dest));
+        const error = (() => {
+            try {
+                ensureRealDirs(dest, 'x/y');
+            } catch (caught) {
+                return caught;
+            }
+            return null;
+        })();
 
         expect(error).toBeInstanceOf(LinkOnTheWayError);
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual([]);
-        expect(read(folder, 'backup', 'sub', 'b.md')).toBe('B1');
+        expect((error as LinkOnTheWayError).component).toBe('x');
     });
 
-    it('throws ForeignStagingEntryError and leaves the linked folder alone when the backup root is a symbolic link', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        fs.mkdirSync(folder);
-        put(path.join(root, 'outside', 'a.md'), 'OUTSIDE');
-        fs.symlinkSync(path.join(root, 'outside'), path.join(folder, 'backup'));
+    it('ensureRealDirs creates the missing folders and returns the deepest one', () => {
+        const deepest = ensureRealDirs(dest, 'x/y/z');
 
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(ForeignStagingEntryError);
-        expect(read(root, 'outside', 'a.md')).toBe('OUTSIDE');
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['a.md']);
-    });
-
-    it('treats a backup subfolder that is a symbolic link as one leaf, never walking into it', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        fs.mkdirSync(path.join(folder, 'backup'), { recursive: true });
-        put(path.join(root, 'outside', 'a.md'), 'OUTSIDE');
-        fs.symlinkSync(path.join(root, 'outside'), path.join(folder, 'backup', 'sub'));
-        put(path.join(dest, 'sub', 'real.md'), 'REAL');
-
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(LeftoverDiffersError);
-        expect((error as LeftoverDiffersError).differing).toEqual(['sub']);
-        expect(fs.readdirSync(path.join(root, 'outside'))).toEqual(['a.md']);
-        expect(read(root, 'outside', 'a.md')).toBe('OUTSIDE');
-        expect(read(dest, 'sub', 'real.md')).toBe('REAL');
+        expect(deepest).toBe(path.join(dest, 'x', 'y', 'z'));
+        expect(fs.statSync(deepest).isDirectory()).toBe(true);
+        expect(ensureRealDirs(dest, '')).toBe(dest);
     });
 });
 
-describe('rollback only undoes what this pull left (PM ruling 11)', () => {
-    it('keeps a file that replaced the placed one before the rollback ran, and its saved copy, and reports a restore failure', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        const faults = hooks('fail-manifest-rename,replace-before-rollback:a.md');
-        const commit = stageAll(dest, M, [w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false))], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
+describe('nothing the pull did not create is ever deleted (build rule 1)', () => {
+    it('leaves user entries named like the old staging folders, and any other entry, alone through a loop that stops on an error', () => {
+        put(path.join(dest, '.solidactions-pull-900123', 'backup', 'a.md'), 'MY DOC');
+        put(path.join(dest, '.solidactions-pull-7'), 'MY FILE');
+        put(path.join(dest, 'keep.md'), 'KEEP');
+        const before = listing(dest);
 
-        const rollback = rollbackAll(commit, faults);
+        writeAll(dest, [w('a.md', 'A', { kind: 'absent' }), w('b.md', 'B', { kind: 'absent' })], hooks('fail-rename:2'));
 
-        expect(read(dest, 'a.md')).toBe('LATER');
-        expect(read(dest, 'a.md.aside')).toBe('A2');
-        expect(read(commit.stagingAbs, 'backup', 'a.md')).toBe('A1');
-        expect(rollback.restoreFailure?.kind).toBe('restore');
-        expect(rollback.restoreFailure?.error).toBeInstanceOf(ChangedSincePlacedError);
-    });
-
-    it('keeps a file that replaced a new file before the rollback ran, and says it is a removal failure', () => {
-        const faults = hooks('fail-manifest-rename,replace-before-rollback:n.md');
-        const commit = stageAll(dest, M, [w('n.md', 'N1', { kind: 'absent' })], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
-
-        const rollback = rollbackAll(commit, faults);
-
-        expect(read(dest, 'n.md')).toBe('LATER');
-        expect(rollback.restoreFailure?.kind).toBe('remove-file');
-        expect(rollback.restoreFailure?.error).toBeInstanceOf(ChangedSincePlacedError);
-        expect(fs.existsSync(commit.stagingAbs)).toBe(true);
-    });
-
-    it('keeps a file created where the previous copy had been moved aside, and the saved copy', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        const faults = hooks('fail-rename:1,replace-before-rollback:a.md');
-        const commit = stageAll(dest, M, [w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false))], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
-
-        const rollback = rollbackAll(commit, faults);
-
-        expect(read(dest, 'a.md')).toBe('LATER');
-        expect(read(commit.stagingAbs, 'backup', 'a.md')).toBe('A1');
-        expect(rollback.restoreFailure?.kind).toBe('restore');
-    });
-
-    it('names a created folder that cannot be removed as a folder failure', () => {
-        const faults = hooks('fail-manifest-rename,replace-before-rollback:x/user.txt');
-        const commit = stageAll(dest, M, [w('x/c.md', 'CCC', { kind: 'absent' })], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
-
-        const rollback = rollbackAll(commit, faults);
-
-        expect(rollback.restoreFailure?.kind).toBe('remove-folder');
-        expect(rollback.restoreFailure?.relPath).toBe('x');
-        expect(fs.existsSync(path.join(dest, 'x', 'c.md'))).toBe(false);
-    });
-
-    it('still restores everything when nothing changed in between (the identity check passes for the pull\'s own files)', () => {
-        put(path.join(dest, 'a.md'), 'A1');
-        const faults = hooks('fail-manifest-rename');
-        const commit = stageAll(dest, M, [w('a.md', 'A2', authorizedStateOf(path.join(dest, 'a.md'), false)), w('n.md', 'N1', { kind: 'absent' })], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
-
-        const rollback = rollbackAll(commit, faults);
-
-        expect(rollback.restoreFailure).toBeNull();
-        expect(read(dest, 'a.md')).toBe('A1');
-        expect(fs.existsSync(path.join(dest, 'n.md'))).toBe(false);
-        expect(stagingFolders()).toEqual([]);
-    });
-});
-
-describe('every removal of the staging folder checks that it is still a real folder (final review 1, F-M4)', () => {
-    it('rollback leaves a link that replaced the staging folder alone, and the folder it points at', () => {
-        const faults = hooks('fail-manifest-rename');
-        const commit = stageAll(dest, M, [w('n.md', 'N1', { kind: 'absent' })], MANIFEST_BYTES, faults);
-        captureError(() => commitAll(commit, faults));
-        put(path.join(root, 'elsewhere', 'keep.txt'), 'KEEP');
-        fs.rmSync(commit.stagingAbs, { recursive: true });
-        fs.symlinkSync(path.join(root, 'elsewhere'), commit.stagingAbs);
-
-        const rollback = rollbackAll(commit, faults);
-
-        expect(rollback.restoreFailure).toBeNull();
-        expect(fs.lstatSync(commit.stagingAbs).isSymbolicLink()).toBe(true);
-        expect(read(root, 'elsewhere', 'keep.txt')).toBe('KEEP');
-    });
-});
-
-describe('the staging claim', () => {
-    it('creates this pull\'s own staging folder, refuses a second claim of the same name, and releases only a real folder', () => {
-        const claim = claimStaging(dest);
-
-        expect(claim?.name).toBe(`${STAGING_PREFIX}${process.pid}`);
-        expect(fs.statSync(path.join(dest, claim!.name)).isDirectory()).toBe(true);
-        expect(claimStaging(dest)).toBeNull();
-
-        releaseStaging(claim!);
-
-        expect(fs.existsSync(path.join(dest, claim!.name))).toBe(false);
-    });
-
-    it('never removes a link that replaced the claimed folder', () => {
-        const claim = claimStaging(dest)!;
-        fs.rmdirSync(claim.abs);
-        put(path.join(root, 'elsewhere', 'keep.txt'), 'KEEP');
-        fs.symlinkSync(path.join(root, 'elsewhere'), claim.abs);
-
-        releaseStaging(claim);
-
-        expect(read(root, 'elsewhere', 'keep.txt')).toBe('KEEP');
-        expect(fs.lstatSync(claim.abs).isSymbolicLink()).toBe(true);
-    });
-
-    it('is staged into by stageAll, which then removes it on a staging failure', () => {
-        const claim = claimStaging(dest)!;
-        const faults = hooks('fail-manifest-temp');
-
-        const error = captureError(() => stageAll(dest, M, [w('a.md', 'A', { kind: 'absent' })], MANIFEST_BYTES, faults, claim));
-
-        expect(error).toBeInstanceOf(WriteStepError);
-        expect(fs.existsSync(claim.abs)).toBe(false);
-    });
-
-    it('is skipped by the leftover scan: a pull never finds its own claim', () => {
-        const claim = claimStaging(dest)!;
-
-        expect(cleanupLeftovers(dest, claim.name)).toEqual({ restored: [], cleaned: 0 });
-        expect(fs.existsSync(claim.abs)).toBe(true);
-    });
-});
-
-describe('leftovers are classified before any is changed (PM ruling 11)', () => {
-    it('refuses for a live pull listed after dead leftovers, restoring and removing none of them', () => {
-        const dead: string[] = [];
-        for (let i = 0; i < 5; i++) {
-            const folder = path.join(dest, `${STAGING_PREFIX}${900000 + i * 11}`);
-            put(path.join(folder, 'backup', `saved${i}.md`), `S${i}`);
-            dead.push(folder);
-        }
-        const child = childProcess.spawn('sleep', ['5'], { stdio: 'ignore' });
-        try {
-            fs.mkdirSync(path.join(dest, `${STAGING_PREFIX}${child.pid}`));
-
-            const error = captureError(() => cleanupLeftovers(dest));
-
-            expect(error).toBeInstanceOf(AnotherPullRunningError);
-            expect((error as AnotherPullRunningError).folderName).toBe(`${STAGING_PREFIX}${child.pid}`);
-            for (const folder of dead) expect(fs.existsSync(folder)).toBe(true);
-            expect(fs.readdirSync(dest).filter((name) => name.startsWith('saved'))).toEqual([]);
-        } finally {
-            child.kill('SIGKILL');
-        }
-    });
-
-    it('refuses for a folder that is not doc pull\'s layout, found after dead leftovers, changing none of them', () => {
-        const dead = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(dead, 'backup', 'saved.md'), 'SAVED');
-        put(path.join(dest, `${STAGING_PREFIX}5`, 'notes.txt'), 'USER');
-
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(ForeignStagingEntryError);
-        expect((error as ForeignStagingEntryError).entryName).toBe(`${STAGING_PREFIX}5`);
-        expect(read(dead, 'backup', 'saved.md')).toBe('SAVED');
-        expect(fs.existsSync(path.join(dest, 'saved.md'))).toBe(false);
-        expect(read(dest, `${STAGING_PREFIX}5`, 'notes.txt')).toBe('USER');
-    });
-
-    it.each([
-        ['a folder holding a doc', (folder: string) => put(path.join(folder, 'a.md'), 'MY DOC')],
-        ['a manifest.tmp that is a folder', (folder: string) => fs.mkdirSync(path.join(folder, 'manifest.tmp'), { recursive: true })],
-        ['a new that is a file', (folder: string) => put(path.join(folder, 'new'), 'FILE')],
-    ])('never deletes %s at a dead pid', (_name, fill) => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        fill(folder);
-        const before = fs.readdirSync(folder, { recursive: true }).map(String).sort();
-
-        const error = captureError(() => cleanupLeftovers(dest));
-
-        expect(error).toBeInstanceOf(ForeignStagingEntryError);
-        expect(fs.readdirSync(folder, { recursive: true }).map(String).sort()).toEqual(before);
-    });
-
-    it('cleans a folder that holds exactly doc pull\'s layout (new/, backup/, manifest.tmp)', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}${deadPid()}`);
-        put(path.join(folder, 'new', '0'), 'STAGED');
-        put(path.join(folder, 'manifest.tmp'), '{}');
-        put(path.join(folder, 'backup', 'a.md'), 'SAVED');
-
-        expect(cleanupLeftovers(dest)).toEqual({ restored: ['a.md'], cleaned: 1 });
-        expect(fs.existsSync(folder)).toBe(false);
-    });
-
-    it('treats pid 0 as not running, so its leftover is cleaned up instead of blocking the destination forever', () => {
-        const folder = path.join(dest, `${STAGING_PREFIX}0`);
-        put(path.join(folder, 'backup', 'a.md'), 'SAVED');
-
-        expect(cleanupLeftovers(dest)).toEqual({ restored: ['a.md'], cleaned: 1 });
-        expect(read(dest, 'a.md')).toBe('SAVED');
-    });
-
-    it('reports a destination it cannot list as DestinationUnreadableError, the only error that reads "cannot read"', () => {
-        const error = captureError(() => cleanupLeftovers(path.join(root, 'missing')));
-
-        expect(error).toBeInstanceOf(DestinationUnreadableError);
-        expect((error as Error).message).toMatch(/ENOENT/);
-    });
-});
-
-describe('names doc pull keeps for itself (spec §1.3)', () => {
-    it.each([
-        ['.solidactions-docs.json', true],
-        ['.SOLIDACTIONS-DOCS.JSON', true],
-        ['.solidactions-pull-123', true],
-        ['.solidactions-pull-123.md', true],
-        ['.Solidactions-Pull-', true],
-        ['_.solidactions-docs.json', false],
-        ['.solidactions-docs-2.json', false],
-        ['solidactions-pull-1', false],
-    ])('%s is reserved: %s', (name, reserved) => {
-        expect(isReservedName(name, M)).toBe(reserved);
-    });
-
-    it('compares composed and decomposed spellings, and cases, as one name', () => {
-        expect(nameKey('caf\u00e9')).toBe(nameKey('cafe\u0301'));
-        expect(nameKey('Page')).toBe(nameKey('page'));
-        expect(nameKey('a')).not.toBe(nameKey('b'));
+        expect(read(dest, '.solidactions-pull-900123', 'backup', 'a.md')).toBe('MY DOC');
+        expect(read(dest, '.solidactions-pull-7')).toBe('MY FILE');
+        expect(read(dest, 'keep.md')).toBe('KEEP');
+        expect(listing(dest)).toEqual([...before, 'a.md'].sort());
     });
 });
 
@@ -883,5 +316,165 @@ describe('writeFileAtomic', () => {
         expect(fs.lstatSync(path.join(dest, 'f.txt')).isFile()).toBe(true);
         expect(read(dest, 'f.txt')).toBe('HELLO');
         expect(read(root, 'outside.txt')).toBe('OUTSIDE');
+    });
+
+    it('removes its temp file and leaves the target as it was when the step before the rename throws', () => {
+        put(path.join(dest, 'f.txt'), 'OLD');
+
+        expect(() => writeFileAtomic(dest, 'f.txt', 'NEW', () => { throw new Error('stop'); })).toThrow('stop');
+
+        expect(read(dest, 'f.txt')).toBe('OLD');
+        expect(fs.readdirSync(dest)).toEqual(['f.txt']);
+    });
+
+    it('runs the step before the rename after the temp file exists, under the reserved temp prefix', () => {
+        let seen: string[] = [];
+
+        writeFileAtomic(dest, 'f.txt', 'NEW', () => { seen = fs.readdirSync(dest); });
+
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatch(/^\.sa-write-\d+-[0-9a-f]{12}\.tmp$/);
+        expect(isReservedName(seen[0], M)).toBe(true);
+    });
+});
+
+describe('the destination lock (spec §1.4)', () => {
+    it('creates the lock file holding this process\'s pid', () => {
+        acquireLock(dest, M);
+
+        expect(read(dest, LOCK)).toBe(`${process.pid}\n`);
+        expect(lockNameFor(M)).toBe(LOCK);
+        expect(fs.readdirSync(dest)).toEqual([LOCK]);
+    });
+
+    it('refuses a second acquire with LockHeldError naming the lock, and changes nothing', () => {
+        acquireLock(dest, M);
+
+        const error = (() => {
+            try {
+                acquireLock(dest, M);
+            } catch (caught) {
+                return caught;
+            }
+            return null;
+        })();
+
+        expect(error).toBeInstanceOf(LockHeldError);
+        expect((error as LockHeldError).lockName).toBe(LOCK);
+        expect(read(dest, LOCK)).toBe(`${process.pid}\n`);
+    });
+
+    it('refuses a lock left by another process, whatever pid it names, and never removes it', () => {
+        put(path.join(dest, LOCK), '4194303\n');
+
+        expect(() => acquireLock(dest, M)).toThrow(LockHeldError);
+        releaseLock(dest, M);
+
+        expect(read(dest, LOCK)).toBe('4194303\n');
+    });
+
+    it('refuses a symbolic link at the lock name and never follows it', () => {
+        fs.mkdirSync(path.join(root, 'elsewhere'));
+        fs.symlinkSync(path.join(root, 'elsewhere'), path.join(dest, LOCK));
+
+        expect(() => acquireLock(dest, M)).toThrow(LockHeldError);
+
+        expect(fs.readdirSync(path.join(root, 'elsewhere'))).toEqual([]);
+        expect(fs.lstatSync(path.join(dest, LOCK)).isSymbolicLink()).toBe(true);
+    });
+
+    it('refuses a folder at the lock name', () => {
+        fs.mkdirSync(path.join(dest, LOCK));
+
+        expect(() => acquireLock(dest, M)).toThrow(LockHeldError);
+    });
+
+    it('reports a destination it cannot create the lock in as the filesystem\'s own error, not as a held lock', () => {
+        const error = (() => {
+            try {
+                acquireLock(path.join(root, 'missing'), M);
+            } catch (caught) {
+                return caught;
+            }
+            return null;
+        })();
+
+        expect(error).not.toBeInstanceOf(LockHeldError);
+        expect((error as NodeJS.ErrnoException).code).toBe('ENOENT');
+    });
+
+    it('releases the lock it created, and is safe to call again', () => {
+        acquireLock(dest, M);
+
+        releaseLock(dest, M);
+        releaseLock(dest, M);
+
+        expect(fs.readdirSync(dest)).toEqual([]);
+    });
+
+    it('leaves a lock that no longer holds this pid, a link and a folder alone', () => {
+        put(path.join(dest, LOCK), 'someone else\n');
+        releaseLock(dest, M);
+        expect(read(dest, LOCK)).toBe('someone else\n');
+        fs.rmSync(path.join(dest, LOCK));
+
+        fs.symlinkSync(path.join(root, 'nowhere'), path.join(dest, LOCK));
+        releaseLock(dest, M);
+        expect(fs.lstatSync(path.join(dest, LOCK)).isSymbolicLink()).toBe(true);
+        fs.rmSync(path.join(dest, LOCK));
+
+        fs.mkdirSync(path.join(dest, LOCK));
+        releaseLock(dest, M);
+        expect(fs.statSync(path.join(dest, LOCK)).isDirectory()).toBe(true);
+    });
+});
+
+describe('names doc pull keeps for itself (spec §1.3)', () => {
+    it.each([
+        ['.solidactions-docs.json', true],
+        ['.SOLIDACTIONS-DOCS.JSON', true],
+        ['.solidactions-docs.json.lock', true],
+        ['.Solidactions-Docs.JSON.LOCK', true],
+        ['.sa-write-123-abc.tmp', true],
+        ['.SA-WRITE-', true],
+        ['_.solidactions-docs.json', false],
+        ['.solidactions-docs-2.json', false],
+        ['.solidactions-docs.json.lock.md', false],
+        ['sa-write-1', false],
+        ['.solidactions-pull-123', false],
+        ['.solidactions-pull-123.md', false],
+    ])('%s is reserved: %s', (name, reserved) => {
+        expect(isReservedName(name, M)).toBe(reserved);
+    });
+
+    it('compares composed and decomposed spellings, and cases, as one name', () => {
+        expect(nameKey('café')).toBe(nameKey('café'));
+        expect(nameKey('Page')).toBe(nameKey('page'));
+        expect(nameKey('a')).not.toBe(nameKey('b'));
+    });
+});
+
+describe('the manifest write faults', () => {
+    it('throw from the manifest temp and rename steps only when asked, and only with the hooks on', () => {
+        expect(() => hooks('fail-manifest-temp').beforeManifestTemp()).toThrow(/open manifest temp \(test hook\)/);
+        expect(() => hooks('fail-manifest-rename').beforeManifestRename()).toThrow(/rename manifest \(test hook\)/);
+        expect(() => hooks('fail-manifest-rename').beforeManifestTemp()).not.toThrow();
+        expect(() => faultsFromEnv({ SOLIDACTIONS_DOC_PULL_TEST_FAULT: 'fail-manifest-temp' }).beforeManifestTemp()).not.toThrow();
+    });
+
+    it('rewrites the named file after the writes when asked to', () => {
+        put(path.join(dest, 'a.md'), 'WRITTEN');
+
+        hooks('change-after-writes:a.md').afterWrites(dest);
+
+        expect(read(dest, 'a.md')).toBe('CHANGED');
+    });
+
+    it('ignores an unknown fault name, and combines faults given as a comma-separated list', () => {
+        const faults = hooks('no-such-fault:1,fail-rename:1,fail-manifest-rename');
+
+        expect(() => faults.beforeRename(1)).toThrow(/rename \(test hook\)/);
+        expect(() => faults.beforeRename(2)).not.toThrow();
+        expect(() => faults.beforeManifestRename()).toThrow();
     });
 });

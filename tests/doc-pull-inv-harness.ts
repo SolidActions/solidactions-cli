@@ -17,7 +17,7 @@ import { writeGlobal } from './helpers';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 export const MANIFEST_FILE = '.solidactions-docs.json';
-const STAGING_PATTERN = /^\.solidactions-pull-\d+$/;
+export const LOCK_FILE = `${MANIFEST_FILE}.lock`;
 const SINGLE_DOC_WARNING = "deletions not propagated: single-doc pull cannot speak for a folder's contents\n";
 
 export const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
@@ -95,6 +95,33 @@ export function pulledOk(destination: string, rels: string[], stderr: StreamExpe
 /** The warning a single-doc pull prints when the destination already tracks a folder. */
 export const singleDocWarning = SINGLE_DOC_WARNING;
 
+/** `n` of `m` planned files were written when a pull stopped (the counts the failure lines print). */
+export const updatedFiles = (n: number, m: number): string => `${n} of ${m} files were updated`;
+
+/** A write error at doc `rel`, with the files before it recorded (spec §1.5). */
+export const cannotWriteLine = (rel: string, what: string, n: number, m: number): string =>
+    `error: cannot write ${rel}: EIO: i/o error, ${what} (test hook) — ${updatedFiles(n, m)} and are tracked; pull again.\n`;
+
+/** A target that changed after the checks (spec §1.5). */
+export const changedLine = (rel: string, n: number, m: number): string =>
+    `error: ${rel} changed after doc pull checked it — ${updatedFiles(n, m)} and are tracked. Pull again, or pass --overwrite to replace it.\n`;
+
+/** A folder at a target (ruling 9). */
+export const folderLine = (rel: string, n: number, m: number): string =>
+    `error: ${rel} is a folder (doc pull writes a file there) — ${updatedFiles(n, m)} and are tracked. Move it aside and pull again.\n`;
+
+/** The manifest itself could not be written: every file was written, the manifest is as it was. */
+export const manifestNotWrittenLine = (what: string, n: number, m: number): string =>
+    `error: cannot write ${MANIFEST_FILE}: EIO: i/o error, ${what} (test hook) — ${updatedFiles(n, m)}; the manifest was not changed.\n`;
+
+/** The INV-C gate refused to record a manifest (spec §1.5): `reason` is the gate's own wording. */
+export const gateLine = (rel: string, reason: string, n: number, m: number): string =>
+    `error: doc pull stopped before recording a manifest that would not match the files (${rel}: ${reason}) — ${updatedFiles(n, m)}; the manifest was not changed.\n`;
+
+/** The lock refusal (spec §1.4). */
+export const lockLine = (out: string): string =>
+    `error: ${out}/${LOCK_FILE} exists: another doc pull may be writing to ${out}. If none is running, delete that file and pull again.\n`;
+
 /** A run a test hook killed: no exit code, the signal, and the streams it had written. */
 export function killed(stderr: StreamExpectation = '', stdout: StreamExpectation = ''): Expected {
     return { code: null, signal: 'SIGKILL', stdout, stderr };
@@ -141,21 +168,10 @@ export function snapshot(dir: string): Snapshot {
     return { entries, inodes };
 }
 
-export const stagingEntries = (out: string): string[] => fs.readdirSync(out).filter((name) => STAGING_PATTERN.test(name));
+/** The entries doc pull keeps for itself in `out`: its lock and any temp file. Both must be gone after every exit. */
+export const internalEntries = (out: string): string[] => fs.readdirSync(out).filter((name) => name === LOCK_FILE || name.startsWith('.sa-write-'));
 export const read = (...parts: string[]): string => fs.readFileSync(path.join(...parts), 'utf8');
 export const manifestOf = (out: string): { folder_path: string; docs: Record<string, Record<string, any>> } => JSON.parse(read(out, MANIFEST_FILE));
-
-/** A pid nothing is running as, so a hand-made staging folder looks like a killed pull's. */
-export function deadPid(): number {
-    for (let pid = 900000; pid < 1000000; pid++) {
-        try {
-            process.kill(pid, 0);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
-        }
-    }
-    throw new Error('no free pid found');
-}
 
 /** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
 export function caseInsensitiveFilesystem(): boolean {
@@ -195,11 +211,9 @@ export function useDocPullHarness() {
     let served: ServedDoc[] = [];
     /** When true the list answers folder_path_not_found, so the pull takes the single-doc fallback. */
     let singleForm = false;
-    /** The pid of the CLI most recently started; `{pid}` in a served folder name becomes this (a folder named after the pull itself). */
-    let childPid = 0;
-    /** While set, list answers wait here until `release()`; `arrived` counts the list calls waiting. */
-    let listGate: { waiting: Array<() => void> } | null = null;
-    const dirOf = (d: ServedDoc): string => (d.relative ?? '').split('{pid}').join(String(childPid));
+    /** While set, the first `limit` list answers wait here until `release()`; the rest answer at once. */
+    let listGate: { waiting: Array<() => void>; limit: number } | null = null;
+    const dirOf = (d: ServedDoc): string => d.relative ?? '';
 
     function answerMcp(args: Record<string, any>): string {
         if (args.action === 'list' && singleForm) {
@@ -269,7 +283,7 @@ export function useDocPullHarness() {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(answerMcp(body.params.arguments));
                 };
-                if (listGate !== null && body.params.arguments.action === 'list') listGate.waiting.push(respond);
+                if (listGate !== null && body.params.arguments.action === 'list' && listGate.waiting.length < listGate.limit) listGate.waiting.push(respond);
                 else respond();
             });
         });
@@ -300,7 +314,6 @@ export function useDocPullHarness() {
             Object.assign(env, extraEnv);
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
             pid = child.pid ?? 0;
-            childPid = pid;
             let stdout = '';
             let stderr = '';
             child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -339,15 +352,15 @@ export function useDocPullHarness() {
             expectResult(result, expected);
             return result;
         },
-        /** One pull started and not awaited: its pid (for a staging folder named after it) and its eventual result. */
+        /** One pull started and not awaited: its pid (also what its lock file holds) and its eventual result. */
         start(form: Form, title: string, flags: string[] = ['-y'], faultSpec?: string): { pid: number; result: Promise<CliResult> } {
             singleForm = form === 'single';
             const target = form === 'single' ? `docs/${title}` : 'docs';
             return startCli(handle.root, ['doc', 'pull', target, handle.out, ...flags], faultSpec === undefined ? {} : fault(faultSpec));
         },
-        /** Hold every `list` answer until `release()`; `waiting()` is how many pulls are blocked on one. */
-        gateLists(): { release(): void; waiting(): number } {
-            const gate: { waiting: Array<() => void> } = { waiting: [] };
+        /** Hold the first `limit` `list` answers (all of them by default) until `release()`; `waiting()` is how many pulls are blocked on one. */
+        gateLists(limit = Infinity): { release(): void; waiting(): number } {
+            const gate: { waiting: Array<() => void>; limit: number } = { waiting: [], limit };
             listGate = gate;
             return {
                 release(): void {

@@ -60,6 +60,7 @@ export function readManifest(dir: string, opts: { warnOnParseError?: boolean } =
     }
 }
 
-export function writeManifest(dir: string, manifest: DocsManifest): void {
-    writeFileAtomic(dir, DOCS_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
+/** `beforeRename` is doc pull's test seam (spec §1.8): it runs once the temp file exists, just before the rename. */
+export function writeManifest(dir: string, manifest: DocsManifest, beforeRename?: () => void): void {
+    writeFileAtomic(dir, DOCS_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`, beforeRename);
 }

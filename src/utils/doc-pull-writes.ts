@@ -3,26 +3,24 @@ import fs from 'fs';
 import path from 'path';
 
 /**
- * doc pull's commit (cli#168, cli#188, cli#182; spec §1). A pull first claims its staging folder,
- * <destination>/.solidactions-pull-<pid>/, and refuses if another live pull's folder (or anything that is not
- * a folder doc pull created) is there. Every file is then staged in it, and renamed into place after its target
- * is re-checked against the state the preflight saw; whatever it replaces is kept as a backup in the staging
- * folder, and the manifest is published last. Any in-process failure restores the backups, but only where the
- * entry at the target is still the one this pull placed (or still vacant). A killed pull leaves the old manifest
- * and its staging folder, which the next pull cleans up (cleanupLeftovers). A rename replaces the directory
- * entry, so a hard link's other names keep their bytes and a link at the final name is replaced, not followed.
- * Node has no openat: a directory component swapped for a link, or a final component changed between its check
- * and its rename, is a documented residual race in the user's own folder (spec §1.6). No power-loss durability
- * is claimed.
+ * doc pull's write path (cli#168, cli#188, cli#182; spec §1, PM ruling 12). The pull stops at the first error and
+ * records exactly what it wrote: each file is written to a sibling temp file (opened O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW)
+ * and renamed into place, after the target is re-checked against the state the preflight saw; the caller then writes the
+ * manifest once. A rename replaces the directory entry, so a hard link's other names keep their bytes and a link at the
+ * final name is replaced, not followed. The pull never deletes, moves or restores anything it did not create in this run
+ * (its own temp file, and its own lock file, are the only things it removes here), so there is nothing to roll back.
+ * One O_EXCL lock file in the destination root keeps two pulls apart. Node has no openat: a directory component swapped
+ * for a link, or a final component changed between its check and its rename, is a documented residual race in the
+ * user's own folder (spec §1.6). No power-loss durability is claimed.
  */
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const NEW_FILE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW;
 
-export const STAGING_PREFIX = '.solidactions-pull-';
-const STAGING_PATTERN = /^\.solidactions-pull-(\d+)$/;
+/** The name prefix of writeFileAtomic's temp files; reserved with the manifest and its lock (spec §1.3 Names). */
+const TEMP_PREFIX = '.sa-write-';
 
-/** What a staging folder holds at its top level (spec §1.4): anything else is not a folder doc pull created. */
-const STAGING_LAYOUT: Record<string, 'folder' | 'file'> = { new: 'folder', backup: 'folder', 'manifest.tmp': 'file' };
+/** The lock file's name beside a manifest. */
+export const lockNameFor = (manifestName: string): string => `${manifestName}.lock`;
 
 /**
  * The key two names are compared by: composed (NFC) and lower-cased, so spellings one filesystem or
@@ -30,10 +28,10 @@ const STAGING_LAYOUT: Record<string, 'folder' | 'file'> = { new: 'folder', backu
  */
 export const nameKey = (name: string): string => name.normalize('NFC').toLowerCase().normalize('NFC');
 
-/** A name doc pull keeps for itself at every level: the manifest and anything in the staging namespace (spec §1.3). */
+/** A name doc pull keeps for itself at every level: the manifest, its lock, and the temp-file prefix (spec §1.3). */
 export function isReservedName(name: string, manifestName: string): boolean {
     const key = nameKey(name);
-    return key === nameKey(manifestName) || key.startsWith(nameKey(STAGING_PREFIX));
+    return key === nameKey(manifestName) || key === nameKey(lockNameFor(manifestName)) || key.startsWith(nameKey(TEMP_PREFIX));
 }
 
 export class LinkOnTheWayError extends Error {
@@ -57,48 +55,19 @@ export class WriteStepError extends Error {
     }
 }
 
-export class AnotherPullRunningError extends Error {
-    constructor(public readonly pid: number, public readonly folderName: string) {
-        super(`another doc pull (pid ${pid}) is running`);
-        this.name = 'AnotherPullRunningError';
-    }
-}
-
-export class ForeignStagingEntryError extends Error {
-    constructor(public readonly entryName: string) {
-        super(`${entryName} is not a folder doc pull created`);
-        this.name = 'ForeignStagingEntryError';
-    }
-}
-
-export class LeftoverDiffersError extends Error {
-    constructor(public readonly folderName: string, public readonly differing: string[]) {
-        super(`${differing.length} file(s) differ from their saved copies in ${folderName}`);
-        this.name = 'LeftoverDiffersError';
-    }
-}
-
-/** The destination's own listing failed while looking for leftovers: the only failure that reads "cannot read" (spec §1.4). */
-export class DestinationUnreadableError extends Error {
-    constructor(cause: Error) {
-        super(cause.message);
-        this.name = 'DestinationUnreadableError';
-    }
-}
-
-/** A rollback step found the target no longer holds what this pull left there: both sides stay as they are (spec §1.5). */
-export class ChangedSincePlacedError extends Error {
-    constructor(relPath: string, placed: boolean) {
-        super(placed ? `${relPath} was replaced after doc pull wrote it` : `${relPath} was created after doc pull moved the previous copy aside`);
-        this.name = 'ChangedSincePlacedError';
-    }
-}
-
 /** Ruling 9: a folder (or any entry that is neither a file nor a link) at a target is never moved or deleted. */
 export class UnsupportedTargetError extends Error {
     constructor(public readonly relPath: string) {
         super(`${relPath} is a folder now`);
         this.name = 'UnsupportedTargetError';
+    }
+}
+
+/** The lock file is already there: another pull may be writing to the destination, or a killed one left it (spec §1.4). */
+export class LockHeldError extends Error {
+    constructor(public readonly lockName: string) {
+        super(`${lockName} exists`);
+        this.name = 'LockHeldError';
     }
 }
 
@@ -111,45 +80,20 @@ export interface PlannedWrite {
     authorized: Authorized;
 }
 
-export interface CommitItem extends PlannedWrite {
-    newAbs: string;
-    targetAbs: string;
-    backupAbs: string | null;
-    placed: boolean;
-    /** dev:ino of the staged file as it was renamed in; rollback only touches a target that still has it (spec §1.5). */
-    placedIdentity: string | null;
-}
-
-/** The staging folder this pull created first, before it looks at anything else in the destination (spec §1.3 step 1). */
-export interface StagingClaim {
-    name: string;
-    abs: string;
-}
-
-/** What rollback could not undo: a backup it could not put back, a new file it could not remove, or a folder it could not remove. */
-export interface RestoreFailure {
-    relPath: string;
+/** Why the write loop stopped: the write it was on, and the error (a typed refusal, or a WriteStepError wrapping the cause). */
+export interface WriteStop {
+    write: PlannedWrite;
     error: unknown;
-    kind: 'restore' | 'remove-file' | 'remove-folder';
-}
-
-export interface Commit {
-    destination: string;
-    stagingAbs: string;
-    manifestName: string;
-    items: CommitItem[];
-    createdDirs: string[];
 }
 
 export interface Faults {
-    failManifestTemp: boolean;
-    failManifestRename: boolean;
+    beforeManifestTemp(): void;
+    beforeManifestRename(): void;
     afterChecks(destination: string): void;
-    beforeCommit(destination: string): void;
+    beforeWrites(destination: string): void;
+    afterWrites(destination: string): void;
     beforeRename(n: number): void;
     afterRename(n: number): void;
-    beforeRollback(destination: string): void;
-    beforeRestore(n: number): void;
 }
 
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
@@ -165,18 +109,17 @@ function ioFault(what: string): Error {
  */
 export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
     const none: Faults = {
-        failManifestTemp: false,
-        failManifestRename: false,
+        beforeManifestTemp: () => undefined,
+        beforeManifestRename: () => undefined,
         afterChecks: () => undefined,
-        beforeCommit: () => undefined,
+        beforeWrites: () => undefined,
+        afterWrites: () => undefined,
         beforeRename: () => undefined,
         afterRename: () => undefined,
-        beforeRollback: () => undefined,
-        beforeRestore: () => undefined,
     };
     if (env.SOLIDACTIONS_TEST_HOOKS !== '1') return none;
     const faults: Faults = { ...none };
-    // A comma-separated list combines faults, e.g. "fail-rename:2,fail-restore:1".
+    // A comma-separated list combines faults, e.g. "fail-rename:2,create-before-commit:a.md".
     for (const spec of (env.SOLIDACTIONS_DOC_PULL_TEST_FAULT ?? '').split(',')) {
         const [name, arg = ''] = spec.split(/:(.*)/s);
         switch (name) {
@@ -184,13 +127,10 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
                 faults.beforeRename = (n) => { if (n === Number(arg)) throw ioFault('rename'); };
                 break;
             case 'fail-manifest-temp':
-                faults.failManifestTemp = true;
+                faults.beforeManifestTemp = () => { throw ioFault('open manifest temp'); };
                 break;
             case 'fail-manifest-rename':
-                faults.failManifestRename = true;
-                break;
-            case 'fail-restore':
-                faults.beforeRestore = (n) => { if (n === Number(arg)) throw ioFault('restore'); };
+                faults.beforeManifestRename = () => { throw ioFault('rename manifest'); };
                 break;
             case 'kill-after-renames':
                 faults.afterRename = (n) => { if (n === Number(arg)) process.kill(process.pid, 'SIGKILL'); };
@@ -203,34 +143,21 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
                 };
                 break;
             case 'create-before-commit':
-                faults.beforeCommit = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'RACE');
+                faults.beforeWrites = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'RACE');
                 break;
             case 'mkdir-before-commit':
-                faults.beforeCommit = (destination) => {
+                faults.beforeWrites = (destination) => {
                     const dir = path.join(destination, ...segments(arg));
                     fs.mkdirSync(dir);
                     fs.writeFileSync(path.join(dir, 'user.txt'), 'USER');
                 };
                 break;
-            case 'swap-before-rollback': {
-                const [dirRel, outside] = arg.split('>');
-                faults.beforeRollback = (destination) => {
-                    const dir = path.join(destination, ...segments(dirRel));
-                    fs.renameSync(dir, `${dir}.swapped`);
-                    fs.symlinkSync(outside, dir);
-                };
-                break;
-            }
-            case 'replace-before-rollback':
-                faults.beforeRollback = (destination) => {
-                    const abs = path.join(destination, ...segments(arg));
-                    if (lstatOrNull(abs) !== null) fs.renameSync(abs, `${abs}.aside`); // keeps the old inode alive, so the new file cannot reuse it
-                    fs.writeFileSync(abs, 'LATER');
-                };
+            case 'change-after-writes':
+                faults.afterWrites = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'CHANGED');
                 break;
             case 'link-before-commit': {
                 const [linkRel, linkTarget] = arg.split('>');
-                faults.beforeCommit = (destination) => fs.symlinkSync(linkTarget, path.join(destination, ...segments(linkRel)));
+                faults.beforeWrites = (destination) => fs.symlinkSync(linkTarget, path.join(destination, ...segments(linkRel)));
                 break;
             }
             default:
@@ -239,9 +166,6 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
     }
     return faults;
 }
-
-/** dev:ino as exact text (a bigint stat does not round large inode numbers). */
-const identityOf = (stat: fs.BigIntStats): string => `${stat.dev}:${stat.ino}`;
 
 function lstatOrNull(abs: string): fs.Stats | null {
     try {
@@ -259,16 +183,15 @@ function stillAuthorized(targetAbs: string, authorized: Authorized): boolean {
     return stat !== null && stat.isFile() && sha256(fs.readFileSync(targetAbs)) === authorized.sha256;
 }
 
-export function ensureRealDirs(destination: string, dirRel: string, createdDirs: string[] | null): string {
+/** Every folder of `dirRel` under `destination`, created where missing; a link or a file on the way refuses (cli#182). Returns the folder's path. */
+export function ensureRealDirs(destination: string, dirRel: string): string {
     const parts = dirRel === '' ? [] : segments(dirRel);
     let current = destination;
     for (let i = 0; i < parts.length; i++) {
         current = path.join(current, parts[i]);
         let stat = lstatOrNull(current);
         if (stat === null) {
-            if (createdDirs === null) throw Object.assign(new Error(`ENOENT: no such directory, ${current}`), { code: 'ENOENT' });
             fs.mkdirSync(current);
-            createdDirs.push(current);
             stat = fs.lstatSync(current);
         }
         if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -288,286 +211,77 @@ function writeNew(abs: string, data: string | Buffer): void {
 }
 
 /**
- * Create this pull's staging folder, the first thing a pull does in the destination (spec §1.3 step 1).
- * Returns null when something already has that name (a leftover of an earlier process that had this pid, or
- * an entry that is not ours); the caller classifies it with the other leftovers.
+ * Write every planned file in order, stopping at the first one that cannot be written or whose target is no longer in the
+ * state the preflight saw (spec §1.3). Nothing is deleted or restored: the files written before the stop stay, and are
+ * returned so the caller can record them.
  */
-export function claimStaging(destination: string): StagingClaim | null {
-    const name = `${STAGING_PREFIX}${process.pid}`;
-    const abs = path.join(destination, name);
-    try {
-        fs.mkdirSync(abs, { mode: 0o700 });
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null;
-        throw error;
-    }
-    return { name, abs };
-}
-
-/** Remove a claimed staging folder that nothing was staged in. Only ever the folder this pull created. */
-export function releaseStaging(claim: StagingClaim): void {
-    removeStagingFolder(claim.abs);
-}
-
-export function stageAll(destination: string, manifestName: string, writes: PlannedWrite[], manifestBytes: string, faults: Faults, claimed?: StagingClaim): Commit {
-    const stagingName = claimed?.name ?? `${STAGING_PREFIX}${process.pid}`;
-    const stagingAbs = path.join(destination, stagingName);
-    let createdStaging = claimed !== undefined;
-    try {
-        if (claimed === undefined) {
-            fs.mkdirSync(stagingAbs, { mode: 0o700 });
-            createdStaging = true;
-        }
-        fs.mkdirSync(path.join(stagingAbs, 'new'));
-    } catch (error) {
-        // Only the folder this call created or claimed: a pre-existing entry at the name is never removed.
-        if (createdStaging) removeStagingFolder(stagingAbs);
-        throw new WriteStepError(stagingName, error);
-    }
-    const commit: Commit = { destination, stagingAbs, manifestName, items: [], createdDirs: [] };
-    try {
-        writes.forEach((write, index) => {
-            const newAbs = path.join(stagingAbs, 'new', String(index));
-            try {
-                ensureRealDirs(destination, `${stagingName}/new`, null);
-                writeNew(newAbs, write.data);
-            } catch (error) {
-                throw new WriteStepError(write.relPath, error);
-            }
-            commit.items.push({ ...write, newAbs, targetAbs: path.join(destination, ...segments(write.relPath)), backupAbs: null, placed: false, placedIdentity: null });
-        });
+export function writeAll(destination: string, writes: PlannedWrite[], faults: Faults): { placed: PlannedWrite[]; stop: WriteStop | null } {
+    faults.beforeWrites(destination);
+    const placed: PlannedWrite[] = [];
+    for (let i = 0; i < writes.length; i++) {
+        const write = writes[i];
+        const targetAbs = path.join(destination, ...segments(write.relPath));
         try {
-            if (faults.failManifestTemp) throw ioFault('open manifest.tmp');
-            ensureRealDirs(destination, stagingName, null);
-            writeNew(path.join(stagingAbs, 'manifest.tmp'), manifestBytes);
+            const dirAbs = ensureRealDirs(destination, write.dirRel);
+            writeFileAtomic(dirAbs, path.basename(targetAbs), write.data, () => {
+                const existing = lstatOrNull(targetAbs);
+                if (existing !== null && !existing.isFile() && !existing.isSymbolicLink()) throw new UnsupportedTargetError(write.relPath);
+                if (!stillAuthorized(targetAbs, write.authorized)) throw new PublicationRefusedError(write.relPath);
+                faults.beforeRename(i + 1);
+            });
         } catch (error) {
-            throw new WriteStepError(manifestName, error);
+            const typed = error instanceof LinkOnTheWayError || error instanceof PublicationRefusedError || error instanceof UnsupportedTargetError;
+            return { placed, stop: { write, error: typed ? error : new WriteStepError(write.relPath, error) } };
         }
-    } catch (error) {
-        removeStagingFolder(stagingAbs);
-        throw error;
-    }
-    return commit;
-}
-
-/** Remove the staging folder only while it is still a real folder, as finalizeCommit does: a link now at its name is left alone. */
-function removeStagingFolder(stagingAbs: string): void {
-    const stat = lstatOrNull(stagingAbs);
-    if (stat !== null && stat.isDirectory() && !stat.isSymbolicLink()) fs.rmSync(stagingAbs, { recursive: true, force: true });
-}
-
-export function commitAll(commit: Commit, faults: Faults): void {
-    faults.beforeCommit(commit.destination);
-    const stagingName = path.basename(commit.stagingAbs);
-    for (let i = 0; i < commit.items.length; i++) {
-        const item = commit.items[i];
-        try {
-            ensureRealDirs(commit.destination, item.dirRel, commit.createdDirs);
-        } catch (error) {
-            if (error instanceof LinkOnTheWayError) throw error;
-            throw new WriteStepError(item.relPath, error);
-        }
-        const existing = lstatOrNull(item.targetAbs);
-        if (existing !== null && !existing.isFile() && !existing.isSymbolicLink()) throw new UnsupportedTargetError(item.relPath);
-        if (!stillAuthorized(item.targetAbs, item.authorized)) throw new PublicationRefusedError(item.relPath);
-        try {
-            // Ruling 8: the staging side is anchored at the destination too, so a link planted at the
-            // staging folder, new/ or backup/ never redirects a move.
-            ensureRealDirs(commit.destination, `${stagingName}/new`, null);
-            if (existing !== null) {
-                // Backed up at commit time, so a target created late under --overwrite is restorable too.
-                const backupAbs = path.join(commit.stagingAbs, 'backup', ...segments(item.relPath));
-                ensureRealDirs(commit.destination, `${stagingName}/backup${item.dirRel === '' ? '' : `/${item.dirRel}`}`, []);
-                if (existing.isFile()) fs.chmodSync(item.newAbs, existing.mode & 0o7777);
-                fs.renameSync(item.targetAbs, backupAbs);
-                item.backupAbs = backupAbs;
-            }
-            faults.beforeRename(i + 1);
-            item.placedIdentity = identityOf(fs.lstatSync(item.newAbs, { bigint: true }));
-            fs.renameSync(item.newAbs, item.targetAbs);
-            item.placed = true;
-        } catch (error) {
-            throw new WriteStepError(item.relPath, error);
-        }
+        placed.push(write);
         faults.afterRename(i + 1);
     }
+    return { placed, stop: null };
+}
+
+/**
+ * Create the destination's lock file, holding this pid (spec §1.4). Any existing entry of that name refuses, a link or a
+ * folder included; the file is never removed or liveness-tested except by the pull that created it (releaseLock).
+ */
+export function acquireLock(destination: string, manifestName: string): void {
+    const lockName = lockNameFor(manifestName);
+    const lockAbs = path.join(destination, lockName);
+    let fd: number;
     try {
-        if (faults.failManifestRename) throw ioFault('rename manifest');
-        ensureRealDirs(commit.destination, stagingName, null);
-        fs.renameSync(path.join(commit.stagingAbs, 'manifest.tmp'), path.join(commit.destination, commit.manifestName));
+        fd = fs.openSync(lockAbs, NEW_FILE_FLAGS, 0o666);
     } catch (error) {
-        throw new WriteStepError(commit.manifestName, error);
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new LockHeldError(lockName);
+        throw error;
     }
-}
-
-export function rollbackAll(commit: Commit, faults: Faults): { restoreFailure: RestoreFailure | null } {
-    faults.beforeRollback(commit.destination);
-    const stagingName = path.basename(commit.stagingAbs);
-    let restoreFailure: RestoreFailure | null = null;
-    let restoring = 0;
-    for (const item of [...commit.items].reverse()) {
-        if (item.backupAbs === null && !item.placed) continue;
-        try {
-            // Ruling 8: the same parent checks as the forward path, on both ends.
-            ensureRealDirs(commit.destination, item.dirRel, null);
-            // PM ruling 11: only undo what this pull left. A placed file must still be the inode that was renamed in;
-            // a file moved aside and not placed leaves the target vacant. Anything else is someone's later work.
-            const current = fs.lstatSync(item.targetAbs, { bigint: true, throwIfNoEntry: false });
-            const ours = item.placed ? current !== undefined && identityOf(current) === item.placedIdentity : current === undefined;
-            if (!ours) throw new ChangedSincePlacedError(item.relPath, item.placed);
-            if (item.backupAbs !== null) {
-                ensureRealDirs(commit.destination, `${stagingName}/backup${item.dirRel === '' ? '' : `/${item.dirRel}`}`, null);
-                restoring += 1;
-                faults.beforeRestore(restoring);
-                fs.renameSync(item.backupAbs, item.targetAbs); // the original inode, links included
-                item.backupAbs = null;
-            } else {
-                fs.unlinkSync(item.targetAbs); // this pull's new file
-            }
-            item.placed = false;
-        } catch (error) {
-            restoreFailure ??= { relPath: item.relPath, error, kind: item.backupAbs !== null ? 'restore' : 'remove-file' };
-        }
-    }
-    for (const dir of [...commit.createdDirs].reverse()) {
-        const rel = path.relative(commit.destination, dir).split(path.sep).join('/');
-        try {
-            ensureRealDirs(commit.destination, rel, null);
-            fs.rmdirSync(dir);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; // already gone
-            restoreFailure ??= { relPath: rel, error, kind: 'remove-folder' };
-        }
-    }
-    if (restoreFailure === null) removeStagingFolder(commit.stagingAbs);
-    return { restoreFailure };
-}
-
-export function finalizeCommit(commit: Commit): { error: unknown } | null {
     try {
-        const stat = lstatOrNull(commit.stagingAbs);
-        if (stat !== null && (stat.isSymbolicLink() || !stat.isDirectory())) throw new LinkOnTheWayError(path.basename(commit.stagingAbs));
-        fs.rmSync(commit.stagingAbs, { recursive: true, force: false });
-        return null;
+        fs.writeFileSync(fd, `${process.pid}\n`);
     } catch (error) {
-        return { error };
+        fs.closeSync(fd);
+        fs.unlinkSync(lockAbs); // the file this call just created
+        throw error;
     }
+    fs.closeSync(fd);
 }
 
-function pidRunning(pid: number): boolean {
-    if (!Number.isInteger(pid) || pid < 1) return false; // pid 0 would signal this process's own group: never "running"
+/** Remove the lock this process created: only a regular file still holding this pid, so a lock someone else made is never touched. */
+export function releaseLock(destination: string, manifestName: string): void {
+    const lockAbs = path.join(destination, lockNameFor(manifestName));
     try {
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
-}
-
-/** Every leaf (file or link) under `root`, as '/'-joined paths; never follows a link. */
-function walkLeaves(root: string, prefix = ''): string[] {
-    const stat = lstatOrNull(root);
-    if (stat === null) return [];
-    const out: string[] = [];
-    for (const name of fs.readdirSync(root)) {
-        const abs = path.join(root, name);
-        const rel = prefix === '' ? name : `${prefix}/${name}`;
-        const entry = fs.lstatSync(abs);
-        if (entry.isDirectory() && !entry.isSymbolicLink()) out.push(...walkLeaves(abs, rel));
-        else out.push(rel);
-    }
-    return out;
-}
-
-function sameEntry(aAbs: string, bAbs: string): boolean {
-    const a = fs.lstatSync(aAbs);
-    const b = fs.lstatSync(bAbs);
-    if (a.isSymbolicLink() && b.isSymbolicLink()) return fs.readlinkSync(aAbs) === fs.readlinkSync(bAbs);
-    if (a.isFile() && b.isFile()) return fs.readFileSync(aAbs).equals(fs.readFileSync(bAbs));
-    return false;
-}
-
-/** A leftover must hold only doc pull's own layout (spec §1.4); anything else, or a link in its place, is not ours to delete. */
-function requireOwnLayout(name: string, folderAbs: string): void {
-    for (const entry of fs.readdirSync(folderAbs)) {
-        const expected = STAGING_LAYOUT[entry];
-        if (expected === undefined) throw new ForeignStagingEntryError(name);
-        const stat = fs.lstatSync(path.join(folderAbs, entry));
-        const isExpected = expected === 'folder' ? stat.isDirectory() : stat.isFile();
-        if (stat.isSymbolicLink() || !isExpected) throw new ForeignStagingEntryError(`${name}/${entry}`);
+        if (lstatOrNull(lockAbs)?.isFile() === true && fs.readFileSync(lockAbs, 'utf8') === `${process.pid}\n`) fs.unlinkSync(lockAbs);
+    } catch {
+        // already gone, or not ours to inspect
     }
 }
 
 /**
- * Look at every `.solidactions-pull-<digits>` entry in the destination root, changing nothing, and return the
- * names of the ones a killed pull left behind (spec §1.4). Throws for the first entry that is a live pull's
- * folder or not a folder doc pull created, so nothing is restored or removed while a live writer exists.
- * `ownName` is this pull's own claimed folder, which is skipped.
+ * Write `dir/name` through a sibling temp file and a rename: never half-written, never through a link at `name`.
+ * `beforeRename` runs after the temp file exists and just before the rename; if it throws, the temp file is removed.
  */
-export function classifyLeftovers(destination: string, ownName: string | null): string[] {
-    let names: string[];
-    try {
-        names = fs.readdirSync(destination);
-    } catch (error) {
-        throw new DestinationUnreadableError(error as Error);
-    }
-    const dead: string[] = [];
-    for (const name of names.sort()) {
-        const match = STAGING_PATTERN.exec(name);
-        if (match === null || name === ownName) continue;
-        const folderAbs = path.join(destination, name);
-        try {
-            const stat = fs.lstatSync(folderAbs);
-            if (stat.isSymbolicLink() || !stat.isDirectory()) throw new ForeignStagingEntryError(name);
-            requireOwnLayout(name, folderAbs);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; // removed while we looked
-            throw error;
-        }
-        const pid = Number(match[1]);
-        if (pid !== process.pid && pidRunning(pid)) throw new AnotherPullRunningError(pid, name);
-        dead.push(name);
-    }
-    return dead;
-}
-
-/** Clean up after a killed pull (spec §1.4). Idempotent: a second run finds nothing to do. */
-export function cleanupLeftovers(destination: string, ownName: string | null = null): { restored: string[]; cleaned: number } {
-    const restored: string[] = [];
-    let cleaned = 0;
-    for (const name of classifyLeftovers(destination, ownName)) {
-        const folderAbs = path.join(destination, name);
-        const backupRoot = path.join(folderAbs, 'backup');
-        const differing: string[] = [];
-        for (const rel of walkLeaves(backupRoot)) {
-            const slash = rel.lastIndexOf('/');
-            const parentRel = slash === -1 ? '' : rel.slice(0, slash);
-            // Ruling 8: the same parent checks as the forward path, on both ends.
-            ensureRealDirs(backupRoot, parentRel, null);
-            ensureRealDirs(destination, parentRel, []);
-            const backupAbs = path.join(backupRoot, ...segments(rel));
-            const targetAbs = path.join(destination, ...segments(rel));
-            if (lstatOrNull(targetAbs) === null) {
-                fs.renameSync(backupAbs, targetAbs);
-                restored.push(rel);
-            } else if (sameEntry(backupAbs, targetAbs)) {
-                fs.unlinkSync(backupAbs);
-            } else {
-                differing.push(rel);
-            }
-        }
-        if (differing.length > 0) throw new LeftoverDiffersError(name, differing);
-        fs.rmSync(folderAbs, { recursive: true, force: true });
-        cleaned += 1;
-    }
-    return { restored, cleaned };
-}
-
-/** Write `dir/name` through a sibling temp file and a rename: never half-written, never through a link at `name`. */
-export function writeFileAtomic(dir: string, name: string, data: string | Buffer): void {
-    const tempAbs = path.join(dir, `.sa-write-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+export function writeFileAtomic(dir: string, name: string, data: string | Buffer, beforeRename?: () => void): void {
+    const tempAbs = path.join(dir, `${TEMP_PREFIX}${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
     writeNew(tempAbs, data);
     try {
+        beforeRename?.();
         const existing = lstatOrNull(path.join(dir, name));
         if (existing !== null && existing.isFile()) fs.chmodSync(tempAbs, existing.mode & 0o7777);
         fs.renameSync(tempAbs, path.join(dir, name));

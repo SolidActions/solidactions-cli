@@ -22,8 +22,13 @@
  * names case-insensitively while tracked unchanged docs keep exact paths.
  *
  * Each case asserts the bytes of every file in the destination, the whole
- * manifest (path -> id, revision, hash), the exit status, and the refusal
- * message when it refuses.
+ * manifest (path -> id, revision, hash), the exit status (never a killing
+ * signal), and both streams. A refusal row must name its refusal (a required,
+ * non-empty `stderr` list; stdout is empty). A row that pulls has its stdout
+ * and its WHOLE stderr derived from the row's own data (`derivedStdout`,
+ * `derivedStderr`): the docs it writes, the failed downloads it warns about, the
+ * tracking it keeps, and the single-doc pull's deletions line. A row with no
+ * such warning therefore asserts an empty stderr; no row can skip the check.
  */
 
 import * as childProcess from 'child_process';
@@ -156,6 +161,7 @@ afterAll(() => new Promise<void>((resolve, reject) => server.close((err) => (err
 
 interface CliResult {
     code: number | null;
+    signal: NodeJS.Signals | null;
     stdout: string;
     stderr: string;
 }
@@ -172,6 +178,8 @@ async function runPull(args: string[]): Promise<CliResult> {
             for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
                 delete env[key];
             }
+            // The product's own opt-out: a background update check could otherwise print an `AGENT NOTE` line on stderr.
+            env.SOLIDACTIONS_NO_AGENT_NUDGES = '1';
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'pull', ...args], { cwd: homeRoot, env });
             let stdout = '';
             let stderr = '';
@@ -181,9 +189,9 @@ async function runPull(args: string[]): Promise<CliResult> {
                 child.kill();
                 reject(new Error(`CLI timed out. stdout: ${stdout} stderr: ${stderr}`));
             }, 30_000);
-            child.on('close', (code) => {
+            child.on('close', (code, signal) => {
                 clearTimeout(timer);
-                resolve({ code, stdout, stderr });
+                resolve({ code, signal, stdout, stderr });
             });
             child.on('error', (error) => {
                 clearTimeout(timer);
@@ -360,9 +368,9 @@ interface MatrixCase {
     served: ServedDoc[];
     /** Expected entries after a non-refused pull, and the expected manifest. Omitted for (c). */
     after?: { files: Record<string, Entry>; manifest: Record<string, ManifestExpectation> };
-    /** Expected refusal or warning text on stderr. */
+    /** A refusal row (outcome 'c'): what its stderr must say; required and non-empty. A row that pulls derives its whole stderr instead. */
     stderr?: RegExp[];
-    /** The whole stdout of a non-refused pull, with `{dest}` for the destination. Rows without it only check the summary line. */
+    /** A row that pulls: its whole stdout, with `{dest}` for the destination, when `derivedStdout` is not the answer. */
     stdout?: string;
 }
 
@@ -640,7 +648,6 @@ function sameFileCases(): MatrixCase[] {
             // The new name is a new file; the unmodified old twin is removed.
             after: { files: { [kind.newRel]: newBytes }, manifest: { [kind.newRel]: entry(5, 8, newBytes) } },
             stdout: `pulled 1 doc → {dest}\n  ${kind.newRel}\n`,
-            stderr: [/^$/],
         });
         cases.push({
             name: caseName(kind, 'folder', 'modified source, target is the same file as the source', overwrite),
@@ -720,7 +727,6 @@ function preservedSourceAliasCases(): MatrixCase[] {
                 files: { 'old.png': MEDIA_KIND.oldBytes, 'new.png': MEDIA_KIND.oldBytes },
                 manifest: { 'old.png': entry(5, 7, MEDIA_KIND.oldBytes) },
             },
-            stderr: [/doc 5 download failed; still tracked as old\.png/],
         });
         cases.push({
             name: caseName(VISUAL_KIND, 'folder', 'two renamed docs write targets that alias the same file', overwrite),
@@ -761,11 +767,16 @@ function preservedSourceAliasCases(): MatrixCase[] {
             },
             untracked: { 'other.html': { hardlinkTo: 'page.md' }, 'page.html': { hardlinkTo: 'other.md' } },
             served: [VISUAL_KIND.renamed(), { id: 6, title: 'other', revision: 60, docType: 'visual', body: Buffer.from('<h1>six</h1>') }],
-            after: {
-                files: { 'page.html': newBytesOf(VISUAL_KIND), 'other.html': Buffer.from('<h1>six</h1>') },
-                manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
-            },
-            ...(overwrite ? { stdout: 'pulled 2 docs → {dest}\n  page.html\n  other.html\n', stderr: [/^$/] } : {}),
+            // Without --overwrite the first renamed doc's target is an untracked hard link of the other doc's source: not owned, refused.
+            ...(overwrite
+                ? {
+                    after: {
+                        files: { 'page.html': newBytesOf(VISUAL_KIND), 'other.html': Buffer.from('<h1>six</h1>') },
+                        manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
+                    },
+                    stdout: 'pulled 2 docs → {dest}\n  page.html\n  other.html\n',
+                }
+                : { stderr: [/page\.html exists locally but is not tracked/, /doc 5/, /renamed from page\.md/, /--overwrite/] }),
         });
     }
     return cases;
@@ -837,7 +848,6 @@ function failedMediaCases(): MatrixCase[] {
     const kind = MEDIA_KIND;
     const cases: MatrixCase[] = [];
     const keptOld = { 'old.png': entry(5, 7, kind.oldBytes) };
-    const keptMessage = /doc 5 download failed; still tracked as old\.png/;
 
     for (const overwrite of [false, true]) {
         for (const form of ['folder', 'single'] as const) {
@@ -868,7 +878,7 @@ function failedMediaCases(): MatrixCase[] {
                     if (src === 'modified') {
                         cases.push({ ...base, outcome: 'c', stderr: [/old\.png holds unpublished edits for doc 5/, /download failed/, /push|move/i, /pull again once the download succeeds/i] });
                     } else {
-                        cases.push({ ...base, outcome: 'b', after: { files, manifest }, stderr: [/failed to download media for doc 5/, keptMessage] });
+                        cases.push({ ...base, outcome: 'b', after: { files, manifest } });
                     }
                 }
             }
@@ -979,16 +989,74 @@ function pullArgs(testCase: MatrixCase, dest: string): string[] {
     return [target, dest, testCase.overwrite ? '--overwrite' : '--yes'];
 }
 
-function expectStderr(result: CliResult, testCase: MatrixCase): void {
-    for (const pattern of testCase.stderr ?? []) {
+/** A refusal names its refusal: every pattern must match the stderr. */
+function expectRefusalStderr(result: CliResult, testCase: MatrixCase): void {
+    expect(testCase.stderr?.length ?? 0, `${testCase.name}: a refusal row must name its refusal`).toBeGreaterThan(0);
+    for (const pattern of testCase.stderr!) {
         expect(result.stderr).toMatch(pattern);
     }
+}
+
+/** Where each written doc lands: the final manifest's path for its id (a failed download has no new path). */
+function pathsById(testCase: MatrixCase): Map<number, string> {
+    return new Map(Object.entries(testCase.after!.manifest).map(([rel, e]) => [e.id, rel]));
+}
+
+/** A served doc that is written: its download did not fail. */
+const isWritten = (doc: ServedDoc): boolean => doc.media !== 'fail';
+
+/** What a pull prints on stdout, from the row: one line per written doc, in the order served. */
+function derivedStdout(testCase: MatrixCase, dest: string): string {
+    if (testCase.stdout !== undefined) return testCase.stdout.replace('{dest}', dest);
+    const paths = pathsById(testCase);
+    const written = testCase.served.filter(isWritten).map((doc) => paths.get(doc.id)!);
+    return `pulled ${written.length} doc${written.length === 1 ? '' : 's'} → ${dest}\n${written.map((rel) => `  ${rel}\n`).join('')}`;
+}
+
+/**
+ * The WHOLE stderr of a row that pulls, in the order doc pull prints it (spec §1.5, cli#183/#190/#167): the tracking kept
+ * for each renamed doc whose download failed; the "same file as" notes for a renamed doc's old path that another doc now
+ * holds; the failed-download warnings; and, for a single-doc pull into a tracked destination, the deletions line. A row with
+ * none of these has an empty stderr.
+ */
+function derivedStderr(testCase: MatrixCase): string {
+    const paths = pathsById(testCase);
+    const oldPathOf = (doc: ServedDoc): string | undefined => Object.entries(testCase.tracked).find(([, file]) => file.id === doc.id)?.[0];
+    const present = (rel: string): boolean => (testCase.tracked[rel].state ?? 'file') === 'file';
+    const failures = testCase.served.filter((doc) => !isWritten(doc));
+    const writtenPaths = new Set(testCase.served.filter(isWritten).map((doc) => paths.get(doc.id)!));
+    let text = '';
+    for (const doc of failures) {
+        const old = oldPathOf(doc);
+        if (old === undefined) continue;
+        text += present(old) ? `! kept ${old} — doc ${doc.id} download failed; still tracked as ${old}\n` : `! doc ${doc.id} download failed; still tracked as ${old}, which is not present locally\n`;
+    }
+    for (const doc of testCase.served.filter(isWritten)) {
+        const old = oldPathOf(doc);
+        if (old === undefined || old === paths.get(doc.id) || !present(old) || !writtenPaths.has(old)) continue;
+        text += `! kept ${old}: it is the same file as ${old} (a link); the extra name is not tracked — remove it yourself if you don't need it\n`;
+    }
+    for (const doc of failures) text += `warn: failed to download media for doc ${doc.id} (${doc.title}): HTTP 503\n`;
+    if (testCase.form === 'single') text += "deletions not propagated: single-doc pull cannot speak for a folder's contents\n";
+    return text;
 }
 
 describe('doc pull rename matrix (cli#157)', () => {
     it('names every case once', () => {
         const names = MATRIX.map((c) => c.name);
         expect(new Set(names).size).toBe(names.length);
+    });
+
+    it('gives every row a stream expectation: a refusal names its refusal, and a row that pulls derives its whole stderr', () => {
+        for (const c of MATRIX) {
+            if (c.outcome === 'c') {
+                expect(c.stderr?.length ?? 0, c.name).toBeGreaterThan(0);
+                expect(c.after, c.name).toBeUndefined();
+            } else {
+                expect(c.stderr, `${c.name}: a row that pulls must not carry its own stderr patterns`).toBeUndefined();
+                expect(c.after, c.name).toBeDefined();
+            }
+        }
     });
 
     it.each(MATRIX.map((c) => [`(${c.outcome}) ${c.name}`, c] as const))('%s', async (_label, testCase) => {
@@ -1006,14 +1074,14 @@ describe('doc pull rename matrix (cli#157)', () => {
                 expect(result.stdout).toBe('');
                 expect(result.stderr).not.toMatch(/kept .*untracked/);
                 expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
-                expect(result.code).toBe(1);
-                expectStderr(result, testCase);
+                expect({ code: result.code, signal: result.signal }).toEqual({ code: 1, signal: null });
+                expectRefusalStderr(result, testCase);
                 return;
             }
 
-            expect(result.code).toBe(0);
-            expect(result.stdout).toMatch(/^pulled \d+ docs? → /);
-            if (testCase.stdout !== undefined) expect(result.stdout).toBe(testCase.stdout.replace('{dest}', dest));
+            expect({ code: result.code, signal: result.signal }, `stdout: ${result.stdout} stderr: ${result.stderr}`).toEqual({ code: 0, signal: null });
+            expect(result.stdout).toBe(derivedStdout(testCase, dest));
+            expect(result.stderr).toBe(derivedStderr(testCase));
             const after = testCase.after!;
             expect(snapshot(dest)).toEqual(sortedEntries(after.files));
 
@@ -1032,7 +1100,6 @@ describe('doc pull rename matrix (cli#157)', () => {
                 if (!fs.existsSync(abs)) continue;
                 expect(sha256Hex(fs.readFileSync(abs))).toBe(e.body_sha256);
             }
-            expectStderr(result, testCase);
         } finally {
             fs.rmSync(root, { recursive: true, force: true });
         }
@@ -1054,7 +1121,7 @@ describe('doc pull rename matrix (cli#157)', () => {
 
             const result = await runPull(pullArgs(testCase, dest));
 
-            expect(result.code).toBe(0);
+            expect({ code: result.code, signal: result.signal }).toEqual({ code: 0, signal: null });
             expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  ${kind.newRel}\n`);
             expect(result.stderr).toBe('');
             expect(fs.readFileSync(path.join(dest, kind.newRel))).toEqual(newBytesOf(kind));

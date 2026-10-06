@@ -32,7 +32,8 @@ const ALLOWED: Record<string, string> = {
     DOCS_MANIFEST: 'constant file name',
     'download.status': 'HTTP status code from axios, a number, never server text',
     'error.pid': 'a process id, a number',
-    tail: 'built from shown() parts and string literals where it is assigned (the commit failure lines)',
+    tail: 'built from .length counts and string literals where it is assigned (the stopped-write lines)',
+    updated: 'built from .length counts and a string literal where it is assigned (the manifest-not-changed lines)',
     line: 'a pendingWarnings entry, built from shown() parts where it is pushed',
     lost: 'built from shown() parts',
 };

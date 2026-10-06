@@ -1,12 +1,13 @@
 /**
- * `doc pull` commits through a staging folder (cli#168, cli#188, cli#182; spec §1).
+ * `doc pull` stops at the first error and records exactly what it wrote (cli#168, cli#188, cli#182; spec §1, PM ruling 12).
  *
  * Every case runs the built CLI (`node dist/index.js`) against a real in-process HTTP server with a
- * temp HOME and real files. A first pull writes `a.md`, `sub/b.md` and the media file `pic.png`;
- * each case then serves new bytes and pulls again, sometimes with a failure injected through the
- * module's own test-only switch (`SOLIDACTIONS_TEST_HOOKS=1` plus `SOLIDACTIONS_DOC_PULL_TEST_FAULT`).
- * "Nothing changed" means the snapshot of everything under the destination (dot-entries and the
- * manifest included, with every file's inode) equals the one taken before the failed pull.
+ * temp HOME and real files. A first pull writes `a.md`, `pic.png` and `sub/b.md`; each case then serves
+ * new bytes and pulls again, sometimes with a failure injected through the module's own test-only
+ * switch (`SOLIDACTIONS_TEST_HOOKS=1` plus `SOLIDACTIONS_DOC_PULL_TEST_FAULT`). A failed pull exits 1 with the
+ * matching line; the files before the failure are updated AND tracked in the manifest with their own hashes,
+ * the failing file and the ones after it keep their bytes and their earlier entries, nothing outside the
+ * destination is touched, nothing the pull did not create is deleted, and the next pull completes the job.
  */
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
@@ -15,12 +16,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { writeGlobal } from './helpers';
-import { expectResult, failed, killed, pulledStdout } from './doc-pull-inv-harness';
+import { LOCK_FILE, MANIFEST_FILE, cannotWriteLine, changedLine, expectResult, failed, folderLine, killed, lockLine, manifestNotWrittenLine, pulledStdout, sha256 } from './doc-pull-inv-harness';
 import type { CliResult, Expected } from './doc-pull-inv-harness';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
-const MANIFEST_FILE = '.solidactions-docs.json';
-const STAGING_PATTERN = /^\.solidactions-pull-\d+$/;
 
 interface ServedDoc {
     id: number;
@@ -185,8 +184,6 @@ function snapshot(dir: string): Snapshot {
     return { entries, inodes };
 }
 
-const stagingEntries = (out: string): string[] => fs.readdirSync(out).filter((name) => STAGING_PATTERN.test(name));
-
 function docsV(version: 1 | 2, extra: ServedDoc[] = []): ServedDoc[] {
     return [
         ...extra,
@@ -196,17 +193,24 @@ function docsV(version: 1 | 2, extra: ServedDoc[] = []): ServedDoc[] {
     ];
 }
 
-/** The files a pull of `docsV` writes, in the order it lists them (root docs, then the folder's). */
+/** The files a pull of `docsV` writes, in the order it writes them (root docs, then the folder's). */
 const TRIO = ['a.md', 'pic.png', 'sub/b.md'];
 const WITH_N = ['n.md', ...TRIO];
 
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const refusal = (rel: string): string => `error: ${rel} changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.\n`;
-const cannotWrite = (rel: string, what: string): string => `error: cannot write ${rel}: EIO: i/o error, ${what} (test hook) — nothing was changed.\n`;
-/** A rollback that could not put one saved copy back: the line, with the staging folder name and the doc path captured. */
-const COULD_NOT_RESTORE = /^error: cannot write (\S+): EIO: i\/o error, rename \(test hook\) — could not restore \1 \(EIO: i\/o error, restore \(test hook\)\); its previous copy is in (\.solidactions-pull-\d+)\/backup\/\1\.\n$/;
+/** What the manifest says about one of the three files after a pull of `docsV(version)`. */
+function entryOf(rel: string, version: 1 | 2): Record<string, unknown> {
+    const spec: Record<string, { id: number; title: string; media: boolean; bytes: string }> = {
+        'a.md': { id: 1, title: 'a', media: false, bytes: `A${version}` },
+        'pic.png': { id: 3, title: 'pic', media: true, bytes: `P${version}` },
+        'sub/b.md': { id: 2, title: 'b', media: false, bytes: `B${version}` },
+    };
+    const { id, title, media, bytes } = spec[rel];
+    return { id, title, current_revision_id: version, media, body_sha256: sha256(bytes) };
+}
 
-describe('doc pull commits through a staging folder', { timeout: 60_000 }, () => {
+const bytesOf = (rel: string, version: 1 | 2): string => ({ 'a.md': `A${version}`, 'pic.png': `P${version}`, 'sub/b.md': `B${version}` })[rel] as string;
+
+describe('doc pull stops at the first error and records exactly what it wrote', { timeout: 60_000 }, () => {
     let root: string;
     let out: string;
     let before: Snapshot;
@@ -225,62 +229,124 @@ describe('doc pull commits through a staging folder', { timeout: 60_000 }, () =>
         fs.rmSync(root, { recursive: true, force: true });
     });
 
-    const expectNothingChanged = (): void => {
+    const manifestDocs = (): Record<string, unknown> => JSON.parse(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8')).docs;
+    const internals = (): string[] => fs.readdirSync(out).filter((name) => name === LOCK_FILE || name.startsWith('.sa-write-'));
+
+    /**
+     * What a pull that stopped after writing the first `written` of the three files must have left: those files at their new
+     * bytes with entries of their own, the rest untouched (bytes, inodes) and still tracked as before; no lock, no temp file.
+     */
+    const expectStoppedAfter = (written: number): void => {
         const after = snapshot(out);
-        expect(after.entries).toEqual(before.entries);
-        expect(after.inodes).toEqual(before.inodes);
-        expect(stagingEntries(out)).toEqual([]);
+        const expectedDocs: Record<string, unknown> = {};
+        TRIO.forEach((rel, index) => {
+            const isWritten = index < written;
+            expect(after.entries[rel], rel).toBe(`F:${bytesOf(rel, isWritten ? 2 : 1)}`);
+            if (!isWritten) expect(after.inodes[rel], `${rel} inode`).toBe(before.inodes[rel]);
+            expectedDocs[rel] = entryOf(rel, isWritten ? 2 : 1);
+        });
+        expect(manifestDocs()).toEqual(expectedDocs);
+        expect(internals()).toEqual([]);
+        expect(Object.keys(after.entries).filter((rel) => !TRIO.includes(rel)).sort()).toEqual(['sub', MANIFEST_FILE].sort());
+        expect(fs.readdirSync(root).sort()).toEqual(['home', 'out']);
     };
 
-    it.each([1, 2, 3])('restores every doc and the manifest with their original inodes when rename %i fails', async (n) => {
-        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write (a\.md|sub\/b\.md|pic\.png): EIO: i\/o error, rename \(test hook\) — nothing was changed\.\n$/), fault(`fail-rename:${n}`));
+    it.each([1, 2, 3])('fail-rename:%i stops at that file: the ones before it are updated and tracked, it and the ones after keep their bytes and entries', async (n) => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine(TRIO[n - 1], 'rename', n - 1, 3)), fault(`fail-rename:${n}`));
 
-        expectNothingChanged();
+        expectStoppedAfter(n - 1);
     });
 
-    it('names the three docs across the three rename failures, one each', async () => {
-        const named = new Set<string>();
-        for (const n of [1, 2, 3]) {
-            const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write (a\.md|sub\/b\.md|pic\.png): EIO: i\/o error, rename \(test hook\) — nothing was changed\.\n$/), fault(`fail-rename:${n}`));
-            named.add(/cannot write (a\.md|sub\/b\.md|pic\.png):/.exec(result.stderr)?.[1] ?? 'none');
-        }
+    it('a doc after the failed one is not written at all, and its temp file was removed', async () => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('pic.png', 'rename', 1, 3)), fault('fail-rename:2'));
 
-        expect([...named].sort()).toEqual(['a.md', 'pic.png', 'sub/b.md']);
+        expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B1');
+        expect(fs.readdirSync(out).filter((name) => name.startsWith('.sa-write-'))).toEqual([]);
+        expect(fs.readdirSync(path.join(out, 'sub'))).toEqual(['b.md']);
     });
 
-    it('fails when the manifest temp file cannot be written: the line names the manifest and nothing changed', async () => {
-        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWrite(MANIFEST_FILE, 'open manifest.tmp')), fault('fail-manifest-temp'));
+    it('the next pull, with no fault, completes the job and every entry matches its file', async () => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('pic.png', 'rename', 1, 3)), fault('fail-rename:2'));
 
-        expectNothingChanged();
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: '' });
+
+        expectStoppedAfter(3);
     });
 
-    it('restores every doc when the manifest rename fails', async () => {
-        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWrite(MANIFEST_FILE, 'rename manifest')), fault('fail-manifest-rename'));
+    it('fails when the manifest temp file cannot be written: every file is written, the manifest is as it was, and the line says so', async () => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(manifestNotWrittenLine('open manifest temp', 3, 3)), fault('fail-manifest-temp'));
 
-        expectNothingChanged();
+        const after = snapshot(out);
+        for (const rel of TRIO) expect(after.entries[rel]).toBe(`F:${bytesOf(rel, 2)}`);
+        expect(after.entries[MANIFEST_FILE]).toBe(before.entries[MANIFEST_FILE]);
+        expect(internals()).toEqual([]);
     });
 
-    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('names the staging folder and changes nothing when the staging folder cannot be created (a really read-only destination)', async () => {
+    it('fails when the manifest cannot be renamed into place: its temp file is removed and the manifest is as it was', async () => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(manifestNotWrittenLine('rename manifest', 3, 3)), fault('fail-manifest-rename'));
+
+        const after = snapshot(out);
+        for (const rel of TRIO) expect(after.entries[rel]).toBe(`F:${bytesOf(rel, 2)}`);
+        expect(after.entries[MANIFEST_FILE]).toBe(before.entries[MANIFEST_FILE]);
+        expect(internals()).toEqual([]);
+    });
+
+    it('after a manifest failure the files hold their new bytes under the old manifest, and the next pull adopts them instead of calling them local edits', async () => {
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(manifestNotWrittenLine('rename manifest', 3, 3)), fault('fail-manifest-rename'));
+
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: '' });
+
+        expectStoppedAfter(3);
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('names the lock and changes nothing when the lock cannot be created (a really read-only destination)', async () => {
         fs.chmodSync(out, 0o555);
 
-        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-pull-\d+: EACCES[^\n]* — nothing was changed\.\n$/));
+        await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-docs\.json\.lock: EACCES[^\n]* — nothing was changed\.\n$/));
 
         fs.chmodSync(out, 0o755);
-        expectNothingChanged();
+        expect(snapshot(out)).toEqual(before);
     });
 
     describe('a target that changes after the check', () => {
-        it('refuses a doc that appeared after the check, keeps the racing file and changes nothing else', async () => {
+        /** Everything but `rels` is as it was before the failed pull (the manifest file is compared by its entries). */
+        const expectOnlyChanged = (rels: string[]): void => {
+            const after = snapshot(out);
+            for (const rel of rels) {
+                delete after.entries[rel];
+                delete after.inodes[rel];
+            }
+            const beforeEntries = { ...before.entries };
+            const beforeInodes = { ...before.inodes };
+            for (const rel of [...rels, MANIFEST_FILE]) {
+                delete beforeEntries[rel];
+                delete beforeInodes[rel];
+            }
+            delete after.entries[MANIFEST_FILE];
+            delete after.inodes[MANIFEST_FILE];
+            expect(after.entries).toEqual(beforeEntries);
+            expect(after.inodes).toEqual(beforeInodes);
+            expect(internals()).toEqual([]);
+        };
+
+        it('refuses a doc that appeared after the check, keeps the racing file, and tracks the files it did not get to as before', async () => {
             served = docsV(2, [{ id: 9, title: 'n', revision: 1, body: 'N1' }]);
 
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(refusal('n.md')), fault('create-before-commit:n.md'));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(changedLine('n.md', 0, 4)), fault('create-before-commit:n.md'));
 
-            const after = snapshot(out);
-            expect(after.entries['n.md']).toBe('F:RACE');
-            delete after.entries['n.md'];
-            delete after.inodes['n.md'];
-            expect(after).toEqual(before);
-            expect(stagingEntries(out)).toEqual([]);
+            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('RACE');
+            expectOnlyChanged(['n.md']);
+            expect(manifestDocs()).toEqual(Object.fromEntries(TRIO.map((rel) => [rel, entryOf(rel, 1)])));
+        });
+
+        it('refuses a tracked file rewritten after the check, after the files before it were written and tracked', async () => {
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(changedLine('sub/b.md', 2, 3)), fault('create-before-commit:sub/b.md'));
+
+            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('RACE');
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
+            expect(fs.readFileSync(path.join(out, 'pic.png'), 'utf8')).toBe('P2');
+            expect(manifestDocs()).toEqual({ 'a.md': entryOf('a.md', 2), 'pic.png': entryOf('pic.png', 2), 'sub/b.md': entryOf('sub/b.md', 1) });
+            expect(internals()).toEqual([]);
         });
 
         it('replaces the racing file with the served bytes when --overwrite is given', async () => {
@@ -290,7 +356,7 @@ describe('doc pull commits through a staging folder', { timeout: 60_000 }, () =>
 
             expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('N1');
             expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
-            expect(stagingEntries(out)).toEqual([]);
+            expect(internals()).toEqual([]);
         });
 
         it('refuses a symbolic link that appeared at a new doc, leaves the link and the file it points at alone', async () => {
@@ -298,13 +364,11 @@ describe('doc pull commits through a staging folder', { timeout: 60_000 }, () =>
             const outside = path.join(root, 'outside.txt');
             fs.writeFileSync(outside, 'OUTSIDE');
 
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(refusal('n.md')), fault(`link-before-commit:n.md>${outside}`));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(changedLine('n.md', 0, 4)), fault(`link-before-commit:n.md>${outside}`));
 
             expect(fs.readFileSync(outside, 'utf8')).toBe('OUTSIDE');
-            const after = snapshot(out);
-            expect(after.entries['n.md']).toBe(`L:${outside}`);
-            delete after.entries['n.md'];
-            expect(after).toEqual(before);
+            expect(snapshot(out).entries['n.md']).toBe(`L:${outside}`);
+            expectOnlyChanged(['n.md']);
         });
 
         it('replaces a symbolic link that appeared at a new doc with a regular file under --overwrite, without writing through it', async () => {
@@ -319,176 +383,139 @@ describe('doc pull commits through a staging folder', { timeout: 60_000 }, () =>
             expect(fs.readFileSync(outside, 'utf8')).toBe('OUTSIDE');
         });
 
-        it('leaves a folder that appeared at a target alone (with its contents), rolls back every other change and says so (ruling 9)', async () => {
+        it('leaves a folder that appeared at a target alone (with its contents), writes nothing else and says so, even under --overwrite (ruling 9)', async () => {
             served = docsV(2, [{ id: 9, title: 'n', revision: 1, body: 'N1' }]);
 
-            await runCli(root, ['doc', 'pull', 'docs', out, '--overwrite'], failed('error: n.md is a folder now (doc pull writes a file there) — nothing was changed. Move it aside and pull again.\n'), fault('mkdir-before-commit:n.md'));
+            await runCli(root, ['doc', 'pull', 'docs', out, '--overwrite'], failed(folderLine('n.md', 0, 4)), fault('mkdir-before-commit:n.md'));
 
             expect(fs.readFileSync(path.join(out, 'n.md', 'user.txt'), 'utf8')).toBe('USER');
-            const after = snapshot(out);
-            for (const key of ['n.md', 'n.md/user.txt']) {
-                delete after.entries[key];
-                delete after.inodes[key];
-            }
-            expect(after).toEqual(before);
-            expect(stagingEntries(out)).toEqual([]);
-        });
-    });
-
-    describe('what rollback leaves alone (PM ruling 11)', () => {
-        /** The saved copy a failed rollback names must be there, with the bytes the pull replaced. */
-        const expectSavedCopy = (staging: string, rel: string): void => {
-            expect(stagingEntries(out)).toEqual([staging]);
-            expect(fs.readFileSync(path.join(out, staging, 'backup', rel), 'utf8')).toBe(before.entries[rel].slice(2));
-        };
-
-        it('a placed file replaced before the rollback runs is kept, its saved copy is kept, and the line says so; every other file is restored', async () => {
-            const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-docs\.json: EIO: i\/o error, rename manifest \(test hook\) — could not restore a\.md \(a\.md was replaced after doc pull wrote it\); its previous copy is in (\.solidactions-pull-\d+)\/backup\/a\.md\.\n$/), fault('fail-manifest-rename,replace-before-rollback:a.md'));
-
-            const staging = /in (\.solidactions-pull-\d+)\//.exec(result.stderr)![1];
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('LATER');
-            expect(fs.readFileSync(path.join(out, 'a.md.aside'), 'utf8')).toBe('A2');
-            expectSavedCopy(staging, 'a.md');
-            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B1');
-            expect(fs.readFileSync(path.join(out, 'pic.png'), 'utf8')).toBe('P1');
-            expect(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8')).toBe(before.entries[MANIFEST_FILE].slice(2));
+            expectOnlyChanged(['n.md', 'n.md/user.txt']);
         });
 
-        it('a file created at a target whose previous copy was moved aside is kept, the saved copy is kept, and the line says so', async () => {
-            const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write a\.md: EIO: i\/o error, rename \(test hook\) — could not restore a\.md \(a\.md was created after doc pull moved the previous copy aside\); its previous copy is in (\.solidactions-pull-\d+)\/backup\/a\.md\.\n$/), fault('fail-rename:1,replace-before-rollback:a.md'));
-
-            const staging = /in (\.solidactions-pull-\d+)\//.exec(result.stderr)![1];
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('LATER');
-            expectSavedCopy(staging, 'a.md');
-        });
-
-        it('a new file replaced before the rollback runs is kept, and the line says this pull created it and there is no previous copy', async () => {
-            served = docsV(2, [{ id: 9, title: 'n', revision: 1, body: 'N1' }]);
-
-            const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-docs\.json: EIO: i\/o error, rename manifest \(test hook\) — could not remove n\.md \(n\.md was replaced after doc pull wrote it\); this pull created it, so it has no previous copy\.\n$/), fault('fail-manifest-rename,replace-before-rollback:n.md'));
-
-            expect(result.stderr).not.toContain('previous copy is in');
-            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('LATER');
-            expect(fs.readFileSync(path.join(out, 'n.md.aside'), 'utf8')).toBe('N1');
-            const [staging] = stagingEntries(out);
-            expect(fs.existsSync(path.join(out, staging, 'backup', 'n.md'))).toBe(false);
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A1');
-        });
-
-        it('a folder this pull created that cannot be removed is named as such, with no previous copy claimed', async () => {
-            served = docsV(2, [{ id: 9, title: 'n', revision: 1, relative: 'newdir', body: 'N1' }]);
-
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-docs\.json: EIO: i\/o error, rename manifest \(test hook\) — could not remove the folder newdir \(ENOTEMPTY[^\n]*\); this pull created it\.\n$/), fault('fail-manifest-rename,replace-before-rollback:newdir/user.txt'));
-
-            expect(fs.readFileSync(path.join(out, 'newdir', 'user.txt'), 'utf8')).toBe('LATER');
-            expect(fs.existsSync(path.join(out, 'newdir', 'n.md'))).toBe(false);
-        });
-    });
-
-    describe('an interrupted pull', () => {
-        it('keeps the staging folder when a restore fails; the next hook-free pull cleans up and completes', async () => {
-            const failedRun = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(COULD_NOT_RESTORE), fault('fail-rename:3,fail-restore:1'));
-
-            const [, rel, staging] = COULD_NOT_RESTORE.exec(failedRun.stderr)!;
-            expect(stagingEntries(out)).toEqual([staging]);
-            expect(fs.readFileSync(path.join(out, staging, 'backup', rel), 'utf8')).toBe(before.entries[rel].slice(2));
-
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: `! cleaned up after an interrupted doc pull in ${out} (restored 1 file(s))\n` });
-
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
-            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B2');
-            expect(fs.readFileSync(path.join(out, 'pic.png'), 'utf8')).toBe('P2');
-            expect(stagingEntries(out)).toEqual([]);
-        });
-
-        it('a killed pull leaves the old manifest and its staging folder; the next pull refuses to guess, and it completes once the folder is removed with --overwrite', async () => {
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], killed(), fault('kill-after-renames:1'));
-
-            expect(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8')).toBe(before.entries[MANIFEST_FILE].slice(2));
-            const [folder] = stagingEntries(out);
-            expect(folder).toBeDefined();
-            expect(fs.readFileSync(path.join(out, folder, 'backup', 'a.md'), 'utf8')).toBe('A1');
-
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(`error: an interrupted doc pull left saved copies in ${path.join(out, folder)}; 1 file(s) differ from their saved copies (first: a.md), so neither was changed. Keep the versions you want, delete that folder, and pull again.\n`));
-
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
-            expect(fs.readFileSync(path.join(out, folder, 'backup', 'a.md'), 'utf8')).toBe('A1');
-
-            fs.rmSync(path.join(out, folder), { recursive: true });
-            await runCli(root, ['doc', 'pull', 'docs', out, '--overwrite'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: '' });
-
-            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B2');
-        });
-
-        it('a pull killed after publishing only a new file is cleaned up by the next pull, which adopts that file and completes', async () => {
-            served = docsV(2, [{ id: 9, title: 'n', revision: 1, body: 'N1' }]);
-
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], killed(), fault('kill-after-renames:1'));
-
-            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('N1');
-            expect(stagingEntries(out)).toHaveLength(1);
-
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, WITH_N), stderr: `! cleaned up after an interrupted doc pull in ${out} (restored 0 file(s))\n` });
-
-            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('N1');
-            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
-            expect(JSON.parse(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8')).docs['n.md'].id).toBe(9);
-            expect(stagingEntries(out)).toEqual([]);
-        });
-
-        it('a link refusal after earlier files were placed still says which saved copy could not be restored, and keeps it', async () => {
+        it('a link on the way to a later doc stops there with the link refusal; the files before it are written and tracked, and nothing lands behind the link', async () => {
             served = docsV(2, [{ id: 9, title: 'n', revision: 1, relative: 'newdir', body: 'N1' }]);
             const outside = path.join(root, 'outside');
             fs.mkdirSync(outside);
             fs.writeFileSync(path.join(outside, 'keep.txt'), 'KEEP');
 
-            const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: could not restore (a\.md|sub\/b\.md|pic\.png) \(EIO: i\/o error, restore \(test hook\)\); its previous copy is in (\.solidactions-pull-\d+)\/backup\/\1\.\nerror: newdir\/n\.md is a symbolic link \(or sits under one: newdir\); this pull would write doc 9 \("n"\) through it\.\nReplace it with a regular file or folder and pull again\.\n$/), fault(`link-before-commit:newdir>${outside},fail-restore:1`));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed('error: newdir/n.md is a symbolic link (or sits under one: newdir); this pull would write doc 9 ("n") through it.\nReplace it with a regular file or folder and pull again.\n'), fault(`link-before-commit:newdir>${outside}`));
 
-            const [, rel, staging] = /could not restore (\S+) .* in (\.solidactions-pull-\d+)\//.exec(result.stderr)!;
-            expect(stagingEntries(out)).toEqual([staging]);
-            expect(fs.readFileSync(path.join(out, staging, 'backup', rel), 'utf8')).toBe(before.entries[rel].slice(2));
             expect(fs.readdirSync(outside)).toEqual(['keep.txt']);
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
+            expect(fs.readFileSync(path.join(out, 'pic.png'), 'utf8')).toBe('P2');
+            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B1');
+            expect(manifestDocs()).toEqual({ 'a.md': entryOf('a.md', 2), 'pic.png': entryOf('pic.png', 2), 'sub/b.md': entryOf('sub/b.md', 1) });
+            expect(internals()).toEqual([]);
+        });
+    });
+
+    describe('a renamed doc', () => {
+        const renamed = (): ServedDoc[] => docsV(2).map((d) => (d.id === 1 ? { ...d, title: 'a2' } : d));
+
+        it('written before the stop keeps its old file tracked beside the new one; the next pull finishes the rename and removes the old file', async () => {
+            served = renamed();
+
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('pic.png', 'rename', 1, 3)), fault('fail-rename:2'));
+
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A1');
+            expect(fs.readFileSync(path.join(out, 'a2.md'), 'utf8')).toBe('A2');
+            expect(manifestDocs()).toEqual({
+                'a.md': entryOf('a.md', 1),
+                'a2.md': { ...entryOf('a.md', 2), title: 'a2' },
+                'pic.png': entryOf('pic.png', 1),
+                'sub/b.md': entryOf('sub/b.md', 1),
+            });
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, ['a2.md', 'pic.png', 'sub/b.md']), stderr: '' });
+
+            expect(fs.existsSync(path.join(out, 'a.md'))).toBe(false);
+            expect(fs.readFileSync(path.join(out, 'a2.md'), 'utf8')).toBe('A2');
+            expect(manifestDocs()).toEqual({
+                'a2.md': { ...entryOf('a.md', 2), title: 'a2' },
+                'pic.png': entryOf('pic.png', 2),
+                'sub/b.md': entryOf('sub/b.md', 2),
+            });
+            expect(internals()).toEqual([]);
         });
 
-        it('refuses while another pull is running and changes nothing', async () => {
-            const child = childProcess.spawn('sleep', ['5'], { stdio: 'ignore' });
-            try {
-                fs.mkdirSync(path.join(out, `.solidactions-pull-${child.pid}`));
-                before = snapshot(out);
+        it('written before one stop and not reached by a second keeps every earlier entry of the doc, old and new path', async () => {
+            served = renamed();
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('pic.png', 'rename', 1, 3)), fault('fail-rename:2'));
+            const afterFirst = manifestDocs();
 
-                await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(`error: another doc pull (pid ${child.pid}) may be writing to ${out} (folder .solidactions-pull-${child.pid}); wait for it to finish, or delete that folder if no doc pull is running.\n`));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('a2.md', 'rename', 0, 3)), fault('fail-rename:1'));
 
-                expect(snapshot(out)).toEqual(before);
-            } finally {
-                child.kill('SIGKILL');
+            expect(manifestDocs()).toEqual(afterFirst);
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A1');
+            expect(fs.readFileSync(path.join(out, 'a2.md'), 'utf8')).toBe('A2');
+        });
+    });
+
+    describe('what a pull never touches (build rule 1)', () => {
+        it('leaves user files and folders named like the old staging folders alone, through a successful pull and a failed one', async () => {
+            const folder = path.join(out, '.solidactions-pull-900123');
+            fs.mkdirSync(path.join(folder, 'backup'), { recursive: true });
+            fs.writeFileSync(path.join(folder, 'backup', 'a.md'), 'MY OLD DOC');
+            fs.writeFileSync(path.join(out, '.solidactions-pull-7'), 'MY FILE');
+            const userEntries = snapshot(out).entries;
+            const mine = Object.fromEntries(Object.entries(userEntries).filter(([rel]) => rel.startsWith('.solidactions-pull-')));
+
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(cannotWriteLine('pic.png', 'rename', 1, 3)), fault('fail-rename:2'));
+            const afterFailed = snapshot(out).entries;
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: '' });
+            const afterOk = snapshot(out).entries;
+
+            for (const after of [afterFailed, afterOk]) {
+                for (const [rel, state] of Object.entries(mine)) expect(after[rel], rel).toBe(state);
             }
         });
 
-        it('refuses a staging-folder name that is a symbolic link and never follows it', async () => {
-            const elsewhere = path.join(root, 'elsewhere');
-            fs.mkdirSync(elsewhere);
-            fs.symlinkSync(elsewhere, path.join(out, '.solidactions-pull-1'));
-            before = snapshot(out);
+        it('a folder where a doc goes is never moved or deleted, and the pull stops there without --overwrite as well', async () => {
+            fs.rmSync(path.join(out, 'pic.png'));
+            fs.mkdirSync(path.join(out, 'pic.png'));
+            fs.writeFileSync(path.join(out, 'pic.png', 'mine.txt'), 'MINE');
+            const manifest = JSON.parse(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8'));
+            manifest.docs = Object.fromEntries(Object.entries(manifest.docs).filter(([rel]) => rel !== 'pic.png'));
+            fs.writeFileSync(path.join(out, MANIFEST_FILE), JSON.stringify(manifest));
 
-            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(`error: ${path.join(out, '.solidactions-pull-1')} is not a folder doc pull created; remove it and pull again.\n`));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed('error: "pic.png" exists and is not a regular file — cannot write doc 3 (pic).\n'));
 
-            expect(snapshot(out)).toEqual(before);
-            expect(fs.readdirSync(elsewhere)).toEqual([]);
+            expect(fs.readFileSync(path.join(out, 'pic.png', 'mine.txt'), 'utf8')).toBe('MINE');
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A1');
+        });
+    });
+
+    describe('an interrupted pull', () => {
+        it('a killed pull leaves its lock, the files it placed and the old manifest; the next pull refuses naming the lock; once the lock is deleted the pull completes', async () => {
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], killed(), fault('kill-after-renames:1'));
+
+            expect(fs.readFileSync(path.join(out, LOCK_FILE), 'utf8')).toMatch(/^\d+\n$/);
+            expect(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8')).toBe(before.entries[MANIFEST_FILE].slice(2));
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
+            expect(fs.readFileSync(path.join(out, 'sub', 'b.md'), 'utf8')).toBe('B1');
+            const killedState = snapshot(out);
+
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(lockLine(out)));
+
+            expect(snapshot(out)).toEqual(killedState);
+            fs.rmSync(path.join(out, LOCK_FILE));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, TRIO), stderr: '' });
+
+            expectStoppedAfter(3);
         });
 
-        it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a cleanup that fails for another reason than reading the destination says so, not "cannot read", and changes nothing further', async () => {
-            const dead = path.join(out, '.solidactions-pull-900125');
-            fs.mkdirSync(path.join(dead, 'backup', 'sub'), { recursive: true });
-            fs.writeFileSync(path.join(dead, 'backup', 'sub', 'saved.md'), 'SAVED');
-            before = snapshot(out);
-            fs.chmodSync(path.join(out, 'sub'), 0o555);
-            try {
-                await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(new RegExp(`^error: could not clean up after an interrupted doc pull in ${escapeRegExp(out)}: EACCES[^\n]*\n$`)));
-            } finally {
-                fs.chmodSync(path.join(out, 'sub'), 0o755);
-            }
+        it('a pull killed after publishing only a new file: after the lock is deleted the next pull adopts that file and tracks it', async () => {
+            served = docsV(2, [{ id: 9, title: 'n', revision: 1, body: 'N1' }]);
 
-            expect(snapshot(out)).toEqual(before);
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], killed(), fault('kill-after-renames:1'));
+
+            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('N1');
+            fs.rmSync(path.join(out, LOCK_FILE));
+            await runCli(root, ['doc', 'pull', 'docs', out, '-y'], { code: 0, stdout: pulledStdout(out, WITH_N), stderr: '' });
+
+            expect(fs.readFileSync(path.join(out, 'n.md'), 'utf8')).toBe('N1');
+            expect(fs.readFileSync(path.join(out, 'a.md'), 'utf8')).toBe('A2');
+            expect(manifestDocs()['n.md']).toEqual({ id: 9, title: 'n', current_revision_id: 1, media: false, body_sha256: sha256('N1') });
+            expect(internals()).toEqual([]);
         });
     });
 
