@@ -21,6 +21,11 @@
 - Sol re-check task-planrecheckcli-48d5 (REQUEST CHANGES 0a92aa3) → PM ruling 7 (plan-check card task-plancheckcli-f9a4): simplify, no journal.
 
 Rulings 3-6 still bind (scopes, sweeps, runner-a gate, M1).
+- Sol re-check 2 task-planrecheck2cli-d0bc (REQUEST CHANGES 7d9a0f4) → **mandatory build rulings 8-10** (build card task-buildclidocpull-c955), folded in below:
+  - 8 (N7): every reverse path runs the forward path's parent/containment checks, and one sweep drives them through symlinked parents;
+  - 9 (N8): a folder at a target is refused even with `--overwrite`, never moved or deleted, with Sol's repro as a RED test;
+  - 10 (N9): the honest-manifest assertion allows a refused file named in the error.
+  The "cannot read" wording through the leftover check (Sol's FILE item) is fixed inline in Task 3 instead, because it would otherwise turn Task 1's committed test red (manager ruling, told to the PM).
 
 **Card rule (for the manager):** every developer card carries this plan's **Global Constraints** section verbatim and the spec path. Each task states its own expected lines.
 
@@ -156,11 +161,12 @@ Expected: PASS.
   - `class AnotherPullRunningError extends Error { readonly pid: number }`
   - `class ForeignStagingEntryError extends Error { readonly entryName: string }`
   - `class LeftoverDiffersError extends Error { readonly folderName: string; readonly differing: string[] }`
+  - `class UnsupportedTargetError extends Error { readonly relPath: string }` (ruling 9)
   - `type Authorized = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' }`
   - `interface PlannedWrite { relPath: string; dirRel: string; data: string | Buffer; authorized: Authorized }`
   - `interface Commit { destination: string; stagingAbs: string; manifestName: string; items: CommitItem[]; createdDirs: string[] }`
   - `interface CommitItem extends PlannedWrite { newAbs: string; targetAbs: string; backupAbs: string | null; placed: boolean }`
-  - `interface Faults { failManifestTemp: boolean; failManifestRename: boolean; beforeCommit(destination: string): void; beforeRename(n: number): void; afterRename(n: number): void; beforeRestore(n: number): void }`
+  - `interface Faults { failManifestTemp: boolean; failManifestRename: boolean; beforeCommit(destination: string): void; beforeRename(n: number): void; afterRename(n: number): void; beforeRollback(destination: string): void; beforeRestore(n: number): void }`
   - `function faultsFromEnv(env?: NodeJS.ProcessEnv): Faults`
   - `function authorizedStateOf(targetAbs: string, overwrite: boolean): Authorized`
   - `function ensureRealDirs(destination: string, dirRel: string, createdDirs: string[] | null): string`
@@ -216,6 +222,22 @@ Expected: PASS.
       - running `cleanupLeftovers` twice in a row is safe (the second returns `cleaned: 0`).
   14. **`writeFileAtomic`** writes, and replaces a symlink at its name without following it.
   15. **Faults are inert without the switch:** `faultsFromEnv({ SOLIDACTIONS_DOC_PULL_TEST_FAULT: 'fail-rename:1' })` → a commit succeeds.
+  16. **Ruling 9, Sol's repro, RED: a late folder at an overwrite target.**
+      - Stage `n.md` with `authorized: { kind: 'any' }`, then `hooks('mkdir-before-commit:n.md')` creates `dest/n.md/` holding `user.txt` (`USER`).
+      - `commitAll` throws `UnsupportedTargetError('n.md')`. After `rollbackAll`, `dest/n.md/user.txt` reads `USER`, and no staging folder remains.
+      - The same with `absent` authorization also throws `UnsupportedTargetError`: the type check comes before the authorization check.
+      - A second write committed before it is rolled back.
+  17. **Ruling 8, a reverse path through a swapped parent:**
+      - Writes: `a.md` (existing `A1`) and `sub/b.md` (existing `B1`). `<root>/outside/b.md` reads `OUTSIDE`.
+      - Faults: `hooks('fail-manifest-rename,swap-before-rollback:sub><root>/outside')`. `commitAll` throws, then `rollbackAll` runs.
+      - Expect: `outside/b.md` still reads `OUTSIDE`, nothing new under `outside/`, and `a.md` restored to `A1`.
+      - The result's `restoreFailure` names `sub/b.md` (a `LinkOnTheWayError`), and the staging folder is kept with `backup/sub/b.md` (`B1`).
+  18. **Ruling 8, leftover backup root is a link:** `<dest>/.solidactions-pull-999999/backup` is a symlink to `<root>/outside` (holding `a.md`). `cleanupLeftovers` throws `ForeignStagingEntryError`, and `outside/a.md` still exists, unchanged.
+  19. **Ruling 8, a leftover backup subfolder is a link:** `backup/sub` is a symlink to `<root>/outside`, and the destination has a real `sub/`. The walk never enters the link: it is one leaf, `sub`, which differs from the real `sub/`. So `cleanupLeftovers` throws `LeftoverDiffersError`, and nothing under `outside/` changes.
+  20. **Ruling 8, a created folder swapped for a link:**
+      - `x/c.md` is new, so `x/` is created by the commit.
+      - Faults: `hooks('fail-manifest-rename,swap-before-rollback:x><root>/outside-empty')`, where `outside-empty` is a real empty folder.
+      - After rollback, `<root>/outside-empty` still exists, and nothing under it was removed or added.
 
 - [ ] **Step 2: Run them and watch them fail** (the module is missing).
 Run: `npx vitest run --project unit tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-2-red.log`
@@ -288,6 +310,14 @@ export class LeftoverDiffersError extends Error {
     }
 }
 
+/** Ruling 9: a folder (or any entry that is neither a file nor a link) at a target is never moved or deleted. */
+export class UnsupportedTargetError extends Error {
+    constructor(public readonly relPath: string) {
+        super(`${relPath} is a folder now`);
+        this.name = 'UnsupportedTargetError';
+    }
+}
+
 export type Authorized = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' };
 
 export interface PlannedWrite {
@@ -318,6 +348,7 @@ export interface Faults {
     beforeCommit(destination: string): void;
     beforeRename(n: number): void;
     afterRename(n: number): void;
+    beforeRollback(destination: string): void;
     beforeRestore(n: number): void;
 }
 
@@ -339,6 +370,7 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
         beforeCommit: () => undefined,
         beforeRename: () => undefined,
         afterRename: () => undefined,
+        beforeRollback: () => undefined,
         beforeRestore: () => undefined,
     };
     if (env.SOLIDACTIONS_TEST_HOOKS !== '1') return none;
@@ -365,6 +397,22 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
             case 'create-before-commit':
                 faults.beforeCommit = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'RACE');
                 break;
+            case 'mkdir-before-commit':
+                faults.beforeCommit = (destination) => {
+                    const dir = path.join(destination, ...segments(arg));
+                    fs.mkdirSync(dir);
+                    fs.writeFileSync(path.join(dir, 'user.txt'), 'USER');
+                };
+                break;
+            case 'swap-before-rollback': {
+                const [dirRel, outside] = arg.split('>');
+                faults.beforeRollback = (destination) => {
+                    const dir = path.join(destination, ...segments(dirRel));
+                    fs.renameSync(dir, `${dir}.swapped`);
+                    fs.symlinkSync(outside, dir);
+                };
+                break;
+            }
             case 'link-before-commit': {
                 const [linkRel, linkTarget] = arg.split('>');
                 faults.beforeCommit = (destination) => fs.symlinkSync(linkTarget, path.join(destination, ...segments(linkRel)));
@@ -473,9 +521,10 @@ export function commitAll(commit: Commit, faults: Faults): void {
             if (error instanceof LinkOnTheWayError) throw error;
             throw new WriteStepError(item.relPath, error);
         }
+        const existing = lstatOrNull(item.targetAbs);
+        if (existing !== null && !existing.isFile() && !existing.isSymbolicLink()) throw new UnsupportedTargetError(item.relPath);
         if (!stillAuthorized(item.targetAbs, item.authorized)) throw new PublicationRefusedError(item.relPath);
         try {
-            const existing = lstatOrNull(item.targetAbs);
             if (existing !== null) {
                 // Backed up at commit time, so a target created late under --overwrite is restorable too.
                 const backupAbs = path.join(commit.stagingAbs, 'backup', ...segments(item.relPath));
@@ -501,12 +550,16 @@ export function commitAll(commit: Commit, faults: Faults): void {
 }
 
 export function rollbackAll(commit: Commit, faults: Faults): { restoreFailure: { relPath: string; error: unknown } | null } {
+    faults.beforeRollback(commit.destination);
     let restoreFailure: { relPath: string; error: unknown } | null = null;
     let restoring = 0;
     for (const item of [...commit.items].reverse()) {
         if (item.backupAbs === null && !item.placed) continue;
         try {
+            // Ruling 8: the same parent checks as the forward path, on both ends.
+            ensureRealDirs(commit.destination, item.dirRel, null);
             if (item.backupAbs !== null) {
+                ensureRealDirs(commit.stagingAbs, item.dirRel === '' ? 'backup' : `backup/${item.dirRel}`, null);
                 restoring += 1;
                 faults.beforeRestore(restoring);
                 fs.renameSync(item.backupAbs, item.targetAbs); // the original inode, links included
@@ -521,9 +574,10 @@ export function rollbackAll(commit: Commit, faults: Faults): { restoreFailure: {
     }
     for (const dir of [...commit.createdDirs].reverse()) {
         try {
+            ensureRealDirs(commit.destination, path.relative(commit.destination, dir).split(path.sep).join('/'), null);
             fs.rmdirSync(dir);
         } catch {
-            // not empty, or gone: keep it
+            // not empty, gone, or no longer a real folder of ours: keep it
         }
     }
     if (restoreFailure === null) fs.rmSync(commit.stagingAbs, { recursive: true, force: true });
@@ -585,10 +639,15 @@ export function cleanupLeftovers(destination: string): { restored: string[]; cle
         if (pid !== process.pid && pidRunning(pid)) throw new AnotherPullRunningError(pid);
 
         const backupRoot = path.join(folderAbs, 'backup');
+        const rootStat = lstatOrNull(backupRoot);
+        if (rootStat !== null && (rootStat.isSymbolicLink() || !rootStat.isDirectory())) throw new ForeignStagingEntryError(`${name}/backup`);
         const differing: string[] = [];
         for (const rel of walkLeaves(backupRoot)) {
             const slash = rel.lastIndexOf('/');
-            ensureRealDirs(destination, slash === -1 ? '' : rel.slice(0, slash), []);
+            const parentRel = slash === -1 ? '' : rel.slice(0, slash);
+            // Ruling 8: the same parent checks as the forward path, on both ends.
+            ensureRealDirs(backupRoot, parentRel, null);
+            ensureRealDirs(destination, parentRel, []);
             const backupAbs = path.join(backupRoot, ...segments(rel));
             const targetAbs = path.join(destination, ...segments(rel));
             if (lstatOrNull(targetAbs) === null) {
@@ -657,6 +716,8 @@ Expected: PASS, and the build is clean.
 **Spec:** §1.3-1.5, §1.8, §1.9. Lines (values through `shown()`; `<D>` is the destination):
 - write failure: `error: cannot write <rel>: <error message> — nothing was changed.`
 - publication refusal: `error: <rel> changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.`
+- a folder at a target (ruling 9): `error: <rel> is a folder now (doc pull writes a file there) — nothing was changed. Move it aside and pull again.`
+- an unreadable destination at the leftover check: Task 1's line, `error: cannot read <D>: <the fs error's message>`
 - rollback incomplete: `error: cannot write <rel>: <error message> — could not restore <rel2> (<message>); its previous copy is in <staging name>/backup/<rel2>.` (the refusal form ends the same way)
 - staging left behind after success: `! could not remove <staging name>: <message> — it holds the previous copies of the files this pull replaced; delete it yourself`
 - leftovers: `! cleaned up after an interrupted doc pull in <D> (restored <n> file(s))`; `error: an interrupted doc pull left saved copies in <D>/<name>; <k> file(s) differ from their saved copies (first: <rel>), so neither was changed. Keep the versions you want, delete that folder, and pull again.`; `error: another doc pull (pid <pid>) is writing to <D>; wait for it to finish.`; `error: <D>/<name> is not a folder doc pull created; remove it and pull again.`
@@ -682,6 +743,8 @@ Expected: PASS, and the build is clean.
   11. **A foreign entry:** `<out>/.solidactions-pull-1` as a symlink. Exit 1, the not-a-folder line.
   12. **Hard link (cli#188):** hard-link `<tmp>/outside.md` to `<out>/a.md`. Pull: exit 0, `a.md` reads `A2`, and `outside.md` still reads `A1`.
   13. **Mode kept:** `chmod 0o600 <out>/a.md` before the pull; afterwards it is still `0o600`.
+  14. **Ruling 9, Sol's repro end to end:** the server adds `n.md`, and the fault is `mkdir-before-commit:n.md`, with `--overwrite`. Expect exit 1 with the folder line for `n.md`, `<out>/n.md/user.txt` reading `USER`, and everything else unchanged (rolled back).
+  15. **The unreadable-destination wording survives the leftover check:** re-run Task 1's case 1 (`tests/doc-pull-destination-checks.test.ts`) in the neighbour run. It must still show `error: cannot read <D>: EACCES`.
 
 - [ ] **Step 2: Run them and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-transactional.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-3-red.log`
@@ -705,6 +768,9 @@ Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are ine
                 process.stderr.write(chalk.red(`error: an interrupted doc pull left saved copies in ${shown(path.join(destination, error.folderName))}; ${error.differing.length} file(s) differ from their saved copies (first: ${shown(error.differing[0])}), so neither was changed. Keep the versions you want, delete that folder, and pull again.\n`));
             } else if (error instanceof LinkOnTheWayError) {
                 process.stderr.write(chalk.red(`error: cannot restore an interrupted pull's saved copies: ${shown(error.component)} is a symbolic link or not a directory.\n`));
+            } else if (typeof (error as NodeJS.ErrnoException).code === 'string') {
+                // An unreadable destination gets Task 1's line here too (cli#191).
+                process.stderr.write(chalk.red(`error: cannot read ${shown(destination)}: ${shown((error as Error).message)}\n`));
             } else {
                 throw error;
             }
@@ -753,6 +819,11 @@ Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are ine
         }
         if (error instanceof PublicationRefusedError) {
             process.stderr.write(chalk.red(`error: ${shown(error.relPath)} changed after doc pull checked it — ${tail} Pull again, or pass --overwrite to replace it.\n`));
+            process.exit(1);
+        }
+        if (error instanceof UnsupportedTargetError) {
+            // Ruling 9: a folder at a target is left alone, never moved or deleted.
+            process.stderr.write(chalk.red(`error: ${shown(error.relPath)} is a folder now (doc pull writes a file there) — ${tail} Move it aside and pull again.\n`));
             process.exit(1);
         }
         const relPath = error instanceof WriteStepError ? error.relPath : DOCS_MANIFEST;
@@ -881,8 +952,21 @@ Each file builds its rows from a table and runs one spawned scenario per row. Ea
     - (d) case (a) plus an injected failure after its rename (`fail-rename:<n+1>`), so the rollback path runs.
 
     In every row, every file outside the destination keeps its bytes and inode.
-  - **INV-B, no clobber (`doc-pull-inv-no-clobber`).** Rows: {an untracked file at the target at preflight, a file created at the target after staging (`create-before-commit`), a tracked file rewritten after staging (`create-before-commit` rewriting it)} × {without `--overwrite`: refused and the bytes unchanged; with `--overwrite`: replaced} × {markdown, media}. Add one composed row: with `--overwrite`, a late file at target 1, then `fail-rename:2`. The late file is restored with its bytes.
-  - **INV-C, honest manifest (`doc-pull-inv-honest-manifest`).** For every row, after the pull exits (0 or 1): every manifest entry with a `body_sha256` matches the sha256 of the file at its path, and an exit-1 row leaves the manifest bytes identical to before. Rows are the product of:
+  - **Ruling 8, reverse paths through symlinked parents** (in `doc-pull-inv-outside`). One row per reverse path, each with an outside folder holding sentinel files, asserting that nothing outside changes:
+    - a backup put-back whose target parent was swapped for a link (`fail-manifest-rename,swap-before-rollback:sub><outside>`);
+    - removal of this pull's new file under a swapped parent (a new `sub/n.md`, same faults);
+    - removal of a folder this pull created, swapped for a link (a new `x/c.md`, `swap-before-rollback:x><outside>`);
+    - leftover cleanup with the backup root a link;
+    - leftover cleanup with a backup subfolder a link;
+    - leftover cleanup whose target parent is a link.
+
+    The first three exit 1 with the rollback-incomplete line; the last three exit 1 with their spec §1.4 refusal.
+  - **INV-B, no clobber (`doc-pull-inv-no-clobber`).** Rows: {an untracked file at the target at preflight, a file created at the target after staging (`create-before-commit`), a tracked file rewritten after staging (`create-before-commit` rewriting it)} × {without `--overwrite`: refused and the bytes unchanged; with `--overwrite`: replaced} × {markdown, media}. Add one composed row: with `--overwrite`, a late file at target 1, then `fail-rename:2`. The late file is restored with its bytes. Add the **late folder** rows (ruling 9): `mkdir-before-commit` at a target, without and with `--overwrite`. Both exit 1 with the folder line, and the folder and its `user.txt` are intact.
+  - **INV-C, honest manifest (`doc-pull-inv-honest-manifest`).** The assertion is ruling 10's. For every row, after the pull exits (0 or 1), every manifest entry with a `body_sha256` either:
+    - matches the sha256 of the file at its path, or
+    - is at the path that this run's stderr names as refused or failed (the publication-refusal or folder line, with its reason), or, for a tracked file the row deliberately edited outside the pull, at a path the row lists as edited.
+
+    An exit-1 row also leaves the manifest bytes identical to before. A refused tracked target keeps its outside edit (`RACE`), and the old manifest stays. Rows are the product of:
     - **doc kind:** markdown, media;
     - **pull form:** folder, single-doc;
     - **target state:** new path, unchanged tracked path, renamed doc;

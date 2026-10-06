@@ -3,7 +3,7 @@
 **Wave:** cli-docpull (CrewOps wave card task-waveclidocpull-da80, run seq:sa-wave-cli:f1b70309), branch `wave/2026-10-05-cli-docpull`, cut from main at bd7efc5 (wave cli-hardening merged).
 **Issues:** cli#168, cli#183, cli#190, cli#188, cli#191, cli#176, cli#182. Peter approved the wave in CrewOps ask task-starttheclidoc-01c7 ("approved", built mainly on Muse), recorded on each issue.
 **Plan:** `docs/superpowers/plans/2026-10-05-cli-docpull.md`.
-**Plan reviews:** Sol (task-planreviewcli-d807) REQUEST CHANGES d5474a7; PM rulings 1-6 (plan card task-planclidocpull-948e). Sol's re-check (task-planrecheckcli-48d5) REQUEST CHANGES 0a92aa3; PM ruling 7 (plan-check card task-plancheckcli-f9a4) simplified §1. Both are folded in below.
+**Plan reviews:** Sol re-check 2 (task-planrecheck2cli-d0bc, REQUEST CHANGES 7d9a0f4) gave the mandatory build rulings 8-10 (build card task-buildclidocpull-c955), folded in below. Earlier: Sol (task-planreviewcli-d807) REQUEST CHANGES d5474a7; PM rulings 1-6 (plan card task-planclidocpull-948e). Sol's re-check (task-planrecheckcli-48d5) REQUEST CHANGES 0a92aa3; PM ruling 7 (plan-check card task-plancheckcli-f9a4) simplified §1. Both are folded in below.
 
 Each issue lists acceptable fixes; this spec picks one per issue. Cited later as "spec §N". Every message below is printed through doc-pull.ts's `shown()` display sanitiser (wave cli-hardening, cli#189), and `tests/doc-pull-display-guard.test.ts` keeps that true.
 
@@ -23,7 +23,7 @@ This is the design of **PM ruling 7** (plan-check card task-plancheckcli-f9a4), 
 
 - **INV-A, never outside the destination.** No byte outside the destination changes, whether through a hard link to a tracked file or through a symbolic link at the final path component, planted before or after the checks. This is qualified by the directory-component race in §1.6.
 - **INV-B, no clobber.** A file the pull does not own is never replaced without `--overwrite`, neither at wave cli-safety's preflight nor at the moment of each rename. A file created or changed after the preflight is not owned.
-- **INV-C, honest manifest.** Every manifest doc pull writes records, for each entry with a hash, exactly the bytes that pull left at that path. An in-process failure writes no manifest.
+- **INV-C, honest manifest.** Every manifest doc pull writes records, for each entry with a hash, exactly the bytes that pull left at that path. An in-process failure writes no manifest. The sweep's assertion (ruling 10): every hash matches the file on disk, or the file is listed as refused with its reason.
 
 ### 1.3 Order
 
@@ -35,7 +35,7 @@ This is the design of **PM ruling 7** (plan-check card task-plancheckcli-f9a4), 
 4. **Commit**, for each staged doc in plan order:
    1. **Directories:** walk the target's `dirRel` one component at a time from the destination. A missing component is created (non-recursive) and recorded. Every component must `lstat` as a real directory, never a link; otherwise `LinkOnTheWayError`. The destination itself is not checked (wave cli-safety allows a symlinked destination).
    2. **Re-check (INV-B):** `lstat` the target. `absent` requires no entry at the name. `sha256` requires a regular file with exactly those bytes. `any` always passes. A mismatch is a publication refusal.
-   3. **Backup:** if anything is at the target (a file, a link, under `--overwrite` anything), `rename(target, <staging>/backup/<relPath>)`, creating the backup's parent folders inside the staging folder. The backup is decided now, at commit time, so a target created late under `--overwrite` is backed up too.
+   3. **Backup:** if a file or a link is at the target (ruling 9: a folder or any other entry type is refused with `UnsupportedTargetError` before the authorization check, even under `--overwrite`, and is never moved or deleted), `rename(target, <staging>/backup/<relPath>)`, creating the backup's parent folders inside the staging folder. The backup is decided now, at commit time, so a target created late under `--overwrite` is backed up too.
    4. **Mode:** if the backup is a regular file, `chmod` the staged file to its permission bits.
    5. **Rename:** `rename(<staging>/new/<n>, target)`. A rename replaces the directory entry. A hard link's other names keep their old inode and bytes (cli#188), and a link at the final name is replaced, not followed (cli#182).
 5. **Publish:** `rename(<staging>/manifest.tmp, .solidactions-docs.json)`.
@@ -73,7 +73,10 @@ Any error in steps 3-5, or a publication refusal, rolls back in reverse:
 doc-pull.ts prints one line and exits 1:
 - an error: `error: cannot write <rel>: <error message> — nothing was changed.`, where `<rel>` is the doc path, or `.solidactions-docs.json` for the manifest temp or rename;
 - a publication refusal: `error: <rel> changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.`;
-- a `LinkOnTheWayError`: wave cli-safety's link refusal (`refuseLink`).
+- a `LinkOnTheWayError`: wave cli-safety's link refusal (`refuseLink`);
+- a folder at a target (ruling 9): `error: <rel> is a folder now (doc pull writes a file there) — nothing was changed. Move it aside and pull again.`
+
+**Ruling 8:** every reverse step runs the forward path's parent checks (`ensureRealDirs`) on both ends: the target's parents in the destination, and the backup's parents in the staging folder. That covers putting a backup back, removing a new file, removing a created folder, and leftover cleanup. Leftover cleanup also requires `backup/` itself to be a real folder. A failed check is a restore failure (the staging folder is kept), never a write through a link.
 
 If a rollback step itself fails, the staging folder (with its backups) is **kept**. The line then ends `— could not restore <rel> (<message>); its previous copy is in <staging rel>/backup/<rel>.` instead of `— nothing was changed.`, and the next pull's leftover check (§1.4) picks it up.
 
@@ -96,7 +99,9 @@ These are inert unless `SOLIDACTIONS_TEST_HOOKS=1`. `SOLIDACTIONS_DOC_PULL_TEST_
 - `fail-restore:<n>`: during rollback, restoring the n-th backup throws `EIO` (the kept-folder path);
 - `kill-after-renames:<n>`: `process.kill(process.pid, 'SIGKILL')` after the n-th doc rename (for §1.4's tests);
 - `create-before-commit:<rel>`: write a file `RACE` at `<rel>` after staging (INV-B);
-- `link-before-commit:<rel>><abs target>`: create a symlink at `<rel>` to `<abs target>` after staging (INV-A/B).
+- `link-before-commit:<rel>><abs target>`: create a symlink at `<rel>` to `<abs target>` after staging (INV-A/B);
+- `mkdir-before-commit:<rel>`: create a folder at `<rel>` holding `user.txt` after staging (ruling 9);
+- `swap-before-rollback:<dirRel>><abs folder>`: before rollback, rename `<dirRel>` aside and put a symlink to `<abs folder>` in its place (ruling 8).
 
 PM ruling 7 sanctions injected failures for the in-process failure points. The code documents these as test-only; the README does not.
 
