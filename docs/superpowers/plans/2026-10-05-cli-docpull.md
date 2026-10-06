@@ -2,25 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sa-subagent-driven-development to implement this plan task-by-task (the wave's build step). Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `doc pull` is all-or-nothing on its files and manifest, including after a kill, and it never writes through a link or over a file it doesn't own, even one created after its checks. It also keeps tracking that a failed download would lose, and fails loudly on an unreadable destination or a missing terminal.
+**Goal:** `doc pull` leaves the previous files and manifest on any in-process failure, cleans up after a killed pull, and never writes outside the destination or over a file it doesn't own, even one created after its checks. It also keeps tracking that a failed download would lose, and fails loudly on an unreadable destination or a missing terminal.
 
-**Architecture:**
-- A new module, `src/utils/doc-pull-writes.ts`, runs a journalled transaction (spec §1):
-  - stage doc temp files and the new manifest temp;
-  - write a journal;
-  - move each replaced file to a backup and rename its staged file into place, re-checking ownership first;
-  - publish the manifest;
-  - remove the backups and the journal.
-- Any failure before publication rolls back. The next pull recovers an interrupted one.
-- `report()` in `src/commands/doc-pull.ts` computes the final manifest before any write, drives the transaction, and runs rename cleanup and deletion propagation only after publication.
+**Architecture (PM ruling 7, spec §1):**
+- A new module, `src/utils/doc-pull-writes.ts`, stages every file into `<destination>/.solidactions-pull-<pid>/`.
+- It renames each one into place after re-checking the target's preflight-authorized state, keeping a backup of anything replaced, and publishes the manifest last.
+- On any in-process failure it restores the backups. The next pull cleans up a folder left by a killed pull.
+- `report()` in `src/commands/doc-pull.ts` computes the final manifest before any write, drives the module, and runs rename cleanup and deletion propagation only after publication.
 
 **Tech Stack:** TypeScript (Node 20+, CommonJS), commander, vitest 4 (`unit` project). Unit tests run on Linux in CI.
 
 **Spec:** `docs/superpowers/specs/2026-10-05-cli-docpull-design.md` (cited as "spec §N"; it wins over this plan on any conflict).
 
-**Issues:** cli#168, cli#183, cli#190, cli#188, cli#191, cli#176, cli#182 (SolidActions/solidactions-cli). Approved by Peter in CrewOps ask task-starttheclidoc-01c7 ("approved", built mainly on Muse), recorded on each issue. The transaction design and its test-only fault points are recorded on cli#168 (issuecomment-6008515604).
+**Issues:** cli#168, cli#183, cli#190, cli#188, cli#191, cli#176, cli#182 (SolidActions/solidactions-cli). Approved by Peter in CrewOps ask task-starttheclidoc-01c7 ("approved", built mainly on Muse), recorded on each issue. The commit design (PM ruling 7) is recorded on cli#168 (issuecomment-6008646035).
 
-**Plan review:** Sol (task-planreviewcli-d807) REQUEST CHANGES d5474a7. The PM's rulings 1-6 (plan card task-planclidocpull-948e) are folded in, cited as "C1/C2/I1-I3/M1".
+**Plan reviews:**
+- Sol task-planreviewcli-d807 (REQUEST CHANGES d5474a7) → PM rulings 1-6 (plan card task-planclidocpull-948e);
+- Sol re-check task-planrecheckcli-48d5 (REQUEST CHANGES 0a92aa3) → PM ruling 7 (plan-check card task-plancheckcli-f9a4): simplify, no journal.
+
+Rulings 3-6 still bind (scopes, sweeps, runner-a gate, M1).
 
 **Card rule (for the manager):** every developer card carries this plan's **Global Constraints** section verbatim and the spec path. Each task states its own expected lines.
 
@@ -54,11 +54,11 @@
 
 ## Review Focus
 
-1. **INV-1 at every boundary:** a failure while staging a doc temp, the manifest temp or the journal, a failed doc rename, a failed manifest rename, a publication refusal, a kill after N renames, and a kill after publication. After each, plus the next pull's recovery for a kill, the destination is exactly the previous state or exactly the new one (spec §1.1-1.4). Tasks 3 and 5 pin it.
-2. **INV-3 at publication time:** a file created or changed at a target after staging is never replaced without `--overwrite`, and is replaced with it (spec §1.2 step 3). Tasks 2, 3 and 5 pin it.
-3. **INV-2 with the qualified race:** a hard-linked tracked file's other name keeps its bytes, and a link planted at the final name is replaced, not followed. A rollback restores the original inode (spec §1.2-1.3). Tasks 2, 3 and 5 pin it.
-4. **Scripts keep working:** `doc pull … -y` with no terminal still pulls into a non-empty destination. Without `-y` it exits 1 with the line, and the terminal "no" still prints `Cancelled.` and exits 0 (spec §4). Task 1 pins all three.
-5. **The rename matrix and write-safety suites stay green,** with the hard-link stand-ins for case-insensitive aliases rewritten to the new semantics. The true alias cases run where the filesystem allows and are skipped with a reason on Linux (spec §1.7). Task 3 pins them.
+1. **Every in-process failure point leaves the previous state:** each doc rename, the manifest temp, the manifest rename, a publication refusal and a rollback-restore failure. The files (bytes and inodes), the manifest and the absence of a staging folder are checked after each; a failed restore keeps the folder and names it (spec §1.5). Tasks 2 and 3 pin it.
+2. **INV-B at rename time:** a file or link created or changed at a target after the checks is never replaced without `--overwrite`. With `--overwrite` it is backed up first, so a later failure restores it (spec §1.3 step 4). Tasks 2, 3 and 5 pin it.
+3. **A killed pull** leaves the old manifest. The next pull cleans a leftover folder when it is safe, refuses (keeping both copies) when a target differs, and refuses when that pid is still running (spec §1.4). Tasks 2 and 3 pin it.
+4. **Scripts keep working:** `doc pull … -y` with no terminal still pulls into a non-empty destination. Without `-y` it exits 1 with the line, and the terminal "no" still prints `Cancelled.` and exits 0 (spec §4). Task 1 pins it.
+5. **The rename matrix and write-safety suites stay green,** with the hard-link stand-ins for case-insensitive aliases rewritten to the new semantics. The true alias cases run where the filesystem allows and are skipped with a reason on Linux (spec §1.7). Task 3 pins it.
 
 ---
 
@@ -140,7 +140,7 @@ Expected: PASS.
 
 ---
 
-### Task 2: the journalled transaction module (cli#168, cli#188, cli#182)
+### Task 2: the staging-folder commit module (cli#168, cli#188, cli#182)
 
 **Files (file scope):**
 - Create: `src/utils/doc-pull-writes.ts`
@@ -149,60 +149,73 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: nothing from this wave.
 - Produces (exactly these exports; Task 3 uses them):
-  - `JOURNAL_NAME = '.solidactions-pull-journal.json'`
+  - `STAGING_PREFIX = '.solidactions-pull-'`
   - `class LinkOnTheWayError extends Error { readonly component: string }`
   - `class PublicationRefusedError extends Error { readonly relPath: string }`
   - `class WriteStepError extends Error { readonly relPath: string; readonly cause: unknown }`
-  - `class JournalDamagedError extends Error {}`
-  - `type Expectation = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' }`
-  - `interface StagedDoc { relPath: string; dirRel: string; tempAbs: string; targetAbs: string; backupAbs: string | null; expect: Expectation; backedUp: boolean; committed: boolean }`
-  - `interface Transaction { destination: string; manifestName: string; docs: StagedDoc[]; createdDirs: string[]; manifestTempAbs: string | null; manifestSha256: string | null; journalWritten: boolean }`
-  - `interface Faults { beforeCommit(tx: Transaction): void; afterRename(count: number): void; afterPublish(tx: Transaction): void }`
+  - `class AnotherPullRunningError extends Error { readonly pid: number }`
+  - `class ForeignStagingEntryError extends Error { readonly entryName: string }`
+  - `class LeftoverDiffersError extends Error { readonly folderName: string; readonly differing: string[] }`
+  - `type Authorized = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' }`
+  - `interface PlannedWrite { relPath: string; dirRel: string; data: string | Buffer; authorized: Authorized }`
+  - `interface Commit { destination: string; stagingAbs: string; manifestName: string; items: CommitItem[]; createdDirs: string[] }`
+  - `interface CommitItem extends PlannedWrite { newAbs: string; targetAbs: string; backupAbs: string | null; placed: boolean }`
+  - `interface Faults { failManifestTemp: boolean; failManifestRename: boolean; beforeCommit(destination: string): void; beforeRename(n: number): void; afterRename(n: number): void; beforeRestore(n: number): void }`
   - `function faultsFromEnv(env?: NodeJS.ProcessEnv): Faults`
-  - `function newTransaction(destination: string, manifestName: string): Transaction`
-  - `function tempName(suffix: '.tmp' | '.bak'): string`
-  - `function ensureRealDirs(destination: string, dirRel: string, tx: Transaction | null): string`
-  - `function stageDoc(tx: Transaction, dirRel: string, fileName: string, relPath: string, data: string | Buffer, overwrite: boolean): void`
-  - `function stageManifest(tx: Transaction, bytes: string): void`
-  - `function writeJournal(tx: Transaction): void`
-  - `function commitTransaction(tx: Transaction, faults: Faults): void`. It renames docs, then publishes the manifest.
-  - `function rollbackTransaction(tx: Transaction): { restoreFailure: { relPath: string; error: unknown } | null }`
-  - `function finalizeTransaction(tx: Transaction): Array<{ relPath: string; backupRel: string; error: unknown }>`
-  - `function recoverInterrupted(destination: string, manifestName: string): { action: 'none' } | { action: 'forward' } | { action: 'back'; restored: string[] }`. It throws `JournalDamagedError`.
+  - `function authorizedStateOf(targetAbs: string, overwrite: boolean): Authorized`
+  - `function ensureRealDirs(destination: string, dirRel: string, createdDirs: string[] | null): string`
+  - `function stageAll(destination: string, manifestName: string, writes: PlannedWrite[], manifestBytes: string, faults: Faults): Commit`
+  - `function commitAll(commit: Commit, faults: Faults): void`
+  - `function rollbackAll(commit: Commit, faults: Faults): { restoreFailure: { relPath: string; error: unknown } | null }`
+  - `function finalizeCommit(commit: Commit): { error: unknown } | null`
+  - `function cleanupLeftovers(destination: string): { restored: string[]; cleaned: number }`
   - `function writeFileAtomic(dir: string, name: string, data: string | Buffer): void`
 
-**Spec:** §1.1-1.5, §1.8.
+**Spec:** §1.1-1.5, §1.8, §1.9.
 
-- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-writes.test.ts`. Each test makes its own `fs.mkdtempSync` root, with `dest = <root>/dest` created and `MANIFEST = '.solidactions-docs.json'`, and removes the root after. The helper `run(tx)` means `writeJournal(tx); commitTransaction(tx, noFaults)`, where `noFaults` is `faultsFromEnv({})`.
+- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-writes.test.ts`.
+  - Each test makes its own `fs.mkdtempSync` root, with `dest = <root>/dest`, `M = '.solidactions-docs.json'`, `none = faultsFromEnv({})`, and `hooks(fault) = faultsFromEnv({ SOLIDACTIONS_TEST_HOOKS: '1', SOLIDACTIONS_DOC_PULL_TEST_FAULT: fault })`. It removes the root after.
+  - `w(rel, data, authorized)` builds a `PlannedWrite` (`dirRel` = the rel's folder, or `''`).
+  - `go(writes, faults)` = `stageAll(dest, M, writes, '{"v":2}\n', faults)` then `commitAll(c, faults)` then `finalizeCommit(c)`.
   1. **Happy path:**
-     - Stage `a.md` (root) and `x/y/b.md`, then the manifest `{"v":2}`, and run.
-     - Both targets hold their bytes and the manifest reads `{"v":2}`.
-     - `finalizeTransaction` returns `[]`. Afterwards no `.sa-pull-*` file and no journal exist under `dest`.
-  2. **Staging touches no target:** after staging and `writeJournal`, but before commit, no target exists, a `.sa-pull-*.tmp` exists next to each, and the journal exists.
-  3. **Link on the way:** `ensureRealDirs(dest, 'x/y', tx)` with `dest/x` a symlink to `<root>/outside` throws `LinkOnTheWayError`, whose `component` is `'x'`. Nothing is created under `<root>/outside`.
-  4. **Planted link at the final name (cli#182):** stage `a.md` (absent at staging, so expectation `absent`), then create `dest/a.md` as a symlink to `<root>/outside.txt` (`OUTSIDE`). Commit throws `PublicationRefusedError` (INV-3). `rollbackTransaction` leaves `outside.txt` reading `OUTSIDE`, keeps the link, and removes all temps and the journal. Then the same with `overwrite = true`: the commit succeeds, `dest/a.md` is a regular file with the staged bytes, and `outside.txt` still reads `OUTSIDE`.
-  5. **Hard link (cli#188):** `dest/a.md` (`OLD`) is hard-linked as `<root>/other.txt`. Stage `NEW` and run: `a.md` reads `NEW` and `other.txt` reads `OLD`. In a second case, the rollback after a publication failure (step 9) restores `a.md` with **the same inode** as `other.txt`.
-  6. **Mode kept:** an existing `dest/a.md` with mode `0o600` keeps `0o600` after run. A new file gets `0o666 & ~umask`.
-  7. **Publication refusal (C2):** stage `a.md` over an existing `OLD`, then rewrite it to `EDITED` before commit. Commit throws `PublicationRefusedError('a.md')`, and after rollback `a.md` reads `EDITED`. The same flow with `overwrite = true` commits.
-  8. **Doc rename failure rolls back:**
-     - Stage `a.md` (existing `A1`) and `sub/b.md` (existing `B1`).
-     - After `writeJournal`, `chmod 0o555 dest/sub` (skip on win32/root).
-     - Commit throws `WriteStepError` with `relPath 'sub/b.md'`.
-     - `rollbackTransaction` returns `{ restoreFailure: null }`: `a.md` reads `A1` with its original inode, and `sub/b.md` reads `B1`. Restore the mode, then check that no `.sa-pull-*` file and no journal remain.
-  9. **Manifest rename failure:** make `dest/.solidactions-docs.json` a non-empty directory before commit. Commit throws `WriteStepError` with `relPath '.solidactions-docs.json'` after all doc renames, and rollback restores every doc to its old bytes.
-  10. **Recovery, roll back:**
-      - Stage and journal `a.md` (existing `A1`) and `n.md` (new). Then do by hand what an interrupted commit does: rename `a.md` to its backup, the `a.md` temp to `a.md`, and the `n.md` temp to `n.md`. Leave the journal and the old manifest.
-      - `recoverInterrupted(dest, MANIFEST)` returns `{ action: 'back', restored: ['a.md'] }`.
-      - Afterwards `a.md` reads `A1`, `n.md` is gone, and no `.sa-pull-*` file or journal remains.
-  11. **Recovery, roll forward:** the same, but also rename the manifest temp into place. The result is `{ action: 'forward' }`: the backups and the journal are removed, and `a.md` keeps the new bytes.
-  12. **Damaged journal:** a journal holding `not json`, or one whose `entries[0].target` is `'../escape'`, makes `recoverInterrupted` throw `JournalDamagedError` and change nothing.
-  13. **No journal:** `recoverInterrupted` returns `{ action: 'none' }`.
-  14. **Finalize failure:** after a successful run with a backup in `sub/`, `chmod 0o555 dest/sub` before `finalizeTransaction` (skip on win32/root). It returns one item naming `sub/b.md` and the backup's relative path. The journal is already gone.
-  15. **`writeFileAtomic`** writes the file and replaces a symlink at its name without following it. `tempName('.tmp')` matches `/^\.sa-pull-\d+-[0-9a-f]{12}\.tmp$/`.
-  16. **Faults** (also `link-before-commit:a.md>/abs/outside.txt` creates that symlink in `beforeCommit`):
-      - `faultsFromEnv({ SOLIDACTIONS_DOC_PULL_TEST_FAULT: 'kill-after-renames:1' })` without `SOLIDACTIONS_TEST_HOOKS` is inert: `afterRename(1)` returns.
-      - With `SOLIDACTIONS_TEST_HOOKS: '1'` and `readonly-before-commit:sub`, `beforeCommit` makes `dest/sub` mode `0o555` (skip on win32/root; restore it).
-      - Don't test the kill fault here: Task 3 covers it in a spawned process.
+     - Writes: `a.md` (`absent`) and `x/y/b.md` (`absent`).
+     - Both targets hold their bytes, the manifest reads `{"v":2}\n`, and `finalizeCommit` returns `null`.
+     - Nothing named `.solidactions-pull-*` remains under `dest`.
+  2. **Staging touches no target:** after `stageAll`, before `commitAll`, no target exists. `<dest>/.solidactions-pull-<pid>/new/0` and `…/manifest.tmp` exist.
+  3. **Replacing a tracked file:** `dest/a.md` holds `OLD`, with `authorized = authorizedStateOf(<dest>/a.md, false)` (a `sha256`). After `go`, `a.md` reads `NEW`.
+  4. **Link on the way:** `ensureRealDirs(dest, 'x/y', [])` with `dest/x` a symlink to `<root>/outside` throws `LinkOnTheWayError`, whose `component` is `'x'`. Nothing is created under `<root>/outside`.
+  5. **Late file, INV-B (cli#182/C2):**
+     - Stage `n.md` (`absent`), then `fs.writeFileSync(<dest>/n.md, 'LATE')`.
+     - `commitAll` throws `PublicationRefusedError('n.md')`. After `rollbackAll`, `n.md` reads `LATE`, and the staging folder is gone.
+     - With `authorized: { kind: 'any' }`, the commit succeeds and `n.md` holds the staged bytes.
+     - With `any` plus a second write whose rename fails (`hooks('fail-rename:2')`), rollback restores `n.md` to `LATE`: the late file was backed up.
+  6. **Late link:** the same as case 5, but the late entry is a symlink to `<root>/outside.txt` (`OUTSIDE`).
+     - With `absent`, the commit is refused, and after rollback the link is still there and `outside.txt` reads `OUTSIDE`.
+     - With `any`, `n.md` becomes a regular file, and `outside.txt` still reads `OUTSIDE`.
+  7. **Hard link (cli#188):** `dest/a.md` (`OLD`) is hard-linked as `<root>/other.txt`. After `go` with a `sha256` authorization, `a.md` reads `NEW`, and `other.txt` reads `OLD`.
+  8. **Rollback restores the original inode:**
+     - `dest/a.md` (`A1`, hard-linked as `<root>/other.txt`) and `dest/sub/b.md` (`B1`). Use `hooks('fail-rename:2')`.
+     - `commitAll` throws `WriteStepError` with `relPath 'sub/b.md'`.
+     - `rollbackAll` returns `{ restoreFailure: null }`: `a.md` reads `A1` with the same inode as `other.txt`, and `sub/b.md` reads `B1`.
+     - The manifest is untouched, and no staging folder remains.
+  9. **Manifest temp failure:** with `hooks('fail-manifest-temp')`, `stageAll` throws `WriteStepError` with `relPath M`. No staging folder remains, and no target changed.
+  10. **Manifest rename failure:** with `hooks('fail-manifest-rename')`, `commitAll` throws `WriteStepError` with `relPath M` after every doc rename. `rollbackAll` restores every doc, and the old manifest bytes are unchanged.
+  11. **Restore failure keeps the folder:**
+      - Use one faults object for the whole run: `hooks('fail-rename:2,fail-restore:1')`.
+      - It returns a `restoreFailure` naming the doc whose backup it failed to restore. The staging folder still exists, holding that backup.
+      - Then `cleanupLeftovers(dest)` restores it (the target is absent or identical) and removes the folder.
+  12. **Mode kept:** a target with mode `0o600` keeps `0o600` after `go`.
+  13. **Leftovers** (`cleanupLeftovers`), each set up by hand under `<dest>/.solidactions-pull-999999` (assume that pid is not running; pick one with `process.kill(pid, 0)` throwing `ESRCH`):
+      - no such folder → `{ restored: [], cleaned: 0 }`;
+      - `backup/sub/b.md` (`B1`) with `sub/b.md` absent → restored, the folder is removed, and the result is `restored: ['sub/b.md']`;
+      - a backup with identical bytes at its target → the backup is dropped and the folder is removed;
+      - a backup whose target differs → throws `LeftoverDiffersError` (`differing: ['a.md']`), and the folder and both files are unchanged;
+      - a folder named with the pid of a live child process (spawn `sleep 5`, and kill it after) → throws `AnotherPullRunningError` with that pid;
+      - `.solidactions-pull-1` as a symlink → throws `ForeignStagingEntryError`;
+      - a backup whose target folder `sub` is now a symlink to `<root>/outside` → throws `LinkOnTheWayError`, and nothing is written outside;
+      - running `cleanupLeftovers` twice in a row is safe (the second returns `cleaned: 0`).
+  14. **`writeFileAtomic`** writes, and replaces a symlink at its name without following it.
+  15. **Faults are inert without the switch:** `faultsFromEnv({ SOLIDACTIONS_DOC_PULL_TEST_FAULT: 'fail-rename:1' })` → a commit succeeds.
 
 - [ ] **Step 2: Run them and watch them fail** (the module is missing).
 Run: `npx vitest run --project unit tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-2-red.log`
@@ -216,19 +229,22 @@ import fs from 'fs';
 import path from 'path';
 
 /**
- * The journalled doc pull transaction (cli#168, cli#188, cli#182; spec §1). Stage doc
- * temps and the manifest temp, write a journal, then for each doc re-check ownership,
- * move the old file to a backup and rename the temp into place, then publish the
- * manifest. Any failure before publication rolls back; the next pull recovers an
- * interrupted one. A rename replaces the directory entry, so a hard link's other names
- * keep their bytes and a link planted at the final name is replaced, not followed.
- * Node has no openat: a directory component swapped for a link between the re-check
- * and the rename is a documented residual race (spec §1.6).
+ * doc pull's commit (cli#168, cli#188, cli#182; spec §1, PM ruling 7). Every file is
+ * staged in <destination>/.solidactions-pull-<pid>/, then renamed into place after its
+ * target is re-checked against the state the preflight authorized; whatever it replaces
+ * is kept as a backup in the staging folder, and the manifest is published last. Any
+ * in-process failure restores the backups. A killed pull leaves the old manifest and its
+ * staging folder, which the next pull cleans up (cleanupLeftovers). A rename replaces the
+ * directory entry, so a hard link's other names keep their bytes and a link at the final
+ * name is replaced, not followed. Node has no openat: a directory component swapped for a
+ * link between the walk and the rename is a documented residual race (spec §1.6). No
+ * power-loss durability is claimed.
  */
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
-const TEMP_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW;
+const NEW_FILE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW;
 
-export const JOURNAL_NAME = '.solidactions-pull-journal.json';
+export const STAGING_PREFIX = '.solidactions-pull-';
+const STAGING_PATTERN = /^\.solidactions-pull-(\d+)$/;
 
 export class LinkOnTheWayError extends Error {
     constructor(public readonly component: string) {
@@ -251,122 +267,151 @@ export class WriteStepError extends Error {
     }
 }
 
-export class JournalDamagedError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = 'JournalDamagedError';
+export class AnotherPullRunningError extends Error {
+    constructor(public readonly pid: number) {
+        super(`another doc pull (pid ${pid}) is running`);
+        this.name = 'AnotherPullRunningError';
     }
 }
 
-export type Expectation = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' };
-
-export interface StagedDoc {
-    relPath: string;
-    dirRel: string;
-    tempAbs: string;
-    targetAbs: string;
-    backupAbs: string | null;
-    expect: Expectation;
-    backedUp: boolean;
-    committed: boolean;
+export class ForeignStagingEntryError extends Error {
+    constructor(public readonly entryName: string) {
+        super(`${entryName} is not a folder doc pull created`);
+        this.name = 'ForeignStagingEntryError';
+    }
 }
 
-export interface Transaction {
+export class LeftoverDiffersError extends Error {
+    constructor(public readonly folderName: string, public readonly differing: string[]) {
+        super(`${differing.length} file(s) differ from their saved copies in ${folderName}`);
+        this.name = 'LeftoverDiffersError';
+    }
+}
+
+export type Authorized = { kind: 'absent' } | { kind: 'sha256'; sha256: string } | { kind: 'any' };
+
+export interface PlannedWrite {
+    relPath: string;
+    dirRel: string;
+    data: string | Buffer;
+    authorized: Authorized;
+}
+
+export interface CommitItem extends PlannedWrite {
+    newAbs: string;
+    targetAbs: string;
+    backupAbs: string | null;
+    placed: boolean;
+}
+
+export interface Commit {
     destination: string;
+    stagingAbs: string;
     manifestName: string;
-    docs: StagedDoc[];
+    items: CommitItem[];
     createdDirs: string[];
-    manifestTempAbs: string | null;
-    manifestSha256: string | null;
-    journalWritten: boolean;
 }
 
 export interface Faults {
-    beforeCommit(tx: Transaction): void;
-    afterRename(count: number): void;
-    afterPublish(tx: Transaction): void;
-}
-
-interface JournalEntry {
-    target: string;
-    temp: string;
-    backup: string | null;
-}
-
-interface Journal {
-    version: 1;
-    manifest_sha256: string;
-    manifest_temp: string;
-    created_dirs: string[];
-    entries: JournalEntry[];
+    failManifestTemp: boolean;
+    failManifestRename: boolean;
+    beforeCommit(destination: string): void;
+    beforeRename(n: number): void;
+    afterRename(n: number): void;
+    beforeRestore(n: number): void;
 }
 
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
+const segments = (rel: string): string[] => rel.split('/');
 
-/** True when anything (a file, a directory, even a dangling link) is at `abs`. */
-function lexists(abs: string): boolean {
-    try {
-        fs.lstatSync(abs);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-export function tempName(suffix: '.tmp' | '.bak'): string {
-    return `.sa-pull-${process.pid}-${crypto.randomBytes(6).toString('hex')}${suffix}`;
-}
-
-export function newTransaction(destination: string, manifestName: string): Transaction {
-    return { destination, manifestName, docs: [], createdDirs: [], manifestTempAbs: null, manifestSha256: null, journalWritten: false };
+function ioFault(what: string): Error {
+    return Object.assign(new Error(`EIO: i/o error, ${what} (test hook)`), { code: 'EIO' });
 }
 
 /**
- * Test-only fault points (spec §1.5). Inert unless SOLIDACTIONS_TEST_HOOKS=1; each one
- * performs a real filesystem action or a real kill so a spawned test reaches a failure
- * point deterministically. Never documented for users.
+ * Test-only injected failures (spec §1.8, sanctioned by PM ruling 7). Inert unless
+ * SOLIDACTIONS_TEST_HOOKS=1. Never documented for users.
  */
 export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
-    const none: Faults = { beforeCommit: () => undefined, afterRename: () => undefined, afterPublish: () => undefined };
-    if (env.SOLIDACTIONS_TEST_HOOKS !== '1') return none;
-    const [name, arg = ''] = (env.SOLIDACTIONS_DOC_PULL_TEST_FAULT ?? '').split(/:(.*)/s);
-    const kill = (): void => {
-        process.kill(process.pid, 'SIGKILL');
+    const none: Faults = {
+        failManifestTemp: false,
+        failManifestRename: false,
+        beforeCommit: () => undefined,
+        beforeRename: () => undefined,
+        afterRename: () => undefined,
+        beforeRestore: () => undefined,
     };
-    switch (name) {
-        case 'kill-after-renames':
-            return { ...none, afterRename: (count) => { if (count === Number(arg)) kill(); } };
-        case 'kill-after-publish':
-            return { ...none, afterPublish: () => kill() };
-        case 'readonly-before-commit':
-            return { ...none, beforeCommit: (tx) => fs.chmodSync(path.join(tx.destination, ...arg.split('/')), 0o555) };
-        case 'create-before-commit':
-            return { ...none, beforeCommit: (tx) => fs.writeFileSync(path.join(tx.destination, ...arg.split('/')), 'RACE') };
-        case 'link-before-commit': {
-            const [linkRel, linkTarget] = arg.split('>');
-            return { ...none, beforeCommit: (tx) => fs.symlinkSync(linkTarget, path.join(tx.destination, ...linkRel.split('/'))) };
+    if (env.SOLIDACTIONS_TEST_HOOKS !== '1') return none;
+    const faults: Faults = { ...none };
+    // A comma-separated list combines faults, e.g. "fail-rename:2,fail-restore:1".
+    for (const spec of (env.SOLIDACTIONS_DOC_PULL_TEST_FAULT ?? '').split(',')) {
+        const [name, arg = ''] = spec.split(/:(.*)/s);
+        switch (name) {
+            case 'fail-rename':
+                faults.beforeRename = (n) => { if (n === Number(arg)) throw ioFault('rename'); };
+                break;
+            case 'fail-manifest-temp':
+                faults.failManifestTemp = true;
+                break;
+            case 'fail-manifest-rename':
+                faults.failManifestRename = true;
+                break;
+            case 'fail-restore':
+                faults.beforeRestore = (n) => { if (n === Number(arg)) throw ioFault('restore'); };
+                break;
+            case 'kill-after-renames':
+                faults.afterRename = (n) => { if (n === Number(arg)) process.kill(process.pid, 'SIGKILL'); };
+                break;
+            case 'create-before-commit':
+                faults.beforeCommit = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'RACE');
+                break;
+            case 'link-before-commit': {
+                const [linkRel, linkTarget] = arg.split('>');
+                faults.beforeCommit = (destination) => fs.symlinkSync(linkTarget, path.join(destination, ...segments(linkRel)));
+                break;
+            }
+            default:
+                break;
         }
-        case 'readonly-after-publish':
-            return { ...none, afterPublish: (tx) => fs.chmodSync(path.join(tx.destination, ...arg.split('/')), 0o555) };
-        default:
-            return none;
+    }
+    return faults;
+}
+
+function lstatOrNull(abs: string): fs.Stats | null {
+    try {
+        return fs.lstatSync(abs);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
     }
 }
 
-export function ensureRealDirs(destination: string, dirRel: string, tx: Transaction | null): string {
-    const parts = dirRel === '' ? [] : dirRel.split('/');
+/** The state the preflight authorizes for a target (spec §1.3 step 2). */
+export function authorizedStateOf(targetAbs: string, overwrite: boolean): Authorized {
+    if (overwrite) return { kind: 'any' };
+    const stat = lstatOrNull(targetAbs);
+    if (stat === null) return { kind: 'absent' };
+    if (!stat.isFile()) return { kind: 'absent' }; // never matches: a non-file target is refused at commit
+    return { kind: 'sha256', sha256: sha256(fs.readFileSync(targetAbs)) };
+}
+
+function stillAuthorized(targetAbs: string, authorized: Authorized): boolean {
+    if (authorized.kind === 'any') return true;
+    const stat = lstatOrNull(targetAbs);
+    if (authorized.kind === 'absent') return stat === null;
+    return stat !== null && stat.isFile() && sha256(fs.readFileSync(targetAbs)) === authorized.sha256;
+}
+
+export function ensureRealDirs(destination: string, dirRel: string, createdDirs: string[] | null): string {
+    const parts = dirRel === '' ? [] : segments(dirRel);
     let current = destination;
     for (let i = 0; i < parts.length; i++) {
         current = path.join(current, parts[i]);
-        let stat: fs.Stats | null = null;
-        try {
-            stat = fs.lstatSync(current);
-        } catch (error) {
-            if (tx === null || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
+        let stat = lstatOrNull(current);
         if (stat === null) {
+            if (createdDirs === null) throw Object.assign(new Error(`ENOENT: no such directory, ${current}`), { code: 'ENOENT' });
             fs.mkdirSync(current);
-            tx!.createdDirs.push(current);
+            createdDirs.push(current);
             stat = fs.lstatSync(current);
         }
         if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -376,233 +421,210 @@ export function ensureRealDirs(destination: string, dirRel: string, tx: Transact
     return current;
 }
 
-function writeTemp(dirAbs: string, data: string | Buffer, mode: number | null): string {
-    const tempAbs = path.join(dirAbs, tempName('.tmp'));
-    const fd = fs.openSync(tempAbs, TEMP_FLAGS, 0o666);
+function writeNew(abs: string, data: string | Buffer): void {
+    const fd = fs.openSync(abs, NEW_FILE_FLAGS, 0o666);
     try {
-        if (mode !== null) fs.fchmodSync(fd, mode);
         fs.writeFileSync(fd, data);
-    } catch (error) {
+    } finally {
         fs.closeSync(fd);
-        fs.unlinkSync(tempAbs);
-        throw error;
     }
-    fs.closeSync(fd);
-    return tempAbs;
 }
 
-/** The target as it is now: absent, a regular file (its bytes' hash and mode), or anything else. */
-function inspect(targetAbs: string): { kind: 'absent' } | { kind: 'file'; sha256: string; mode: number } | { kind: 'other' } {
-    let stat: fs.Stats;
+export function stageAll(destination: string, manifestName: string, writes: PlannedWrite[], manifestBytes: string, faults: Faults): Commit {
+    const stagingName = `${STAGING_PREFIX}${process.pid}`;
+    const stagingAbs = path.join(destination, stagingName);
     try {
-        stat = fs.lstatSync(targetAbs);
+        fs.mkdirSync(stagingAbs, { mode: 0o700 });
+        fs.mkdirSync(path.join(stagingAbs, 'new'));
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
-        throw error;
+        throw new WriteStepError(stagingName, error);
     }
-    if (!stat.isFile()) return { kind: 'other' };
-    return { kind: 'file', sha256: sha256(fs.readFileSync(targetAbs)), mode: stat.mode & 0o7777 };
-}
-
-export function stageDoc(tx: Transaction, dirRel: string, fileName: string, relPath: string, data: string | Buffer, overwrite: boolean): void {
-    let dirAbs: string;
+    const commit: Commit = { destination, stagingAbs, manifestName, items: [], createdDirs: [] };
     try {
-        dirAbs = ensureRealDirs(tx.destination, dirRel, tx);
-    } catch (error) {
-        if (error instanceof LinkOnTheWayError) throw error;
-        throw new WriteStepError(relPath, error);
-    }
-    const targetAbs = path.join(dirAbs, fileName);
-    const now = inspect(targetAbs);
-    if (now.kind === 'other' && !overwrite) throw new PublicationRefusedError(relPath);
-    const expect: Expectation = overwrite ? { kind: 'any' } : now.kind === 'file' ? { kind: 'sha256', sha256: now.sha256 } : { kind: 'absent' };
-    let tempAbs: string;
-    try {
-        tempAbs = writeTemp(dirAbs, data, now.kind === 'file' ? now.mode : null);
-    } catch (error) {
-        throw new WriteStepError(relPath, error);
-    }
-    const backupAbs = now.kind === 'absent' ? null : path.join(dirAbs, tempName('.bak'));
-    tx.docs.push({ relPath, dirRel, tempAbs, targetAbs, backupAbs, expect, backedUp: false, committed: false });
-}
-
-export function stageManifest(tx: Transaction, bytes: string): void {
-    const targetAbs = path.join(tx.destination, tx.manifestName);
-    const now = inspect(targetAbs);
-    try {
-        tx.manifestTempAbs = writeTemp(tx.destination, bytes, now.kind === 'file' ? now.mode : null);
-    } catch (error) {
-        throw new WriteStepError(tx.manifestName, error);
-    }
-    tx.manifestSha256 = sha256(bytes);
-}
-
-const rel = (tx: Transaction, abs: string): string => path.relative(tx.destination, abs).split(path.sep).join('/');
-
-export function writeJournal(tx: Transaction): void {
-    const journal: Journal = {
-        version: 1,
-        manifest_sha256: tx.manifestSha256 ?? '',
-        manifest_temp: tx.manifestTempAbs === null ? '' : rel(tx, tx.manifestTempAbs),
-        created_dirs: tx.createdDirs.map((dir) => rel(tx, dir)),
-        entries: tx.docs.map((d) => ({ target: rel(tx, d.targetAbs), temp: rel(tx, d.tempAbs), backup: d.backupAbs === null ? null : rel(tx, d.backupAbs) })),
-    };
-    try {
-        writeFileAtomic(tx.destination, JOURNAL_NAME, `${JSON.stringify(journal, null, 2)}\n`);
-    } catch (error) {
-        throw new WriteStepError(JOURNAL_NAME, error);
-    }
-    tx.journalWritten = true;
-}
-
-function stillAsExpected(d: StagedDoc): boolean {
-    if (d.expect.kind === 'any') return true;
-    const now = inspect(d.targetAbs);
-    if (d.expect.kind === 'absent') return now.kind === 'absent';
-    return now.kind === 'file' && now.sha256 === d.expect.sha256;
-}
-
-export function commitTransaction(tx: Transaction, faults: Faults): void {
-    faults.beforeCommit(tx);
-    let renamed = 0;
-    for (const d of tx.docs) {
-        if (!stillAsExpected(d)) throw new PublicationRefusedError(d.relPath);
-        try {
-            ensureRealDirs(tx.destination, d.dirRel, null);
-            if (d.backupAbs !== null && lexists(d.targetAbs)) {
-                fs.renameSync(d.targetAbs, d.backupAbs);
-                d.backedUp = true;
+        writes.forEach((write, index) => {
+            const newAbs = path.join(stagingAbs, 'new', String(index));
+            try {
+                writeNew(newAbs, write.data);
+            } catch (error) {
+                throw new WriteStepError(write.relPath, error);
             }
-            fs.renameSync(d.tempAbs, d.targetAbs);
-            d.committed = true;
+            commit.items.push({ ...write, newAbs, targetAbs: path.join(destination, ...segments(write.relPath)), backupAbs: null, placed: false });
+        });
+        try {
+            if (faults.failManifestTemp) throw ioFault('open manifest.tmp');
+            writeNew(path.join(stagingAbs, 'manifest.tmp'), manifestBytes);
+        } catch (error) {
+            throw new WriteStepError(manifestName, error);
+        }
+    } catch (error) {
+        fs.rmSync(stagingAbs, { recursive: true, force: true });
+        throw error;
+    }
+    return commit;
+}
+
+export function commitAll(commit: Commit, faults: Faults): void {
+    faults.beforeCommit(commit.destination);
+    for (let i = 0; i < commit.items.length; i++) {
+        const item = commit.items[i];
+        try {
+            ensureRealDirs(commit.destination, item.dirRel, commit.createdDirs);
         } catch (error) {
             if (error instanceof LinkOnTheWayError) throw error;
-            throw new WriteStepError(d.relPath, error);
+            throw new WriteStepError(item.relPath, error);
         }
-        renamed += 1;
-        faults.afterRename(renamed);
+        if (!stillAuthorized(item.targetAbs, item.authorized)) throw new PublicationRefusedError(item.relPath);
+        try {
+            const existing = lstatOrNull(item.targetAbs);
+            if (existing !== null) {
+                // Backed up at commit time, so a target created late under --overwrite is restorable too.
+                const backupAbs = path.join(commit.stagingAbs, 'backup', ...segments(item.relPath));
+                fs.mkdirSync(path.dirname(backupAbs), { recursive: true });
+                if (existing.isFile()) fs.chmodSync(item.newAbs, existing.mode & 0o7777);
+                fs.renameSync(item.targetAbs, backupAbs);
+                item.backupAbs = backupAbs;
+            }
+            faults.beforeRename(i + 1);
+            fs.renameSync(item.newAbs, item.targetAbs);
+            item.placed = true;
+        } catch (error) {
+            throw new WriteStepError(item.relPath, error);
+        }
+        faults.afterRename(i + 1);
     }
     try {
-        fs.renameSync(tx.manifestTempAbs!, path.join(tx.destination, tx.manifestName));
+        if (faults.failManifestRename) throw ioFault('rename manifest');
+        fs.renameSync(path.join(commit.stagingAbs, 'manifest.tmp'), path.join(commit.destination, commit.manifestName));
     } catch (error) {
-        throw new WriteStepError(tx.manifestName, error);
+        throw new WriteStepError(commit.manifestName, error);
     }
-    faults.afterPublish(tx);
 }
 
-const quietly = (action: () => void): void => {
-    try {
-        action();
-    } catch {
-        // already gone
-    }
-};
-
-export function rollbackTransaction(tx: Transaction): { restoreFailure: { relPath: string; error: unknown } | null } {
+export function rollbackAll(commit: Commit, faults: Faults): { restoreFailure: { relPath: string; error: unknown } | null } {
     let restoreFailure: { relPath: string; error: unknown } | null = null;
-    for (const d of [...tx.docs].reverse()) {
+    let restoring = 0;
+    for (const item of [...commit.items].reverse()) {
+        if (item.backupAbs === null && !item.placed) continue;
         try {
-            if (d.backedUp && d.backupAbs !== null) {
-                fs.renameSync(d.backupAbs, d.targetAbs); // restores the original inode, links included
-            } else if (d.committed) {
-                fs.unlinkSync(d.targetAbs);
+            if (item.backupAbs !== null) {
+                restoring += 1;
+                faults.beforeRestore(restoring);
+                fs.renameSync(item.backupAbs, item.targetAbs); // the original inode, links included
+                item.backupAbs = null;
+            } else {
+                fs.unlinkSync(item.targetAbs); // this pull's new file
             }
+            item.placed = false;
         } catch (error) {
-            restoreFailure ??= { relPath: d.relPath, error };
-            continue;
+            restoreFailure ??= { relPath: item.relPath, error };
         }
-        quietly(() => fs.unlinkSync(d.tempAbs));
     }
-    if (tx.manifestTempAbs !== null) quietly(() => fs.unlinkSync(tx.manifestTempAbs!));
-    for (const dir of [...tx.createdDirs].reverse()) quietly(() => fs.rmdirSync(dir));
-    if (restoreFailure === null) quietly(() => fs.unlinkSync(path.join(tx.destination, JOURNAL_NAME)));
+    for (const dir of [...commit.createdDirs].reverse()) {
+        try {
+            fs.rmdirSync(dir);
+        } catch {
+            // not empty, or gone: keep it
+        }
+    }
+    if (restoreFailure === null) fs.rmSync(commit.stagingAbs, { recursive: true, force: true });
     return { restoreFailure };
 }
 
-export function finalizeTransaction(tx: Transaction): Array<{ relPath: string; backupRel: string; error: unknown }> {
-    quietly(() => fs.unlinkSync(path.join(tx.destination, JOURNAL_NAME)));
-    const failures: Array<{ relPath: string; backupRel: string; error: unknown }> = [];
-    for (const d of tx.docs) {
-        if (!d.backedUp || d.backupAbs === null) continue;
-        try {
-            fs.unlinkSync(d.backupAbs);
-        } catch (error) {
-            failures.push({ relPath: d.relPath, backupRel: rel(tx, d.backupAbs), error });
-        }
-    }
-    return failures;
-}
-
-function inside(destination: string, relPath: string): string {
-    if (relPath === '' || path.isAbsolute(relPath) || relPath.split('/').includes('..')) {
-        throw new JournalDamagedError(`journal path ${JSON.stringify(relPath)} is not inside the destination`);
-    }
-    return path.join(destination, ...relPath.split('/'));
-}
-
-export function recoverInterrupted(destination: string, manifestName: string): { action: 'none' } | { action: 'forward' } | { action: 'back'; restored: string[] } {
-    const journalAbs = path.join(destination, JOURNAL_NAME);
-    if (!fs.existsSync(journalAbs)) return { action: 'none' };
-    let journal: Journal;
+export function finalizeCommit(commit: Commit): { error: unknown } | null {
     try {
-        journal = JSON.parse(fs.readFileSync(journalAbs, 'utf8'));
-    } catch {
-        throw new JournalDamagedError('the journal is not valid JSON');
-    }
-    if (journal?.version !== 1 || !Array.isArray(journal.entries) || !Array.isArray(journal.created_dirs)) {
-        throw new JournalDamagedError('the journal has an unknown shape');
-    }
-    const entries = journal.entries.map((e) => ({
-        target: inside(destination, e.target),
-        temp: inside(destination, e.temp),
-        backup: e.backup === null ? null : inside(destination, e.backup),
-        rel: e.target,
-    }));
-    const manifestTemp = journal.manifest_temp === '' ? null : inside(destination, journal.manifest_temp);
-    const dirs = journal.created_dirs.map((d) => inside(destination, d));
-
-    const manifestAbs = path.join(destination, manifestName);
-    const published = fs.existsSync(manifestAbs) && sha256(fs.readFileSync(manifestAbs)) === journal.manifest_sha256;
-    if (published) {
-        for (const e of entries) {
-            if (e.backup !== null) quietly(() => fs.unlinkSync(e.backup!));
-            quietly(() => fs.unlinkSync(e.temp));
-        }
-        if (manifestTemp !== null) quietly(() => fs.unlinkSync(manifestTemp));
-        fs.unlinkSync(journalAbs);
-        return { action: 'forward' };
-    }
-
-    const restored: string[] = [];
-    for (const e of [...entries].reverse()) {
-        if (e.backup !== null && fs.existsSync(e.backup)) {
-            fs.renameSync(e.backup, e.target);
-            restored.push(e.rel);
-        } else if (!fs.existsSync(e.temp)) {
-            quietly(() => fs.unlinkSync(e.target)); // this pull's new file
-        }
-        quietly(() => fs.unlinkSync(e.temp));
-    }
-    if (manifestTemp !== null) quietly(() => fs.unlinkSync(manifestTemp));
-    for (const dir of [...dirs].reverse()) quietly(() => fs.rmdirSync(dir));
-    fs.unlinkSync(journalAbs);
-    return { action: 'back', restored: restored.reverse() };
-}
-
-export function writeFileAtomic(dir: string, name: string, data: string | Buffer): void {
-    const targetAbs = path.join(dir, name);
-    const now = inspect(targetAbs);
-    const tempAbs = writeTemp(dir, data, now.kind === 'file' ? now.mode : null);
-    try {
-        fs.renameSync(tempAbs, targetAbs);
+        fs.rmSync(commit.stagingAbs, { recursive: true, force: false });
+        return null;
     } catch (error) {
-        quietly(() => fs.unlinkSync(tempAbs));
+        return { error };
+    }
+}
+
+function pidRunning(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+}
+
+/** Every leaf (file or link) under `root`, as '/'-joined paths; never follows a link. */
+function walkLeaves(root: string, prefix = ''): string[] {
+    const stat = lstatOrNull(root);
+    if (stat === null) return [];
+    const out: string[] = [];
+    for (const name of fs.readdirSync(root)) {
+        const abs = path.join(root, name);
+        const rel = prefix === '' ? name : `${prefix}/${name}`;
+        const entry = fs.lstatSync(abs);
+        if (entry.isDirectory() && !entry.isSymbolicLink()) out.push(...walkLeaves(abs, rel));
+        else out.push(rel);
+    }
+    return out;
+}
+
+function sameEntry(aAbs: string, bAbs: string): boolean {
+    const a = fs.lstatSync(aAbs);
+    const b = fs.lstatSync(bAbs);
+    if (a.isSymbolicLink() && b.isSymbolicLink()) return fs.readlinkSync(aAbs) === fs.readlinkSync(bAbs);
+    if (a.isFile() && b.isFile()) return fs.readFileSync(aAbs).equals(fs.readFileSync(bAbs));
+    return false;
+}
+
+/** Clean up after a killed pull (spec §1.4). Idempotent: a second run finds nothing to do. */
+export function cleanupLeftovers(destination: string): { restored: string[]; cleaned: number } {
+    const restored: string[] = [];
+    let cleaned = 0;
+    for (const name of fs.readdirSync(destination)) {
+        const match = STAGING_PATTERN.exec(name);
+        if (match === null) continue;
+        const folderAbs = path.join(destination, name);
+        const stat = fs.lstatSync(folderAbs);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new ForeignStagingEntryError(name);
+        const pid = Number(match[1]);
+        if (pid !== process.pid && pidRunning(pid)) throw new AnotherPullRunningError(pid);
+
+        const backupRoot = path.join(folderAbs, 'backup');
+        const differing: string[] = [];
+        for (const rel of walkLeaves(backupRoot)) {
+            const slash = rel.lastIndexOf('/');
+            ensureRealDirs(destination, slash === -1 ? '' : rel.slice(0, slash), []);
+            const backupAbs = path.join(backupRoot, ...segments(rel));
+            const targetAbs = path.join(destination, ...segments(rel));
+            if (lstatOrNull(targetAbs) === null) {
+                fs.renameSync(backupAbs, targetAbs);
+                restored.push(rel);
+            } else if (sameEntry(backupAbs, targetAbs)) {
+                fs.unlinkSync(backupAbs);
+            } else {
+                differing.push(rel);
+            }
+        }
+        if (differing.length > 0) throw new LeftoverDiffersError(name, differing);
+        fs.rmSync(folderAbs, { recursive: true, force: true });
+        cleaned += 1;
+    }
+    return { restored, cleaned };
+}
+
+/** Write `dir/name` through a sibling temp file and a rename: never half-written, never through a link at `name`. */
+export function writeFileAtomic(dir: string, name: string, data: string | Buffer): void {
+    const tempAbs = path.join(dir, `.sa-write-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+    writeNew(tempAbs, data);
+    try {
+        const existing = lstatOrNull(path.join(dir, name));
+        if (existing !== null && existing.isFile()) fs.chmodSync(tempAbs, existing.mode & 0o7777);
+        fs.renameSync(tempAbs, path.join(dir, name));
+    } catch (error) {
+        try {
+            fs.unlinkSync(tempAbs);
+        } catch {
+            // already gone
+        }
         throw error;
     }
 }
 ```
-
-Watch one edge: in recovery, an entry whose backup exists but whose temp also still exists means the target was moved to the backup and the temp was never renamed. Restoring the backup is right there, and the code's order (backup first) handles it.
 
 - [ ] **Step 4: Run GREEN.**
 Run: `npx vitest run --project unit tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-2-green.log`
@@ -613,98 +635,118 @@ Expected: PASS, and the build is clean.
 
 ---
 
-### Task 3: doc pull runs through the transaction (cli#168, cli#188, cli#182)
+### Task 3: doc pull commits through the staging folder (cli#168, cli#188, cli#182)
 
 **Files (file scope):**
 - Modify: `src/commands/doc-pull.ts`:
-  - `docPullWithConfig`: call recovery before the destination checks;
-  - `commitDocs` and `report()`: compute the final manifest before writes, run the transaction, roll back, finalize, then rename cleanup and deletion propagation after publication.
+  - `docPullWithConfig`: the leftover check before the destination checks;
+  - `commitDocs` and `report()`: the final manifest computed before writes, the authorized states, the module calls, rollback, finalize, and rename cleanup plus deletion propagation after publication.
   - Task 1 edited `docPullWithConfig`'s destination block; keep it.
 - Modify: `src/utils/docs-manifest.ts` (`writeManifest` uses `writeFileAtomic`)
-- Create: `tests/doc-pull-transactional.test.ts` (spawned; the failure points)
+- Create: `tests/doc-pull-transactional.test.ts` (spawned; the failure points and leftovers)
 - Modify: `tests/doc-pull-write-safety.test.ts` (the hard-link stand-in tests ~433-478, I1)
 - Modify: `tests/doc-pull-rename-matrix.test.ts` (`sameFileCases` ~619-636 and the "two renamed docs alias each other targets via hardlinks" rows ~744-761, I1)
 - Modify: `tests/doc-pull.test.ts` (the case-only rename hard-link test ~1864-1898, I1)
-- Modify: `tests/doc-pull-display-guard.test.ts` (only `ALLOWED` entries for new printed names that hold no server text, each with a reason, I1)
+- Modify: `tests/doc-pull-display-guard.test.ts` (only `ALLOWED` entries for new printed names that hold no raw server text, each with a reason, I1)
 - Modify: `README.md` (`### doc` section: one paragraph, spec §1.9)
 
 **Interfaces:**
 - Consumes: everything Task 2 produces (`src/utils/doc-pull-writes.ts`).
-- Produces: `commitDocs`'s callers now get the manifest written by the transaction. Task 4 edits the manifest-building rules in `report()`.
+- Produces: `report()` builds `manifestDocs` and a `pendingWarnings: string[]` before any write. Task 4 edits those rules.
 
-**Spec:** §1.2-1.5, §1.8-1.9. Lines (values through `shown()`):
+**Spec:** §1.3-1.5, §1.8, §1.9. Lines (values through `shown()`; `<D>` is the destination):
 - write failure: `error: cannot write <rel>: <error message> — nothing was changed.`
 - publication refusal: `error: <rel> changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.`
-- rollback incomplete: `error: cannot write <rel>: <error message> — could not restore <rel2> (<message>); the next doc pull into this folder finishes the rollback.`
-- leftover backup: `! could not remove <backupRel>: <message> — it is the previous copy of <rel>; delete it yourself`
-- recovery: `! finished an interrupted pull in <destination> (removed its leftover backups)`; `! rolled back an interrupted pull in <destination>: restored <n> file(s)`
-- damaged journal: `error: <destination> holds a damaged pull journal (.solidactions-pull-journal.json) from an interrupted pull; check the .sa-pull-*.bak files next to your docs, then delete the journal and pull again.`
+- rollback incomplete: `error: cannot write <rel>: <error message> — could not restore <rel2> (<message>); its previous copy is in <staging name>/backup/<rel2>.` (the refusal form ends the same way)
+- staging left behind after success: `! could not remove <staging name>: <message> — it holds the previous copies of the files this pull replaced; delete it yourself`
+- leftovers: `! cleaned up after an interrupted doc pull in <D> (restored <n> file(s))`; `error: an interrupted doc pull left saved copies in <D>/<name>; <k> file(s) differ from their saved copies (first: <rel>), so neither was changed. Keep the versions you want, delete that folder, and pull again.`; `error: another doc pull (pid <pid>) is writing to <D>; wait for it to finish.`; `error: <D>/<name> is not a folder doc pull created; remove it and pull again.`
 
 - [ ] **Step 1: Write the failing tests** in `tests/doc-pull-transactional.test.ts`.
   - Fixture: a first pull (`-y`) writes `a.md` (`A1`), `sub/b.md` (`B1`) and media `pic.png` (`P1`).
-  - `snapshot(out)` maps every file under `<out>` (dot-files included) to its bytes, and every regular file to its inode.
-  - Each case serves new versions (`A2`, `B2`, `P2`) and pulls again with `-y`.
-  - "Nothing changed" means: `snapshot` equals the one taken before the pull (bytes and inodes), and no `.sa-pull-*` file or journal exists.
+  - `snapshot(out)` maps every entry under `<out>` (dot-entries included) to its bytes, and every regular file to its inode.
+  - Each case serves `A2`, `B2`, `P2` and pulls again with `-y`.
+  - "Nothing changed" means: `snapshot` equals the one taken before (bytes, inodes, manifest), and no `.solidactions-pull-*` entry exists.
   - Fault cases set `SOLIDACTIONS_TEST_HOOKS=1` and `SOLIDACTIONS_DOC_PULL_TEST_FAULT`.
-  1. **Doc temp fails** (skip on win32/root): `chmod 0o555 <out>/sub` before the pull. Exit 1, the write-failure line for `sub/b.md`, nothing changed.
-  2. **Manifest temp fails** (Sol's case; skip on win32/root). Use a separate fixture whose only doc is `sub/a.md`: a first pull writes it, then `chmod 0o555 <out>` (the root) while `sub/` stays writable. The second pull stages `sub/a.md` fine, then fails creating the manifest temp in the root: exit 1, the write-failure line names `.solidactions-docs.json`, nothing changed.
-  3. **Doc rename fails:** fault `readonly-before-commit:sub` (skip on win32/root). Exit 1, the write-failure line for `sub/b.md`, nothing changed. This includes `a.md`, already renamed and then restored with its original inode.
-  4. **Manifest rename fails:** `<out>/.solidactions-docs.json` is replaced by a non-empty directory before the pull (preserve the real manifest bytes elsewhere; this pull treats the folder as untracked, so pass `--overwrite`). Exit 1, a write-failure line naming `.solidactions-docs.json`, and every doc file keeps its old bytes and inode.
-  5. **Publication refusal (C2):** the server adds a new doc `n.md`, and the fault is `create-before-commit:n.md`. Exit 1, the publication-refusal line for `n.md`, `n.md` reads `RACE`, and everything else is unchanged. The same with `--overwrite`: exit 0, and `n.md` holds the served bytes.
-  6. **Interrupted commit:** fault `kill-after-renames:1`. The child is killed (`signal === 'SIGKILL'`), and the journal exists. A second pull without hooks prints `! rolled back an interrupted pull in <out>: restored 1 file(s)`, then completes. The end state is the new state (`A2`, `B2`, `P2`, a manifest matching them), with no `.sa-pull-*` file and no journal.
-  7. **Interrupted cleanup:** fault `kill-after-publish`. The child is killed, and the manifest already matches the new bytes. A second pull prints `! finished an interrupted pull in <out> (removed its leftover backups)`, and afterwards no `.sa-pull-*` file remains.
-  8. **Cleanup failure:** fault `readonly-after-publish:sub` (skip on win32/root). Exit 0, the leftover-backup line for `sub/b.md`, and the manifest matches the new bytes. Restore the mode.
-  9. **Damaged journal:** write `not json` to `<out>/.solidactions-pull-journal.json`. Exit 1, the damaged-journal line, nothing changed.
-  10. **Hard link (cli#188):** hard-link `<tmp>/outside.md` to `<out>/a.md`. Pull: exit 0, `a.md` reads `A2`, and `outside.md` still reads `A1`.
-  11. **Mode kept:** `chmod 0o600 <out>/a.md` before the pull; afterwards it is still `0o600`.
+  1. **Each doc rename fails:** for `fail-rename:1`, `fail-rename:2` and `fail-rename:3`: exit 1, the write-failure line naming that doc, nothing changed (the docs renamed before it are restored with their original inodes).
+  2. **Manifest temp fails** (`fail-manifest-temp`): exit 1, the write-failure line names `.solidactions-docs.json`, nothing changed.
+  3. **Manifest rename fails** (`fail-manifest-rename`): the same; every doc is restored.
+  4. **Doc temp fails for real** (skip on win32/root): `chmod 0o555 <out>` (the root, where the staging folder must be created). Exit 1, the write-failure line names the `.solidactions-pull-<pid>` folder, nothing changed.
+  5. **Publication refusal (INV-B):** the server adds a new doc `n.md`, and the fault is `create-before-commit:n.md`. Exit 1, the refusal line for `n.md`, `n.md` reads `RACE`, and everything else is unchanged. With `--overwrite`: exit 0, `n.md` holds the served bytes.
+  6. **A planted link:** `link-before-commit:n.md><tmp>/outside.txt`. Without `--overwrite`: exit 1, the refusal line, `outside.txt` unchanged, and the link left in place. With `--overwrite`: exit 0, `n.md` is a regular file, and `outside.txt` is unchanged.
+  7. **Restore failure:** `fail-rename:3,fail-restore:1`. Exit 1, the rollback-incomplete line, and the `.solidactions-pull-<pid>` folder kept. A second, hook-free pull prints the cleaned-up line (the target of the unrestored backup is absent, or holds identical bytes) and completes.
+  8. **Killed mid-commit:** `kill-after-renames:1`. The child is killed (`signal === 'SIGKILL'`), the manifest is the old one, and the staging folder exists.
+     - A second, hook-free pull prints the leftover-differs error and exits 1: `a.md` now holds `A2`, while its saved copy holds `A1`. Both stay, and the folder is kept.
+     - After the test deletes the folder by hand, a third pull with `--overwrite` completes.
+  9. **Killed after only new files:** the server adds `n.md`, ordered first, and the fault is `kill-after-renames:1`. The second pull prints `! cleaned up after an interrupted doc pull in <out> (restored 0 file(s))`, then adopts `n.md` (identical bytes) and completes.
+  10. **Another pull running:** create `<out>/.solidactions-pull-<pid of a live child>` (spawn `sleep 5`). The pull exits 1 with the another-pull line, nothing changed. Kill the child after.
+  11. **A foreign entry:** `<out>/.solidactions-pull-1` as a symlink. Exit 1, the not-a-folder line.
+  12. **Hard link (cli#188):** hard-link `<tmp>/outside.md` to `<out>/a.md`. Pull: exit 0, `a.md` reads `A2`, and `outside.md` still reads `A1`.
+  13. **Mode kept:** `chmod 0o600 <out>/a.md` before the pull; afterwards it is still `0o600`.
 
 - [ ] **Step 2: Run them and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-transactional.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-3-red.log`
-Expected: FAIL on cases 1-10 (case 11 may pass today: say so). Before Step 3, the hooks are inert, so the fault cases fail on their assertions.
+Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are inert before Step 3, so the fault cases fail on their assertions.
 
 - [ ] **Step 3: Implement** in `src/commands/doc-pull.ts`.
-  1. **Recovery** (spec §1.4), at the top of `docPullWithConfig`, before the `previousManifest` read, when `destination` exists:
+  1. **Leftover check** (spec §1.4), at the top of `docPullWithConfig` when `destination` exists, before the `previousManifest` read:
 
 ```ts
         try {
-            const recovery = recoverInterrupted(destination, DOCS_MANIFEST);
-            if (recovery.action === 'forward') {
-                process.stderr.write(chalk.yellow(`! finished an interrupted pull in ${shown(destination)} (removed its leftover backups)\n`));
-            } else if (recovery.action === 'back') {
-                process.stderr.write(chalk.yellow(`! rolled back an interrupted pull in ${shown(destination)}: restored ${recovery.restored.length} file(s)\n`));
+            const leftovers = cleanupLeftovers(destination);
+            if (leftovers.cleaned > 0) {
+                process.stderr.write(chalk.yellow(`! cleaned up after an interrupted doc pull in ${shown(destination)} (restored ${leftovers.restored.length} file(s))\n`));
             }
         } catch (error) {
-            if (!(error instanceof JournalDamagedError)) throw error;
-            process.stderr.write(chalk.red(`error: ${shown(destination)} holds a damaged pull journal (${JOURNAL_NAME}) from an interrupted pull; check the .sa-pull-*.bak files next to your docs, then delete the journal and pull again.\n`));
+            if (error instanceof AnotherPullRunningError) {
+                process.stderr.write(chalk.red(`error: another doc pull (pid ${error.pid}) is writing to ${shown(destination)}; wait for it to finish.\n`));
+            } else if (error instanceof ForeignStagingEntryError) {
+                process.stderr.write(chalk.red(`error: ${shown(path.join(destination, error.entryName))} is not a folder doc pull created; remove it and pull again.\n`));
+            } else if (error instanceof LeftoverDiffersError) {
+                process.stderr.write(chalk.red(`error: an interrupted doc pull left saved copies in ${shown(path.join(destination, error.folderName))}; ${error.differing.length} file(s) differ from their saved copies (first: ${shown(error.differing[0])}), so neither was changed. Keep the versions you want, delete that folder, and pull again.\n`));
+            } else if (error instanceof LinkOnTheWayError) {
+                process.stderr.write(chalk.red(`error: cannot restore an interrupted pull's saved copies: ${shown(error.component)} is a symbolic link or not a directory.\n`));
+            } else {
+                throw error;
+            }
             process.exit(1);
         }
 ```
 
-  2. **Final manifest first** (spec §1.2 step 1). In `report()`, move every rule that changes `manifestDocs` so it runs **before** any write:
+     (`error.pid` is a number. If the display guard flags it, add an `ALLOWED` entry with the reason "a process id, a number".)
+  2. **Final manifest and authorized states first** (spec §1.3 step 2). In `report()`, move every rule that changes `manifestDocs` so it runs **before** any write:
      - today's rule-5 block (a failed download over a local file);
      - the rename-keep block (`!m.replacementWritten` restores the old entry);
      - the single-doc merge.
 
-     Their yellow warning lines go into a `pendingWarnings: string[]`, printed only after publication. `commitDocs` no longer writes: it returns the manifest entries for `planned` (today's entry shape). The final `docs` object, and the bytes `${JSON.stringify({ folder_path: folderPath, docs }, null, 2)}\n`, exist before the transaction starts.
-  3. **The transaction**, replacing today's `commitDocs` call and `writeManifest(destination, manifest)`:
+     Their yellow warning lines go into `pendingWarnings`, printed after publication. `commitDocs` no longer writes: it returns the manifest entries for `planned`, in today's entry shape. Then build:
+
+```ts
+    const writes: PlannedWrite[] = [];
+    for (const p of planned) {
+        const data = p.isMedia ? p.mediaBytes : p.doc.body;
+        if (data === null) continue; // a failed media download writes nothing
+        const targetAbs = path.join(destination, ...p.relPath.split('/'));
+        writes.push({ relPath: p.relPath, dirRel: p.dirRel, data, authorized: authorizedStateOf(targetAbs, options.overwrite === true) });
+    }
+    const manifestBytes = `${JSON.stringify({ folder_path: folderPath, docs }, null, 2)}\n`;
+```
+
+     The authorized states are taken right after wave cli-safety's checks, before anything is written.
+  3. **The commit**, replacing today's `commitDocs` write loop and `writeManifest(destination, manifest)`:
 
 ```ts
     fs.mkdirSync(destination, { recursive: true });
-    const tx = newTransaction(destination, DOCS_MANIFEST);
+    const faults = faultsFromEnv();
+    let commit: Commit | null = null;
     try {
-        for (const p of planned) {
-            const data = p.isMedia ? p.mediaBytes : p.doc.body;
-            if (data === null) continue; // a failed media download writes nothing
-            stageDoc(tx, p.dirRel, p.fileName, p.relPath, data, options.overwrite === true);
-        }
-        stageManifest(tx, manifestBytes);
-        writeJournal(tx);
-        commitTransaction(tx, faultsFromEnv());
+        commit = stageAll(destination, DOCS_MANIFEST, writes, manifestBytes, faults);
+        commitAll(commit, faults);
     } catch (error) {
-        const { restoreFailure } = rollbackTransaction(tx);
+        const restoreFailure = commit === null ? null : rollbackAll(commit, faults).restoreFailure;
+        const stagingName = `${STAGING_PREFIX}${process.pid}`;
         const tail = restoreFailure === null
             ? 'nothing was changed.'
-            : `could not restore ${shown(restoreFailure.relPath)} (${shown((restoreFailure.error as Error).message)}); the next doc pull into this folder finishes the rollback.`;
+            : `could not restore ${shown(restoreFailure.relPath)} (${shown((restoreFailure.error as Error).message)}); its previous copy is in ${shown(`${stagingName}/backup/${restoreFailure.relPath}`)}.`;
         if (error instanceof LinkOnTheWayError) {
             const p = planned.find((q) => q.relPath.startsWith(`${error.component}/`))!;
             refuseLink(p.relPath, error.component, p.doc);
@@ -717,20 +759,21 @@ Expected: FAIL on cases 1-10 (case 11 may pass today: say so). Before Step 3, th
         process.stderr.write(chalk.red(`error: cannot write ${shown(relPath)}: ${shown((error as Error).message)} — ${tail}\n`));
         process.exit(1);
     }
-    for (const leftover of finalizeTransaction(tx)) {
-        process.stderr.write(chalk.yellow(`! could not remove ${shown(leftover.backupRel)}: ${shown((leftover.error as Error).message)} — it is the previous copy of ${shown(leftover.relPath)}; delete it yourself\n`));
+    const leftover = finalizeCommit(commit!);
+    if (leftover !== null) {
+        process.stderr.write(chalk.yellow(`! could not remove ${shown(`${STAGING_PREFIX}${process.pid}`)}: ${shown((leftover.error as Error).message)} — it holds the previous copies of the files this pull replaced; delete it yourself\n`));
     }
     for (const line of pendingWarnings) process.stderr.write(chalk.yellow(`${line}\n`));
 ```
 
-     The `files` list (paths written) is the `relPath` of every `tx.docs` entry with `committed`.
+     `tail` holds only `shown()` parts: add it to the display guard's `ALLOWED` with that reason if the guard flags it. The `files` list (paths written) is every `commit.items` entry with `placed`.
   4. **After publication**, unchanged in logic: compute `writtenIdentities` from the written files, run the rename-cleanup **removal** loop (today's `fs.rmSync` part), print the existing warnings, and run deletion propagation. None of these may run before publication.
   5. `src/utils/docs-manifest.ts`: `writeManifest` becomes `writeFileAtomic(dir, DOCS_MANIFEST, \`${JSON.stringify(manifest, null, 2)}\n\`)`.
-  6. README `### doc` paragraph (spec §1.9): "A `doc pull` is all or nothing: it writes every file to a hidden temp file first and publishes the manifest last, so a failed pull leaves your folder exactly as it was. If a pull is killed mid-way, the next `doc pull` into that folder finishes or rolls it back before doing anything else. `.sa-pull-*` files and `.solidactions-pull-journal.json` belong to that mechanism; leave them unless a pull tells you otherwise."
+  6. README `### doc` paragraph (spec §1.9): "`doc pull` writes everything to a staging folder (`.solidactions-pull-<pid>`) inside the destination first, then moves the files into place and saves the manifest last. If it fails, it puts back every file it replaced and leaves the manifest unchanged. If the process is killed while moving files, the manifest is the old one, and tracked files are always re-checked by hash, so nothing is overwritten silently. The next pull cleans up the leftover folder, or tells you which files to resolve. There is no guarantee after a power loss."
 
 - [ ] **Step 4: Migrate the hard-link stand-ins (I1).** These tests used a hard link to stand in for a case-insensitive alias. After this task, a pull replaces a file through a rename, so a hard link is an **independent** name: it keeps the old bytes, and rename cleanup removes an unmodified old twin. For each test listed in Files:
-  1. Rewrite the Linux hard-link version to assert the new behaviour exactly:
-     - **write-safety "a same-file case-only rename adopts instead of refusing, with no --overwrite":** exit 0, `page.md` reads `NEW5`, `Page.md` is gone (rename cleanup removed the unmodified old twin), the manifest keys are `['page.md']`, and stderr has no `not tracked` and no `kept … same file`.
+  1. Rewrite the Linux hard-link version to assert exactly:
+     - **write-safety "a same-file case-only rename adopts instead of refusing, with no --overwrite":** exit 0, `page.md` reads `NEW5`, `Page.md` is gone, the manifest keys are `['page.md']`, and stderr has no `not tracked` and no `kept … same file`.
      - **write-safety "a cross-alias hard link under --overwrite …":** exit 0. `new5.md`/`new6.md` read `NEW5`/`NEW6B`, `page.md` and `other.md` are gone, stderr has no `kept … same file`, and the manifest is unchanged from today's expectation.
      - **rename-matrix `sameFileCases`** (unmodified source, hard-linked target): the after files become `{ [newRel]: newBytes }` (oldRel removed), with the manifest unchanged.
      - **rename-matrix "two renamed docs alias each other targets via hardlinks":**
@@ -753,7 +796,7 @@ Expected: PASS (the rename matrix takes about a minute). Every skipped test name
 
 **Files (file scope):**
 - Modify: `src/commands/doc-pull.ts`:
-  - the manifest entry for a failed media download (now built before the transaction, Task 3);
+  - the manifest entry for a failed media download (now built before any write, Task 3);
   - the failed-download-over-a-local-file rule;
   - `report()`'s parameters and its two call sites in `docPullWithConfig`.
 - Create: `tests/doc-pull-failed-download.test.ts` (spawned)
@@ -818,40 +861,41 @@ Expected: PASS.
 ### Task 5: one sweep test per invariant (cli#168, cli#188, cli#182, cli#183, cli#190; I2)
 
 **Files (file scope):**
-- Create: `tests/doc-pull-inv-all-or-nothing.test.ts` (INV-1, spawned)
-- Create: `tests/doc-pull-inv-no-link.test.ts` (INV-2, spawned)
-- Create: `tests/doc-pull-inv-no-clobber.test.ts` (INV-3, spawned)
+- Create: `tests/doc-pull-inv-outside.test.ts` (INV-A, spawned)
+- Create: `tests/doc-pull-inv-no-clobber.test.ts` (INV-B, spawned)
+- Create: `tests/doc-pull-inv-honest-manifest.test.ts` (INV-C, spawned)
 
 **Interfaces:**
-- Consumes: the CLI as built after Tasks 1-4, and its test-only fault points (spec §1.5).
+- Consumes: the CLI as built after Tasks 1-4, and its test-only injected failures (spec §1.8).
 - Produces: tests only. If a sweep row fails on the built code, that is a finding: stop and report it with the row. Do not change `src/`.
 
-**Spec:** §1.1 (the invariants), §1.5, §1.7, §2.
+**Spec:** §1.2 (the invariants), §1.7, §1.8, §2.
 
-Each file builds its rows from a table and runs one spawned scenario per row. For each scenario, it prints (in the test title) the row's coordinates.
+Each file builds its rows from a table and runs one spawned scenario per row. Each test title gives the row's coordinates.
 
 - [ ] **Step 1: Write the sweep tests.**
-  - **INV-1 (`doc-pull-inv-all-or-nothing`).** Rows are the product of:
-    - **doc kind:** markdown, media (successful download), media (failed download at an unchanged tracked path, cli#183);
-    - **pull form:** folder pull, single-doc pull;
-    - **target state:** new path, unchanged tracked path, renamed doc (old → new path);
-    - **failure point:** none, doc rename (`readonly-before-commit` of the target's directory), manifest rename (the manifest path is a directory; folder form only), publication refusal (`create-before-commit` at a new target), kill after the first rename then recovery, kill after publish then recovery.
-
-    Prune impossible combinations (say which, in a comment). For every row, the end state, after the second, hook-free pull for kill rows, is exactly the previous snapshot or exactly the new expected state: bytes, manifest entries and inodes of untouched files. No `.sa-pull-*` file and no journal remain. A failed row's stderr has exactly one `error:` line, from spec §1.3.
-  - **INV-2 (`doc-pull-inv-no-link`).** Rows: {markdown, media} × {folder, single-doc} × the link case:
+  - **INV-A, never outside the destination (`doc-pull-inv-outside`).** Rows: {markdown, media} × {folder pull, single-doc pull} × the link case:
     - (a) a tracked file hard-linked to a file outside the destination;
-    - (b) a symlink to an outside file at a new target name **before** the pull, which wave cli-safety refuses at preflight;
-    - (c) a symlink to an outside file planted at a new target name **after staging** (fault `link-before-commit:<rel>><abs outside file>`). This is refused without `--overwrite` (INV-3). With `--overwrite` the link is replaced by a regular file.
+    - (b) a symlink to an outside file at a new target name before the pull, which wave cli-safety refuses;
+    - (c) a symlink to an outside file planted at a new target name after staging (`link-before-commit:<rel>><abs>`), both without and with `--overwrite`;
+    - (d) case (a) plus an injected failure after its rename (`fail-rename:<n+1>`), so the rollback path runs.
 
-    Assert in every row that no byte outside the destination changes.
-  - **INV-3 (`doc-pull-inv-no-clobber`).** Rows: {untracked file at the target at preflight, a file created at the target after staging (`create-before-commit`), a tracked file edited after staging (`create-before-commit` rewriting it)} × {without `--overwrite`: refused, the file's bytes unchanged; with `--overwrite`: replaced} × {markdown, media}.
-  - **Platform rows** (spec §1.7), in INV-1 and INV-3, gated by runtime detection with the reason in the title:
+    In every row, every file outside the destination keeps its bytes and inode.
+  - **INV-B, no clobber (`doc-pull-inv-no-clobber`).** Rows: {an untracked file at the target at preflight, a file created at the target after staging (`create-before-commit`), a tracked file rewritten after staging (`create-before-commit` rewriting it)} × {without `--overwrite`: refused and the bytes unchanged; with `--overwrite`: replaced} × {markdown, media}. Add one composed row: with `--overwrite`, a late file at target 1, then `fail-rename:2`. The late file is restored with its bytes.
+  - **INV-C, honest manifest (`doc-pull-inv-honest-manifest`).** For every row, after the pull exits (0 or 1): every manifest entry with a `body_sha256` matches the sha256 of the file at its path, and an exit-1 row leaves the manifest bytes identical to before. Rows are the product of:
+    - **doc kind:** markdown, media;
+    - **pull form:** folder, single-doc;
+    - **target state:** new path, unchanged tracked path, renamed doc;
+    - **outcome:** success, `fail-rename:1`, `fail-manifest-temp`, `fail-manifest-rename`, publication refusal.
+
+    Add a **mixed fixture** (I2/N5): one media doc whose download fails at an unchanged tracked path (cli#183), next to a staged markdown sibling, with outcomes success and `fail-rename:1`. In both, the failed doc's entry equals its previous entry, and on failure the sibling is restored. Prune impossible combinations, listed in a comment.
+  - **Platform rows** (spec §1.7), in INV-B and INV-C, gated by runtime detection with the reason in the title:
     - a case-only rename on a case-insensitive filesystem;
     - an NFC/NFD name pair on a normalising filesystem;
-    - (INV-2) the no-`O_NOFOLLOW` path, which skips unless `fs.constants.O_NOFOLLOW` is undefined.
+    - (INV-A) the no-`O_NOFOLLOW` path, which skips unless `fs.constants.O_NOFOLLOW` is undefined.
 
 - [ ] **Step 2: Run them.** Run the heavy-run gate first.
-Run: `npm run build && npx vitest run --project unit tests/doc-pull-inv-all-or-nothing.test.ts tests/doc-pull-inv-no-link.test.ts tests/doc-pull-inv-no-clobber.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-5-sweeps.log`
+Run: `npm run build && npx vitest run --project unit tests/doc-pull-inv-outside.test.ts tests/doc-pull-inv-no-clobber.test.ts tests/doc-pull-inv-honest-manifest.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-5-sweeps.log`
 Expected: PASS, with every skip naming its reason. No RED step applies: these pin behaviour Tasks 1-4 built. Show each test is real by temporarily breaking one assertion per file (note it in the report, then restore it).
 
 - [ ] **Step 3: Report (do not commit).** List every changed path, the row counts per file (run / skipped with reasons), the run with its counts and log path, and any row that failed (as a finding).
