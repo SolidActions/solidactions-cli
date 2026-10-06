@@ -983,3 +983,20 @@ Run: `npm run build && npx vitest run --project unit tests/doc-pull-inv-outside.
 Expected: PASS, with every skip naming its reason. No RED step applies: these pin behaviour Tasks 1-4 built. Show each test is real by temporarily breaking one assertion per file (note it in the report, then restore it).
 
 - [ ] **Step 3: Report (do not commit).** List every changed path, the row counts per file (run / skipped with reasons), the run with its counts and log path, and any row that failed (as a finding).
+
+## Continue here
+
+(Manager context wall, 2026-10-06. The build card task-buildclidocpull-c955 and the ledger `.superpowers/sdd/2026-10-05-cli-docpull/progress.md` hold the details.)
+
+- **Task 1:** committed 10a5e90. Code accepted by Sol under the PM exception; the evidence was closed per the PM ruling (manager tsc log).
+- **Task 2:** uncommitted in the slot (`src/utils/doc-pull-writes.ts`, `tests/doc-pull-writes.test.ts`).
+  - Sol's review task-reviewtask2pm-b7b3 was REQUEST CHANGES 4b9cdcb (F1 staging-side parents, F2 evidence, M1 cleanup).
+  - Fix round 1 (task-task2fixround1-65b0) is DONE.
+  - Scoped re-review **task-rereviewtask2fix-b63e** is OPEN with reviewer-sol, at head tree 78014ab (HEAD 10a5e90 plus Task 2's two files).
+  - On APPROVE: commit exactly those two paths, and check that their blobs equal tree 78014ab's.
+- **Next:** Task 3 (integration), then Tasks 4 and 5, then final review 1.
+  - Routing (PM rulings on the build card): implementation goes to dev-muse when free, otherwise dev-sonnet. Per-task reviews go to dev-muse or dev-strong when free, otherwise reviewer-sol under the PM exception (mail the PM first so Sol is restarted fresh). Never review in the author's pool.
+  - Card generators: `.superpowers/sdd/2026-10-05-cli-docpull/mkcard.py` and `mkreview.py`.
+  - A per-task package must contain only that task's paths. Build it with a temporary index (read-tree HEAD, add the paths, write-tree).
+- **Rulings so far** (ledger): the wording item is fixed inline in Task 3; Task 1's readManifest try/catch is not needed; the F1 fix shape anchors every staging path at the destination.
+- **Wave card task-waveclidocpull-da80 metadata:** plan keys only (N = 0, verdict none, all issues planned). No final review has run yet.
