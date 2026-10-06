@@ -160,6 +160,22 @@ export function faultsFromEnv(env: NodeJS.ProcessEnv = process.env): Faults {
             case 'change-after-writes':
                 faults.afterWrites = (destination) => fs.writeFileSync(path.join(destination, ...segments(arg)), 'CHANGED');
                 break;
+            case 'break-after-writes': {
+                // `<how>:<rel>`: the entry at <rel> is made uninspectable before the outcomes are decided (cli#168 FR5).
+                const [how, rel = ''] = arg.split(/:(.*)/s);
+                faults.afterWrites = (destination) => {
+                    const abs = path.join(destination, ...segments(rel));
+                    if (how === 'chmod0') {
+                        fs.chmodSync(abs, 0o000);
+                        return;
+                    }
+                    fs.rmSync(abs, { recursive: true, force: true });
+                    if (how === 'folder') fs.mkdirSync(abs);
+                    else if (how === 'file') fs.writeFileSync(abs, 'BLOCKER');
+                    else if (how === 'loop') fs.symlinkSync(path.basename(abs), abs);
+                };
+                break;
+            }
             case 'link-before-commit': {
                 const [linkRel, linkTarget] = arg.split('>');
                 faults.beforeWrites = (destination) => fs.symlinkSync(linkTarget, path.join(destination, ...segments(linkRel)));

@@ -981,6 +981,8 @@ export interface RenameMove {
     replacementWritten: boolean;
     /** `new` is the very file at `old` (a case-only rename on a case-insensitive filesystem). */
     targetIsSource: boolean;
+    /** Why `old` could not be checked when the rename was planned (any error but ENOENT): the outcome refuses the manifest with it (cli#168, issuecomment-6025529901). */
+    sourceError?: string;
 }
 
 /** What one planned doc came to, which is all the manifest is made of (spec §1.3, PM ruling 12 rule 3). */
@@ -992,6 +994,12 @@ export interface DocOutcome {
     placed: Map<string, ManifestEntry>;
     /** The earlier entries the doc keeps, by path: a refused doc's, a kept-previous one's, a placed renamed doc's old twin after a stop. */
     kept: Map<string, ManifestEntry>;
+    /**
+     * A path this outcome depends on that the pull cannot vouch for: an inspection error or a non-regular entry, never
+     * "absent" (only ENOENT is). The INV-C gate refuses the manifest with it, so no tracking is dropped (cli#168,
+     * issuecomment-6025529901).
+     */
+    refusal?: { rel: string; reason: string };
 }
 
 /** True when anything at all (a link included) is at `abs`. */
@@ -1004,24 +1012,37 @@ function entryExists(abs: string): boolean {
     }
 }
 
-/** A regular file (following links) at `rel`, and the hash of its bytes; the hash is null when there is none or it cannot be read. */
-function localFile(destination: string, rel: string): { present: boolean; hash: string | null } {
-    const abs = path.join(destination, ...rel.split('/'));
+/** The error code and Node's description of a filesystem failure, without the path Node appends: `EACCES: permission denied`. */
+function describeError(error: unknown): string {
+    const match = /^[A-Z0-9]+: ([^,]+)/.exec(error instanceof Error ? error.message : '');
+    return match === null ? errnoOf(error) : `${errnoOf(error)}: ${match[1]}`;
+}
+
+/** What `lstat` finds at `rel`: nothing (only ENOENT), the entry, or why it cannot be checked. */
+function inspect(destination: string, rel: string): { kind: 'absent' } | { kind: 'entry'; stat: fs.Stats } | { kind: 'error'; reason: string } {
     try {
-        if (!fs.statSync(abs).isFile()) return { present: false, hash: null };
-    } catch {
-        return { present: false, hash: null };
-    }
-    try {
-        return { present: true, hash: sha256Hex(fs.readFileSync(abs)) };
-    } catch {
-        return { present: true, hash: null };
+        return { kind: 'entry', stat: fs.lstatSync(path.join(destination, ...rel.split('/'))) };
+    } catch (error) {
+        return errnoOf(error) === 'ENOENT' ? { kind: 'absent' } : { kind: 'error', reason: `cannot check it (${describeError(error)})` };
     }
 }
 
-/** What is at `rel` when a failed download's earlier entry is dropped for want of its file (manager ruling on cli#168 I1(b)): a string literal. */
-function absentState(destination: string, rel: string): string {
-    return entryExists(path.join(destination, ...rel.split('/'))) ? 'is not a regular file' : 'is not present locally';
+/**
+ * What is at a path a doc's outcome depends on (cli#168, issuecomment-6025529901): `absent` only on ENOENT; a regular file
+ * (no link) and the hash of its bytes; otherwise a refusal naming why the pull cannot vouch for it.
+ */
+function localState(destination: string, rel: string): { kind: 'absent' } | { kind: 'file'; hash: string } | { kind: 'refused'; reason: string } {
+    const found = inspect(destination, rel);
+    if (found.kind === 'absent') return found;
+    if (found.kind === 'error') return { kind: 'refused', reason: found.reason };
+    if (found.stat.isDirectory()) return { kind: 'refused', reason: 'is a folder, not a file' };
+    if (found.stat.isSymbolicLink()) return { kind: 'refused', reason: 'is a symbolic link, not a file' };
+    if (!found.stat.isFile()) return { kind: 'refused', reason: 'is not a regular file' };
+    try {
+        return { kind: 'file', hash: sha256Hex(fs.readFileSync(path.join(destination, ...rel.split('/')))) };
+    } catch (error) {
+        return { kind: 'refused', reason: `cannot read it (${describeError(error)})` };
+    }
 }
 
 /**
@@ -1030,6 +1051,9 @@ function absentState(destination: string, rel: string): string {
  * path is the one the entry names; a doc the pull never got to keeps its earlier entry. An earlier entry with a hash is
  * kept only while a file is at its path: a missing file drops the doc's tracking with a warning (manager ruling on cli#168,
  * issuecomment-6013479498, I1(b)), so the gate never meets a kept entry with a hash for a missing file.
+ * "Missing" is only ENOENT: every path an outcome depends on is classified by `localState`, and an inspection error or a
+ * non-regular entry there makes the outcome carry a `refusal`, which the gate refuses the manifest with, so no tracking is
+ * dropped or relabelled (cli#168, issuecomment-6025529901).
  * `pendingWarnings` receives the `! …` lines printed after a successful pull.
  */
 export function decideOutcomes(
@@ -1061,12 +1085,25 @@ export function decideOutcomes(
         if (!failedDownload(p)) {
             if (placedPaths.has(p.relPath)) {
                 // A stopped pull never removes a renamed doc's old twin, so that file keeps its tracking too (listed first, so
-                // the next pull sees the rename and finishes it). A twin that is gone keeps no entry with a hash (I1(b)).
-                const move = stopped ? renameMoves.find((m) => m.id === p.doc.id && m.sourcePresent) : undefined;
+                // the next pull sees the rename and finishes it). A twin that is gone keeps no entry (I1(b)); one the pull
+                // cannot vouch for keeps its entry and refuses the manifest. A complete pull retires the old entry (cli#157),
+                // but an old name it cannot even check could hold edits nobody verified, so that refuses too; a folder or a
+                // link there is still nothing to keep or remove.
+                const move = renameMoves.find((m) => m.id === p.doc.id);
                 const oldEntry = move === undefined ? undefined : entryAt(previousManifest, move.oldRel);
-                const kept = new Map<string, ManifestEntry>();
-                if (move !== undefined && oldEntry !== undefined && (oldEntry.body_sha256 == null || localFile(destination, move.oldRel).present)) kept.set(move.oldRel, oldEntry);
-                outcomes.push({ id: p.doc.id, kind: 'placed', placed: new Map([[p.relPath, entry]]), kept });
+                const outcome: DocOutcome = { id: p.doc.id, kind: 'placed', placed: new Map([[p.relPath, entry]]), kept: new Map() };
+                if (move?.sourceError !== undefined) {
+                    if (oldEntry !== undefined) outcome.kept.set(move.oldRel, oldEntry);
+                    outcome.refusal = { rel: move.oldRel, reason: move.sourceError };
+                } else if (move !== undefined && oldEntry !== undefined && stopped) {
+                    const old = localState(destination, move.oldRel);
+                    if (old.kind !== 'absent') outcome.kept.set(move.oldRel, oldEntry);
+                    if (old.kind === 'refused') outcome.refusal = { rel: move.oldRel, reason: old.reason };
+                } else if (move !== undefined && oldEntry !== undefined) {
+                    const old = inspect(destination, move.oldRel);
+                    if (old.kind === 'error') outcome.refusal = { rel: move.oldRel, reason: old.reason };
+                }
+                outcomes.push(outcome);
             } else {
                 outcomes.push({ id: p.doc.id, kind: 'refused', placed: new Map(), kept: new Map(earlierById.get(p.doc.id)) });
             }
@@ -1087,33 +1124,44 @@ export function decideOutcomes(
         //
         // cli#190: if that local file is another doc's (tracked with a hash at this path), that
         // doc's tracking is kept when it is still on the server and not moved by this pull.
+        //
+        // An inspection error or a non-regular entry at the path is never "absent": the doc keeps its earlier entries
+        // and the gate refuses the manifest. The previous owner's entry is never replaced by this doc's id with no hash.
         const tracked = entryAt(previousManifest, p.relPath);
-        const local = localFile(destination, p.relPath);
+        const local = localState(destination, p.relPath);
+        if (local.kind === 'refused') {
+            outcomes.push({ id: p.doc.id, kind: 'refused', placed: new Map(), kept: new Map(earlierById.get(p.doc.id)), refusal: { rel: p.relPath, reason: local.reason } });
+            continue;
+        }
         const ownEntry = tracked !== undefined && tracked.id === p.doc.id ? tracked : undefined;
-        if (ownEntry !== undefined && (ownEntry.body_sha256 == null ? !local.present : local.hash === ownEntry.body_sha256)) {
+        if (ownEntry !== undefined && (ownEntry.body_sha256 == null ? local.kind === 'absent' : local.kind === 'file' && local.hash === ownEntry.body_sha256)) {
             outcomes.push({ id: p.doc.id, kind: 'kept-previous', placed: new Map(), kept: new Map([[p.relPath, ownEntry]]) });
             continue;
         }
-        if (ownEntry !== undefined && ownEntry.body_sha256 != null && !local.present) {
+        if (ownEntry !== undefined && ownEntry.body_sha256 != null && local.kind === 'absent') {
             outcomes.push({ id: p.doc.id, kind: 'dropped', placed: new Map(), kept: new Map() });
-            const state = absentState(destination, p.relPath);
-            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} ${state}; not tracking it — pull again later.`);
+            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} is not present locally; not tracking it — pull again later.`);
             continue;
         }
-        if (!local.present) {
+        const otherOwner = tracked !== undefined && tracked.id !== p.doc.id ? tracked : undefined;
+        if (local.kind === 'absent' && otherOwner === undefined) {
             outcomes.push({ id: p.doc.id, kind: 'placed', placed: new Map([[p.relPath, entry]]), kept: new Map() });
             continue;
         }
-        const otherDoc = tracked !== undefined && tracked.id !== p.doc.id && tracked.body_sha256 != null ? tracked : undefined;
+        const otherDoc = otherOwner !== undefined && otherOwner.body_sha256 != null ? otherOwner : undefined;
         outcomes.push({ id: p.doc.id, kind: 'dropped', placed: new Map(), kept: new Map() });
-        if (otherDoc !== undefined && local.hash === otherDoc.body_sha256 && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
+        if (otherDoc !== undefined && local.kind === 'file' && local.hash === otherDoc.body_sha256 && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
             outcomes.push({ id: otherDoc.id, kind: 'kept-previous', placed: new Map(), kept: new Map([[p.relPath, otherDoc]]) });
             pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds doc ${otherDoc.id}'s file ("${shown(otherDoc.title)}"); still tracking it as doc ${otherDoc.id} — pull again later`);
             continue;
         }
         // A pull that stopped keeps every earlier entry of a doc it has no outcome for, so it takes no tracking from that doc.
-        const lost = otherDoc === undefined || stopped ? '' : ` Doc ${otherDoc.id} ("${shown(otherDoc.title)}") was tracked at ${shown(p.relPath)} before and is no longer tracked there.`;
-        pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later.${lost}`);
+        const lost = otherOwner === undefined || stopped ? '' : ` Doc ${otherOwner.id} ("${shown(otherOwner.title)}") was tracked at ${shown(p.relPath)} before and is no longer tracked there.`;
+        if (local.kind === 'absent') {
+            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} is not present locally; not tracking it — pull again later.${lost}`);
+        } else {
+            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later.${lost}`);
+        }
     }
 
     // A rename whose replacement is NOT written (a failed media download plans a new path but
@@ -1124,15 +1172,18 @@ export function decideOutcomes(
     for (const m of renameMoves) {
         if (m.replacementWritten) continue;
         const oldEntry = entryAt(previousManifest, m.oldRel);
-        const local = localFile(destination, m.oldRel);
-        if (oldEntry !== undefined && oldEntry.body_sha256 != null && !local.present) {
+        const local: ReturnType<typeof localState> = m.sourceError === undefined ? localState(destination, m.oldRel) : { kind: 'refused', reason: m.sourceError };
+        if (local.kind === 'refused') {
+            outcomes.push({ id: m.id, kind: 'refused', placed: new Map(), kept: new Map(earlierById.get(m.id)), refusal: { rel: m.oldRel, reason: local.reason } });
+            continue;
+        }
+        if (oldEntry !== undefined && oldEntry.body_sha256 != null && local.kind === 'absent') {
             outcomes.push({ id: m.id, kind: 'dropped', placed: new Map(), kept: new Map() });
-            const state = absentState(destination, m.oldRel);
-            pendingWarnings.push(`! doc ${m.id} ("${shown(m.title)}") failed to download and ${shown(m.oldRel)} ${state}; not tracking it — pull again later.`);
+            pendingWarnings.push(`! doc ${m.id} ("${shown(m.title)}") failed to download and ${shown(m.oldRel)} is not present locally; not tracking it — pull again later.`);
             continue;
         }
         outcomes.push({ id: m.id, kind: 'kept-previous', placed: new Map(), kept: oldEntry === undefined ? new Map() : new Map([[m.oldRel, oldEntry]]) });
-        if (local.present) {
+        if (local.kind === 'file') {
             pendingWarnings.push(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}`);
         } else {
             pendingWarnings.push(`! doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}, which is not present locally`);
@@ -1200,9 +1251,14 @@ const errnoOf = (error: unknown): string => (error as NodeJS.ErrnoException).cod
  *    touched by this run, and is not read: a folder or an edited file at that name is the refusal's own state.
  * The three exceptions to PM ruling 13 (a refused doc's carried entry is not read; a kept entry's missing file is NOT
  * one; EPERM like EACCES for a placed file) are the manager ruling on cli#168, issuecomment-6013479498.
+ * First of all, an outcome's own `refusal` (a path it depends on that `decideOutcomes` could not vouch for: an inspection
+ * error or a non-regular entry, cli#168 issuecomment-6025529901) is the problem.
  * Returns the first problem, or null.
  */
 export function manifestProblem(destination: string, manifest: DocsManifest, outcomes: DocOutcome[], placedFiles: Map<string, { hash: string; identity: string }>): { rel: string; reason: string } | null {
+    for (const outcome of outcomes) {
+        if (outcome.refusal !== undefined) return outcome.refusal;
+    }
     const byKey = new Map<string, string>();
     for (const rel of Object.keys(manifest.docs)) {
         const key = nameKey(rel);
@@ -1346,11 +1402,14 @@ async function report(
             if (old === undefined || old === p.relPath) continue;
             const absOld = path.join(destination, ...old.split('/'));
             let sourceStat: fs.Stats | null = null;
+            let sourceError: string | undefined;
             try {
                 const stat = fs.statSync(absOld);
                 if (stat.isFile()) sourceStat = stat;
-            } catch {
+            } catch (error) {
                 sourceStat = null;
+                // Only ENOENT is "no source"; any other failure is a source nobody could check for edits.
+                if (errnoOf(error) !== 'ENOENT') sourceError = `cannot check it (${describeError(error)})`;
             }
             let modified = false;
             let targetIsSource = false;
@@ -1382,6 +1441,7 @@ async function report(
                 // A failed media download plans a new path but writes nothing there.
                 replacementWritten: !p.isMedia || p.mediaBytes !== null,
                 targetIsSource,
+                ...(sourceError === undefined ? {} : { sourceError }),
             });
         }
         const plannedPaths = new Map(planned.map((p) => [p.relPath, p]));
