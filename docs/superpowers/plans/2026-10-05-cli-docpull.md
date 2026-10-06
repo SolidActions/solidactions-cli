@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sa-subagent-driven-development to implement this plan task-by-task (the wave's build step). Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded in part (PM ruling 12, 2026-10-06, on cli#168 and build card task-buildclidocpull-c955):** after final reviews 1 and 2 found the same integrity families twice, the PM adopted the Fable seat's design review (task-designreviewcli-2b13): `doc pull` stops on the first error and records exactly what was written; the staging folder, rollback, leftover recovery and pid checks were removed; one `O_EXCL` lock file guards concurrency; the manifest is a pure function of per-doc outcomes with an INV-C runtime gate. The spec's §1 was rewritten to match (commit d25fcc6). Tasks 2-3 below describe the original staging design as built and reviewed; the code no longer follows them where ruling 12 differs.
+
 **Goal:** `doc pull` leaves the previous files and manifest on any in-process failure, cleans up after a killed pull, and never writes outside the destination or over a file it doesn't own, even one created after its checks. It also keeps tracking that a failed download would lose, and fails loudly on an unreadable destination or a missing terminal.
 
 **Architecture (PM ruling 7, spec §1):**
@@ -986,9 +988,8 @@ Expected: PASS, with every skip naming its reason. No RED step applies: these pi
 
 ## Continue here
 
-(Manager, 2026-10-06, before final review 2. The build card task-buildclidocpull-c955 and the ledger `.superpowers/sdd/2026-10-05-cli-docpull/progress.md` hold the details.)
+(Manager, 2026-10-06, before final review 3. The build card task-buildclidocpull-c955 and the ledger `.superpowers/sdd/2026-10-05-cli-docpull/progress.md` hold the details.)
 
-- **Tasks 1-5 are committed** (T1 10a5e90, T2 c5bb697, T3 fdaa073, T4 8eeaf0b, T5 7af17b1). Each passed a per-task review by reviewer-sol under the PM's exception (dev-sonnet implemented every task: the editor wave held dev-muse).
-- **Final review 1** (7af17b1): Sol and Fable in parallel, both REQUEST CHANGES. PM ruling 11 (on cli#168): C2 option B, C3 option A. One fix card (task-finalreviewfix-3d8e, dev-sonnet) addressed all 12 items; committed 22cf6be.
-- **Filed:** cli#200, cli#201 (test hygiene), cli#202 (pid liveness), cli#203 (nits), cli#204 (removal re-check).
-- **Next:** final review 2 at the head after this commit: Sol and Fable fresh, delta-only (PM ruling 11). Mail the PM before creating the cards.
+- Tasks 1-5 committed; final review 1 (7af17b1, Sol + Fable) and final review 2 (25365d1, Sol) REQUEST CHANGES; fix round 1 22cf6be; PM ruling 12 redesign = fix round 2 d25fcc6.
+- **Filed:** cli#200, cli#201, cli#203, cli#204, cli#205; cli#202 closed (obsolete under ruling 12).
+- **Next:** final review 3 at the head after this commit: Sol, delta-only (verify FR2's findings against ruling 12, review the fix diff). Mail the PM before creating the card.
