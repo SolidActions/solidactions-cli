@@ -562,12 +562,17 @@ describe('doc pull never writes outside the destination or through a link (cli#1
                 expect(Object.keys(manifestJson().docs)).not.toContain('pic.png');
             });
 
-            it('prints the prompt text naming the untracked-file refusal when the destination is not empty', async () => {
+            it('fails with the no-terminal line, not the prompt, when the destination is not empty and nothing can answer it', async () => {
                 fs.writeFileSync(path.join(dest, 'Note.md'), NOTE_BYTES);
+                const before = world(root);
 
                 const result = await runPullArgs(root, ['doc', 'pull', 'docs', dest]);
 
-                expect(result.stdout).toContain("Pulling overwrites tracked files; local files the folder doesn't track are refused unless --overwrite.");
+                // The prompt text itself is covered through a real terminal in tests/doc-pull-destination-checks.test.ts.
+                expect(result.code).toBe(1);
+                expect(result.stderr).toContain(`error: ${dest} is not empty and there is no terminal to confirm the pull; pass -y to pull into it.`);
+                expect(result.stdout).not.toContain('Continue?');
+                expect(world(root)).toEqual(before);
             });
         });
     });

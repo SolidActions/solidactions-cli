@@ -590,13 +590,24 @@ export async function docPullWithConfig(
     // in report() — only once the server walk is known can it tell a real conflict (the
     // doc still exists remotely) from an edited orphan (kept + warned, no flag needed).
     if (fs.existsSync(destination)) {
-        if (!fs.statSync(destination).isDirectory()) {
-            process.stderr.write(chalk.red(`error: destination "${shown(destination)}" exists and is not a directory.\n`));
+        let entries: string[];
+        try {
+            if (!fs.statSync(destination).isDirectory()) {
+                process.stderr.write(chalk.red(`error: destination "${shown(destination)}" exists and is not a directory.\n`));
+                process.exit(1);
+            }
+            entries = fs.readdirSync(destination);
+        } catch (error) {
+            // cli#191: one line naming the destination, never a raw scandir stack.
+            process.stderr.write(chalk.red(`error: cannot read ${shown(destination)}: ${shown((error as Error).message)}\n`));
             process.exit(1);
         }
-
-        const entries = fs.readdirSync(destination);
         if (entries.length > 0 && !options.yes && !options.overwrite) {
+            if (process.stdin.isTTY !== true) {
+                // cli#176: nobody can answer the prompt; a script must not read "Cancelled" as success.
+                process.stderr.write(chalk.red(`error: ${shown(destination)} is not empty and there is no terminal to confirm the pull; pass -y to pull into it.\n`));
+                process.exit(1);
+            }
             console.log(chalk.yellow(`Destination "${shown(destination)}" is not empty (${entries.length} items).`));
             console.log(chalk.yellow("Pulling overwrites tracked files; local files the folder doesn't track are refused unless --overwrite."));
             const response = await prompts({

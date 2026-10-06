@@ -12,7 +12,6 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/doc-pull';
 import type { DocsManifest } from '../src/commands/doc-pull';
@@ -890,40 +889,9 @@ describe('docPullWithConfig — single-doc fallback', () => {
 // ---------------------------------------------------------------------------
 
 describe('docPullWithConfig — overwrite confirm', () => {
-    it('non-empty dest without --yes: declining the prompt exits 0 and writes nothing', async () => {
-        const { dir: tmpDest, cleanup } = makeTmpDir();
-        const dest = path.join(tmpDest, 'out');
-        fs.mkdirSync(dest, { recursive: true });
-        fs.writeFileSync(path.join(dest, 'existing.txt'), 'hi', 'utf8');
-
-        responseQueue = [
-            makeMcpSuccess({
-                folders: [],
-                docs: [{ id: 1, title: 'brief', properties: {} }],
-            }),
-        ];
-
-        const restoreExit = patchProcessExit();
-        const { lines: logLines, restore: restoreStdout } = captureStdout();
-
-        try {
-            prompts.inject([false]);
-            const code = await runExpectingExit(() => docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
-            expect(code).toBe(0);
-
-            // No MCP calls at all — confirmation happens before any network I/O
-            expect(allCaptures.length).toBe(0);
-            // Existing file untouched, no manifest written
-            expect(fs.existsSync(path.join(dest, 'existing.txt'))).toBe(true);
-            expect(fs.existsSync(path.join(dest, DOCS_MANIFEST))).toBe(false);
-            expect(fs.existsSync(path.join(dest, 'brief.md'))).toBe(false);
-            expect(logLines.join('\n')).toContain('Cancelled');
-        } finally {
-            restoreExit();
-            restoreStdout();
-            cleanup();
-        }
-    });
+    // Declining the prompt (exit 0, nothing written) is covered through a real terminal in
+    // tests/doc-pull-destination-checks.test.ts; in-process there is no terminal, so the pull now
+    // fails with the no-terminal line instead of prompting (cli#176).
 
     it('--yes bypasses the confirmation on a non-empty dest', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
