@@ -703,7 +703,7 @@ export async function docPullWithConfig(
         const docFolder = typeof data.folder_path === 'string' ? data.folder_path : (dir === '.' ? '' : dir);
         refuseManifestClobber(previousManifest, docFolder, folderPath, destination, options);
 
-        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback);
+        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback, new Set([data.id]));
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${shown(listResult.code)}: ${shown(listResult.message)}\n`));
@@ -713,7 +713,7 @@ export async function docPullWithConfig(
 
     const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
     const typeWarnings = await backfillDocTypes(config, fetched);
-    await report(destination, folderPath, fetched, options, config, [...fetchWarnings, ...typeWarnings], previousManifest, usedSingleDocFallback);
+    await report(destination, folderPath, fetched, options, config, [...fetchWarnings, ...typeWarnings], previousManifest, usedSingleDocFallback, new Set(rows.map((row) => row.id)));
 }
 
 /**
@@ -928,6 +928,7 @@ async function report(
     extraWarnings: string[],
     previousManifest: DocsManifest | null,
     usedSingleDocFallback: boolean,
+    listedIds: Set<number>,
 ): Promise<void> {
     // Single-doc fallback merging into a manifest that tracks the same folder
     // must not steal a filename another tracked doc owns (cli#153 C1): the
@@ -1194,15 +1195,26 @@ async function report(
     const pendingWarnings: string[] = [];
     const manifestDocs = manifestEntriesFor(planned);
 
+    // cli#183: a failed download at a path the previous manifest tracked for the same doc keeps
+    // that entry unchanged (revision and hash), as a failed rename does: nothing was written,
+    // so the manifest must not claim a newer revision or drop the hash of the file still there.
+    //
     // cli#167: a media doc whose download failed must not be tracked over a
     // local file the previous manifest does not track, with a hash, for that
     // same doc: nothing is written, so the manifest would claim bytes the
     // pull never gave it. A rename keeps its restore-old-entry handling below.
+    //
+    // cli#190: if that local file is another doc's (tracked with a hash at this path), that
+    // doc's tracking is kept when it is still on the server and not moved by this pull.
     const renamedIds = new Set(renameMoves.map((m) => m.id));
+    const plannedIds = new Set(planned.map((q) => q.doc.id));
     for (const p of planned) {
         if (!p.isMedia || p.mediaBytes !== null || renamedIds.has(p.doc.id)) continue;
         const tracked = previousManifest?.docs[p.relPath];
-        if (tracked !== undefined && tracked.id === p.doc.id && tracked.body_sha256 != null) continue;
+        if (tracked !== undefined && tracked.id === p.doc.id) {
+            manifestDocs[p.relPath] = tracked;
+            if (tracked.body_sha256 != null) continue;
+        }
         let holdsLocalFile = false;
         try {
             holdsLocalFile = fs.statSync(path.join(destination, ...p.relPath.split('/'))).isFile();
@@ -1210,8 +1222,15 @@ async function report(
             holdsLocalFile = false;
         }
         if (!holdsLocalFile) continue;
+        const otherDoc = tracked !== undefined && tracked.id !== p.doc.id && tracked.body_sha256 != null ? tracked : undefined;
         delete manifestDocs[p.relPath];
-        pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later`);
+        if (otherDoc !== undefined && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
+            manifestDocs[p.relPath] = otherDoc;
+            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds doc ${otherDoc.id}'s file ("${shown(otherDoc.title)}"); still tracking it as doc ${otherDoc.id} — pull again later`);
+            continue;
+        }
+        const lost = otherDoc === undefined ? '' : ` Doc ${otherDoc.id} ("${shown(otherDoc.title)}") was tracked at ${shown(p.relPath)} before and is no longer tracked there.`;
+        pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later.${lost}`);
     }
 
     // A rename whose replacement is NOT written (a failed media download plans a new path but

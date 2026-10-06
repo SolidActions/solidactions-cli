@@ -34,6 +34,7 @@ const ALLOWED: Record<string, string> = {
     'error.pid': 'a process id, a number',
     tail: 'built from shown() parts and string literals where it is assigned (the commit failure lines)',
     line: 'a pendingWarnings entry, built from shown() parts where it is pushed',
+    lost: 'built from shown() parts',
 };
 
 interface Interpolation {
