@@ -22,6 +22,17 @@ import { writeGlobal } from './helpers';
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 const MANIFEST_FILE = '.solidactions-docs.json';
 
+/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
+function caseInsensitiveFilesystem(): boolean {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
+        return fs.existsSync(path.join(dir, 'PROBE.md'));
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
 function sha256Hex(data: Buffer): string {
     return crypto.createHash('sha256').update(data).digest('hex');
 }
@@ -159,9 +170,9 @@ function runPullArgs(root: string, args: string[]): Promise<CliResult> {
     writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
     return new Promise<CliResult>((resolve, reject) => {
         const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-        delete env.SOLIDACTIONS_HOST;
-        delete env.SOLIDACTIONS_API_KEY;
-        delete env.SOLIDACTIONS_WORKSPACE_ID;
+        for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+            delete env[key];
+        }
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
@@ -189,9 +200,9 @@ function runPull(root: string, dest: string, overwrite: boolean): Promise<CliRes
     writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
     return new Promise<CliResult>((resolve, reject) => {
         const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-        delete env.SOLIDACTIONS_HOST;
-        delete env.SOLIDACTIONS_API_KEY;
-        delete env.SOLIDACTIONS_WORKSPACE_ID;
+        for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+            delete env[key];
+        }
         const args = ['doc', 'pull', 'docs', dest, overwrite ? '--overwrite' : '--yes'];
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd: root, env });
         let stdout = '';
@@ -438,6 +449,23 @@ describe('doc pull never writes outside the destination or through a link (cli#1
 
             const result = await runPull(root, dest, false);
 
+            // A pull replaces a file through a rename, so a hard link is an independent name:
+            // page.md is the new file, and the unmodified old twin Page.md is removed.
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
+            expect(fs.existsSync(path.join(dest, 'Page.md'))).toBe(false);
+            expect(Object.keys(manifestJson().docs)).toEqual(['page.md']);
+            expect(result.stderr).not.toMatch(/not tracked/);
+            expect(result.stderr).not.toMatch(/kept .*same file/);
+        });
+
+        it.skipIf(!caseInsensitiveFilesystem())('a case-only rename on one file under two names adopts instead of refusing (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
+            served = [{ id: 5, title: 'page', revision: 9, body: NEW5 }];
+            fs.writeFileSync(path.join(dest, 'Page.md'), OLD5);
+            seedManifest([{ rel: 'Page.md', doc: { id: 5, title: 'Page', revision: 8, body: OLD5 }, bytes: OLD5 }]);
+
+            const result = await runPull(root, dest, false);
+
             expect(result.code).toBe(0);
             expect(fs.readFileSync(path.join(dest, 'Page.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
@@ -446,7 +474,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(result.stderr).not.toMatch(/kept .*same file/);
         });
 
-        it('a cross-alias hard link under --overwrite keeps both old paths with a warning naming the written path', async () => {
+        it('a cross-alias hard link under --overwrite writes both new names by rename and removes the unmodified old names', async () => {
             const COMMON_B = Buffer.from('# other old bytes');
             served = [
                 { id: 5, title: 'new5', revision: 9, body: NEW5 },
@@ -464,12 +492,11 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             const result = await runPull(root, dest, true);
 
             expect(result.code).toBe(0);
-            expect(result.stderr).toMatch(/! kept page\.md: it is the same file as new6\.md \(a link\)/);
-            expect(result.stderr).toMatch(/! kept other\.md: it is the same file as new5\.md \(a link\)/);
+            expect(result.stderr).not.toMatch(/kept .*same file/);
             expect(fs.readFileSync(path.join(dest, 'new5.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'new6.md'))).toEqual(NEW6B);
-            expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW6B);
-            expect(fs.readFileSync(path.join(dest, 'other.md'))).toEqual(NEW5);
+            expect(fs.existsSync(path.join(dest, 'page.md'))).toBe(false);
+            expect(fs.existsSync(path.join(dest, 'other.md'))).toBe(false);
             const docs = manifestJson().docs;
             expect(Object.keys(docs).sort()).toEqual(['new5.md', 'new6.md']);
             expect(docs['new5.md'].id).toBe(5);

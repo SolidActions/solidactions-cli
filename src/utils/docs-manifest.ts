@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import chalk from 'chalk';
+import { writeFileAtomic } from './doc-pull-writes';
 
 export const DOCS_MANIFEST = '.solidactions-docs.json';
 
@@ -60,5 +61,5 @@ export function readManifest(dir: string, opts: { warnOnParseError?: boolean } =
 }
 
 export function writeManifest(dir: string, manifest: DocsManifest): void {
-    fs.writeFileSync(path.join(dir, DOCS_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    writeFileAtomic(dir, DOCS_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
 }

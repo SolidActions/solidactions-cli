@@ -25,7 +25,26 @@ import { Config } from '../utils/config';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { escapeJsonDisplayText, sanitizeDisplayText } from '../utils/source-provenance';
-import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
+import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex } from '../utils/docs-manifest';
+import {
+    AnotherPullRunningError,
+    authorizedStateOf,
+    cleanupLeftovers,
+    Commit,
+    commitAll,
+    faultsFromEnv,
+    finalizeCommit,
+    ForeignStagingEntryError,
+    LeftoverDiffersError,
+    LinkOnTheWayError,
+    PlannedWrite,
+    PublicationRefusedError,
+    rollbackAll,
+    STAGING_PREFIX,
+    stageAll,
+    UnsupportedTargetError,
+    WriteStepError,
+} from '../utils/doc-pull-writes';
 
 // Re-exported for backward compatibility: tests and doc-push import these from here.
 export { DOCS_MANIFEST, sha256Hex };
@@ -342,7 +361,7 @@ async function backfillDocTypes(config: Config, fetched: FetchedDoc[]): Promise<
  * A fetched doc resolved to its final on-disk path (including per-directory
  * collision suffixes), with media confirmed/downloaded and its content hash
  * computed. No filesystem writes happen while building this — see
- * `commitDocs`. Kept separate so a caller can inspect the plan (e.g. to
+ * the commit in `report`. Kept separate so a caller can inspect the plan (e.g. to
  * check for an unpushed-local-changes conflict) before anything touches
  * disk.
  */
@@ -461,7 +480,7 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
                 bodySha256 = sha256Hex(media.bytes);
             } else {
                 // Download failure: warning already recorded above; the doc is still
-                // tracked (manifest entry written by commitDocs) but there is nothing
+                // tracked (manifest entry written by the commit) but there is nothing
                 // to write to disk.
                 bodySha256 = null;
             }
@@ -510,34 +529,17 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
 }
 
 /**
- * Write every planned doc to disk under `destination` and build the
- * manifest docs map. The only step in the whole pull that creates
- * directories or writes/overwrites files — called only after every refusal
- * (unpushed local changes, rename conflicts, a target that is not a regular
- * file) has had its chance, so it never stops half-way or clobbers a file
- * the caller decided to keep.
+ * The manifest entry for every planned doc, in the shape the manifest stores. Writes nothing:
+ * the files and the manifest are committed together, through the staging folder, only after
+ * every refusal (unpushed local changes, rename conflicts, a target that is not a regular
+ * file) has had its chance, so a pull never stops half-way or clobbers a file the caller
+ * decided to keep.
  */
-function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs: DocsManifest['docs']; files: Array<{ path: string; action: 'written' }> } {
+function manifestEntriesFor(planned: PlannedDoc[]): DocsManifest['docs'] {
     const manifestDocs: DocsManifest['docs'] = {};
-    const files: Array<{ path: string; action: 'written' }> = [];
-
     for (const p of planned) {
-        const dirAbs = p.dirRel ? path.join(destination, ...p.dirRel.split('/')) : destination;
-        fs.mkdirSync(dirAbs, { recursive: true });
-        const targetAbs = path.join(dirAbs, p.fileName);
-
-        if (p.isMedia) {
-            if (p.mediaBytes) {
-                fs.writeFileSync(targetAbs, p.mediaBytes);
-                files.push({ path: p.relPath, action: 'written' });
-            }
-            // else: download failure, warning already recorded by planDocs; skip the
-            // write but still record the manifest entry below so the doc isn't lost.
-        } else {
-            fs.writeFileSync(targetAbs, p.doc.body, 'utf8');
-            files.push({ path: p.relPath, action: 'written' });
-        }
-
+        // A failed media download writes nothing, but its manifest entry is still recorded
+        // so the doc isn't lost.
         manifestDocs[p.relPath] = {
             id: p.doc.id,
             title: p.doc.title,
@@ -546,8 +548,7 @@ function commitDocs(destination: string, planned: PlannedDoc[]): { manifestDocs:
             body_sha256: p.bodySha256,
         };
     }
-
-    return { manifestDocs, files };
+    return manifestDocs;
 }
 
 /**
@@ -566,6 +567,15 @@ function refuseManifestClobber(previousManifest: DocsManifest | null, resolvedFo
     process.exit(1);
 }
 
+/** True when `abs` is an existing directory; any stat failure is left to the destination checks below. */
+function isExistingDirectory(abs: string): boolean {
+    try {
+        return fs.statSync(abs).isDirectory();
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Core implementation — accepts an injected config so tests can point at a
  * stub server without touching the filesystem config.
@@ -578,6 +588,33 @@ export async function docPullWithConfig(
 ): Promise<void> {
     const destInput = dest ?? `./${lastSegment(folderPath)}`;
     const destination = path.resolve(destInput);
+
+    // cli#168: a killed pull leaves its staging folder; restore what it saved (or say what to
+    // resolve) before anything else reads the destination (spec §1.4).
+    if (isExistingDirectory(destination)) {
+        try {
+            const leftovers = cleanupLeftovers(destination);
+            if (leftovers.cleaned > 0) {
+                process.stderr.write(chalk.yellow(`! cleaned up after an interrupted doc pull in ${shown(destination)} (restored ${leftovers.restored.length} file(s))\n`));
+            }
+        } catch (error) {
+            if (error instanceof AnotherPullRunningError) {
+                process.stderr.write(chalk.red(`error: another doc pull (pid ${error.pid}) is writing to ${shown(destination)}; wait for it to finish.\n`));
+            } else if (error instanceof ForeignStagingEntryError) {
+                process.stderr.write(chalk.red(`error: ${shown(path.join(destination, error.entryName))} is not a folder doc pull created; remove it and pull again.\n`));
+            } else if (error instanceof LeftoverDiffersError) {
+                process.stderr.write(chalk.red(`error: an interrupted doc pull left saved copies in ${shown(path.join(destination, error.folderName))}; ${error.differing.length} file(s) differ from their saved copies (first: ${shown(error.differing[0])}), so neither was changed. Keep the versions you want, delete that folder, and pull again.\n`));
+            } else if (error instanceof LinkOnTheWayError) {
+                process.stderr.write(chalk.red(`error: cannot restore an interrupted pull's saved copies: ${shown(error.component)} is a symbolic link or not a directory.\n`));
+            } else if (typeof (error as NodeJS.ErrnoException).code === 'string') {
+                // An unreadable destination gets the same line as below (cli#191).
+                process.stderr.write(chalk.red(`error: cannot read ${shown(destination)}: ${shown((error as Error).message)}\n`));
+            } else {
+                throw error;
+            }
+            process.exit(1);
+        }
+    }
 
     // Captured once, before the walk, so deletion propagation (below) can diff
     // against the folder tree as it stood before this pull. Already read below
@@ -789,7 +826,7 @@ function resolveOrExplain(destination: string, rel: string, target?: { id: numbe
 /**
  * Refuse, before any write, a pull that would write a planned doc through a
  * symbolic link or to a place that resolves outside the destination. Covers
- * every planned doc, including a failed media download: commitDocs still
+ * every planned doc, including a failed media download: the commit still
  * creates its directory. Also refuse, unless `--overwrite`, a planned write
  * over a regular file the pull does not own (cli#167): one the previous
  * manifest does not track with a hash and whose bytes differ from the
@@ -1120,10 +1157,10 @@ async function report(
 
     // Unpushed-local-changes protection: now that the server walk is known, refuse only
     // for a file whose doc still exists remotely — i.e. its relative path is part of this
-    // pull's plan and would be overwritten by commitDocs below. A modified file whose
+    // pull's plan and would be overwritten by the commit below. A modified file whose
     // relPath is NOT in the plan is an orphan, not a conflict: it is left alone here and
     // the deletion-propagation block further down keeps it and warns (no --overwrite
-    // needed). This check must run before commitDocs — nothing may be written to disk
+    // needed). This check must run before the commit — nothing may be written to disk
     // before a real conflict has had the chance to refuse.
     if (previousManifest && !options.overwrite) {
         const modified = detectLocalModifications(destination, previousManifest);
@@ -1151,17 +1188,15 @@ async function report(
         }
     }
 
-    // Every throw below can carry a server-derived path (commitDocs writes
-    // title-named files): the command boundary in `docPull` prints it
-    // sanitised.
-    fs.mkdirSync(destination, { recursive: true });
-    const destPrefix = path.resolve(destination) + path.sep;
-    const realDest = fs.realpathSync(destination);
-    const { manifestDocs, files } = commitDocs(destination, planned);
+    // The final manifest and every warning it implies are settled before any write (spec §1.3
+    // step 2): the commit publishes the files and then exactly these bytes. The warnings are
+    // printed after publication.
+    const pendingWarnings: string[] = [];
+    const manifestDocs = manifestEntriesFor(planned);
 
     // cli#167: a media doc whose download failed must not be tracked over a
     // local file the previous manifest does not track, with a hash, for that
-    // same doc: nothing was written, so the manifest would claim bytes the
+    // same doc: nothing is written, so the manifest would claim bytes the
     // pull never gave it. A rename keeps its restore-old-entry handling below.
     const renamedIds = new Set(renameMoves.map((m) => m.id));
     for (const p of planned) {
@@ -1176,8 +1211,94 @@ async function report(
         }
         if (!holdsLocalFile) continue;
         delete manifestDocs[p.relPath];
-        process.stderr.write(chalk.yellow(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later\n`));
+        pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later`);
     }
+
+    // A rename whose replacement is NOT written (a failed media download plans a new path but
+    // writes nothing) keeps its old file and its old manifest entry: deleting it would destroy
+    // the only good copy. Without an old file the old entry is still kept, so the doc is not
+    // tracked (with no hash) at a new path that may hold an untracked file. The refusals above
+    // guarantee no other doc in this pull claims that old path.
+    for (const m of renameMoves) {
+        if (m.replacementWritten) continue;
+        delete manifestDocs[m.newRel];
+        const oldEntry = previousManifest?.docs[m.oldRel];
+        if (oldEntry !== undefined) {
+            manifestDocs[m.oldRel] = oldEntry;
+        }
+        if (m.sourcePresent) {
+            pendingWarnings.push(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}`);
+        } else {
+            pendingWarnings.push(`! doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}, which is not present locally`);
+        }
+    }
+
+    let docs = manifestDocs;
+    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
+        // A single-doc pull speaks for one doc only: keep every other tracked entry (cli#153),
+        // dropping any stale key that pointed at this same doc id.
+        const pulledIds = new Set(Object.values(manifestDocs).map((entry) => entry.id));
+        docs = Object.fromEntries(Object.entries(previousManifest.docs).filter(([, entry]) => !pulledIds.has(entry.id)));
+        Object.assign(docs, manifestDocs);
+    }
+    const manifest: DocsManifest = { folder_path: folderPath, docs };
+    const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
+
+    // The state each target was authorized in is taken right after the checks above, before
+    // anything is written; the commit re-checks every target against it (INV-B).
+    const writes: PlannedWrite[] = [];
+    for (const p of planned) {
+        const data = p.isMedia ? p.mediaBytes : p.doc.body;
+        if (data === null) continue; // a failed media download writes nothing
+        const targetAbs = path.join(destination, ...p.relPath.split('/'));
+        writes.push({ relPath: p.relPath, dirRel: p.dirRel, data, authorized: authorizedStateOf(targetAbs, options.overwrite === true) });
+    }
+
+    // Every throw below can carry a server-derived path (a title-named file): the command
+    // boundary in `docPull` prints it sanitised.
+    fs.mkdirSync(destination, { recursive: true });
+    const destPrefix = path.resolve(destination) + path.sep;
+    const realDest = fs.realpathSync(destination);
+    const faults = faultsFromEnv();
+    let commit: Commit | null = null;
+    try {
+        commit = stageAll(destination, DOCS_MANIFEST, writes, manifestBytes, faults);
+        commitAll(commit, faults);
+    } catch (error) {
+        const restoreFailure = commit === null ? null : rollbackAll(commit, faults).restoreFailure;
+        const stagingName = `${STAGING_PREFIX}${process.pid}`;
+        const tail = restoreFailure === null
+            ? 'nothing was changed.'
+            : `could not restore ${shown(restoreFailure.relPath)} (${shown((restoreFailure.error as Error).message)}); its previous copy is in ${shown(`${stagingName}/backup/${restoreFailure.relPath}`)}.`;
+        if (error instanceof LinkOnTheWayError) {
+            const linked = planned.find((q) => q.relPath.startsWith(`${error.component}/`));
+            if (linked !== undefined) {
+                // Spec §1.5: a failed rollback always says where the saved copy is.
+                if (restoreFailure !== null) process.stderr.write(chalk.red(`error: ${tail}\n`));
+                refuseLink(linked.relPath, error.component, linked.doc);
+            }
+        }
+        if (error instanceof PublicationRefusedError) {
+            process.stderr.write(chalk.red(`error: ${shown(error.relPath)} changed after doc pull checked it — ${tail} Pull again, or pass --overwrite to replace it.\n`));
+            process.exit(1);
+        }
+        if (error instanceof UnsupportedTargetError) {
+            // Ruling 9: a folder at a target is left alone, never moved or deleted.
+            process.stderr.write(chalk.red(`error: ${shown(error.relPath)} is a folder now (doc pull writes a file there) — ${tail} Move it aside and pull again.\n`));
+            process.exit(1);
+        }
+        const relPath = error instanceof WriteStepError ? error.relPath : DOCS_MANIFEST;
+        process.stderr.write(chalk.red(`error: cannot write ${shown(relPath)}: ${shown((error as Error).message)} — ${tail}\n`));
+        process.exit(1);
+    }
+    const leftover = finalizeCommit(commit);
+    if (leftover !== null) {
+        process.stderr.write(chalk.yellow(`! could not remove ${shown(`${STAGING_PREFIX}${process.pid}`)}: ${shown((leftover.error as Error).message)} — it holds the previous copies of the files this pull replaced; delete it yourself\n`));
+    }
+    for (const line of pendingWarnings) process.stderr.write(chalk.yellow(`${line}\n`));
+    const files: Array<{ path: string; action: 'written' }> = commit.items
+        .filter((item) => item.placed)
+        .map((item) => ({ path: item.relPath, action: 'written' as const }));
 
     // Identity of every file this pull actually wrote, keyed by dev:ino. Used by the
     // deletion-propagation loop below to recognize an "orphan" that is really just the
@@ -1199,31 +1320,13 @@ async function report(
         }
     }
 
-    // Rename cleanup (PM ruling 2, cli#157): each unmodified old twin is gone
-    // now that the new file is written — but never one this pull just wrote
-    // for another doc (e.g. a new markdown doc that now takes `page.md`).
-    // Edited sources were all refused before any write, even with --overwrite.
-    // A twin whose replacement was NOT written (a failed media download plans
-    // a new path but writes nothing) keeps its old file and its old manifest
-    // entry — deleting it would destroy the only good copy. Without an old
-    // file the old entry is still kept, so the doc is not tracked (with no
-    // hash) at a new path that may hold an untracked file. The refusals above
-    // guarantee no other doc in this pull claims that old path.
+    // Rename cleanup (PM ruling 2, cli#157), after publication only: each unmodified old twin is
+    // gone now that the new file is written — but never one this pull just wrote for another
+    // doc (e.g. a new markdown doc that now takes `page.md`). Edited sources were all refused
+    // before any write, even with --overwrite. A twin whose replacement was not written was
+    // kept above.
     for (const m of renameMoves) {
-        if (!m.replacementWritten) {
-            delete manifestDocs[m.newRel];
-            const oldEntry = previousManifest?.docs[m.oldRel];
-            if (oldEntry !== undefined) {
-                manifestDocs[m.oldRel] = oldEntry;
-            }
-            if (m.sourcePresent) {
-                process.stderr.write(chalk.yellow(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}\n`));
-            } else {
-                process.stderr.write(chalk.yellow(`! doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}, which is not present locally\n`));
-            }
-            continue;
-        }
-        if (!m.sourcePresent) continue;
+        if (!m.replacementWritten || !m.sourcePresent) continue;
         const absOld = path.resolve(destination, ...m.oldRel.split('/'));
         // cli#167 M2: the old path is the same file as one this pull just
         // wrote under another name (a link) — it is kept, loudly, so the
@@ -1249,17 +1352,6 @@ async function report(
             continue;
         }
     }
-
-    let docs = manifestDocs;
-    if (usedSingleDocFallback && previousManifest !== null && previousManifest.folder_path === folderPath) {
-        // A single-doc pull speaks for one doc only: keep every other tracked entry (cli#153),
-        // dropping any stale key that pointed at this same doc id.
-        const pulledIds = new Set(Object.values(manifestDocs).map((entry) => entry.id));
-        docs = Object.fromEntries(Object.entries(previousManifest.docs).filter(([, entry]) => !pulledIds.has(entry.id)));
-        Object.assign(docs, manifestDocs);
-    }
-    const manifest: DocsManifest = { folder_path: folderPath, docs };
-    writeManifest(destination, manifest);
 
     for (const warning of [...extraWarnings, ...warnings]) {
         process.stderr.write(chalk.yellow(`${warning}\n`));

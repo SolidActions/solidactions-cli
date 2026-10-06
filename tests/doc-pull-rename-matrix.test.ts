@@ -168,9 +168,9 @@ async function runPull(args: string[]): Promise<CliResult> {
     try {
         return await new Promise<CliResult>((resolve, reject) => {
             const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-            delete env.SOLIDACTIONS_HOST;
-            delete env.SOLIDACTIONS_API_KEY;
-            delete env.SOLIDACTIONS_WORKSPACE_ID;
+            for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+                delete env[key];
+            }
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'pull', ...args], { cwd: homeRoot, env });
             let stdout = '';
             let stderr = '';
@@ -617,9 +617,11 @@ function oddSourceCases(): MatrixCase[] {
 }
 
 /**
- * A case-only rename on a case-insensitive filesystem: `Page.md` and
- * `page.md` are the same file. On Linux a hard link stands in for that one
- * file (both names share an inode).
+ * A case-only rename where `Page.md` and `page.md` are hard links of one
+ * inode. A pull replaces a file through a rename, so the link is an
+ * independent name: the new file is written at the new path and an unmodified
+ * old twin is removed. The true alias (one file under two names on a
+ * case-insensitive filesystem) has its own test, gated on that property.
  */
 function sameFileCases(): MatrixCase[] {
     const kind = CASE_KIND;
@@ -632,8 +634,8 @@ function sameFileCases(): MatrixCase[] {
             tracked: { [kind.oldRel]: source(kind, 'unmodified') },
             untracked: { [kind.newRel]: { hardlinkTo: kind.oldRel } },
             served: [kind.renamed()],
-            // Both names are the one file the pull wrote; it is never removed.
-            after: { files: { [kind.oldRel]: newBytes, [kind.newRel]: newBytes }, manifest: { [kind.newRel]: entry(5, 8, newBytes) } },
+            // The new name is a new file; the unmodified old twin is removed.
+            after: { files: { [kind.newRel]: newBytes }, manifest: { [kind.newRel]: entry(5, 8, newBytes) } },
         });
         cases.push({
             name: caseName(kind, 'folder', 'modified source, target is the same file as the source', overwrite),
@@ -741,8 +743,10 @@ function preservedSourceAliasCases(): MatrixCase[] {
             ],
             stderr: [/doc 5/, /doc 6/, /a\/page\.html/, /b\/page\.html/, /same file/],
         });
-        // Both docs move away successfully. Their old names alias the other's
-        // target, which is allowed: cleanup must preserve the files just written.
+        // Both docs move away successfully. Their old names are hard links of the other's
+        // target. Without --overwrite the pull refuses (the aliased names are one file on
+        // disk); with --overwrite each new name is written by rename, an independent file,
+        // and the unmodified old names are removed.
         cases.push({
             name: caseName(VISUAL_KIND, 'folder', 'two renamed docs alias each other targets via hardlinks', overwrite),
             outcome: overwrite ? 'a' : 'c', form: 'folder', overwrite,
@@ -753,12 +757,9 @@ function preservedSourceAliasCases(): MatrixCase[] {
             untracked: { 'other.html': { hardlinkTo: 'page.md' }, 'page.html': { hardlinkTo: 'other.md' } },
             served: [VISUAL_KIND.renamed(), { id: 6, title: 'other', revision: 60, docType: 'visual', body: Buffer.from('<h1>six</h1>') }],
             after: {
-                files: { 'page.md': Buffer.from('<h1>six</h1>'), 'other.html': Buffer.from('<h1>six</h1>'), 'other.md': newBytesOf(VISUAL_KIND), 'page.html': newBytesOf(VISUAL_KIND) },
+                files: { 'page.html': newBytesOf(VISUAL_KIND), 'other.html': Buffer.from('<h1>six</h1>') },
                 manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
             },
-            // cli#167 M2: both old paths alias a file this pull wrote, so
-            // cleanup keeps them with a warning naming the written path.
-            ...(overwrite ? { stderr: [/! kept page\.md: it is the same file as other\.html \(a link\)/, /! kept other\.md: it is the same file as page\.html \(a link\)/] } : {}),
         });
     }
     return cases;
@@ -911,6 +912,17 @@ function failedMediaCases(): MatrixCase[] {
     return cases;
 }
 
+/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
+function caseInsensitiveFilesystem(): boolean {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
+        return fs.existsSync(path.join(dir, 'PROBE.md'));
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
 const MATRIX: MatrixCase[] = [...KINDS.flatMap(kindCases), ...oddSourceCases(), ...sameFileCases(), ...preservedSourceAliasCases(), ...caseFoldAllocationCases(), ...failedMediaCases()];
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1036,31 @@ describe('doc pull rename matrix (cli#157)', () => {
                 expect(sha256Hex(fs.readFileSync(abs))).toBe(e.body_sha256);
             }
             expectStderr(result, testCase);
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it.skipIf(!caseInsensitiveFilesystem())('a case-only rename on one file under two names adopts it and never removes the file this pull wrote (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
+        const kind = CASE_KIND;
+        const testCase: MatrixCase = {
+            name: 'true alias',
+            outcome: 'a', form: 'folder', overwrite: false,
+            tracked: { [kind.oldRel]: source(kind, 'unmodified') },
+            served: [kind.renamed()],
+        };
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-pull-matrix-'));
+        const dest = path.join(root, 'out');
+        try {
+            seed(dest, testCase);
+            served = { form: testCase.form, docs: testCase.served };
+
+            const result = await runPull(pullArgs(testCase, dest));
+
+            expect(result.code).toBe(0);
+            expect(fs.readFileSync(path.join(dest, kind.newRel))).toEqual(newBytesOf(kind));
+            expect(fs.readFileSync(path.join(dest, kind.oldRel))).toEqual(newBytesOf(kind));
+            expect(Object.keys(JSON.parse(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).docs)).toEqual([kind.newRel]);
         } finally {
             fs.rmSync(root, { recursive: true, force: true });
         }

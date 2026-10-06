@@ -227,6 +227,17 @@ function makeTmpDir(): { dir: string; cleanup: () => void } {
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 
+/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
+function caseInsensitiveFilesystem(): boolean {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
+        return fs.existsSync(path.join(dir, 'PROBE.md'));
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
 interface CliResult {
     code: number | null;
     stdout: string;
@@ -247,9 +258,9 @@ async function runPullCli(args: string[]): Promise<CliResult> {
     try {
         return await new Promise<CliResult>((resolve, reject) => {
             const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-            delete childEnv.SOLIDACTIONS_HOST;
-            delete childEnv.SOLIDACTIONS_API_KEY;
-            delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+            for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+                delete childEnv[key];
+            }
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'pull', ...args], {
                 cwd: homeRoot,
                 env: childEnv,
@@ -1824,15 +1835,15 @@ describe('docPullWithConfig — deletion propagation', () => {
         }
     });
 
-    it('never deletes an orphan whose file is the same inode as a file this pull just wrote (case-rename survives)', async () => {
+    it('a case-only rename over a hard-linked old name writes the new name by rename and removes the unmodified old name', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         fs.mkdirSync(dest, { recursive: true });
 
-        // Simulates a case-only rename ("Readme" -> "readme") on a case-insensitive
-        // filesystem: the old and new manifest keys resolve to the SAME underlying file.
-        // On Linux we prove this with an explicit hardlink rather than relying on
-        // case-insensitivity.
+        // A hard link used to stand in for a case-only rename ("Readme" -> "readme") on a
+        // case-insensitive filesystem. A pull now replaces a file through a rename, so the
+        // link is an independent name: the new file is written at readme.md and the
+        // unmodified old twin Readme.md is removed by rename cleanup.
         fs.writeFileSync(path.join(dest, 'readme.md'), 'BODY', 'utf8');
         fs.linkSync(path.join(dest, 'readme.md'), path.join(dest, 'Readme.md'));
 
@@ -1847,26 +1858,42 @@ describe('docPullWithConfig — deletion propagation', () => {
             }),
         ];
 
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
+        try {
+            const result = await runPullCli(['marketing', dest, '--yes']);
+
+            expect(result.code).toBe(0);
+            expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
+            expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
+            expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.skipIf(!caseInsensitiveFilesystem())('a case-only rename on one file under two names never deletes the file this pull just wrote (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'Readme.md'), 'BODY', 'utf8');
+        writeManifest(dest, {
+            'Readme.md': { id: 1, title: 'Readme', current_revision_id: 1, media: false, body_sha256: sha256Hex('BODY') },
+        });
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'readme', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'readme', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'BODY' }],
+            }),
+        ];
 
         try {
-            const code = await runExpectingExit(() =>
-                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
-            );
-            expect(code).toBe(0);
+            const result = await runPullCli(['marketing', dest, '--yes']);
 
-            // The new manifest tracks "readme.md".
-            const manifest = readManifest(dest);
-            expect(Object.keys(manifest.docs)).toEqual(['readme.md']);
-
-            // The old key "Readme.md" is the SAME file (hardlink) the pull just wrote
-            // under "readme.md" — it must not be deleted, even though it looks orphaned.
+            expect(result.code).toBe(0);
+            expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
             expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(true);
             expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
