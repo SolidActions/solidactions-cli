@@ -83,7 +83,7 @@ Rulings 3-6 still bind (scopes, sweeps, runner-a gate, M1).
 - unreadable: `error: cannot read <D>: <the fs error's message>`, e.g. `error: cannot read /tmp/x/out: EACCES: permission denied, scandir '/tmp/x/out'`
 - no terminal: `error: <D> is not empty and there is no terminal to confirm the pull; pass -y to pull into it.`
 
-- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-destination-checks.test.ts`. The server's MCP `list` answers one doc and `bulk_read` returns it (fixture from `tests/doc-pull-write-safety.test.ts`). The spawned child's stdin is a pipe (not a terminal) unless stated.
+- [x] **Step 1: Write the failing tests** in `tests/doc-pull-destination-checks.test.ts`. The server's MCP `list` answers one doc and `bulk_read` returns it (fixture from `tests/doc-pull-write-safety.test.ts`). The spawned child's stdin is a pipe (not a terminal) unless stated.
   1. **Unreadable destination** (skip on win32/root): `<tmp>/out` holds `x.txt`, then `chmod 0o000`. `doc pull F <tmp>/out`: exit 1, stderr contains `error: cannot read <tmp>/out: EACCES` and no `    at ` stack line.
   2. **No terminal, non-empty destination, no `-y`:** `<tmp>/out/x.txt` exists. `doc pull F <tmp>/out`: exit 1, stderr has the exact no-terminal line, stdout has no `Continue?`, and no doc file or manifest was written.
   3. **No terminal with `-y`:** exit 0 and the doc is written.
@@ -93,11 +93,11 @@ Rulings 3-6 still bind (scopes, sweeps, runner-a gate, M1).
      - Run `script -qec "node <abs dist/index.js> doc pull F <tmp>/out" /dev/null` with the same env, and write `n\n` to its stdin after the prompt appears in its output.
      - Expect `Cancelled.` in the output, exit 0, and no doc file written.
 
-- [ ] **Step 2: Run them and watch them fail.**
+- [x] **Step 2: Run them and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-destination-checks.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-1-red.log`
 Expected: FAIL on 1 (wording) and 2 (today: prompt, exit 0). Cases 3-6 pass.
 
-- [ ] **Step 3: Implement** in `docPullWithConfig`. The destination block becomes:
+- [x] **Step 3: Implement** in `docPullWithConfig`. The destination block becomes:
 
 ```ts
     if (fs.existsSync(destination)) {
@@ -132,16 +132,16 @@ Expected: FAIL on 1 (wording) and 2 (today: prompt, exit 0). Cases 3-6 pass.
 
 The `previousManifest` read above it (`fs.existsSync(destination) ? readManifest(destination) : null`) gets the same `try`/`catch` with the same `cannot read` line.
 
-- [ ] **Step 4: Migrate the two older tests (I1).**
+- [x] **Step 4: Migrate the two older tests (I1).**
   - In `tests/doc-pull-write-safety.test.ts`, the prompt-text test (~565-570) spawned without a terminal. It now asserts the no-terminal line and exit 1. Its prompt-text coverage moves to case 6 above: assert both yellow lines appear in the PTY output there.
   - In `tests/doc-pull.test.ts`, replace the in-process "declining the prompt exits 0" test (~893-920) with a pointer comment to `tests/doc-pull-destination-checks.test.ts` case 6, which covers the same behaviour through a real terminal. Remove the test's helper usage only where nothing else in the file needs it.
 
-- [ ] **Step 5: Run GREEN and the neighbours.**
+- [x] **Step 5: Run GREEN and the neighbours.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-destination-checks.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-1-green.log`
 Then (run the heavy-run gate first): `npx vitest run --project unit tests/doc-pull.test.ts tests/doc-pull-write-safety.test.ts tests/doc-pull-display-guard.test.ts tests/doc-pull-display-text.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-1-neighbours.log`
 Expected: PASS.
 
-- [ ] **Step 6: Report (do not commit).** List every changed path, each older test you changed (by name, old vs new expectation), each run with its counts and log path, and anything you had to stop on.
+- [x] **Step 6: Report (do not commit).** List every changed path, each older test you changed (by name, old vs new expectation), each run with its counts and log path, and anything you had to stop on.
 
 ---
 
@@ -179,7 +179,7 @@ Expected: PASS.
 
 **Spec:** §1.1-1.5, §1.8, §1.9.
 
-- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-writes.test.ts`.
+- [x] **Step 1: Write the failing tests** in `tests/doc-pull-writes.test.ts`.
   - Each test makes its own `fs.mkdtempSync` root, with `dest = <root>/dest`, `M = '.solidactions-docs.json'`, `none = faultsFromEnv({})`, and `hooks(fault) = faultsFromEnv({ SOLIDACTIONS_TEST_HOOKS: '1', SOLIDACTIONS_DOC_PULL_TEST_FAULT: fault })`. It removes the root after.
   - `w(rel, data, authorized)` builds a `PlannedWrite` (`dirRel` = the rel's folder, or `''`).
   - `go(writes, faults)` = `stageAll(dest, M, writes, '{"v":2}\n', faults)` then `commitAll(c, faults)` then `finalizeCommit(c)`.
@@ -239,11 +239,11 @@ Expected: PASS.
       - Faults: `hooks('fail-manifest-rename,swap-before-rollback:x><root>/outside-empty')`, where `outside-empty` is a real empty folder.
       - After rollback, `<root>/outside-empty` still exists, and nothing under it was removed or added.
 
-- [ ] **Step 2: Run them and watch them fail** (the module is missing).
+- [x] **Step 2: Run them and watch them fail** (the module is missing).
 Run: `npx vitest run --project unit tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-2-red.log`
 Expected: FAIL (cannot resolve `../src/utils/doc-pull-writes`).
 
-- [ ] **Step 3: Implement** `src/utils/doc-pull-writes.ts`:
+- [x] **Step 3: Implement** `src/utils/doc-pull-writes.ts`:
 
 ```ts
 import crypto from 'crypto';
@@ -685,12 +685,12 @@ export function writeFileAtomic(dir: string, name: string, data: string | Buffer
 }
 ```
 
-- [ ] **Step 4: Run GREEN.**
+- [x] **Step 4: Run GREEN.**
 Run: `npx vitest run --project unit tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-2-green.log`
 Then: `npm run build 2>&1 | tail -3` (it must compile cleanly).
 Expected: PASS, and the build is clean.
 
-- [ ] **Step 5: Report (do not commit).** List every changed path, each run with its counts and log path, and anything you had to stop on.
+- [x] **Step 5: Report (do not commit).** List every changed path, each run with its counts and log path, and anything you had to stop on.
 
 ---
 
@@ -722,7 +722,7 @@ Expected: PASS, and the build is clean.
 - staging left behind after success: `! could not remove <staging name>: <message> — it holds the previous copies of the files this pull replaced; delete it yourself`
 - leftovers: `! cleaned up after an interrupted doc pull in <D> (restored <n> file(s))`; `error: an interrupted doc pull left saved copies in <D>/<name>; <k> file(s) differ from their saved copies (first: <rel>), so neither was changed. Keep the versions you want, delete that folder, and pull again.`; `error: another doc pull (pid <pid>) is writing to <D>; wait for it to finish.`; `error: <D>/<name> is not a folder doc pull created; remove it and pull again.`
 
-- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-transactional.test.ts`.
+- [x] **Step 1: Write the failing tests** in `tests/doc-pull-transactional.test.ts`.
   - Fixture: a first pull (`-y`) writes `a.md` (`A1`), `sub/b.md` (`B1`) and media `pic.png` (`P1`).
   - `snapshot(out)` maps every entry under `<out>` (dot-entries included) to its bytes, and every regular file to its inode.
   - Each case serves `A2`, `B2`, `P2` and pulls again with `-y`.
@@ -746,11 +746,11 @@ Expected: PASS, and the build is clean.
   14. **Ruling 9, Sol's repro end to end:** the server adds `n.md`, and the fault is `mkdir-before-commit:n.md`, with `--overwrite`. Expect exit 1 with the folder line for `n.md`, `<out>/n.md/user.txt` reading `USER`, and everything else unchanged (rolled back).
   15. **The unreadable-destination wording survives the leftover check:** re-run Task 1's case 1 (`tests/doc-pull-destination-checks.test.ts`) in the neighbour run. It must still show `error: cannot read <D>: EACCES`.
 
-- [ ] **Step 2: Run them and watch them fail.**
+- [x] **Step 2: Run them and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-transactional.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-3-red.log`
 Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are inert before Step 3, so the fault cases fail on their assertions.
 
-- [ ] **Step 3: Implement** in `src/commands/doc-pull.ts`.
+- [x] **Step 3: Implement** in `src/commands/doc-pull.ts`.
   1. **Leftover check** (spec §1.4), at the top of `docPullWithConfig` when `destination` exists, before the `previousManifest` read:
 
 ```ts
@@ -842,7 +842,7 @@ Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are ine
   5. `src/utils/docs-manifest.ts`: `writeManifest` becomes `writeFileAtomic(dir, DOCS_MANIFEST, \`${JSON.stringify(manifest, null, 2)}\n\`)`.
   6. README `### doc` paragraph (spec §1.9): "`doc pull` writes everything to a staging folder (`.solidactions-pull-<pid>`) inside the destination first, then moves the files into place and saves the manifest last. If it fails, it puts back every file it replaced and leaves the manifest unchanged. If the process is killed while moving files, the manifest is the old one, and tracked files are always re-checked by hash, so nothing is overwritten silently. The next pull cleans up the leftover folder, or tells you which files to resolve. There is no guarantee after a power loss."
 
-- [ ] **Step 4: Migrate the hard-link stand-ins (I1).** These tests used a hard link to stand in for a case-insensitive alias. After this task, a pull replaces a file through a rename, so a hard link is an **independent** name: it keeps the old bytes, and rename cleanup removes an unmodified old twin. For each test listed in Files:
+- [x] **Step 4: Migrate the hard-link stand-ins (I1).** These tests used a hard link to stand in for a case-insensitive alias. After this task, a pull replaces a file through a rename, so a hard link is an **independent** name: it keeps the old bytes, and rename cleanup removes an unmodified old twin. For each test listed in Files:
   1. Rewrite the Linux hard-link version to assert exactly:
      - **write-safety "a same-file case-only rename adopts instead of refusing, with no --overwrite":** exit 0, `page.md` reads `NEW5`, `Page.md` is gone, the manifest keys are `['page.md']`, and stderr has no `not tracked` and no `kept … same file`.
      - **write-safety "a cross-alias hard link under --overwrite …":** exit 0. `new5.md`/`new6.md` read `NEW5`/`NEW6B`, `page.md` and `other.md` are gone, stderr has no `kept … same file`, and the manifest is unchanged from today's expectation.
@@ -854,12 +854,12 @@ Expected: FAIL on cases 1-12 (case 13 may pass today: say so). The hooks are ine
      If the code's actual result differs from one of these, stop and report it with the test name: do not change the expectation to whatever the code does.
   2. Keep each **true** alias as a separate test, gated by a runtime case-insensitivity check (spec §1.7): `it.skipIf(!caseInsensitive)('… (needs a case-insensitive filesystem; CI unit tests run on Linux)', …)`. Those tests assert today's expectation (both names show the new bytes; nothing is removed).
 
-- [ ] **Step 5: Run GREEN and the neighbours.**
+- [x] **Step 5: Run GREEN and the neighbours.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-transactional.test.ts tests/doc-pull-writes.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-3-green.log`
 Then (run the heavy-run gate first): `npx vitest run --project unit tests/doc-pull.test.ts tests/doc-pull-write-safety.test.ts tests/doc-pull-rename-matrix.test.ts tests/doc-pull-display-guard.test.ts tests/doc-pull-display-text.test.ts tests/doc-pull-destination-checks.test.ts tests/doc-push.test.ts tests/docs-manifest.test.ts tests/doc-media-401.test.ts tests/readme-contract.test.ts tests/host-display-guard.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-3-neighbours.log`
 Expected: PASS (the rename matrix takes about a minute). Every skipped test names its reason in its title.
 
-- [ ] **Step 6: Report (do not commit).** List every changed path, each older test you changed (by name, old vs new expectation), each run with its counts and log path, and anything you had to stop on.
+- [x] **Step 6: Report (do not commit).** List every changed path, each older test you changed (by name, old vs new expectation), each run with its counts and log path, and anything you had to stop on.
 
 ---
 
@@ -882,7 +882,7 @@ Expected: PASS (the rename matrix takes about a minute). Every skipped test name
 - B kept: `! doc <A id> ("<A title>") failed to download and <P> holds doc <B id>'s file ("<B title>"); still tracking it as doc <B id> — pull again later`
 - B not kept: `! doc <A id> ("<A title>") failed to download and <P> holds a local file; not tracking it — pull again later. Doc <B id> ("<B title>") was tracked at <P> before and is no longer tracked there.`
 
-- [ ] **Step 1: Write the failing tests** in `tests/doc-pull-failed-download.test.ts` (spawned; the media fixtures from `tests/doc-pull.test.ts`, with a signed-URL route you can make answer 500).
+- [x] **Step 1: Write the failing tests** in `tests/doc-pull-failed-download.test.ts` (spawned; the media fixtures from `tests/doc-pull.test.ts`, with a signed-URL route you can make answer 500).
   1. **cli#183, with M1:**
      - A first pull writes media doc 5 at `pic.png` (revision 50, hash H1). Save that manifest entry.
      - Then the listing shows doc 5 with the **same title** (same path) but **revision 51**, and the download answers 500. Pull with `-y`: exit 0.
@@ -894,11 +894,11 @@ Expected: PASS (the rename matrix takes about a minute). Every skipped test name
   3. **cli#190, B gone:** the same, but B is not in the listing at all. Expect the B-not-kept line, and the manifest has no entry for doc 9 at `P.png`. Don't assert `P.png`'s presence: deletion propagation treats it as an orphan.
   4. **Unchanged:** a failed download at a new path with no previous entry keeps today's behaviour.
 
-- [ ] **Step 2: Run them and watch them fail.**
+- [x] **Step 2: Run them and watch them fail.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-failed-download.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-4-red.log`
 Expected: FAIL on 1-3; 4 passes.
 
-- [ ] **Step 3: Implement** in `src/commands/doc-pull.ts`.
+- [x] **Step 3: Implement** in `src/commands/doc-pull.ts`.
   - **The failed-download entry:** for `p.isMedia && p.mediaBytes === null`, when `previousManifest?.docs[p.relPath]` exists with `id === p.doc.id`, the entry is **that previous entry, unchanged**.
   - `report(…, listedIds)`: pass `new Set(rows.map((row) => row.id))` for a folder pull and `new Set([data.id])` for the single-doc fallback.
   - **The failed-download-over-a-local-file rule:** where today it deletes A's entry and queues the yellow warning, it becomes:
@@ -920,12 +920,12 @@ Expected: FAIL on 1-3; 4 passes.
 
   Keep the block's existing early `continue`s. Today it continues when the previous entry at P is the same doc with a hash; with cli#183 that entry is now the kept previous one.
 
-- [ ] **Step 4: Run GREEN and the neighbours.**
+- [x] **Step 4: Run GREEN and the neighbours.**
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-failed-download.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-4-green.log`
 Then (run the heavy-run gate first): `npx vitest run --project unit tests/doc-pull.test.ts tests/doc-pull-write-safety.test.ts tests/doc-pull-rename-matrix.test.ts tests/doc-pull-display-guard.test.ts tests/doc-pull-display-text.test.ts tests/doc-pull-transactional.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-4-neighbours.log`
 Expected: PASS.
 
-- [ ] **Step 5: Report (do not commit).** List every changed path, each older test you changed (by name), each run with its counts and log path, and anything you had to stop on.
+- [x] **Step 5: Report (do not commit).** List every changed path, each older test you changed (by name), each run with its counts and log path, and anything you had to stop on.
 
 ---
 
@@ -944,7 +944,7 @@ Expected: PASS.
 
 Each file builds its rows from a table and runs one spawned scenario per row. Each test title gives the row's coordinates.
 
-- [ ] **Step 1: Write the sweep tests.**
+- [x] **Step 1: Write the sweep tests.**
   - **INV-A, never outside the destination (`doc-pull-inv-outside`).** Rows: {markdown, media} × {folder pull, single-doc pull} × the link case:
     - (a) a tracked file hard-linked to a file outside the destination;
     - (b) a symlink to an outside file at a new target name before the pull, which wave cli-safety refuses;
@@ -978,25 +978,17 @@ Each file builds its rows from a table and runs one spawned scenario per row. Ea
     - an NFC/NFD name pair on a normalising filesystem;
     - (INV-A) the no-`O_NOFOLLOW` path, which skips unless `fs.constants.O_NOFOLLOW` is undefined.
 
-- [ ] **Step 2: Run them.** Run the heavy-run gate first.
+- [x] **Step 2: Run them.** Run the heavy-run gate first.
 Run: `npm run build && npx vitest run --project unit tests/doc-pull-inv-outside.test.ts tests/doc-pull-inv-no-clobber.test.ts tests/doc-pull-inv-honest-manifest.test.ts 2>&1 | tee .superpowers/sdd/2026-10-05-cli-docpull/task-5-sweeps.log`
 Expected: PASS, with every skip naming its reason. No RED step applies: these pin behaviour Tasks 1-4 built. Show each test is real by temporarily breaking one assertion per file (note it in the report, then restore it).
 
-- [ ] **Step 3: Report (do not commit).** List every changed path, the row counts per file (run / skipped with reasons), the run with its counts and log path, and any row that failed (as a finding).
+- [x] **Step 3: Report (do not commit).** List every changed path, the row counts per file (run / skipped with reasons), the run with its counts and log path, and any row that failed (as a finding).
 
 ## Continue here
 
-(Manager context wall, 2026-10-06. The build card task-buildclidocpull-c955 and the ledger `.superpowers/sdd/2026-10-05-cli-docpull/progress.md` hold the details.)
+(Manager, 2026-10-06, before final review 2. The build card task-buildclidocpull-c955 and the ledger `.superpowers/sdd/2026-10-05-cli-docpull/progress.md` hold the details.)
 
-- **Task 1:** committed 10a5e90. Code accepted by Sol under the PM exception; the evidence was closed per the PM ruling (manager tsc log).
-- **Task 2:** uncommitted in the slot (`src/utils/doc-pull-writes.ts`, `tests/doc-pull-writes.test.ts`).
-  - Sol's review task-reviewtask2pm-b7b3 was REQUEST CHANGES 4b9cdcb (F1 staging-side parents, F2 evidence, M1 cleanup).
-  - Fix round 1 (task-task2fixround1-65b0) is DONE.
-  - Scoped re-review **task-rereviewtask2fix-b63e** is OPEN with reviewer-sol, at head tree 78014ab (HEAD 10a5e90 plus Task 2's two files).
-  - On APPROVE: commit exactly those two paths, and check that their blobs equal tree 78014ab's.
-- **Next:** Task 3 (integration), then Tasks 4 and 5, then final review 1.
-  - Routing (PM rulings on the build card): implementation goes to dev-muse when free, otherwise dev-sonnet. Per-task reviews go to dev-muse or dev-strong when free, otherwise reviewer-sol under the PM exception (mail the PM first so Sol is restarted fresh). Never review in the author's pool.
-  - Card generators: `.superpowers/sdd/2026-10-05-cli-docpull/mkcard.py` and `mkreview.py`.
-  - A per-task package must contain only that task's paths. Build it with a temporary index (read-tree HEAD, add the paths, write-tree).
-- **Rulings so far** (ledger): the wording item is fixed inline in Task 3; Task 1's readManifest try/catch is not needed; the F1 fix shape anchors every staging path at the destination.
-- **Wave card task-waveclidocpull-da80 metadata:** plan keys only (N = 0, verdict none, all issues planned). No final review has run yet.
+- **Tasks 1-5 are committed** (T1 10a5e90, T2 c5bb697, T3 fdaa073, T4 8eeaf0b, T5 7af17b1). Each passed a per-task review by reviewer-sol under the PM's exception (dev-sonnet implemented every task: the editor wave held dev-muse).
+- **Final review 1** (7af17b1): Sol and Fable in parallel, both REQUEST CHANGES. PM ruling 11 (on cli#168): C2 option B, C3 option A. One fix card (task-finalreviewfix-3d8e, dev-sonnet) addressed all 12 items; committed 22cf6be.
+- **Filed:** cli#200, cli#201 (test hygiene), cli#202 (pid liveness), cli#203 (nits), cli#204 (removal re-check).
+- **Next:** final review 2 at the head after this commit: Sol and Fable fresh, delta-only (PM ruling 11). Mail the PM before creating the cards.
