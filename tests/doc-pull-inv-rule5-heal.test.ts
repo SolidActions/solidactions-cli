@@ -150,8 +150,8 @@ describe('the retry of an interrupted rename heals when the old name aliases the
 
     /** The old name `from` becomes another name for the placed file `to` (the state a case or normalisation alias is in). */
     const ALIASES: Array<{ name: string; skip: boolean; make: (from: string, to: string) => void }> = [
-        { name: 'a hard link', skip: isWindows, make: (from, to) => { fs.rmSync(path.join(h.out, from)); fs.linkSync(path.join(h.out, to), path.join(h.out, from)); } },
-        { name: 'a symbolic link', skip: isWindows, make: (from, to) => { fs.rmSync(path.join(h.out, from)); fs.symlinkSync(to, path.join(h.out, from)); } },
+        { name: 'a hard link (needs POSIX hard links, not run on Windows)', skip: isWindows, make: (from, to) => { fs.rmSync(path.join(h.out, from)); fs.linkSync(path.join(h.out, to), path.join(h.out, from)); } },
+        { name: 'a symbolic link (needs symbolic links, not run on Windows)', skip: isWindows, make: (from, to) => { fs.rmSync(path.join(h.out, from)); fs.symlinkSync(to, path.join(h.out, from)); } },
     ];
 
     for (const alias of ALIASES) {

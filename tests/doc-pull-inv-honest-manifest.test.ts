@@ -373,17 +373,28 @@ describe('INV-C stopped pulls report the tracking decisions they recorded (final
         expectManifestHonest(result);
     });
 
-    it('a renamed doc whose download failed and whose old file is gone x a failed write: the kept entry for the missing file is reported before the error', async () => {
+    it('a renamed doc whose download failed and whose old file is gone x a failed write: its tracking is dropped, and that is reported before the error (manager ruling on cli#168, I1(b))', async () => {
         await h.seed([pic(1), note(1)]);
-        const picEntry = manifestOf(h.out).docs['pic.png'];
+        const noteEntry = manifestOf(h.out).docs['note.md'];
         fs.unlinkSync(path.join(h.out, 'pic.png'));
         h.serve([pic(2, 'pic2'), note(2)]);
 
-        await h.pull('folder', 'docs', failed(`! doc 7 download failed; still tracked as pic.png, which is not present locally\n${stopLine}`), ['-y'], 'fail-rename:1');
+        const result = await h.pull('folder', 'docs', failed(`! doc 7 ("pic2") failed to download and pic.png is not present locally; not tracking it — pull again later.\n${stopLine}`), ['-y'], 'fail-rename:1');
 
-        // The entry stays with its hash for a file that is gone (cli#183): the one state expectManifestHonest does not allow.
-        expect(manifestOf(h.out).docs['pic.png']).toEqual(picEntry);
+        expect(manifestOf(h.out).docs).toEqual({ 'note.md': noteEntry });
+        expectManifestHonest(result);
+    });
+
+    it('a failed download at a tracked path whose file is gone: its tracking is dropped with the "not tracking it" warning, and the pull succeeds (manager ruling on cli#168, I1(b))', async () => {
+        await h.seed([pic(1), note(1)]);
+        fs.unlinkSync(path.join(h.out, 'pic.png'));
+        h.serve([pic(2), note(2)]);
+
+        const result = await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], '! doc 7 ("pic") failed to download and pic.png is not present locally; not tracking it — pull again later.\nwarn: failed to download media for doc 7 (pic): HTTP 500\n'));
+
+        expect(Object.keys(manifestOf(h.out).docs)).toEqual(['note.md']);
         expect(fs.existsSync(path.join(h.out, 'pic.png'))).toBe(false);
+        expectManifestHonest(result);
     });
 
     it('a stopped pull whose manifest could not be written prints no tracking decision: the manifest it would have described was not recorded', async () => {

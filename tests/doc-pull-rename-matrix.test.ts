@@ -857,7 +857,8 @@ function failedMediaCases(): MatrixCase[] {
                     const untracked: Record<string, Buffer> = {};
                     const served: ServedDoc[] = [kind.renamed('fail')];
                     const files: Record<string, Entry> = {};
-                    const manifest: Record<string, ManifestExpectation> = { ...keptOld };
+                    // An absent source keeps no entry with a hash (manager ruling on cli#168, I1(b)): the doc's tracking is dropped.
+                    const manifest: Record<string, ManifestExpectation> = src === 'absent' ? {} : { ...keptOld };
                     if (src === 'unmodified') files['old.png'] = kind.oldBytes;
                     if (target === 'tracked') {
                         trackedSeed['new.png'] = targetTracked(kind);
@@ -906,7 +907,7 @@ function failedMediaCases(): MatrixCase[] {
                 served: [EARLY_SERVED, kind.renamed('fail')],
                 after: {
                     files: { 'early.html': EARLY_NEW, ...(src === 'unmodified' ? { 'old.png': kind.oldBytes } : {}) },
-                    manifest: { 'early.html': entry(4, 41, EARLY_NEW), ...keptOld },
+                    manifest: { 'early.html': entry(4, 41, EARLY_NEW), ...(src === 'unmodified' ? keptOld : {}) },
                 },
             });
         }
@@ -1015,7 +1016,7 @@ function derivedStdout(testCase: MatrixCase, dest: string): string {
 
 /**
  * The WHOLE stderr of a row that pulls, in the order doc pull prints it (spec §1.5, cli#183/#190/#167): the tracking kept
- * for each renamed doc whose download failed; the "same file as" notes for a renamed doc's old path that another doc now
+ * for each renamed doc whose download failed (or dropped, when its old file with a recorded hash is gone: I1(b)); the "same file as" notes for a renamed doc's old path that another doc now
  * holds; the failed-download warnings; and, for a single-doc pull into a tracked destination, the deletions line. A row with
  * none of these has an empty stderr.
  */
@@ -1029,7 +1030,9 @@ function derivedStderr(testCase: MatrixCase): string {
     for (const doc of failures) {
         const old = oldPathOf(doc);
         if (old === undefined) continue;
-        text += present(old) ? `! kept ${old} — doc ${doc.id} download failed; still tracked as ${old}\n` : `! doc ${doc.id} download failed; still tracked as ${old}, which is not present locally\n`;
+        if (present(old)) text += `! kept ${old} — doc ${doc.id} download failed; still tracked as ${old}\n`;
+        else if (testCase.tracked[old].hashless === true) text += `! doc ${doc.id} download failed; still tracked as ${old}, which is not present locally\n`;
+        else text += `! doc ${doc.id} ("${doc.title}") failed to download and ${old} is not present locally; not tracking it — pull again later.\n`;
     }
     for (const doc of testCase.served.filter(isWritten)) {
         const old = oldPathOf(doc);

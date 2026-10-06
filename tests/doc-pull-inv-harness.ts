@@ -40,10 +40,13 @@ export interface ServedDoc {
     downloadFails?: boolean;
     /** The `bulk_read` status for this doc (default `found`): a doc that is listed but not fetched. */
     bulkStatus?: string;
+    /** The MIME the media endpoints report (default `image/png`); any other one has no extension, so the file is the bare title. */
+    mime?: string;
 }
 
 export const extOf = (kind: Kind): string => (kind === 'md' ? '.md' : '.png');
-export const relOf = (d: ServedDoc): string => `${d.relative ? `${d.relative}/` : ''}${d.title}${extOf(d.kind)}`;
+const mimeOf = (d: ServedDoc): string => d.mime ?? 'image/png';
+export const relOf = (d: ServedDoc): string => `${d.relative ? `${d.relative}/` : ''}${d.title}${d.kind === 'media' && mimeOf(d) !== 'image/png' ? '' : extOf(d.kind)}`;
 
 /** A doc at version `version`: its bytes are `V<version>-<title>`, so every version is distinct. */
 export function doc(kind: Kind, id: number, title: string, version: number, relative?: string): ServedDoc {
@@ -54,7 +57,7 @@ function mcpResult(data: object, isError = false): string {
     return JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError, content: [{ type: 'text', text: JSON.stringify(data) }] } });
 }
 
-const mediaProps = (d: ServedDoc): Record<string, unknown> => (d.kind === 'media' ? { blob_sha: `sha-${d.id}`, mime: 'image/png', size: 4 } : {});
+const mediaProps = (d: ServedDoc): Record<string, unknown> => (d.kind === 'media' ? { blob_sha: `sha-${d.id}`, mime: mimeOf(d), size: 4 } : {});
 const bodyOf = (d: ServedDoc): string => (d.kind === 'md' ? d.bytes : '');
 
 export interface CliResult {
@@ -146,10 +149,13 @@ export interface Snapshot {
     inodes: Record<string, number>;
 }
 
+/** A path-keyed record with no prototype, so a file named like an Object.prototype member is an own key like any other. */
+const byPath = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
+
 /** Every entry under `dir` (dot-entries included): files by bytes, links by target, folders as `D`; plus every regular file's inode. */
 export function snapshot(dir: string): Snapshot {
-    const entries: Record<string, string> = {};
-    const inodes: Record<string, number> = {};
+    const entries = byPath<string>();
+    const inodes = byPath<number>();
     const walk = (abs: string, prefix: string): void => {
         for (const name of fs.readdirSync(abs).sort()) {
             const full = path.join(abs, name);
@@ -173,7 +179,12 @@ export function snapshot(dir: string): Snapshot {
 /** The entries doc pull keeps for itself in `out`: its lock and any temp file. Both must be gone after every exit. */
 export const internalEntries = (out: string): string[] => fs.readdirSync(out).filter((name) => name === LOCK_FILE || name.startsWith('.sa-write-'));
 export const read = (...parts: string[]): string => fs.readFileSync(path.join(...parts), 'utf8');
-export const manifestOf = (out: string): { folder_path: string; docs: Record<string, Record<string, any>> } => JSON.parse(read(out, MANIFEST_FILE));
+export function manifestOf(out: string): { folder_path: string; docs: Record<string, Record<string, any>> } {
+    const manifest = JSON.parse(read(out, MANIFEST_FILE));
+    const docs = byPath<Record<string, any>>();
+    for (const [rel, entry] of Object.entries(manifest.docs as Record<string, Record<string, any>>)) docs[rel] = entry;
+    return { folder_path: manifest.folder_path, docs };
+}
 
 /** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
 export function caseInsensitiveFilesystem(): boolean {
@@ -266,7 +277,7 @@ export function useDocPullHarness() {
                         return;
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ url: `http://127.0.0.1:${port}/blob/${d.id}`, mime: 'image/png', size: 4 }));
+                    res.end(JSON.stringify({ url: `http://127.0.0.1:${port}/blob/${d.id}`, mime: mimeOf(d), size: 4 }));
                     return;
                 }
                 const blob = url.match(/^\/blob\/(\d+)$/);

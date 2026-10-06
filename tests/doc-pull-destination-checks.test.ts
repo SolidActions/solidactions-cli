@@ -169,7 +169,7 @@ function seedDestination(): void {
 }
 
 describe('doc pull destination checks (cli#191, cli#176)', () => {
-    it.skipIf(!canChmod)('an unreadable destination fails with one "cannot read" line and no stack', async () => {
+    it.skipIf(!canChmod)('an unreadable destination fails with one "cannot read" line and no stack (needs a non-root user, who cannot read a mode-000 folder; Windows has no modes)', async () => {
         seedDestination();
         fs.chmodSync(dest, 0o000);
 

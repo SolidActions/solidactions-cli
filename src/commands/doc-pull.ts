@@ -25,7 +25,7 @@ import { Config } from '../utils/config';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { callDocsTool } from '../utils/mcp';
 import { escapeJsonDisplayText, sanitizeDisplayText } from '../utils/source-provenance';
-import { DOCS_MANIFEST, DocsManifest, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
+import { DOCS_MANIFEST, DocsManifest, docsFrom, entryAt, ManifestEntry, readManifest, sha256Hex, writeManifest } from '../utils/docs-manifest';
 import {
     acquireLock,
     Authorized,
@@ -48,14 +48,14 @@ import {
 export { DOCS_MANIFEST, sha256Hex };
 export type { DocsManifest, ManifestEntry };
 
-/** Extension appended to a media file's sanitized title when the title itself has none. */
-const MIME_EXTENSIONS: Record<string, string> = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/gif': '.gif',
-    'image/webp': '.webp',
-    'application/pdf': '.pdf',
-};
+/** Extension appended to a media file's sanitized title when the title itself has none. A Map: a server MIME is never an inherited name (PM ruling 14). */
+const MIME_EXTENSIONS = new Map<string, string>([
+    ['image/png', '.png'],
+    ['image/jpeg', '.jpg'],
+    ['image/gif', '.gif'],
+    ['image/webp', '.webp'],
+    ['application/pdf', '.pdf'],
+]);
 
 export interface DocPullOptions {
     yes?: boolean;
@@ -494,7 +494,7 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
                 ext = titleExt;
             } else {
                 base = sanitized;
-                ext = (media.mime && MIME_EXTENSIONS[media.mime]) ?? '';
+                ext = (media.mime && MIME_EXTENSIONS.get(media.mime)) ?? '';
             }
         } else if (doc.docType === 'visual') {
             ext = '.html';
@@ -929,7 +929,7 @@ function checkPlannedWrites(
     const untracked: string[] = [];
     for (const p of planned) {
         if (p.isMedia && p.mediaBytes === null) continue; // a failed download writes nothing
-        const tracked = previousManifest?.docs[p.relPath];
+        const tracked = entryAt(previousManifest, p.relPath);
         if (tracked !== undefined && tracked.body_sha256 != null) continue; // checked as unpushed local changes
         const targetAbs = path.join(destination, ...p.relPath.split('/'));
         let targetStat: fs.Stats;
@@ -989,9 +989,9 @@ export interface DocOutcome {
     /** placed: written (or tracked with no bytes after a failed download); kept-previous: its earlier entry stays; dropped: no entry; refused: not written, its earlier entry carried. */
     kind: 'placed' | 'kept-previous' | 'dropped' | 'refused';
     /** The entries this run records for the doc's own bytes, by path: the file it placed (or tracked with no bytes). Wins over any `kept` entry at the same name (rule 3). */
-    placed: Record<string, ManifestEntry>;
+    placed: Map<string, ManifestEntry>;
     /** The earlier entries the doc keeps, by path: a refused doc's, a kept-previous one's, a placed renamed doc's old twin after a stop. */
-    kept: Record<string, ManifestEntry>;
+    kept: Map<string, ManifestEntry>;
 }
 
 /** True when anything at all (a link included) is at `abs`. */
@@ -1004,10 +1004,32 @@ function entryExists(abs: string): boolean {
     }
 }
 
+/** A regular file (following links) at `rel`, and the hash of its bytes; the hash is null when there is none or it cannot be read. */
+function localFile(destination: string, rel: string): { present: boolean; hash: string | null } {
+    const abs = path.join(destination, ...rel.split('/'));
+    try {
+        if (!fs.statSync(abs).isFile()) return { present: false, hash: null };
+    } catch {
+        return { present: false, hash: null };
+    }
+    try {
+        return { present: true, hash: sha256Hex(fs.readFileSync(abs)) };
+    } catch {
+        return { present: true, hash: null };
+    }
+}
+
+/** What is at `rel` when a failed download's earlier entry is dropped for want of its file (manager ruling on cli#168 I1(b)): a string literal. */
+function absentState(destination: string, rel: string): string {
+    return entryExists(path.join(destination, ...rel.split('/'))) ? 'is not a regular file' : 'is not present locally';
+}
+
 /**
  * One outcome per planned doc, after the writes: the files this pull placed, and for every other doc what its
- * manifest entry should be (cli#183, cli#190, cli#167). A failed download keeps the tracking it had, unless the
- * file now at its path is not the one the entry names; a doc the pull never got to keeps its earlier entry.
+ * manifest entry should be (cli#183, cli#190, cli#167). A failed download keeps the tracking it had while the file at its
+ * path is the one the entry names; a doc the pull never got to keeps its earlier entry. An earlier entry with a hash is
+ * kept only while a file is at its path: a missing file drops the doc's tracking with a warning (manager ruling on cli#168,
+ * issuecomment-6013479498, I1(b)), so the gate never meets a kept entry with a hash for a missing file.
  * `pendingWarnings` receives the `! …` lines printed after a successful pull.
  */
 export function decideOutcomes(
@@ -1022,10 +1044,12 @@ export function decideOutcomes(
     pendingWarnings: string[],
 ): DocOutcome[] {
     const outcomes: DocOutcome[] = [];
-    const earlierById = new Map<number, Record<string, ManifestEntry>>();
+    const earlierById = new Map<number, Map<string, ManifestEntry>>();
     if (previousManifest !== null && previousManifest.folder_path === folderPath) {
         for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
-            earlierById.set(entry.id, { ...earlierById.get(entry.id), [relPath]: entry });
+            const earlier = earlierById.get(entry.id) ?? new Map<string, ManifestEntry>();
+            earlier.set(relPath, entry);
+            earlierById.set(entry.id, earlier);
         }
     }
     const renamedIds = new Set(renameMoves.map((m) => m.id));
@@ -1037,12 +1061,14 @@ export function decideOutcomes(
         if (!failedDownload(p)) {
             if (placedPaths.has(p.relPath)) {
                 // A stopped pull never removes a renamed doc's old twin, so that file keeps its tracking too (listed first, so
-                // the next pull sees the rename and finishes it).
+                // the next pull sees the rename and finishes it). A twin that is gone keeps no entry with a hash (I1(b)).
                 const move = stopped ? renameMoves.find((m) => m.id === p.doc.id && m.sourcePresent) : undefined;
-                const oldEntry = move === undefined ? undefined : previousManifest?.docs[move.oldRel];
-                outcomes.push({ id: p.doc.id, kind: 'placed', placed: { [p.relPath]: entry }, kept: move !== undefined && oldEntry !== undefined ? { [move.oldRel]: oldEntry } : {} });
+                const oldEntry = move === undefined ? undefined : entryAt(previousManifest, move.oldRel);
+                const kept = new Map<string, ManifestEntry>();
+                if (move !== undefined && oldEntry !== undefined && (oldEntry.body_sha256 == null || localFile(destination, move.oldRel).present)) kept.set(move.oldRel, oldEntry);
+                outcomes.push({ id: p.doc.id, kind: 'placed', placed: new Map([[p.relPath, entry]]), kept });
             } else {
-                outcomes.push({ id: p.doc.id, kind: 'refused', placed: {}, kept: earlierById.get(p.doc.id) ?? {} });
+                outcomes.push({ id: p.doc.id, kind: 'refused', placed: new Map(), kept: new Map(earlierById.get(p.doc.id)) });
             }
             continue;
         }
@@ -1051,6 +1077,8 @@ export function decideOutcomes(
         // cli#183: a failed download at a path the previous manifest tracked for the same doc keeps
         // that entry unchanged (revision and hash), as a failed rename does: nothing was written,
         // so the manifest must not claim a newer revision or drop the hash of the file still there.
+        // The entry is kept only while the file is the one it names: exactly its hash (INV-C), or no file for an entry
+        // with no hash. A missing file drops the tracking (I1(b)).
         //
         // cli#167: a media doc whose download failed must not be tracked over a
         // local file the previous manifest does not track, with a hash, for that
@@ -1059,35 +1087,27 @@ export function decideOutcomes(
         //
         // cli#190: if that local file is another doc's (tracked with a hash at this path), that
         // doc's tracking is kept when it is still on the server and not moved by this pull.
-        const tracked = previousManifest?.docs[p.relPath];
-        const absTarget = path.join(destination, ...p.relPath.split('/'));
-        let holdsLocalFile = false;
-        try {
-            holdsLocalFile = fs.statSync(absTarget).isFile();
-        } catch {
-            holdsLocalFile = false;
-        }
-        // A kept entry's hash must still be the file's: a locally edited file under --overwrite is not what the entry says (INV-C).
-        let localHash: string | null = null;
-        if (holdsLocalFile) {
-            try {
-                localHash = sha256Hex(fs.readFileSync(absTarget));
-            } catch {
-                localHash = null;
-            }
-        }
-        if (tracked !== undefined && tracked.id === p.doc.id && (tracked.body_sha256 == null || !holdsLocalFile || localHash === tracked.body_sha256) && (tracked.body_sha256 != null || !holdsLocalFile)) {
-            outcomes.push({ id: p.doc.id, kind: 'kept-previous', placed: {}, kept: { [p.relPath]: tracked } });
+        const tracked = entryAt(previousManifest, p.relPath);
+        const local = localFile(destination, p.relPath);
+        const ownEntry = tracked !== undefined && tracked.id === p.doc.id ? tracked : undefined;
+        if (ownEntry !== undefined && (ownEntry.body_sha256 == null ? !local.present : local.hash === ownEntry.body_sha256)) {
+            outcomes.push({ id: p.doc.id, kind: 'kept-previous', placed: new Map(), kept: new Map([[p.relPath, ownEntry]]) });
             continue;
         }
-        if (!holdsLocalFile) {
-            outcomes.push({ id: p.doc.id, kind: 'placed', placed: { [p.relPath]: entry }, kept: {} });
+        if (ownEntry !== undefined && ownEntry.body_sha256 != null && !local.present) {
+            outcomes.push({ id: p.doc.id, kind: 'dropped', placed: new Map(), kept: new Map() });
+            const state = absentState(destination, p.relPath);
+            pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} ${state}; not tracking it — pull again later.`);
+            continue;
+        }
+        if (!local.present) {
+            outcomes.push({ id: p.doc.id, kind: 'placed', placed: new Map([[p.relPath, entry]]), kept: new Map() });
             continue;
         }
         const otherDoc = tracked !== undefined && tracked.id !== p.doc.id && tracked.body_sha256 != null ? tracked : undefined;
-        outcomes.push({ id: p.doc.id, kind: 'dropped', placed: {}, kept: {} });
-        if (otherDoc !== undefined && localHash === otherDoc.body_sha256 && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
-            outcomes.push({ id: otherDoc.id, kind: 'kept-previous', placed: {}, kept: { [p.relPath]: otherDoc } });
+        outcomes.push({ id: p.doc.id, kind: 'dropped', placed: new Map(), kept: new Map() });
+        if (otherDoc !== undefined && local.hash === otherDoc.body_sha256 && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
+            outcomes.push({ id: otherDoc.id, kind: 'kept-previous', placed: new Map(), kept: new Map([[p.relPath, otherDoc]]) });
             pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds doc ${otherDoc.id}'s file ("${shown(otherDoc.title)}"); still tracking it as doc ${otherDoc.id} — pull again later`);
             continue;
         }
@@ -1098,14 +1118,21 @@ export function decideOutcomes(
 
     // A rename whose replacement is NOT written (a failed media download plans a new path but
     // writes nothing) keeps its old file and its old manifest entry: deleting it would destroy
-    // the only good copy. Without an old file the old entry is still kept, so the doc is not
-    // tracked (with no hash) at a new path that may hold an untracked file. The refusals in
-    // `report` guarantee no other doc in this pull claims that old path.
+    // the only good copy. An old entry with a hash whose file is gone is not kept (I1(b)): the doc is then not
+    // tracked at all, neither at the old path nor (with no hash) at a new path that may hold an untracked file. The
+    // refusals in `report` guarantee no other doc in this pull claims that old path.
     for (const m of renameMoves) {
         if (m.replacementWritten) continue;
-        const oldEntry = previousManifest?.docs[m.oldRel];
-        outcomes.push({ id: m.id, kind: 'kept-previous', placed: {}, kept: oldEntry === undefined ? {} : { [m.oldRel]: oldEntry } });
-        if (m.sourcePresent) {
+        const oldEntry = entryAt(previousManifest, m.oldRel);
+        const local = localFile(destination, m.oldRel);
+        if (oldEntry !== undefined && oldEntry.body_sha256 != null && !local.present) {
+            outcomes.push({ id: m.id, kind: 'dropped', placed: new Map(), kept: new Map() });
+            const state = absentState(destination, m.oldRel);
+            pendingWarnings.push(`! doc ${m.id} ("${shown(m.title)}") failed to download and ${shown(m.oldRel)} ${state}; not tracking it — pull again later.`);
+            continue;
+        }
+        outcomes.push({ id: m.id, kind: 'kept-previous', placed: new Map(), kept: oldEntry === undefined ? new Map() : new Map([[m.oldRel, oldEntry]]) });
+        if (local.present) {
             pendingWarnings.push(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}`);
         } else {
             pendingWarnings.push(`! doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}, which is not present locally`);
@@ -1121,18 +1148,19 @@ export function decideOutcomes(
  * placed always win: an earlier entry at a name a placed entry holds, or one equal to it under `nameKey`, is dropped, and
  * the doc that lost it gets a "no longer tracked there" line in `pendingWarnings` (a doc's own old twin loses silently).
  * The overlap is settled here, before anything is collapsed by name, so no retained entry can stand for placed bytes.
+ * Entries are collected in a Map and published as a null-prototype dictionary, so every path is an own key (PM ruling 14).
  */
 export function buildManifest(folderPath: string, previousManifest: DocsManifest | null, outcomes: DocOutcome[], keepUnlisted: boolean, pendingWarnings: string[]): DocsManifest {
     const placedByKey = new Map<string, { relPath: string; entry: ManifestEntry }>();
     for (const outcome of outcomes) {
-        for (const [relPath, entry] of Object.entries(outcome.placed)) placedByKey.set(nameKey(relPath), { relPath, entry });
+        for (const [relPath, entry] of outcome.placed) placedByKey.set(nameKey(relPath), { relPath, entry });
     }
-    const docs: DocsManifest['docs'] = {};
+    const docs = new Map<string, ManifestEntry>();
     const warned = new Set<string>();
     const keep = (relPath: string, entry: ManifestEntry): void => {
         const winner = placedByKey.get(nameKey(relPath));
         if (winner === undefined) {
-            docs[relPath] = entry;
+            docs.set(relPath, entry);
             return;
         }
         if (winner.entry.id !== entry.id && !warned.has(relPath)) {
@@ -1147,10 +1175,10 @@ export function buildManifest(folderPath: string, previousManifest: DocsManifest
         }
     }
     for (const outcome of outcomes) {
-        for (const [relPath, entry] of Object.entries(outcome.kept)) keep(relPath, entry);
-        Object.assign(docs, outcome.placed);
+        for (const [relPath, entry] of outcome.kept) keep(relPath, entry);
+        for (const [relPath, entry] of outcome.placed) docs.set(relPath, entry);
     }
-    return { folder_path: folderPath, docs };
+    return { folder_path: folderPath, docs: docsFrom(docs) };
 }
 
 /** The error code of a filesystem failure, for the gate's wording. */
@@ -1158,15 +1186,20 @@ const errnoOf = (error: unknown): string => (error as NodeJS.ErrnoException).cod
 
 /**
  * INV-C as a runtime gate (spec §1.2, rule 4), checked just before the manifest is written, on the FINAL manifest: no two
- * of its paths may be one entry on some filesystem, and every entry with a hash must be one this run can vouch for.
+ * of its paths may be one entry on some filesystem, every file this run placed must be in it with the hash this run wrote
+ * (PM ruling 14: a placed file the manifest would not record refuses), and every entry with a hash must be one this run
+ * can vouch for:
  *  - A file this run placed (`placedFiles`): it must be a regular file with the `dev:ino` this run renamed in, and the
- *    entry must be the hash of the bytes it wrote. The bytes are read back; only a permission failure on that same file
- *    (a write-only mode it kept from the file it replaced) falls back to the hash this run wrote.
+ *    entry must be the hash of the bytes it wrote. The bytes are read back; only a permission failure (EACCES, or EPERM,
+ *    the same failure on some platforms) on that same file (a write-only mode it kept from the file it replaced) falls
+ *    back to the hash this run wrote.
  *  - An entry kept for a doc this run acted on (a kept-previous outcome, or the old twin of a placed rename): lstat must
- *    show a regular file (no link, no folder) whose bytes hash to the entry. Only a file that is missing stays (cli#183);
- *    any other lstat or read failure is a refusal, never a pass.
+ *    show a regular file (no link, no folder) whose bytes hash to the entry. A missing file refuses like any other lstat
+ *    or read failure: `decideOutcomes` keeps no such entry.
  *  - An entry carried unchanged for a doc this run did not write (a refused doc's, or one it never listed) was not
  *    touched by this run, and is not read: a folder or an edited file at that name is the refusal's own state.
+ * The three exceptions to PM ruling 13 (a refused doc's carried entry is not read; a kept entry's missing file is NOT
+ * one; EPERM like EACCES for a placed file) are the manager ruling on cli#168, issuecomment-6013479498.
  * Returns the first problem, or null.
  */
 export function manifestProblem(destination: string, manifest: DocsManifest, outcomes: DocOutcome[], placedFiles: Map<string, { hash: string; identity: string }>): { rel: string; reason: string } | null {
@@ -1177,10 +1210,15 @@ export function manifestProblem(destination: string, manifest: DocsManifest, out
         if (other !== undefined) return { rel, reason: `the same file as ${other} on a case-insensitive or Unicode-normalising filesystem` };
         byKey.set(key, rel);
     }
+    for (const [rel, placed] of placedFiles) {
+        const entry = entryAt(manifest, rel);
+        if (entry === undefined) return { rel, reason: 'this pull wrote it but the manifest would not record it' };
+        if (entry.body_sha256 !== placed.hash) return { rel, reason: 'its bytes are not the ones the manifest would record' };
+    }
     const verified = new Set<string>();
     for (const outcome of outcomes) {
         if (outcome.kind === 'refused') continue;
-        for (const rel of Object.keys(outcome.kept)) verified.add(rel);
+        for (const rel of outcome.kept.keys()) verified.add(rel);
     }
     for (const [rel, entry] of Object.entries(manifest.docs)) {
         if (entry.body_sha256 == null) continue;
@@ -1192,8 +1230,7 @@ export function manifestProblem(destination: string, manifest: DocsManifest, out
             stat = fs.lstatSync(abs);
         } catch (error) {
             if (errnoOf(error) !== 'ENOENT') return { rel, reason: `it cannot be checked (${errnoOf(error)})` };
-            if (placed !== undefined) return { rel, reason: 'the file this pull wrote is not there' };
-            continue; // a kept entry whose file is missing stays (cli#183)
+            return { rel, reason: placed !== undefined ? 'the file this pull wrote is not there' : 'the file it tracks is not there' };
         }
         if (!stat.isFile()) return { rel, reason: 'it is not a regular file now' };
         if (placed !== undefined && (placed.hash !== entry.body_sha256 || placed.identity !== `${stat.dev}:${stat.ino}`)) return { rel, reason: 'its bytes are not the ones the manifest would record' };
@@ -1319,13 +1356,13 @@ async function report(
             let targetIsSource = false;
             let currentHash: string | null = null;
             if (sourceStat !== null) {
-                const entry = previousManifest.docs[old];
+                const entry = entryAt(previousManifest, old);
                 try {
                     currentHash = sha256Hex(fs.readFileSync(absOld));
                 } catch {
                     currentHash = null;
                 }
-                modified = currentHash === null || currentHash !== entry.body_sha256;
+                modified = currentHash === null || currentHash !== entry?.body_sha256;
                 try {
                     const targetStat = fs.statSync(path.join(destination, ...p.relPath.split('/')));
                     targetIsSource = targetStat.dev === sourceStat.dev && targetStat.ino === sourceStat.ino;
@@ -1392,7 +1429,7 @@ async function report(
             if (!m.modified) continue;
             const taker = plannedTargetForSource(m);
             if (!taker) continue;
-            const oldTitle = previousManifest.docs[m.oldRel]?.title ?? `#${m.id}`;
+            const oldTitle = entryAt(previousManifest, m.oldRel)?.title ?? `#${m.id}`;
             process.stderr.write(chalk.red(`error: ${shown(m.oldRel)} holds unpublished edits for doc ${m.id} ("${shown(oldTitle)}", now written as ${shown(m.newRel)}), but this pull would write doc ${taker.doc.id} ("${shown(taker.doc.title)}") to ${shown(taker.relPath)}, the same file.\n`));
             process.stderr.write(chalk.red(`Move or rename the edited ${shown(m.oldRel)} (or push it first) and pull again.\n`));
             process.exit(1);
@@ -1469,7 +1506,7 @@ async function report(
         if (!options.overwrite) {
             for (const m of renameMoves) {
                 if (!m.replacementWritten || m.targetIsSource) continue;
-                const targetEntry = previousManifest.docs[m.newRel];
+                const targetEntry = entryAt(previousManifest, m.newRel);
                 if (targetEntry !== undefined && targetEntry.body_sha256 != null) continue;
                 const absNew = path.join(destination, ...m.newRel.split('/'));
                 let existing: Buffer | null = null;
@@ -1680,7 +1717,7 @@ async function report(
 
     if (canPropagateDeletions) {
         for (const [relPath, entry] of Object.entries(previousManifest!.docs)) {
-            if (manifest.docs[relPath]) continue;
+            if (entryAt(manifest, relPath) !== undefined) continue;
             // Rename cleanup (cli#157) already handled this path: never a
             // "deleted remotely" orphan warning for it.
             if (handledOldPaths.has(relPath)) continue;

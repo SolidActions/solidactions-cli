@@ -599,7 +599,9 @@ describe('doc pull never writes outside the destination or through a link (cli#1
 
     describe('an existing target that cannot be read is not owned (cli#167)', () => {
         const LOCAL = Buffer.from('# local bytes in a write-only file');
-        const isRoot = process.getuid?.() === 0; // root reads mode-0200 files, so nothing is unreadable to it
+        // Root reads mode-0200 files, so nothing is unreadable to it; Windows has no modes (spec §1.7: a visible, reasoned skip).
+        const cannotMakeUnreadable = process.getuid?.() === 0 || process.platform === 'win32';
+        const NEEDS = ' (needs a non-root user, who cannot read a mode-0200 file; Windows has no modes)';
 
         function manifestJson(): { docs: Record<string, { id: number; body_sha256: string | null }> } {
             return JSON.parse(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8'));
@@ -620,7 +622,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             served = [NOTE];
         });
 
-        it.skipIf(isRoot)('a first pull with -y refuses a write-only untracked file, naming the read error, leaving the bytes and writing no manifest', async () => {
+        it.skipIf(cannotMakeUnreadable)(`a first pull with -y refuses a write-only untracked file, naming the read error, leaving the bytes and writing no manifest${NEEDS}`, async () => {
             writeOnly('Note.md');
 
             const result = await runPull(root, dest, false);
@@ -633,7 +635,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.existsSync(path.join(dest, MANIFEST_FILE))).toBe(false);
         });
 
-        it.skipIf(isRoot)('refuses a tracked entry with no recorded hash over a write-only file, leaving the bytes', async () => {
+        it.skipIf(cannotMakeUnreadable)(`refuses a tracked entry with no recorded hash over a write-only file, leaving the bytes${NEEDS}`, async () => {
             writeOnly('Note.md');
             const manifest = JSON.parse(manifestOf([{ rel: 'Note.md', doc: NOTE, bytes: NOTE_BYTES }]));
             manifest.docs['Note.md'].body_sha256 = null;
@@ -648,7 +650,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
         });
 
-        it.skipIf(isRoot)('refuses a rename whose target is a write-only file, leaving the bytes, the old file and the manifest', async () => {
+        it.skipIf(cannotMakeUnreadable)(`refuses a rename whose target is a write-only file, leaving the bytes, the old file and the manifest${NEEDS}`, async () => {
             const OLD = Buffer.from('# page v1');
             served = [{ id: 5, title: 'Renamed', revision: 9, body: Buffer.from('# page v2') }];
             fs.writeFileSync(path.join(dest, 'Page.md'), OLD);
@@ -665,7 +667,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
         });
 
-        it.skipIf(isRoot)('replaces a write-only file under --overwrite', async () => {
+        it.skipIf(cannotMakeUnreadable)(`replaces a write-only file under --overwrite${NEEDS}`, async () => {
             writeOnly('Note.md');
 
             const result = await runPull(root, dest, true);

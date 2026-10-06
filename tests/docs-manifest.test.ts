@@ -23,6 +23,23 @@ describe('docs-manifest', () => {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    it('a manifest keyed by Object.prototype names reads back with each of them as its own entry, an untracked one as no entry, and writes them all back (PM ruling 14)', () => {
+        const dir = tmpDir();
+        const entry = (id: number): string => `{"id":${id},"title":"t","current_revision_id":1,"media":true,"body_sha256":"h${id}"}`;
+        fs.writeFileSync(path.join(dir, DOCS_MANIFEST), `{"folder_path":"docs","docs":{"__proto__":${entry(1)},"toString":${entry(2)}}}`);
+
+        const read = readManifest(dir)!;
+
+        expect(Object.keys(read.docs)).toEqual(['__proto__', 'toString']);
+        expect(Object.getOwnPropertyDescriptor(read.docs, '__proto__')?.value.id).toBe(1);
+        for (const untracked of ['constructor', 'hasOwnProperty', 'valueOf', 'prototype']) expect(read.docs[untracked], untracked).toBeUndefined();
+        writeManifest(dir, read);
+        const written = JSON.parse(fs.readFileSync(path.join(dir, DOCS_MANIFEST), 'utf8'));
+        expect(Object.keys(written.docs)).toEqual(['__proto__', 'toString']);
+        expect(Object.getOwnPropertyDescriptor(written.docs, '__proto__')?.value.body_sha256).toBe('h1');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
     it('returns null when the manifest is absent', () => {
         const dir = tmpDir();
         expect(readManifest(dir)).toBeNull();

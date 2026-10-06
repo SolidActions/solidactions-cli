@@ -520,8 +520,7 @@ describe('writeAll: rule 5 at the re-check and the identity of each placed file 
         expect(read(dest, 'a.md')).toBe('SOMEONE ELSE');
     });
 
-    it('an unreadable file that appeared after the check (absent authorization) is a refusal, not a write error', () => {
-        if (process.getuid?.() === 0 || process.platform === 'win32') return; // root reads mode-000 files; Windows has no modes
+    it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')('an unreadable file that appeared after the check (absent authorization) is a refusal, not a write error (needs a non-root user, who cannot read a mode-000 file; Windows has no modes)', () => {
         fs.writeFileSync(path.join(dest, 'a.md'), 'NEW');
         fs.chmodSync(path.join(dest, 'a.md'), 0o000);
 

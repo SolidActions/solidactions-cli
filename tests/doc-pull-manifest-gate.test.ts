@@ -230,7 +230,7 @@ describe('C2: the gate checks every final entry and never passes a read it could
             reason: /cannot be checked \(ENOTDIR\)/,
         },
         {
-            name: 'the folder on its way became a looping link (ELOOP)',
+            name: 'the folder on its way became a looping link (ELOOP; needs symbolic links, not run on Windows)',
             rel: 'sub/item.md',
             skip: isWindows,
             apply: () => {
@@ -240,7 +240,7 @@ describe('C2: the gate checks every final entry and never passes a read it could
             reason: /cannot be checked \(ELOOP\)/,
         },
         {
-            name: 'the file became a link to a file holding the same bytes',
+            name: 'the file became a link to a file holding the same bytes (needs symbolic links, not run on Windows)',
             rel: 'item.md',
             skip: isWindows,
             apply: () => {
@@ -274,19 +274,21 @@ describe('C2: the gate checks every final entry and never passes a read it could
         },
     ];
 
-    it.each(PLACED_BREAKS.filter((row) => row.skip !== true))('a placed file where $name: the gate refuses', ({ rel, apply, reason }) => {
-        const { previous, planned, placed } = placedOne(rel, 'PLACED');
-        apply();
+    // Every row is registered; one the platform cannot run is a visible skip whose title says why (spec §1.7).
+    for (const { name, rel, skip, apply, reason } of PLACED_BREAKS) {
+        it.skipIf(skip === true)(`a placed file where ${name}: the gate refuses`, () => {
+            const { previous, planned, placed } = placedOne(rel, 'PLACED');
+            apply();
 
-        const settled = settle(previous, planned, placed, false, []);
+            const settled = settle(previous, planned, placed, false, []);
 
-        expect(settled.problem).not.toBeNull();
-        expect(settled.problem?.rel).toBe(rel);
-        expect(settled.problem?.reason).toMatch(reason);
-    });
+            expect(settled.problem).not.toBeNull();
+            expect(settled.problem?.rel).toBe(rel);
+            expect(settled.problem?.reason).toMatch(reason);
+        });
+    }
 
-    it('a placed file that is write-only (the mode its replaced file had) is accepted: this run renamed it in and wrote its hash (needs a non-root user; Windows has no modes)', () => {
-        if (isRoot || isWindows) return;
+    it.skipIf(isRoot || isWindows)('a placed file that is write-only (the mode its replaced file had) is accepted: this run renamed it in and wrote its hash (needs a non-root user; Windows has no modes)', () => {
         fs.writeFileSync(abs('locked.md'), 'OLD');
         fs.chmodSync(abs('locked.md'), 0o200);
         const planned = [plannedDoc(3, 'locked', 'PLACED')];
@@ -327,7 +329,7 @@ describe('C2: the gate checks every final entry and never passes a read it could
             reason: /cannot be checked \(ENOTDIR\)/,
         },
         {
-            name: 'the folder on its way is a looping link (ELOOP)',
+            name: 'the folder on its way is a looping link (ELOOP; needs symbolic links, not run on Windows)',
             rel: 'sub/pic.png',
             skip: isWindows,
             apply: () => {
@@ -337,14 +339,14 @@ describe('C2: the gate checks every final entry and never passes a read it could
             reason: /cannot be checked \(ELOOP\)/,
         },
         {
-            name: 'the file cannot be read (EACCES; needs a non-root user)',
+            name: 'the file cannot be read (EACCES; needs a non-root user; Windows has no modes)',
             rel: 'pic.png',
             skip: isWindows || isRoot,
             apply: () => fs.chmodSync(abs('pic.png'), 0o000),
             reason: /cannot be read back \(EACCES\)/,
         },
         {
-            name: 'a link to a file holding the entry\'s bytes is at its path',
+            name: 'a link to a file holding the entry\'s bytes is at its path (needs symbolic links, not run on Windows)',
             rel: 'pic.png',
             skip: isWindows,
             apply: () => {
@@ -360,10 +362,10 @@ describe('C2: the gate checks every final entry and never passes a read it could
             reason: /its bytes are not the ones the manifest would record/,
         },
         {
-            name: 'the file is missing (cli#183: a kept entry whose file is gone stays)',
+            name: 'the file went missing after the outcome was decided (manager ruling on cli#168, I1(b): a kept entry with a hash needs its file)',
             rel: 'pic.png',
             apply: () => fs.unlinkSync(abs('pic.png')),
-            accepted: true,
+            reason: /the file it tracks is not there/,
         },
         {
             name: 'the file is still the one the entry names',
@@ -373,21 +375,52 @@ describe('C2: the gate checks every final entry and never passes a read it could
         },
     ];
 
-    it.each(KEPT_BREAKS.filter((row) => row.skip !== true))('a kept entry where $name', ({ rel, apply, accepted, reason }) => {
-        const { previous, planned } = keptEntry(rel, 'PIC-BYTES');
-        const outcomes = decideOutcomes(root, planned, new Set(), false, previous, FOLDER, [], new Set([5]), []);
-        expect(outcomes.map((outcome) => outcome.kind)).toEqual(['kept-previous']);
-        apply();
+    for (const { name, rel, skip, apply, accepted, reason } of KEPT_BREAKS) {
+        it.skipIf(skip === true)(`a kept entry where ${name}`, () => {
+            const { previous, planned } = keptEntry(rel, 'PIC-BYTES');
+            const outcomes = decideOutcomes(root, planned, new Set(), false, previous, FOLDER, [], new Set([5]), []);
+            expect(outcomes.map((outcome) => outcome.kind)).toEqual(['kept-previous']);
+            apply();
 
-        const manifest = buildManifest(FOLDER, previous, outcomes, false, []);
-        const problem = manifestProblem(root, manifest, outcomes, new Map());
+            const manifest = buildManifest(FOLDER, previous, outcomes, false, []);
+            const problem = manifestProblem(root, manifest, outcomes, new Map());
 
-        if (accepted === true) {
-            expect(problem).toBeNull();
-        } else {
-            expect(problem?.rel).toBe(rel);
-            expect(problem?.reason).toMatch(reason as RegExp);
-        }
+            if (accepted === true) {
+                expect(problem).toBeNull();
+            } else {
+                expect(problem?.rel).toBe(rel);
+                expect(problem?.reason).toMatch(reason as RegExp);
+            }
+        });
+    }
+
+    it('a failed download at a tracked path whose file is missing is dropped with the "not tracking it" warning, so the gate meets no kept entry for a missing file (manager ruling on cli#168, I1(b))', () => {
+        const { previous, planned } = keptEntry('pic.png', 'PIC-BYTES');
+        fs.unlinkSync(abs('pic.png'));
+        const warnings: string[] = [];
+
+        const outcomes = decideOutcomes(root, planned, new Set(), false, previous, FOLDER, [], new Set([5]), warnings);
+        const manifest = buildManifest(FOLDER, previous, outcomes, false, warnings);
+
+        expect(outcomes.map((outcome) => outcome.kind)).toEqual(['dropped']);
+        expect(warnings).toEqual(['! doc 5 ("pic") failed to download and pic.png is not present locally; not tracking it — pull again later.']);
+        expect(Object.keys(manifest.docs)).toEqual([]);
+        expect(manifestProblem(root, manifest, outcomes, new Map())).toBeNull();
+    });
+
+    it('a renamed doc whose download failed and whose old file is missing is dropped the same way, and its old entry is not kept (I1(b))', () => {
+        const previous: DocsManifest = { folder_path: FOLDER, docs: { 'old.png': entryFor(5, 'old', 'OLD-BYTES', true) } };
+        const planned = [failedDownloadDoc(5, 'new', 'new.png')];
+        const move: RenameMove = { oldRel: 'old.png', newRel: 'new.png', id: 5, title: 'new', sourcePresent: false, sourceIdentity: null, sourceHash: null, modified: false, replacementWritten: false, targetIsSource: false };
+        const warnings: string[] = [];
+
+        const outcomes = decideOutcomes(root, planned, new Set(), false, previous, FOLDER, [move], new Set([5]), warnings);
+        const manifest = buildManifest(FOLDER, previous, outcomes, false, warnings);
+
+        expect(outcomes.map((outcome) => outcome.kind)).toEqual(['dropped']);
+        expect(warnings).toEqual(['! doc 5 ("new") failed to download and old.png is not present locally; not tracking it — pull again later.']);
+        expect(Object.keys(manifest.docs)).toEqual([]);
+        expect(manifestProblem(root, manifest, outcomes, new Map())).toBeNull();
     });
 
     it('a refused doc\'s carried entry and an unlisted doc\'s entry are not read: a folder or an edited file at their path is the refusal\'s own state, not this run\'s claim', () => {

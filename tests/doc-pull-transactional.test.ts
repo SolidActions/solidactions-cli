@@ -299,7 +299,7 @@ describe('doc pull stops at the first error and records exactly what it wrote', 
         expectStoppedAfter(3);
     });
 
-    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('names the lock and changes nothing when the lock cannot be created (a really read-only destination)', async () => {
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('names the lock and changes nothing when the lock cannot be created (a really read-only destination; needs a non-root user, who cannot write a mode-555 folder; Windows has no modes)', async () => {
         fs.chmodSync(out, 0o555);
 
         await runCli(root, ['doc', 'pull', 'docs', out, '-y'], failed(/^error: cannot write \.solidactions-docs\.json\.lock: EACCES[^\n]* — nothing was changed\.\n$/));
