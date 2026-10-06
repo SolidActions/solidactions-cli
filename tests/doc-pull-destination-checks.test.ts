@@ -96,6 +96,8 @@ function childEnv(): NodeJS.ProcessEnv {
     for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
         delete env[key];
     }
+    // The product's own opt-out: a background update check could otherwise print an `AGENT NOTE` line on stderr.
+    env.SOLIDACTIONS_NO_AGENT_NUDGES = '1';
     return env;
 }
 
@@ -153,6 +155,14 @@ function runPullInTerminal(answer: string): Promise<{ code: number | null; outpu
     });
 }
 
+/** A pull that succeeded: exit 0, its summary on stdout, nothing on stderr. */
+function expectPulledNote(result: CliResult): void {
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  Note.md\n`);
+    expect(result.stderr).toBe('');
+    expect(fs.readFileSync(path.join(dest, 'Note.md'), 'utf8')).toBe(NOTE_BODY);
+}
+
 function seedDestination(): void {
     fs.mkdirSync(dest, { recursive: true });
     fs.writeFileSync(path.join(dest, 'x.txt'), 'local file');
@@ -167,7 +177,8 @@ describe('doc pull destination checks (cli#191, cli#176)', () => {
         fs.chmodSync(dest, 0o700);
 
         expect(result.code).toBe(1);
-        expect(result.stderr).toContain(`error: cannot read ${dest}: EACCES`);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toMatch(new RegExp(`^error: cannot read ${dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: EACCES[^\n]*\n$`));
         expect(result.stderr).not.toContain('    at ');
         expect(fs.readdirSync(dest)).toEqual(['x.txt']);
     });
@@ -178,8 +189,8 @@ describe('doc pull destination checks (cli#191, cli#176)', () => {
         const result = await runPull();
 
         expect(result.code).toBe(1);
-        expect(result.stderr).toContain(NO_TERMINAL_LINE(dest));
-        expect(result.stdout).not.toContain('Continue?');
+        expect(result.stderr).toBe(`${NO_TERMINAL_LINE(dest)}\n`);
+        expect(result.stdout).toBe('');
         expect(fs.readdirSync(dest)).toEqual(['x.txt']);
         expect(fs.existsSync(path.join(dest, MANIFEST_FILE))).toBe(false);
     });
@@ -189,8 +200,7 @@ describe('doc pull destination checks (cli#191, cli#176)', () => {
 
         const result = await runPull(['-y']);
 
-        expect(result.code).toBe(0);
-        expect(fs.readFileSync(path.join(dest, 'Note.md'), 'utf8')).toBe(NOTE_BODY);
+        expectPulledNote(result);
     });
 
     it('a non-empty destination with no terminal and --overwrite pulls', async () => {
@@ -198,8 +208,7 @@ describe('doc pull destination checks (cli#191, cli#176)', () => {
 
         const result = await runPull(['--overwrite']);
 
-        expect(result.code).toBe(0);
-        expect(fs.readFileSync(path.join(dest, 'Note.md'), 'utf8')).toBe(NOTE_BODY);
+        expectPulledNote(result);
     });
 
     it('an empty destination with no terminal and no -y pulls', async () => {
@@ -207,8 +216,7 @@ describe('doc pull destination checks (cli#191, cli#176)', () => {
 
         const result = await runPull();
 
-        expect(result.code).toBe(0);
-        expect(fs.readFileSync(path.join(dest, 'Note.md'), 'utf8')).toBe(NOTE_BODY);
+        expectPulledNote(result);
     });
 
     it.skipIf(!hasScript)('a real terminal gets the prompt, and answering "no" cancels with exit 0 and writes nothing (needs util-linux script for a PTY)', async () => {

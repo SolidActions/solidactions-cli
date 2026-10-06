@@ -34,6 +34,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writeGlobal } from './helpers';
+import { caseInsensitiveFilesystem } from './doc-pull-inv-harness';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 const MANIFEST_FILE = '.solidactions-docs.json';
@@ -361,6 +362,8 @@ interface MatrixCase {
     after?: { files: Record<string, Entry>; manifest: Record<string, ManifestExpectation> };
     /** Expected refusal or warning text on stderr. */
     stderr?: RegExp[];
+    /** The whole stdout of a non-refused pull, with `{dest}` for the destination. Rows without it only check the summary line. */
+    stdout?: string;
 }
 
 type SourceState = 'unmodified' | 'modified' | 'absent';
@@ -636,6 +639,8 @@ function sameFileCases(): MatrixCase[] {
             served: [kind.renamed()],
             // The new name is a new file; the unmodified old twin is removed.
             after: { files: { [kind.newRel]: newBytes }, manifest: { [kind.newRel]: entry(5, 8, newBytes) } },
+            stdout: `pulled 1 doc → {dest}\n  ${kind.newRel}\n`,
+            stderr: [/^$/],
         });
         cases.push({
             name: caseName(kind, 'folder', 'modified source, target is the same file as the source', overwrite),
@@ -760,6 +765,7 @@ function preservedSourceAliasCases(): MatrixCase[] {
                 files: { 'page.html': newBytesOf(VISUAL_KIND), 'other.html': Buffer.from('<h1>six</h1>') },
                 manifest: { 'page.html': entry(5, 8, newBytesOf(VISUAL_KIND)), 'other.html': entry(6, 60, Buffer.from('<h1>six</h1>')) },
             },
+            ...(overwrite ? { stdout: 'pulled 2 docs → {dest}\n  page.html\n  other.html\n', stderr: [/^$/] } : {}),
         });
     }
     return cases;
@@ -912,17 +918,6 @@ function failedMediaCases(): MatrixCase[] {
     return cases;
 }
 
-/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
-function caseInsensitiveFilesystem(): boolean {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
-    try {
-        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
-        return fs.existsSync(path.join(dir, 'PROBE.md'));
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-    }
-}
-
 const MATRIX: MatrixCase[] = [...KINDS.flatMap(kindCases), ...oddSourceCases(), ...sameFileCases(), ...preservedSourceAliasCases(), ...caseFoldAllocationCases(), ...failedMediaCases()];
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +1003,7 @@ describe('doc pull rename matrix (cli#157)', () => {
 
             if (testCase.outcome === 'c') {
                 expect(snapshot(dest)).toEqual(before);
-                expect(result.stdout).not.toContain('pulled');
+                expect(result.stdout).toBe('');
                 expect(result.stderr).not.toMatch(/kept .*untracked/);
                 expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
                 expect(result.code).toBe(1);
@@ -1017,6 +1012,8 @@ describe('doc pull rename matrix (cli#157)', () => {
             }
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toMatch(/^pulled \d+ docs? → /);
+            if (testCase.stdout !== undefined) expect(result.stdout).toBe(testCase.stdout.replace('{dest}', dest));
             const after = testCase.after!;
             expect(snapshot(dest)).toEqual(sortedEntries(after.files));
 
@@ -1058,6 +1055,8 @@ describe('doc pull rename matrix (cli#157)', () => {
             const result = await runPull(pullArgs(testCase, dest));
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  ${kind.newRel}\n`);
+            expect(result.stderr).toBe('');
             expect(fs.readFileSync(path.join(dest, kind.newRel))).toEqual(newBytesOf(kind));
             expect(fs.readFileSync(path.join(dest, kind.oldRel))).toEqual(newBytesOf(kind));
             expect(Object.keys(JSON.parse(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).docs)).toEqual([kind.newRel]);

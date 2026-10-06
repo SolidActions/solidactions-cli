@@ -17,6 +17,7 @@ import { docPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands
 import type { DocsManifest } from '../src/commands/doc-pull';
 import type { Config } from '../src/utils/config';
 import { writeGlobal } from './helpers';
+import { caseInsensitiveFilesystem } from './doc-pull-inv-harness';
 
 /** sha256 hex digest, for asserting manifest body_sha256 values in tests. */
 function sha256Hex(data: string | Buffer): string {
@@ -226,17 +227,6 @@ function makeTmpDir(): { dir: string; cleanup: () => void } {
 }
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
-
-/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
-function caseInsensitiveFilesystem(): boolean {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
-    try {
-        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
-        return fs.existsSync(path.join(dir, 'PROBE.md'));
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-    }
-}
 
 interface CliResult {
     code: number | null;
@@ -1862,6 +1852,8 @@ describe('docPullWithConfig — deletion propagation', () => {
             const result = await runPullCli(['marketing', dest, '--yes']);
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  readme.md\n`);
+            expect(result.stderr).toBe('');
             expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
             expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
             expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(false);
@@ -1890,6 +1882,8 @@ describe('docPullWithConfig — deletion propagation', () => {
             const result = await runPullCli(['marketing', dest, '--yes']);
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  readme.md\n`);
+            expect(result.stderr).toBe('');
             expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
             expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(true);
             expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');

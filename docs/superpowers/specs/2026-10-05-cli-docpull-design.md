@@ -27,11 +27,12 @@ This is the design of **PM ruling 7** (plan-check card task-plancheckcli-f9a4), 
 
 ### 1.3 Order
 
-1. **Leftover check** (§1.4): this runs before anything else in an existing destination.
+1. **Claim, then leftover check** (§1.4): this runs before anything else in an existing destination, and in a new destination right after it is created. The pull creates its own staging folder `<destination>/.solidactions-pull-<pid>/` first (a non-recursive `mkdirSync`, mode `0o700`), and only then looks at every other `.solidactions-pull-*` entry. The claimed folder is empty and ignored by the "not empty" check, the planned-writes checks and `doc push` (which skips dot entries), and it is removed on every way out before the commit takes it over: a refusal, an error, a "no" at the prompt.
 2. **Preflight and plan:** wave cli-safety's checks, unchanged. New:
    - `report()` computes the **final manifest** (every entry, including the failed-download, rename-keep and single-doc merge rules) before any write. Rename cleanup and deletion propagation are computed then, but run only after publication (step 6).
-   - Right after the checks, `report()` records each target's **authorized state**: `absent`, `sha256:<hex of its bytes now>` (a file the checks allowed the pull to replace), or `any` when `--overwrite` is given. This is the state the preflight approved. A later snapshot never widens it.
-3. **Stage:** create the staging folder `<destination>/.solidactions-pull-<pid>/`, with a non-recursive `mkdirSync`, mode `0o700`. A leftover of the same name is removed first only if its pid is not running (§1.4). Then write each doc with bytes (a media doc whose download failed has none) to `new/<n>` inside it, `n` a counter, opened with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` (`fs.constants.O_NOFOLLOW ?? 0`). Then write the new manifest to `manifest.tmp` there.
+   - Each target's **authorized state** is the state the checks themselves saw, carried into the commit: `absent`, `sha256:<hex of the bytes the check read>` (a file the checks allowed the pull to replace), or `any` when `--overwrite` is given. Every check that reads a target (the unpushed-local-changes check, the untracked-file check, the rename-target check) records what it read; nothing reads the target again to authorize it, and the first thing recorded stands. A target no check saw is authorized as `absent`, so anything found there is refused. A later snapshot never widens it.
+   - **Names.** The allocator never gives a doc file or a folder segment the manifest's name (`.solidactions-docs.json`) or a name starting with `.solidactions-pull-`, compared NFC-normalised and case-folded, at any level. Such a name takes a leading `_` (`_.solidactions-docs.json`, `_.solidactions-pull-7/`), then the usual `-N` suffix if that is taken. Names are compared the same way (NFC, case-folded) for collisions, for file names and for folder segments, so two docs (or folders) that differ only by case or Unicode normalisation get distinct names on every filesystem. Two planned writes whose paths still compare equal that way (possible only through a legacy tracked path) are refused before anything is staged: `error: <a> (doc <id>) and <b> (doc <id>) would be the same file on a case-insensitive or Unicode-normalising filesystem; this pull would write different docs through those names.` and `Nothing was written. Rename one of the docs on the server and pull again.`
+3. **Stage:** inside the folder claimed in step 1, create `new/`. If something already holds the claim's name (a leftover of an earlier process that had this pid) it is classified and cleaned with the other leftovers first (§1.4). Then write each doc with bytes (a media doc whose download failed has none) to `new/<n>` inside it, `n` a counter, opened with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` (`fs.constants.O_NOFOLLOW ?? 0`). Then write the new manifest to `manifest.tmp` there.
 4. **Commit**, for each staged doc in plan order:
    1. **Directories:** walk the target's `dirRel` one component at a time from the destination. A missing component is created (non-recursive) and recorded. Every component must `lstat` as a real directory, never a link; otherwise `LinkOnTheWayError`. The destination itself is not checked (wave cli-safety allows a symlinked destination).
    2. **Re-check (INV-B):** `lstat` the target. `absent` requires no entry at the name. `sha256` requires a regular file with exactly those bytes. `any` always passes. A mismatch is a publication refusal.
@@ -43,14 +44,15 @@ This is the design of **PM ruling 7** (plan-check card task-plancheckcli-f9a4), 
 
 All renames stay inside the destination. A destination subfolder on a different filesystem makes a rename fail with `EXDEV`, which is an ordinary in-process failure.
 
-### 1.4 Leftovers from a killed pull
+### 1.4 Leftovers from a killed pull, and overlapping pulls
 
-At the start of every pull into an existing destination, before the "not empty" check, `doc pull` looks for entries named `.solidactions-pull-<digits>` in the destination root:
-- **A real directory whose pid is a running process** (`process.kill(pid, 0)` succeeds, and it is not this process): another pull is running there. Refuse, changing nothing:
-  `error: another doc pull (pid <pid>) is writing to <destination>; wait for it to finish.`
-- **Anything else with that name that is not a real directory** (for example a link): refuse, changing nothing:
+After claiming its own staging folder (§1.3 step 1), and before the "not empty" check, `doc pull` looks at every other entry named `.solidactions-pull-<digits>` in the destination root. **It classifies all of them first and changes none until every one is classified**; only then does it clean up the dead ones:
+- **A real directory whose pid is a running process** (`process.kill(pid, 0)` succeeds or fails with `EPERM`, the pid is at least 1, and it is not this process): another pull is running there. Refuse, changing nothing (the pull removes only its own new, empty staging folder):
+  `error: another doc pull (pid <pid>) may be writing to <destination> (folder <name>); wait for it to finish, or delete that folder if no doc pull is running.`
+  A pid below 1 is never "running" (`kill(0, 0)` would signal the caller's own process group). A reused pid is still read as running; reliable liveness is cli#202.
+- **Anything else with that name that is not a folder doc pull created** refuses the same way, changing nothing: a link, a file, or a real folder with anything at its top level other than `new/` (a folder), `backup/` (a folder) and `manifest.tmp` (a file). A real folder with other contents is never deleted, whatever its pid:
   `error: <destination>/<name> is not a folder doc pull created; remove it and pull again.`
-- **A real directory whose pid is not running:** clean it up. Walk `backup/` without following links. Every path is derived from the walk, never from stored text, and checked to be inside the destination with real-directory parents (the `ensureRealDirs` check). For each backup at `backup/<rel>`:
+- **A real directory in doc pull's own layout whose pid is not running:** clean it up. Walk `backup/` without following links. Every path is derived from the walk, never from stored text, and checked to be inside the destination with real-directory parents (the `ensureRealDirs` check). For each backup at `backup/<rel>`:
   - **target absent:** `rename(backup, target)` (restored);
   - **target present with the same bytes:** drop the backup;
   - **target present with different bytes** (the killed pull's new version, or a later edit): change nothing for that file, and count it.
@@ -60,12 +62,16 @@ At the start of every pull into an existing destination, before the "not empty" 
   - **otherwise:** keep the folder and refuse:
     `error: an interrupted doc pull left saved copies in <destination>/<name>; <k> file(s) differ from their saved copies (first: <rel>), so neither was changed. Keep the versions you want, delete that folder, and pull again.`
 
+Two pulls that start together each claim a folder, and each then sees the other's: both refuse. That is the intended safe outcome, never two publications; run the pull again. A pull that starts while another one is already fetching sees its claimed folder and refuses the same way, so no two pulls can publish into one destination at once, and no pull merges its result into a manifest that another pull is about to replace.
+
+Any other error while cleaning up (not the destination listing itself failing) prints `error: could not clean up after an interrupted doc pull in <destination>: <message>` and changes nothing further. Only the destination listing's own failure prints `error: cannot read <destination>: <message>` (cli#191).
+
 A file the killed pull created new, with no backup, is not removed. With the old manifest it is an untracked file. Wave cli-safety's rules then handle it: the next pull adopts it if the bytes match, and otherwise refuses without `--overwrite`.
 
 ### 1.5 In-process failure: roll back
 
 Any error in steps 3-5, or a publication refusal, rolls back in reverse:
-- every target already renamed into place gets its backup renamed back; with no backup it is unlinked;
+- every target already renamed into place gets its backup renamed back; with no backup it is unlinked. **Only if the entry at the target is still the one this pull placed** (the same device and inode as the staged file that was renamed in, read just before that rename). A file moved aside whose replacement was never placed must find the target still vacant. If something else is there, rollback leaves both the entry at the target and the saved copy alone, keeps the staging folder, and reports it as a restore failure (below);
 - every directory this pull created is removed (newest first, only if empty);
 - the staging folder is removed;
 - the previous manifest was never touched.
@@ -78,11 +84,17 @@ doc-pull.ts prints one line and exits 1:
 
 **Ruling 8:** every reverse step runs the forward path's parent checks (`ensureRealDirs`) on both ends: the target's parents in the destination, and the backup's parents in the staging folder. That covers putting a backup back, removing a new file, removing a created folder, and leftover cleanup. Leftover cleanup also requires `backup/` itself to be a real folder. A failed check is a restore failure (the staging folder is kept), never a write through a link.
 
-If a rollback step itself fails, the staging folder (with its backups) is **kept**. The line then ends `— could not restore <rel> (<message>); its previous copy is in <staging rel>/backup/<rel>.` instead of `— nothing was changed.`, and the next pull's leftover check (§1.4) picks it up.
+If a rollback step itself fails, the staging folder (with its backups) is **kept**. The line ends with the one that is true, instead of `— nothing was changed.`, and the next pull's leftover check (§1.4) picks it up:
+- a backup that could not be put back: `— could not restore <rel> (<message>); its previous copy is in <staging rel>/backup/<rel>.` (the saved copy is there);
+- a new file this pull created that could not be removed, or was left alone because it is no longer the file this pull placed: `— could not remove <rel> (<message>); this pull created it, so it has no previous copy.`;
+- a folder this pull created that could not be removed: `— could not remove the folder <rel> (<message>); this pull created it.`
+
+Every removal of the staging folder (rollback, a failed staging step, finalize) first checks that it is still a real folder; a link that has replaced it is left alone.
 
 ### 1.6 Limits (documented, not closed)
 
-- Node has no `openat`. A directory component swapped for a link between the step-4 directory walk and the rename can still redirect the rename. This is a local race in the user's own folder (cli#182 says so). The final component, which the issue names, is closed.
+- Node has no `openat`. A directory component swapped for a link between the step-4 directory walk and the rename can still redirect the rename. This is a local race in the user's own folder (cli#182 says so). The final component, which the issue names, is closed against a link: a rename replaces the entry and never follows it.
+- **The final-component window.** Between a check (the preflight's read, or the step-4.2 re-check) and the rename that follows it, a file that the user's own tools create or change at the target is not seen. This is the same local-race class as the directory-component race, in the user's own folder, and it is not closed: closing it needs a non-replacing publish (`link()`), which `exFAT` and network shares do not offer. What is closed is the part the pull controls: the authorized state is what the checks saw, not a fresh read (§1.3 step 2), and rollback never puts a backup over, or unlinks, a file this pull did not place (§1.5). Rename cleanup and deletion propagation, which hash a file and then remove it, keep that same window (cli#204).
 - No power-loss durability (§1.1).
 - A case-insensitive or normalising filesystem (macOS, Windows) can make two names one entry. That is tested where the filesystem allows; CI's unit tests run on Linux, so those tests skip there with a stated reason (§1.7).
 
@@ -98,7 +110,9 @@ These are inert unless `SOLIDACTIONS_TEST_HOOKS=1`. `SOLIDACTIONS_DOC_PULL_TEST_
 - `fail-manifest-rename`: step 5 throws `EIO`;
 - `fail-restore:<n>`: during rollback, restoring the n-th backup throws `EIO` (the kept-folder path);
 - `kill-after-renames:<n>`: `process.kill(process.pid, 'SIGKILL')` after the n-th doc rename (for §1.4's tests);
+- `create-after-checks:<rel>`: write a file `RACE` at `<rel>` (creating its folders) right after the preflight's checks, before anything is staged (INV-B: the authorized state is the one the checks saw);
 - `create-before-commit:<rel>`: write a file `RACE` at `<rel>` after staging (INV-B);
+- `replace-before-rollback:<rel>`: before rollback, move the file at `<rel>` aside to `<rel>.aside` (if there is one) and write a new file `LATER` there (§1.5's identity check);
 - `link-before-commit:<rel>><abs target>`: create a symlink at `<rel>` to `<abs target>` after staging (INV-A/B);
 - `mkdir-before-commit:<rel>`: create a folder at `<rel>` holding `user.txt` after staging (ruling 9);
 - `swap-before-rollback:<dirRel>><abs folder>`: before rollback, rename `<dirRel>` aside and put a symlink to `<abs folder>` in its place (ruling 8).

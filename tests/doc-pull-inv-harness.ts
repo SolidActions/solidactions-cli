@@ -67,7 +67,9 @@ export type StreamExpectation = string | RegExp;
 
 /** What one spawned call must have done: its exit status and both streams, in full. */
 export interface Expected {
-    code: number;
+    code: number | null;
+    /** The signal a killed run (a test hook's SIGKILL) ends with; the code is then null. */
+    signal?: NodeJS.Signals;
     stdout: StreamExpectation;
     stderr: StreamExpectation;
 }
@@ -93,6 +95,11 @@ export function pulledOk(destination: string, rels: string[], stderr: StreamExpe
 /** The warning a single-doc pull prints when the destination already tracks a folder. */
 export const singleDocWarning = SINGLE_DOC_WARNING;
 
+/** A run a test hook killed: no exit code, the signal, and the streams it had written. */
+export function killed(stderr: StreamExpectation = '', stdout: StreamExpectation = ''): Expected {
+    return { code: null, signal: 'SIGKILL', stdout, stderr };
+}
+
 /** A failed pull's expectation: nothing on stdout, exit 1, the stderr the row names. */
 export function failed(stderr: StreamExpectation): Expected {
     return { code: 1, stdout: '', stderr };
@@ -100,7 +107,7 @@ export function failed(stderr: StreamExpectation): Expected {
 
 /** One spawned call must end as the row expects: exit status (never a signal), stdout and stderr. */
 export function expectResult(result: CliResult, expected: Expected): void {
-    expect({ code: result.code, signal: result.signal }, `exit status; stdout: ${result.stdout} stderr: ${result.stderr}`).toEqual({ code: expected.code, signal: null });
+    expect({ code: result.code, signal: result.signal }, `exit status; stdout: ${result.stdout} stderr: ${result.stderr}`).toEqual({ code: expected.code, signal: expected.signal ?? null });
     expectStream('stdout', result.stdout, expected.stdout);
     expectStream('stderr', result.stderr, expected.stderr);
 }
@@ -188,6 +195,11 @@ export function useDocPullHarness() {
     let served: ServedDoc[] = [];
     /** When true the list answers folder_path_not_found, so the pull takes the single-doc fallback. */
     let singleForm = false;
+    /** The pid of the CLI most recently started; `{pid}` in a served folder name becomes this (a folder named after the pull itself). */
+    let childPid = 0;
+    /** While set, list answers wait here until `release()`; `arrived` counts the list calls waiting. */
+    let listGate: { waiting: Array<() => void> } | null = null;
+    const dirOf = (d: ServedDoc): string => (d.relative ?? '').split('{pid}').join(String(childPid));
 
     function answerMcp(args: Record<string, any>): string {
         if (args.action === 'list' && singleForm) {
@@ -197,12 +209,12 @@ export function useDocPullHarness() {
             const relative = String(args.folder_path).slice('docs'.length).replace(/^\//, '');
             const prefix = relative ? `${relative}/` : '';
             const folders = new Set(served
-                .map((d) => d.relative ?? '')
+                .map(dirOf)
                 .filter((dir) => dir.startsWith(prefix) && dir !== relative)
                 .map((dir) => dir.slice(prefix.length).split('/')[0]));
             return mcpResult({
                 folders: [...folders].map((name) => ({ name, folder_path: `docs/${prefix}${name}` })),
-                docs: served.filter((d) => (d.relative ?? '') === relative).map((d) => ({ id: d.id, title: d.title, doc_type: null })),
+                docs: served.filter((d) => dirOf(d) === relative).map((d) => ({ id: d.id, title: d.title, doc_type: null })),
             });
         }
         if (args.action === 'read_doc' && args.id === undefined) {
@@ -253,8 +265,12 @@ export function useDocPullHarness() {
                     return;
                 }
                 const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(answerMcp(body.params.arguments));
+                const respond = (): void => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(answerMcp(body.params.arguments));
+                };
+                if (listGate !== null && body.params.arguments.action === 'list') listGate.waiting.push(respond);
+                else respond();
             });
         });
         await new Promise<void>((resolve) => {
@@ -268,11 +284,12 @@ export function useDocPullHarness() {
     afterAll(() => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))));
 
     /** Run the built CLI with a temp HOME pointing at the server; `extraEnv` sets the test hooks on purpose. */
-    function runCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}): Promise<CliResult> {
+    function startCli(cwd: string, args: string[], extraEnv: Record<string, string> = {}): { pid: number; result: Promise<CliResult> } {
         const home = path.join(cwd, 'home');
         fs.mkdirSync(home, { recursive: true });
         writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
-        return new Promise<CliResult>((resolve, reject) => {
+        let pid = 0;
+        const result = new Promise<CliResult>((resolve, reject) => {
             const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
             for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
                 delete env[key];
@@ -282,6 +299,8 @@ export function useDocPullHarness() {
             env.SOLIDACTIONS_NO_AGENT_NUDGES = '1';
             Object.assign(env, extraEnv);
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+            pid = child.pid ?? 0;
+            childPid = pid;
             let stdout = '';
             let stderr = '';
             child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -299,7 +318,10 @@ export function useDocPullHarness() {
                 reject(error);
             });
         });
+        return { pid, result };
     }
+
+    const runCli = (cwd: string, args: string[], extraEnv: Record<string, string> = {}): Promise<CliResult> => startCli(cwd, args, extraEnv).result;
 
     const handle = {
         root: '',
@@ -316,6 +338,24 @@ export function useDocPullHarness() {
             const result = await runCli(handle.root, ['doc', 'pull', target, handle.out, ...flags], faultSpec === undefined ? {} : fault(faultSpec));
             expectResult(result, expected);
             return result;
+        },
+        /** One pull started and not awaited: its pid (for a staging folder named after it) and its eventual result. */
+        start(form: Form, title: string, flags: string[] = ['-y'], faultSpec?: string): { pid: number; result: Promise<CliResult> } {
+            singleForm = form === 'single';
+            const target = form === 'single' ? `docs/${title}` : 'docs';
+            return startCli(handle.root, ['doc', 'pull', target, handle.out, ...flags], faultSpec === undefined ? {} : fault(faultSpec));
+        },
+        /** Hold every `list` answer until `release()`; `waiting()` is how many pulls are blocked on one. */
+        gateLists(): { release(): void; waiting(): number } {
+            const gate: { waiting: Array<() => void> } = { waiting: [] };
+            listGate = gate;
+            return {
+                release(): void {
+                    listGate = null;
+                    for (const respond of gate.waiting.splice(0)) respond();
+                },
+                waiting: () => gate.waiting.length,
+            };
         },
         /** The previous pull's state: `docs` pulled as a folder into `out`; asserts a clean first pull. */
         async seed(docs: ServedDoc[]): Promise<void> {

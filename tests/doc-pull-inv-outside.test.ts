@@ -29,7 +29,11 @@ function expectOutsideUnchanged(before: Snapshot): void {
 
 const racedLine = (rel: string): string => `error: ${rel} changed after doc pull checked it — nothing was changed. Pull again, or pass --overwrite to replace it.\n`;
 const cannotWrite = (rel: string, what: string): RegExp => new RegExp(`^error: cannot write ${escapeRegExp(rel)}: EIO: i/o error, ${escapeRegExp(what)} \\(test hook\\) — nothing was changed\\.\n$`);
+/** A saved copy that could not be put back; the line names where it is kept (final review 1, I3). */
 const couldNotRestore = (rel: string): RegExp => new RegExp(`^error: cannot write \\.solidactions-docs\\.json: EIO: i/o error, rename manifest \\(test hook\\) — could not restore ${escapeRegExp(rel)} \\(.*\\); its previous copy is in \\.solidactions-pull-\\d+/backup/${escapeRegExp(rel)}\\.\n$`);
+
+/** A new file this pull created that could not be removed: no previous copy exists, and the line must not claim one. */
+const couldNotRemove = (rel: string): RegExp => new RegExp(`^error: cannot write \\.solidactions-docs\\.json: EIO: i/o error, rename manifest \\(test hook\\) — could not remove ${escapeRegExp(rel)} \\(.*\\); this pull created it, so it has no previous copy\\.\n$`);
 
 describe.each(KINDS.flatMap((kind) => FORMS.map((form) => [kind, form] as const)))('INV-A never outside the destination: %s | %s', { timeout: 60_000 }, (kind, form) => {
     const item = (version: number) => doc(kind, 5, 'item', version);
@@ -121,7 +125,9 @@ describe('INV-A ruling 8: a reverse step never goes through a link planted on it
         await h.pull('folder', 'b', failed(couldNotRestore('sub/b.md')), ['-y'], `fail-manifest-rename,swap-before-rollback:sub>${h.outside}`);
 
         expectOutsideUnchanged(before);
+        const [staging] = stagingEntries(h.out);
         expect(stagingEntries(h.out)).toHaveLength(1);
+        expect(read(h.out, staging, 'backup', 'sub', 'b.md')).toBe(doc('md', 5, 'b', 1, 'sub').bytes);
     });
 
     it('removing this pull\'s new file under a folder swapped for a link: the rollback is reported incomplete, nothing outside changes', async () => {
@@ -129,18 +135,22 @@ describe('INV-A ruling 8: a reverse step never goes through a link planted on it
         const before = sentinels('b.md', 'n.md');
         h.serve([doc('md', 5, 'b', 2, 'sub'), doc('md', 6, 'n', 1, 'sub')]);
 
-        await h.pull('folder', 'b', failed(new RegExp(`${couldNotRestore('sub/n.md').source}|${couldNotRestore('sub/b.md').source}`)), ['-y'], `fail-manifest-rename,swap-before-rollback:sub>${h.outside}`);
+        await h.pull('folder', 'b', failed(couldNotRemove('sub/n.md')), ['-y'], `fail-manifest-rename,swap-before-rollback:sub>${h.outside}`);
 
         expectOutsideUnchanged(before);
+        const [staging] = stagingEntries(h.out);
+        expect(fs.existsSync(path.join(h.out, staging, 'backup', 'sub', 'n.md'))).toBe(false);
     });
 
     it('removing a folder this pull created, swapped for a link: the rollback is reported incomplete, nothing outside changes', async () => {
         const before = sentinels('keep.txt');
         h.serve([doc('md', 5, 'c', 1, 'x')]);
 
-        await h.pull('folder', 'c', failed(couldNotRestore('x/c.md')), ['-y'], `fail-manifest-rename,swap-before-rollback:x>${h.outside}`);
+        await h.pull('folder', 'c', failed(couldNotRemove('x/c.md')), ['-y'], `fail-manifest-rename,swap-before-rollback:x>${h.outside}`);
 
         expectOutsideUnchanged(before);
+        const [staging] = stagingEntries(h.out);
+        expect(fs.existsSync(path.join(h.out, staging, 'backup'))).toBe(false);
     });
 
     it('leftover cleanup whose backup root is a link: refused, nothing outside changes', async () => {

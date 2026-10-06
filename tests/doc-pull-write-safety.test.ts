@@ -18,20 +18,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { writeGlobal } from './helpers';
+import { caseInsensitiveFilesystem } from './doc-pull-inv-harness';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 const MANIFEST_FILE = '.solidactions-docs.json';
-
-/** Whether the temp filesystem treats names that differ only by case as one file (spec §1.7). */
-function caseInsensitiveFilesystem(): boolean {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-case-probe-'));
-    try {
-        fs.writeFileSync(path.join(dir, 'probe.md'), 'x');
-        return fs.existsSync(path.join(dir, 'PROBE.md'));
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-    }
-}
 
 function sha256Hex(data: Buffer): string {
     return crypto.createHash('sha256').update(data).digest('hex');
@@ -452,6 +442,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             // A pull replaces a file through a rename, so a hard link is an independent name:
             // page.md is the new file, and the unmodified old twin Page.md is removed.
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  page.md\n`);
             expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
             expect(fs.existsSync(path.join(dest, 'Page.md'))).toBe(false);
             expect(Object.keys(manifestJson().docs)).toEqual(['page.md']);
@@ -467,6 +458,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             const result = await runPull(root, dest, false);
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  page.md\n`);
             expect(fs.readFileSync(path.join(dest, 'Page.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
             expect(Object.keys(manifestJson().docs)).toEqual(['page.md']);
@@ -492,6 +484,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             const result = await runPull(root, dest, true);
 
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 2 docs → ${dest}\n  new5.md\n  new6.md\n`);
             expect(result.stderr).not.toMatch(/kept .*same file/);
             expect(fs.readFileSync(path.join(dest, 'new5.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'new6.md'))).toEqual(NEW6B);

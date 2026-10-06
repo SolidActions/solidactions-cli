@@ -213,6 +213,24 @@ describe('a failed media download keeps the tracking it had', { timeout: 60_000 
         expect(Object.values(manifestOf(out).docs).filter((entry) => entry.id === 9)).toEqual([]);
     });
 
+    it("does not keep the other doc's tracking when its file was edited locally: the edit survives, the entry is dropped with the usual warning (cli#190, F-M2)", async () => {
+        seedTracked(out, 'P.png', { id: 9, title: 'old', revision: 3 }, Buffer.from('B-BYTES'));
+        fs.writeFileSync(path.join(out, 'P.png'), 'MY EDITED BYTES');
+        served = [
+            { id: 7, title: 'P', revision: 70, media: Buffer.from('A-BYTES'), downloadFails: true },
+            { id: 9, title: 'old', revision: 3, bulkStatus: 'not_found' },
+        ];
+
+        const result = await runCli(root, ['doc', 'pull', 'docs', out, '--overwrite']);
+
+        expect(result.code).toBe(0);
+        expect(result.stdout).toBe(`pulled 0 docs → ${out}\n`);
+        expect(result.stderr).toContain('! doc 7 ("P") failed to download and P.png holds a local file; not tracking it — pull again later. Doc 9 ("old") was tracked at P.png before and is no longer tracked there.');
+        expect(result.stderr).not.toContain("still tracking it as doc 9");
+        expect(manifestOf(out).docs['P.png']).toBeUndefined();
+        expect(fs.readFileSync(path.join(out, 'P.png'), 'utf8')).toBe('MY EDITED BYTES');
+    });
+
     it('keeps today\'s behaviour for a failed download at a new path with no previous entry', async () => {
         served = [{ id: 7, title: 'fresh', revision: 70, media: Buffer.from('A-BYTES'), downloadFails: true }];
 

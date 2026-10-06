@@ -142,6 +142,34 @@ describe('INV-C mixed fixture: a failed download at a tracked path next to a sta
     });
 });
 
+describe('INV-C: a kept entry whose file was edited is not kept (final review 1, F-M2)', { timeout: 60_000 }, () => {
+    const pic = (version: number): ServedDoc => ({ ...doc('media', 7, 'pic', version), downloadFails: version > 1 });
+    const note = (version: number) => doc('md', 8, 'note', version);
+
+    it('--overwrite x a tracked media file edited locally x a failed download: the entry is dropped with the usual warning, never kept with a hash the file no longer has', async () => {
+        await h.seed([pic(1), note(1)]);
+        fs.writeFileSync(path.join(h.out, 'pic.png'), 'MY EDITED PIC');
+        h.serve([pic(2), note(2)]);
+
+        const result = await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], '! doc 7 ("pic") failed to download and pic.png holds a local file; not tracking it — pull again later.\nwarn: failed to download media for doc 7 (pic): HTTP 500\n! kept pic.png — deleted remotely but modified locally\n  (it is now untracked; use `solidactions doc upload` to re-create it)\n'), ['--overwrite']);
+
+        expect(read(h.out, 'pic.png')).toBe('MY EDITED PIC');
+        expect(manifestOf(h.out).docs['pic.png']).toBeUndefined();
+        expectManifestHonest(result, null);
+    });
+
+    it('--overwrite x a tracked media file that still has its recorded bytes x a failed download: the entry is kept unchanged (cli#183)', async () => {
+        await h.seed([pic(1), note(1)]);
+        const previousEntry = manifestOf(h.out).docs['pic.png'];
+        h.serve([pic(2), note(2)]);
+
+        const result = await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], 'warn: failed to download media for doc 7 (pic): HTTP 500\n'), ['--overwrite']);
+
+        expect(manifestOf(h.out).docs['pic.png']).toEqual(previousEntry);
+        expectManifestHonest(result, null);
+    });
+});
+
 describe('INV-C platform rows', { timeout: 60_000 }, () => {
     it.skipIf(!caseInsensitiveFilesystem())('a case-only rename keeps every hash matching its file (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
         await h.seed([doc('md', 5, 'Page', 1)]);
