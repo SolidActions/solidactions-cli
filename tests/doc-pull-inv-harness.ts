@@ -38,6 +38,8 @@ export interface ServedDoc {
     relative?: string;
     /** The signed-URL download answers 500. */
     downloadFails?: boolean;
+    /** The `bulk_read` status for this doc (default `found`): a doc that is listed but not fetched. */
+    bulkStatus?: string;
 }
 
 export const extOf = (kind: Kind): string => (kind === 'md' ? '.md' : '.png');
@@ -241,6 +243,7 @@ export function useDocPullHarness() {
             return mcpResult({
                 results: ids.map((id, index) => {
                     const d = served.find((candidate) => candidate.id === id)!;
+                    if (d.bulkStatus !== undefined && d.bulkStatus !== 'found') return { index, status: d.bulkStatus, id };
                     return { index, status: 'found', id, title: d.title, current_revision_id: d.revision, properties: mediaProps(d), body: bodyOf(d) };
                 }),
             });

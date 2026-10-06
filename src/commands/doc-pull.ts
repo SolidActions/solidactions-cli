@@ -35,6 +35,7 @@ import {
     lockNameFor,
     LockHeldError,
     nameKey,
+    PlacedWrite,
     PlannedWrite,
     PublicationRefusedError,
     releaseLock,
@@ -113,7 +114,7 @@ function reportWriteError(error: unknown): never {
 }
 
 /** Row collected during the BFS list walk, before bodies are fetched. */
-interface DocRow {
+export interface DocRow {
     id: number;
     title: string;
     /** Relative folder path from the pull root, '' for the root itself, using '/' separators. */
@@ -124,7 +125,7 @@ interface DocRow {
 }
 
 /** Row after bulk_read/read has filled in body + revision. */
-interface FetchedDoc extends DocRow {
+export interface FetchedDoc extends DocRow {
     body: string;
     current_revision_id: number | null;
     properties: Record<string, unknown>;
@@ -389,7 +390,7 @@ async function backfillDocTypes(config: Config, fetched: FetchedDoc[]): Promise<
  * check for an unpushed-local-changes conflict) before anything touches
  * disk.
  */
-interface PlannedDoc {
+export interface PlannedDoc {
     doc: FetchedDoc;
     relPath: string;
     dirRel: string;
@@ -961,7 +962,7 @@ function checkPlannedWrites(
     }
 }
 
-interface RenameMove {
+export interface RenameMove {
     oldRel: string;
     newRel: string;
     id: number;
@@ -970,7 +971,12 @@ interface RenameMove {
     sourcePresent: boolean;
     /** Device + inode of a present source, following filesystem aliases. */
     sourceIdentity: string | null;
-    /** The present source's bytes differ from its recorded hash (or cannot be read). Always false without a source. */
+    /** sha256 of the present source's bytes; null without a source or when they cannot be read. */
+    sourceHash: string | null;
+    /**
+     * The present source holds edits: its bytes differ from its recorded hash (or cannot be read) and are not bytes this
+     * pull itself writes there (rule 5, settled once every planned write is known). Always false without a source.
+     */
     modified: boolean;
     replacementWritten: boolean;
     /** `new` is the very file at `old` (a case-only rename on a case-insensitive filesystem). */
@@ -978,12 +984,14 @@ interface RenameMove {
 }
 
 /** What one planned doc came to, which is all the manifest is made of (spec §1.3, PM ruling 12 rule 3). */
-interface DocOutcome {
+export interface DocOutcome {
     id: number;
     /** placed: written (or tracked with no bytes after a failed download); kept-previous: its earlier entry stays; dropped: no entry; refused: not written, its earlier entry carried. */
     kind: 'placed' | 'kept-previous' | 'dropped' | 'refused';
-    /** The manifest entries the doc contributes, by path: its new entry, its earlier one, or none. */
-    entries: Record<string, ManifestEntry>;
+    /** The entries this run records for the doc's own bytes, by path: the file it placed (or tracked with no bytes). Wins over any `kept` entry at the same name (rule 3). */
+    placed: Record<string, ManifestEntry>;
+    /** The earlier entries the doc keeps, by path: a refused doc's, a kept-previous one's, a placed renamed doc's old twin after a stop. */
+    kept: Record<string, ManifestEntry>;
 }
 
 /** True when anything at all (a link included) is at `abs`. */
@@ -1002,7 +1010,7 @@ function entryExists(abs: string): boolean {
  * file now at its path is not the one the entry names; a doc the pull never got to keeps its earlier entry.
  * `pendingWarnings` receives the `! …` lines printed after a successful pull.
  */
-function decideOutcomes(
+export function decideOutcomes(
     destination: string,
     planned: PlannedDoc[],
     placedPaths: Set<string>,
@@ -1032,9 +1040,9 @@ function decideOutcomes(
                 // the next pull sees the rename and finishes it).
                 const move = stopped ? renameMoves.find((m) => m.id === p.doc.id && m.sourcePresent) : undefined;
                 const oldEntry = move === undefined ? undefined : previousManifest?.docs[move.oldRel];
-                outcomes.push({ id: p.doc.id, kind: 'placed', entries: move !== undefined && oldEntry !== undefined ? { [move.oldRel]: oldEntry, [p.relPath]: entry } : { [p.relPath]: entry } });
+                outcomes.push({ id: p.doc.id, kind: 'placed', placed: { [p.relPath]: entry }, kept: move !== undefined && oldEntry !== undefined ? { [move.oldRel]: oldEntry } : {} });
             } else {
-                outcomes.push({ id: p.doc.id, kind: 'refused', entries: earlierById.get(p.doc.id) ?? {} });
+                outcomes.push({ id: p.doc.id, kind: 'refused', placed: {}, kept: earlierById.get(p.doc.id) ?? {} });
             }
             continue;
         }
@@ -1069,21 +1077,22 @@ function decideOutcomes(
             }
         }
         if (tracked !== undefined && tracked.id === p.doc.id && (tracked.body_sha256 == null || !holdsLocalFile || localHash === tracked.body_sha256) && (tracked.body_sha256 != null || !holdsLocalFile)) {
-            outcomes.push({ id: p.doc.id, kind: 'kept-previous', entries: { [p.relPath]: tracked } });
+            outcomes.push({ id: p.doc.id, kind: 'kept-previous', placed: {}, kept: { [p.relPath]: tracked } });
             continue;
         }
         if (!holdsLocalFile) {
-            outcomes.push({ id: p.doc.id, kind: 'placed', entries: { [p.relPath]: entry } });
+            outcomes.push({ id: p.doc.id, kind: 'placed', placed: { [p.relPath]: entry }, kept: {} });
             continue;
         }
         const otherDoc = tracked !== undefined && tracked.id !== p.doc.id && tracked.body_sha256 != null ? tracked : undefined;
-        outcomes.push({ id: p.doc.id, kind: 'dropped', entries: {} });
+        outcomes.push({ id: p.doc.id, kind: 'dropped', placed: {}, kept: {} });
         if (otherDoc !== undefined && localHash === otherDoc.body_sha256 && listedIds.has(otherDoc.id) && !plannedIds.has(otherDoc.id)) {
-            outcomes.push({ id: otherDoc.id, kind: 'kept-previous', entries: { [p.relPath]: otherDoc } });
+            outcomes.push({ id: otherDoc.id, kind: 'kept-previous', placed: {}, kept: { [p.relPath]: otherDoc } });
             pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds doc ${otherDoc.id}'s file ("${shown(otherDoc.title)}"); still tracking it as doc ${otherDoc.id} — pull again later`);
             continue;
         }
-        const lost = otherDoc === undefined ? '' : ` Doc ${otherDoc.id} ("${shown(otherDoc.title)}") was tracked at ${shown(p.relPath)} before and is no longer tracked there.`;
+        // A pull that stopped keeps every earlier entry of a doc it has no outcome for, so it takes no tracking from that doc.
+        const lost = otherDoc === undefined || stopped ? '' : ` Doc ${otherDoc.id} ("${shown(otherDoc.title)}") was tracked at ${shown(p.relPath)} before and is no longer tracked there.`;
         pendingWarnings.push(`! doc ${p.doc.id} ("${shown(p.doc.title)}") failed to download and ${shown(p.relPath)} holds a local file; not tracking it — pull again later.${lost}`);
     }
 
@@ -1095,7 +1104,7 @@ function decideOutcomes(
     for (const m of renameMoves) {
         if (m.replacementWritten) continue;
         const oldEntry = previousManifest?.docs[m.oldRel];
-        outcomes.push({ id: m.id, kind: 'kept-previous', entries: oldEntry === undefined ? {} : { [m.oldRel]: oldEntry } });
+        outcomes.push({ id: m.id, kind: 'kept-previous', placed: {}, kept: oldEntry === undefined ? {} : { [m.oldRel]: oldEntry } });
         if (m.sourcePresent) {
             pendingWarnings.push(`! kept ${shown(m.oldRel)} — doc ${m.id} download failed; still tracked as ${shown(m.oldRel)}`);
         } else {
@@ -1108,28 +1117,59 @@ function decideOutcomes(
 /**
  * The manifest as a pure function of the previous manifest, the outcomes and whether this pull speaks for one doc
  * (spec §1.3, rule 3). A single-doc pull, or one that stopped before it could propagate deletions, keeps every earlier
- * entry whose doc has no outcome (cli#153); an outcome's own doc never gets its earlier entries back.
+ * entry whose doc has no outcome (cli#153); an outcome's own doc never gets its earlier entries back. Bytes this run
+ * placed always win: an earlier entry at a name a placed entry holds, or one equal to it under `nameKey`, is dropped, and
+ * the doc that lost it gets a "no longer tracked there" line in `pendingWarnings` (a doc's own old twin loses silently).
+ * The overlap is settled here, before anything is collapsed by name, so no retained entry can stand for placed bytes.
  */
-function buildManifest(folderPath: string, previousManifest: DocsManifest | null, outcomes: DocOutcome[], keepUnlisted: boolean): DocsManifest {
+export function buildManifest(folderPath: string, previousManifest: DocsManifest | null, outcomes: DocOutcome[], keepUnlisted: boolean, pendingWarnings: string[]): DocsManifest {
+    const placedByKey = new Map<string, { relPath: string; entry: ManifestEntry }>();
+    for (const outcome of outcomes) {
+        for (const [relPath, entry] of Object.entries(outcome.placed)) placedByKey.set(nameKey(relPath), { relPath, entry });
+    }
     const docs: DocsManifest['docs'] = {};
+    const warned = new Set<string>();
+    const keep = (relPath: string, entry: ManifestEntry): void => {
+        const winner = placedByKey.get(nameKey(relPath));
+        if (winner === undefined) {
+            docs[relPath] = entry;
+            return;
+        }
+        if (winner.entry.id !== entry.id && !warned.has(relPath)) {
+            warned.add(relPath);
+            pendingWarnings.push(`! ${shown(winner.relPath)} now holds the file this pull wrote for doc ${winner.entry.id} ("${shown(winner.entry.title)}"); doc ${entry.id} ("${shown(entry.title)}") was tracked at ${shown(relPath)} before and is no longer tracked there`);
+        }
+    };
     if (keepUnlisted && previousManifest !== null && previousManifest.folder_path === folderPath) {
         const outcomeIds = new Set(outcomes.map((outcome) => outcome.id));
         for (const [relPath, entry] of Object.entries(previousManifest.docs)) {
-            if (!outcomeIds.has(entry.id)) docs[relPath] = entry;
+            if (!outcomeIds.has(entry.id)) keep(relPath, entry);
         }
     }
-    for (const outcome of outcomes) Object.assign(docs, outcome.entries);
+    for (const outcome of outcomes) {
+        for (const [relPath, entry] of Object.entries(outcome.kept)) keep(relPath, entry);
+        Object.assign(docs, outcome.placed);
+    }
     return { folder_path: folderPath, docs };
 }
 
+/** The error code of a filesystem failure, for the gate's wording. */
+const errnoOf = (error: unknown): string => (error as NodeJS.ErrnoException).code ?? 'ERROR';
+
 /**
- * INV-C as a runtime gate (spec §1.2, rule 4), checked just before the manifest is written: no two paths of the final
- * manifest may be one entry on some filesystem (this covers earlier entries carried over), and every hash this run's
- * outcomes record must be the hash of the file at that path now. A kept entry whose file is missing stays (cli#183); a
- * file this run wrote must be there, and when it cannot be read back (a write-only mode) its hash must be that of the
- * bytes this run wrote. Returns the first problem, or null.
+ * INV-C as a runtime gate (spec §1.2, rule 4), checked just before the manifest is written, on the FINAL manifest: no two
+ * of its paths may be one entry on some filesystem, and every entry with a hash must be one this run can vouch for.
+ *  - A file this run placed (`placedFiles`): it must be a regular file with the `dev:ino` this run renamed in, and the
+ *    entry must be the hash of the bytes it wrote. The bytes are read back; only a permission failure on that same file
+ *    (a write-only mode it kept from the file it replaced) falls back to the hash this run wrote.
+ *  - An entry kept for a doc this run acted on (a kept-previous outcome, or the old twin of a placed rename): lstat must
+ *    show a regular file (no link, no folder) whose bytes hash to the entry. Only a file that is missing stays (cli#183);
+ *    any other lstat or read failure is a refusal, never a pass.
+ *  - An entry carried unchanged for a doc this run did not write (a refused doc's, or one it never listed) was not
+ *    touched by this run, and is not read: a folder or an edited file at that name is the refusal's own state.
+ * Returns the first problem, or null.
  */
-function manifestProblem(destination: string, manifest: DocsManifest, outcomes: DocOutcome[], writtenHashes: Map<string, string>): { rel: string; reason: string } | null {
+export function manifestProblem(destination: string, manifest: DocsManifest, outcomes: DocOutcome[], placedFiles: Map<string, { hash: string; identity: string }>): { rel: string; reason: string } | null {
     const byKey = new Map<string, string>();
     for (const rel of Object.keys(manifest.docs)) {
         const key = nameKey(rel);
@@ -1137,20 +1177,34 @@ function manifestProblem(destination: string, manifest: DocsManifest, outcomes: 
         if (other !== undefined) return { rel, reason: `the same file as ${other} on a case-insensitive or Unicode-normalising filesystem` };
         byKey.set(key, rel);
     }
+    const verified = new Set<string>();
     for (const outcome of outcomes) {
-        if (outcome.kind !== 'placed' && outcome.kind !== 'kept-previous') continue;
-        for (const [rel, entry] of Object.entries(outcome.entries)) {
-            if (entry.body_sha256 == null) continue;
-            let actual: string | undefined;
-            try {
-                actual = sha256Hex(fs.readFileSync(path.join(destination, ...rel.split('/'))));
-            } catch (error) {
-                if (!writtenHashes.has(rel)) continue;
-                if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rel, reason: 'the file this pull wrote is not there' };
-                actual = writtenHashes.get(rel);
-            }
-            if (actual !== entry.body_sha256) return { rel, reason: 'its bytes are not the ones the manifest would record' };
+        if (outcome.kind === 'refused') continue;
+        for (const rel of Object.keys(outcome.kept)) verified.add(rel);
+    }
+    for (const [rel, entry] of Object.entries(manifest.docs)) {
+        if (entry.body_sha256 == null) continue;
+        const placed = placedFiles.get(rel);
+        if (placed === undefined && !verified.has(rel)) continue;
+        const abs = path.join(destination, ...rel.split('/'));
+        let stat: fs.Stats;
+        try {
+            stat = fs.lstatSync(abs);
+        } catch (error) {
+            if (errnoOf(error) !== 'ENOENT') return { rel, reason: `it cannot be checked (${errnoOf(error)})` };
+            if (placed !== undefined) return { rel, reason: 'the file this pull wrote is not there' };
+            continue; // a kept entry whose file is missing stays (cli#183)
         }
+        if (!stat.isFile()) return { rel, reason: 'it is not a regular file now' };
+        if (placed !== undefined && (placed.hash !== entry.body_sha256 || placed.identity !== `${stat.dev}:${stat.ino}`)) return { rel, reason: 'its bytes are not the ones the manifest would record' };
+        let actual: string;
+        try {
+            actual = sha256Hex(fs.readFileSync(abs));
+        } catch (error) {
+            if (placed === undefined || (errnoOf(error) !== 'EACCES' && errnoOf(error) !== 'EPERM')) return { rel, reason: `it cannot be read back (${errnoOf(error)})` };
+            actual = placed.hash;
+        }
+        if (actual !== entry.body_sha256) return { rel, reason: 'its bytes are not the ones the manifest would record' };
     }
     return null;
 }
@@ -1159,7 +1213,7 @@ function manifestProblem(destination: string, manifest: DocsManifest, outcomes: 
  * The line for the error or refusal the writes stopped at, then exit 1 (spec §1.5). `tracked` says the manifest
  * recorded the files written before the stop; when it did not, the manifest's own line already said so.
  */
-function reportStop(stop: WriteStop, planned: PlannedDoc[], placed: PlannedWrite[], writes: PlannedWrite[], tracked: boolean): never {
+function reportStop(stop: WriteStop, planned: PlannedDoc[], placed: PlacedWrite[], writes: PlannedWrite[], tracked: boolean): never {
     const { relPath } = stop.write;
     const tail = tracked ? ` — ${placed.length} of ${writes.length} files were updated and are tracked` : '';
     if (stop.error instanceof LinkOnTheWayError) {
@@ -1263,9 +1317,9 @@ async function report(
             }
             let modified = false;
             let targetIsSource = false;
+            let currentHash: string | null = null;
             if (sourceStat !== null) {
                 const entry = previousManifest.docs[old];
-                let currentHash: string | null = null;
                 try {
                     currentHash = sha256Hex(fs.readFileSync(absOld));
                 } catch {
@@ -1286,6 +1340,7 @@ async function report(
                 title: p.doc.title,
                 sourcePresent: sourceStat !== null,
                 sourceIdentity: sourceStat === null ? null : `${sourceStat.dev}:${sourceStat.ino}`,
+                sourceHash: currentHash,
                 modified,
                 // A failed media download plans a new path but writes nothing there.
                 replacementWritten: !p.isMedia || p.mediaBytes !== null,
@@ -1322,6 +1377,15 @@ async function report(
                 ? undefined
                 : plannedByIdentity.get(m.sourceIdentity)?.find((p) => p.doc.id !== m.id));
 
+        // Rule 5 (spec §1.1) at every rename-source decision: a source already holding the bytes this pull writes for its
+        // doc, or for the doc whose write lands on that file, holds no edit (an interrupted pull placed them, and the old
+        // name aliases the placed file or another doc's write took it). Real edits are still refused below.
+        const plannedByDocId = new Map(planned.map((p) => [p.doc.id, p]));
+        for (const m of renameMoves) {
+            if (!m.modified || m.sourceHash === null) continue;
+            const pulledHere = [plannedByDocId.get(m.id), plannedTargetForSource(m)];
+            if (pulledHere.some((q) => q !== undefined && q.bodySha256 !== null && q.bodySha256 === m.sourceHash)) m.modified = false;
+        }
         // Edited sources cannot be discarded by --overwrite during a rename.
         // Report a cross-doc collision first, including an alias's actual path.
         for (const m of renameMoves) {
@@ -1509,10 +1573,10 @@ async function report(
     faults.afterWrites(destination);
     const pendingWarnings: string[] = [];
     const outcomes = decideOutcomes(destination, planned, new Set(placed.map((write) => write.relPath)), stop !== null, previousManifest, folderPath, renameMoves, listedIds, pendingWarnings);
-    const manifest = buildManifest(folderPath, previousManifest, outcomes, usedSingleDocFallback || stop !== null);
+    const manifest = buildManifest(folderPath, previousManifest, outcomes, usedSingleDocFallback || stop !== null, pendingWarnings);
     const updated = `${placed.length} of ${writes.length} files were updated`;
     let manifestRecorded = false;
-    const problem = manifestProblem(destination, manifest, outcomes, new Map(placed.map((write) => [write.relPath, sha256Hex(write.data)])));
+    const problem = manifestProblem(destination, manifest, outcomes, new Map(placed.map((write) => [write.relPath, { hash: sha256Hex(write.data), identity: write.identity }])));
     if (problem !== null) {
         process.stderr.write(chalk.red(`error: doc pull stopped before recording a manifest that would not match the files (${shown(problem.rel)}: ${shown(problem.reason)}) — ${updated}; the manifest was not changed.\n`));
     } else {
@@ -1524,10 +1588,14 @@ async function report(
             process.stderr.write(chalk.red(`error: cannot write ${DOCS_MANIFEST}: ${shown((error as Error).message)} — ${updated}; the manifest was not changed.\n`));
         }
     }
+    // The tracking decisions describe the manifest just recorded, so they come before the error of a pull that stopped
+    // (spec §1.5); a manifest that was not recorded changed no tracking, so says nothing.
+    if (manifestRecorded) {
+        for (const line of pendingWarnings) process.stderr.write(chalk.yellow(`${line}\n`));
+    }
     if (stop !== null) reportStop(stop, planned, placed, writes, manifestRecorded);
     if (!manifestRecorded) process.exit(1);
 
-    for (const line of pendingWarnings) process.stderr.write(chalk.yellow(`${line}\n`));
     const files: Array<{ path: string; action: 'written' }> = placed
         .map((write) => ({ path: write.relPath, action: 'written' as const }));
 

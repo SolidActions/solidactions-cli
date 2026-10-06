@@ -478,3 +478,74 @@ describe('the manifest write faults', () => {
         expect(() => faults.beforeManifestRename()).toThrow();
     });
 });
+
+/**
+ * Final review 3: rule 5 (spec §1.1) at the moment of each rename, and the identity of every file the loop placed, which
+ * the manifest gate compares against what is on disk when it runs.
+ */
+describe('writeAll: rule 5 at the re-check and the identity of each placed file (final review 3)', () => {
+    const identityOf = (abs: string): string => {
+        const stat = fs.lstatSync(abs);
+        return `${stat.dev}:${stat.ino}`;
+    };
+
+    it.each([
+        ['absent', 'a file that appeared after the check'],
+        ['sha256', 'a tracked file that changed after the check'],
+    ])('%s authorization: %s that holds exactly the bytes about to be written is not a refusal', (kind, _what) => {
+        put(path.join(dest, 'a.md'), 'OLD');
+        const authorized: Authorized = kind === 'absent' ? { kind: 'absent' } : authorizedStateOf(path.join(dest, 'a.md'), false);
+        if (kind === 'absent') fs.rmSync(path.join(dest, 'a.md'));
+        fs.writeFileSync(path.join(dest, 'a.md'), 'NEW');
+
+        const result = writeAll(dest, [w('a.md', 'NEW', authorized)], none);
+
+        expect(result.stop).toBeNull();
+        expect(result.placed.map((write) => write.relPath)).toEqual(['a.md']);
+        expect(read(dest, 'a.md')).toBe('NEW');
+    });
+
+    it.each([
+        ['absent', 'a file that appeared after the check'],
+        ['sha256', 'a tracked file that changed after the check'],
+    ])('%s authorization: %s that holds other bytes is still a refusal and is left as it is', (kind, _what) => {
+        put(path.join(dest, 'a.md'), 'OLD');
+        const authorized: Authorized = kind === 'absent' ? { kind: 'absent' } : authorizedStateOf(path.join(dest, 'a.md'), false);
+        fs.writeFileSync(path.join(dest, 'a.md'), 'SOMEONE ELSE');
+
+        const result = writeAll(dest, [w('a.md', 'NEW', authorized)], none);
+
+        expect(result.placed).toEqual([]);
+        expect(result.stop?.error).toBeInstanceOf(PublicationRefusedError);
+        expect(read(dest, 'a.md')).toBe('SOMEONE ELSE');
+    });
+
+    it('an unreadable file that appeared after the check (absent authorization) is a refusal, not a write error', () => {
+        if (process.getuid?.() === 0 || process.platform === 'win32') return; // root reads mode-000 files; Windows has no modes
+        fs.writeFileSync(path.join(dest, 'a.md'), 'NEW');
+        fs.chmodSync(path.join(dest, 'a.md'), 0o000);
+
+        const result = writeAll(dest, [w('a.md', 'NEW', { kind: 'absent' })], none);
+
+        expect(result.stop?.error).toBeInstanceOf(PublicationRefusedError);
+        fs.chmodSync(path.join(dest, 'a.md'), 0o600);
+    });
+
+    it('every placed write carries the dev:ino of the file renamed in: the file now at its name, and not the one it replaced', () => {
+        put(path.join(dest, 'a.md'), 'OLD');
+        const replacedIdentity = identityOf(path.join(dest, 'a.md'));
+        fs.linkSync(path.join(dest, 'a.md'), path.join(root, 'keeps-the-old-inode'));
+
+        const result = writeAll(dest, [w('a.md', 'NEW', { kind: 'any' }), w('b.md', 'NEW', { kind: 'absent' })], none);
+
+        expect(result.placed.map((write) => write.identity)).toEqual([identityOf(path.join(dest, 'a.md')), identityOf(path.join(dest, 'b.md'))]);
+        expect(result.placed[0].identity).not.toBe(replacedIdentity);
+        expect(result.placed[0].identity).not.toBe(result.placed[1].identity);
+    });
+
+    it('writeFileAtomic returns the dev:ino of the file it renamed into place', () => {
+        const identity = writeFileAtomic(dest, 'f.txt', 'HELLO');
+
+        expect(identity).toBe(identityOf(path.join(dest, 'f.txt')));
+    });
+});

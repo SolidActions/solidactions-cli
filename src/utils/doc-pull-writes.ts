@@ -80,6 +80,11 @@ export interface PlannedWrite {
     authorized: Authorized;
 }
 
+/** A write that was renamed into place, and the `dev:ino` of the file it renamed in (so the manifest gate can tell that file from a later one at the same name). */
+export interface PlacedWrite extends PlannedWrite {
+    identity: string;
+}
+
 /** Why the write loop stopped: the write it was on, and the error (a typed refusal, or a WriteStepError wrapping the cause). */
 export interface WriteStop {
     write: PlannedWrite;
@@ -176,11 +181,26 @@ function lstatOrNull(abs: string): fs.Stats | null {
     }
 }
 
-function stillAuthorized(targetAbs: string, authorized: Authorized): boolean {
+/** True when the regular file at `targetAbs` already holds exactly `data`; a file that cannot be read does not. */
+function holdsBytes(targetAbs: string, data: string | Buffer): boolean {
+    try {
+        return sha256(fs.readFileSync(targetAbs)) === sha256(data);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Whether the target is still in a state the checks allowed the pull to replace. Rule 5 (spec §1.1): a regular file that
+ * already holds the bytes about to be written is never a conflict, whatever it was authorized as.
+ */
+function stillAuthorized(targetAbs: string, authorized: Authorized, data: string | Buffer): boolean {
     if (authorized.kind === 'any') return true;
     const stat = lstatOrNull(targetAbs);
-    if (authorized.kind === 'absent') return stat === null;
-    return stat !== null && stat.isFile() && sha256(fs.readFileSync(targetAbs)) === authorized.sha256;
+    if (authorized.kind === 'absent') return stat === null || (stat.isFile() && holdsBytes(targetAbs, data));
+    if (stat === null || !stat.isFile()) return false;
+    const current = sha256(fs.readFileSync(targetAbs));
+    return current === authorized.sha256 || current === sha256(data);
 }
 
 /** Every folder of `dirRel` under `destination`, created where missing; a link or a file on the way refuses (cli#182). Returns the folder's path. */
@@ -201,10 +221,13 @@ export function ensureRealDirs(destination: string, dirRel: string): string {
     return current;
 }
 
-function writeNew(abs: string, data: string | Buffer): void {
+/** Create `abs` (it must not exist) holding `data`; returns the new file's `dev:ino`. */
+function writeNew(abs: string, data: string | Buffer): string {
     const fd = fs.openSync(abs, NEW_FILE_FLAGS, 0o666);
     try {
         fs.writeFileSync(fd, data);
+        const stat = fs.fstatSync(fd);
+        return `${stat.dev}:${stat.ino}`;
     } finally {
         fs.closeSync(fd);
     }
@@ -215,25 +238,26 @@ function writeNew(abs: string, data: string | Buffer): void {
  * state the preflight saw (spec §1.3). Nothing is deleted or restored: the files written before the stop stay, and are
  * returned so the caller can record them.
  */
-export function writeAll(destination: string, writes: PlannedWrite[], faults: Faults): { placed: PlannedWrite[]; stop: WriteStop | null } {
+export function writeAll(destination: string, writes: PlannedWrite[], faults: Faults): { placed: PlacedWrite[]; stop: WriteStop | null } {
     faults.beforeWrites(destination);
-    const placed: PlannedWrite[] = [];
+    const placed: PlacedWrite[] = [];
     for (let i = 0; i < writes.length; i++) {
         const write = writes[i];
         const targetAbs = path.join(destination, ...segments(write.relPath));
+        let identity: string;
         try {
             const dirAbs = ensureRealDirs(destination, write.dirRel);
-            writeFileAtomic(dirAbs, path.basename(targetAbs), write.data, () => {
+            identity = writeFileAtomic(dirAbs, path.basename(targetAbs), write.data, () => {
                 const existing = lstatOrNull(targetAbs);
                 if (existing !== null && !existing.isFile() && !existing.isSymbolicLink()) throw new UnsupportedTargetError(write.relPath);
-                if (!stillAuthorized(targetAbs, write.authorized)) throw new PublicationRefusedError(write.relPath);
+                if (!stillAuthorized(targetAbs, write.authorized, write.data)) throw new PublicationRefusedError(write.relPath);
                 faults.beforeRename(i + 1);
             });
         } catch (error) {
             const typed = error instanceof LinkOnTheWayError || error instanceof PublicationRefusedError || error instanceof UnsupportedTargetError;
             return { placed, stop: { write, error: typed ? error : new WriteStepError(write.relPath, error) } };
         }
-        placed.push(write);
+        placed.push({ ...write, identity });
         faults.afterRename(i + 1);
     }
     return { placed, stop: null };
@@ -276,10 +300,11 @@ export function releaseLock(destination: string, manifestName: string): void {
 /**
  * Write `dir/name` through a sibling temp file and a rename: never half-written, never through a link at `name`.
  * `beforeRename` runs after the temp file exists and just before the rename; if it throws, the temp file is removed.
+ * Returns the `dev:ino` of the file renamed in (a rename keeps the temp file's inode).
  */
-export function writeFileAtomic(dir: string, name: string, data: string | Buffer, beforeRename?: () => void): void {
+export function writeFileAtomic(dir: string, name: string, data: string | Buffer, beforeRename?: () => void): string {
     const tempAbs = path.join(dir, `${TEMP_PREFIX}${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-    writeNew(tempAbs, data);
+    const identity = writeNew(tempAbs, data);
     try {
         beforeRename?.();
         const existing = lstatOrNull(path.join(dir, name));
@@ -293,4 +318,5 @@ export function writeFileAtomic(dir: string, name: string, data: string | Buffer
         }
         throw error;
     }
+    return identity;
 }

@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
-import { FORMS, KINDS, MANIFEST_FILE, NFC_NAME, NFD_NAME, cannotWriteLine, caseInsensitiveFilesystem, changedLine, doc, escapeRegExp, failed, gateLine, internalEntries, manifestNotWrittenLine, manifestOf, normalisingFilesystem, pulledOk, pulledStdout, read, relOf, sha256, singleDocWarning, snapshot, useDocPullHarness } from './doc-pull-inv-harness';
+import { FORMS, KINDS, MANIFEST_FILE, NFC_NAME, NFD_NAME, cannotWriteLine, caseInsensitiveFilesystem, changedLine, doc, escapeRegExp, failed, gateLine, internalEntries, manifestNotWrittenLine, manifestOf, normalisingFilesystem, pulledOk, pulledStdout, read, relOf, sha256, singleDocWarning, snapshot, updatedFiles, useDocPullHarness } from './doc-pull-inv-harness';
 import type { CliResult, Expected, ServedDoc, Snapshot } from './doc-pull-inv-harness';
 
 const h = useDocPullHarness();
@@ -262,5 +262,138 @@ describe('INV-C platform rows', { timeout: 60_000 }, () => {
         expect(read(h.out, `${NFC_NAME}.md`)).toBe(`V2-${NFD_NAME}`);
         expect(read(h.out, `${NFD_NAME}.md`)).toBe(`V2-${NFD_NAME}`);
         expect(fs.readdirSync(h.out).filter((name) => name !== MANIFEST_FILE)).toHaveLength(1);
+    });
+});
+
+/*
+ * Final review 3, C1: a retained entry never replaces the tracking of bytes this pull placed. Rename chains (one-way
+ * reuse, a swap, a 3-cycle) x the plan in both directions x a write failure at each position: whatever the pull
+ * recorded, every hash in the manifest is the bytes on disk at that path. Pruned: none (every position is reachable).
+ */
+describe('INV-C rename chains: a write failure at any position leaves a manifest whose every hash is the file on disk (final review 3, C1)', { timeout: 60_000 }, () => {
+    const CHAINS: Array<{ name: string; hops: Array<[string, string]> }> = [
+        { name: 'one-way reuse (a to b, b to c)', hops: [['a', 'b'], ['b', 'c']] },
+        { name: 'swap (a to b, b to a)', hops: [['a', 'b'], ['b', 'a']] },
+        { name: '3-cycle (a to b, b to c, c to a)', hops: [['a', 'b'], ['b', 'c'], ['c', 'a']] },
+    ];
+    const ROWS = CHAINS.flatMap((chain) => [false, true].flatMap((reversed) => chain.hops.map((_hop, index) => ({ chain, reversed, failAt: index + 1 }))));
+
+    it.each(ROWS)('$chain.name | plan reversed: $reversed | rename $failAt fails', async ({ chain, reversed, failAt }) => {
+        const seeded = chain.hops.map(([from], index) => doc('md', index + 1, from, 1));
+        const next = chain.hops.map(([, to], index) => doc('md', index + 1, to, 2));
+        const plan = reversed ? [...next].reverse() : next;
+        await h.seed(seeded);
+        h.serve(plan);
+        const failing = plan[failAt - 1];
+        // The warning lines about tracking an entry gave up (none, or one per displaced entry) come first, then the error.
+        const stderr = new RegExp(`^(! [^\\n]*\\n)*${escapeRegExp(`error: cannot write ${relOf(failing)}: EIO: i/o error, rename (test hook) — ${updatedFiles(failAt - 1, plan.length)} and are tracked; pull again.\n`)}$`);
+
+        const result = await h.pull('folder', 'docs', failed(stderr), ['-y'], `fail-rename:${failAt}`);
+
+        expectManifestHonest(result);
+        const manifest = manifestOf(h.out);
+        for (const placed of plan.slice(0, failAt - 1)) {
+            expect(manifest.docs[relOf(placed)]?.body_sha256, `${relOf(placed)} was written by this pull`).toBe(sha256(placed.bytes));
+        }
+    });
+
+    it('the swap with the second write failing, exactly: the first doc is tracked at the file this pull wrote for it (and still at its old twin), the second doc loses its entry at that name, and the warning says so before the error', async () => {
+        await h.seed([doc('md', 1, 'a', 1), doc('md', 2, 'b', 1)]);
+        h.serve([doc('md', 1, 'b', 2), doc('md', 2, 'a', 2)]);
+        const warning = '! b.md now holds the file this pull wrote for doc 1 ("b"); doc 2 ("b") was tracked at b.md before and is no longer tracked there\n';
+
+        const result = await h.pull('folder', 'docs', failed(warning + cannotWriteLine('a.md', 'rename', 1, 2)), ['-y'], 'fail-rename:2');
+
+        expect(read(h.out, 'b.md')).toBe('V2-b');
+        expect(read(h.out, 'a.md')).toBe('V1-a');
+        expect(Object.fromEntries(Object.entries(manifestOf(h.out).docs).map(([rel, entry]) => [rel, [entry.id, entry.body_sha256]]))).toEqual({
+            'a.md': [1, sha256('V1-a')],
+            'b.md': [1, sha256('V2-b')],
+        });
+        expectManifestHonest(result);
+    });
+});
+
+/*
+ * Final review 3, I1: every tracking decision that applies to the manifest a stopped pull recorded is printed before the
+ * error line. Rows: an edited media file whose download failed (dropped), a failed download over another doc's file
+ * (kept: the doc is still listed; kept by the stop: it is gone from the server), and a renamed doc's failed download
+ * (its old entry kept, with and without the old file). Every row also has a write that fails.
+ */
+describe('INV-C stopped pulls report the tracking decisions they recorded (final review 3, I1)', { timeout: 60_000 }, () => {
+    const pic = (version: number, title = 'pic'): ServedDoc => ({ ...doc('media', 7, title, version), downloadFails: version > 1 });
+    const note = (version: number) => doc('md', 8, 'note', version);
+    const stopLine = cannotWriteLine('note.md', 'rename', 0, 1);
+
+    it('--overwrite x a tracked media file edited locally x a failed download x a failed write: the dropped tracking is reported before the write error, and the manifest has neither the picture nor a changed note', async () => {
+        await h.seed([pic(1), note(1)]);
+        const noteEntry = manifestOf(h.out).docs['note.md'];
+        fs.writeFileSync(path.join(h.out, 'pic.png'), 'MY EDITED PIC');
+        h.serve([pic(2), note(2)]);
+
+        const result = await h.pull('folder', 'docs', failed(`! doc 7 ("pic") failed to download and pic.png holds a local file; not tracking it — pull again later.\n${stopLine}`), ['--overwrite'], 'fail-rename:1');
+
+        expect(read(h.out, 'pic.png')).toBe('MY EDITED PIC');
+        expect(manifestOf(h.out).docs).toEqual({ 'note.md': noteEntry });
+        expectManifestHonest(result);
+    });
+
+    it('a failed download over a file the manifest tracks for a doc still listed x a failed write: still tracking that doc is reported before the error', async () => {
+        await h.seed([doc('media', 9, 'P', 1), note(1)]);
+        const otherEntry = manifestOf(h.out).docs['P.png'];
+        h.serve([{ ...doc('media', 7, 'P', 2), downloadFails: true }, { ...doc('media', 9, 'old', 2), bulkStatus: 'not_found' }, note(2)]);
+
+        const result = await h.pull('folder', 'docs', failed(`! doc 7 ("P") failed to download and P.png holds doc 9's file ("P"); still tracking it as doc 9 — pull again later\n${stopLine}`), ['-y'], 'fail-rename:1');
+
+        expect(manifestOf(h.out).docs['P.png']).toEqual(otherEntry);
+        expect(read(h.out, 'P.png')).toBe('V1-P');
+        expectManifestHonest(result);
+    });
+
+    it('a failed download over a file the manifest tracks for a doc gone from the server x a failed write: the pull that stopped did not drop that doc\'s entry, so no "no longer tracked" claim is printed and the entry stays for the next pull to propagate', async () => {
+        await h.seed([doc('media', 9, 'P', 1), note(1)]);
+        const otherEntry = manifestOf(h.out).docs['P.png'];
+        h.serve([{ ...doc('media', 7, 'P', 2), downloadFails: true }, note(2)]);
+
+        const result = await h.pull('folder', 'docs', failed(`! doc 7 ("P") failed to download and P.png holds a local file; not tracking it — pull again later.\n${stopLine}`), ['-y'], 'fail-rename:1');
+
+        expect(manifestOf(h.out).docs['P.png']).toEqual(otherEntry);
+        expectManifestHonest(result);
+    });
+
+    it('a renamed doc whose download failed x a failed write: the kept old file and entry are reported before the error', async () => {
+        await h.seed([pic(1), note(1)]);
+        const picEntry = manifestOf(h.out).docs['pic.png'];
+        h.serve([pic(2, 'pic2'), note(2)]);
+
+        const result = await h.pull('folder', 'docs', failed(`! kept pic.png — doc 7 download failed; still tracked as pic.png\n${stopLine}`), ['-y'], 'fail-rename:1');
+
+        expect(manifestOf(h.out).docs['pic.png']).toEqual(picEntry);
+        expect(manifestOf(h.out).docs['pic2.png']).toBeUndefined();
+        expectManifestHonest(result);
+    });
+
+    it('a renamed doc whose download failed and whose old file is gone x a failed write: the kept entry for the missing file is reported before the error', async () => {
+        await h.seed([pic(1), note(1)]);
+        const picEntry = manifestOf(h.out).docs['pic.png'];
+        fs.unlinkSync(path.join(h.out, 'pic.png'));
+        h.serve([pic(2, 'pic2'), note(2)]);
+
+        await h.pull('folder', 'docs', failed(`! doc 7 download failed; still tracked as pic.png, which is not present locally\n${stopLine}`), ['-y'], 'fail-rename:1');
+
+        // The entry stays with its hash for a file that is gone (cli#183): the one state expectManifestHonest does not allow.
+        expect(manifestOf(h.out).docs['pic.png']).toEqual(picEntry);
+        expect(fs.existsSync(path.join(h.out, 'pic.png'))).toBe(false);
+    });
+
+    it('a stopped pull whose manifest could not be written prints no tracking decision: the manifest it would have described was not recorded', async () => {
+        await h.seed([pic(1), note(1)]);
+        fs.writeFileSync(path.join(h.out, 'pic.png'), 'MY EDITED PIC');
+        const manifestBefore = read(h.out, MANIFEST_FILE);
+        h.serve([pic(2), note(2)]);
+
+        await h.pull('folder', 'docs', failed(`${manifestNotWrittenLine('rename manifest', 0, 1)}error: cannot write note.md: EIO: i/o error, rename (test hook)\n`), ['--overwrite'], 'fail-rename:1,fail-manifest-rename');
+
+        expect(read(h.out, MANIFEST_FILE)).toBe(manifestBefore);
     });
 });
