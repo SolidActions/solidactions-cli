@@ -47,7 +47,8 @@ describe('final review 6, C1: the reviewer\'s unit, ported', () => {
     }
 
     it('a listed doc with a failed or omitted bulk-read row retains its local file and previous ownership', { timeout: 20000 }, async () => {
-        const failures: string[] = [];
+        const observed: Record<string, unknown> = {};
+        const expected: Record<string, unknown> = {};
         for (const kind of ['markdown', 'media']) {
             for (const mode of ['error', 'missing']) {
                 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-pull-bulk-'));
@@ -74,17 +75,23 @@ describe('final review 6, C1: the reviewer\'s unit, ported', () => {
                 fs.writeFileSync(path.join(home, '.solidactions', 'config.json'), JSON.stringify({ host: `http://127.0.0.1:${(server.address() as { port: number }).port}`, apiKey: 'test-key', workspaceId: 'test-workspace' }));
                 try {
                     const result = await invoke(root, home, out);
-                    expect(result.signal).toBeNull();
                     const manifest = JSON.parse(fs.readFileSync(path.join(out, MANIFEST_FILE), 'utf8'));
-                    const preserved = fs.existsSync(path.join(out, rel));
-                    if (!preserved || manifest.docs[rel]?.id !== 7) failures.push(`${kind}/${mode}`);
+                    observed[`${kind}/${mode}`] = {
+                        code: result.code,
+                        signal: result.signal,
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        bytes: fs.existsSync(path.join(out, rel)) ? fs.readFileSync(path.join(out, rel), 'utf8') : null,
+                        entry: manifest.docs[rel] ?? null,
+                    };
+                    expected[`${kind}/${mode}`] = { code: 1, signal: null, stdout: pulledStdout(out, []), stderr: fetchFailedLine([[7, 'report']]), bytes, entry };
                 } finally {
                     await new Promise((resolve) => server.close(resolve));
                     fs.rmSync(root, { recursive: true, force: true });
                 }
             }
         }
-        expect(failures, 'A bulk-read failure is not evidence that a listed doc was deleted remotely').toEqual([]);
+        expect(observed, 'A bulk-read failure is not evidence that a listed doc was deleted remotely').toEqual(expected);
     });
 });
 
