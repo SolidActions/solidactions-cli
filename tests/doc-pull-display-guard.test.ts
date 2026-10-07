@@ -16,6 +16,7 @@ const PRINT_MARKERS = [
     'console.log(',
     'console.error(',
     'warnings.push(',
+    'pendingWarnings.push(',
     ' warning: ',
 ];
 
@@ -30,6 +31,12 @@ const ALLOWED: Record<string, string> = {
     warning: 'built from shown() parts where it is pushed',
     DOCS_MANIFEST: 'constant file name',
     'download.status': 'HTTP status code from axios, a number, never server text',
+    'error.pid': 'a process id, a number',
+    tail: 'built from .length counts and string literals where it is assigned (the stopped-write lines)',
+    updated: 'built from .length counts and a string literal where it is assigned (the manifest-not-changed lines)',
+    line: 'a pendingWarnings entry, built from shown() parts where it is pushed',
+    lost: 'built from shown() parts',
+    names: 'built from .id numbers and shown() titles where it is assigned (the could-not-fetch line)',
 };
 
 interface Interpolation {
@@ -221,6 +228,23 @@ describe('doc-pull display guard', () => {
 
     it('accepts a whole shown() call and a plain .id chain', () => {
         expect(checkSource('process.stderr.write(`x ${shown(doc.title)} and ${p.doc.id}`);')).toEqual([]);
+    });
+
+    it('reports a bare interpolation in a deferred warning pushed onto pendingWarnings', () => {
+        expect(checkSource('pendingWarnings.push(`! x ${doc.title}`);')).toEqual(['1: doc.title']);
+        expect(checkSource('pendingWarnings.push(`! x ${shown(doc.title)} and ${p.doc.id}`);')).toEqual([]);
+    });
+
+    it('inspects every pendingWarnings.push producer in doc-pull.ts: dropping any one shown() is reported', () => {
+        const lines = fs.readFileSync(PULL_SOURCE, 'utf8').split('\n');
+        const producers = lines.flatMap((line, index) => (line.includes('pendingWarnings.push(') ? [index] : []));
+        expect(producers.length).toBeGreaterThan(0);
+        for (const index of producers) {
+            const unwrapped = lines.slice();
+            unwrapped[index] = unwrapped[index].replace(/\$\{shown\(([^()]*)\)\}/, '${$1}');
+            expect(unwrapped[index]).not.toBe(lines[index]);
+            expect(checkSource(unwrapped.join('\n')).map((finding) => Number(finding.split(':')[0]))).toContain(index + 1);
+        }
     });
 
     it('every printed interpolation in doc-pull.ts is shown(), numeric, a literal ternary, or allowlisted', () => {

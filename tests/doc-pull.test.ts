@@ -12,12 +12,12 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import prompts from 'prompts';
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { docPullWithConfig, sanitizeTitle, DOCS_MANIFEST } from '../src/commands/doc-pull';
 import type { DocsManifest } from '../src/commands/doc-pull';
 import type { Config } from '../src/utils/config';
 import { writeGlobal } from './helpers';
+import { caseInsensitiveFilesystem } from './doc-pull-inv-harness';
 
 /** sha256 hex digest, for asserting manifest body_sha256 values in tests. */
 function sha256Hex(data: string | Buffer): string {
@@ -248,9 +248,9 @@ async function runPullCli(args: string[]): Promise<CliResult> {
     try {
         return await new Promise<CliResult>((resolve, reject) => {
             const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-            delete childEnv.SOLIDACTIONS_HOST;
-            delete childEnv.SOLIDACTIONS_API_KEY;
-            delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+            for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+                delete childEnv[key];
+            }
             const child = childProcess.spawn(process.execPath, [CLI_BINARY, 'doc', 'pull', ...args], {
                 cwd: homeRoot,
                 env: childEnv,
@@ -890,40 +890,9 @@ describe('docPullWithConfig — single-doc fallback', () => {
 // ---------------------------------------------------------------------------
 
 describe('docPullWithConfig — overwrite confirm', () => {
-    it('non-empty dest without --yes: declining the prompt exits 0 and writes nothing', async () => {
-        const { dir: tmpDest, cleanup } = makeTmpDir();
-        const dest = path.join(tmpDest, 'out');
-        fs.mkdirSync(dest, { recursive: true });
-        fs.writeFileSync(path.join(dest, 'existing.txt'), 'hi', 'utf8');
-
-        responseQueue = [
-            makeMcpSuccess({
-                folders: [],
-                docs: [{ id: 1, title: 'brief', properties: {} }],
-            }),
-        ];
-
-        const restoreExit = patchProcessExit();
-        const { lines: logLines, restore: restoreStdout } = captureStdout();
-
-        try {
-            prompts.inject([false]);
-            const code = await runExpectingExit(() => docPullWithConfig('marketing/fb-campaign', dest, {}, stubConfig()));
-            expect(code).toBe(0);
-
-            // No MCP calls at all — confirmation happens before any network I/O
-            expect(allCaptures.length).toBe(0);
-            // Existing file untouched, no manifest written
-            expect(fs.existsSync(path.join(dest, 'existing.txt'))).toBe(true);
-            expect(fs.existsSync(path.join(dest, DOCS_MANIFEST))).toBe(false);
-            expect(fs.existsSync(path.join(dest, 'brief.md'))).toBe(false);
-            expect(logLines.join('\n')).toContain('Cancelled');
-        } finally {
-            restoreExit();
-            restoreStdout();
-            cleanup();
-        }
-    });
+    // Declining the prompt (exit 0, nothing written) is covered through a real terminal in
+    // tests/doc-pull-destination-checks.test.ts; in-process there is no terminal, so the pull now
+    // fails with the no-terminal line instead of prompting (cli#176).
 
     it('--yes bypasses the confirmation on a non-empty dest', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
@@ -1856,15 +1825,15 @@ describe('docPullWithConfig — deletion propagation', () => {
         }
     });
 
-    it('never deletes an orphan whose file is the same inode as a file this pull just wrote (case-rename survives)', async () => {
+    it('a case-only rename over a hard-linked old name writes the new name by rename and removes the unmodified old name', async () => {
         const { dir: tmpDest, cleanup } = makeTmpDir();
         const dest = path.join(tmpDest, 'out');
         fs.mkdirSync(dest, { recursive: true });
 
-        // Simulates a case-only rename ("Readme" -> "readme") on a case-insensitive
-        // filesystem: the old and new manifest keys resolve to the SAME underlying file.
-        // On Linux we prove this with an explicit hardlink rather than relying on
-        // case-insensitivity.
+        // A hard link used to stand in for a case-only rename ("Readme" -> "readme") on a
+        // case-insensitive filesystem. A pull now replaces a file through a rename, so the
+        // link is an independent name: the new file is written at readme.md and the
+        // unmodified old twin Readme.md is removed by rename cleanup.
         fs.writeFileSync(path.join(dest, 'readme.md'), 'BODY', 'utf8');
         fs.linkSync(path.join(dest, 'readme.md'), path.join(dest, 'Readme.md'));
 
@@ -1879,26 +1848,46 @@ describe('docPullWithConfig — deletion propagation', () => {
             }),
         ];
 
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
+        try {
+            const result = await runPullCli(['marketing', dest, '--yes']);
+
+            expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  readme.md\n`);
+            expect(result.stderr).toBe('');
+            expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
+            expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
+            expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it.skipIf(!caseInsensitiveFilesystem())('a case-only rename on one file under two names never deletes the file this pull just wrote (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
+        const { dir: tmpDest, cleanup } = makeTmpDir();
+        const dest = path.join(tmpDest, 'out');
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'Readme.md'), 'BODY', 'utf8');
+        writeManifest(dest, {
+            'Readme.md': { id: 1, title: 'Readme', current_revision_id: 1, media: false, body_sha256: sha256Hex('BODY') },
+        });
+
+        responseQueue = [
+            makeMcpSuccess({ folders: [], docs: [{ id: 1, title: 'readme', properties: {} }] }),
+            makeMcpSuccess({
+                results: [{ index: 0, status: 'found', id: 1, title: 'readme', folder_path: 'marketing', current_revision_id: 1, properties: {}, body: 'BODY' }],
+            }),
+        ];
 
         try {
-            const code = await runExpectingExit(() =>
-                docPullWithConfig('marketing', dest, { yes: true }, stubConfig()),
-            );
-            expect(code).toBe(0);
+            const result = await runPullCli(['marketing', dest, '--yes']);
 
-            // The new manifest tracks "readme.md".
-            const manifest = readManifest(dest);
-            expect(Object.keys(manifest.docs)).toEqual(['readme.md']);
-
-            // The old key "Readme.md" is the SAME file (hardlink) the pull just wrote
-            // under "readme.md" — it must not be deleted, even though it looks orphaned.
+            expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  readme.md\n`);
+            expect(result.stderr).toBe('');
+            expect(Object.keys(readManifest(dest).docs)).toEqual(['readme.md']);
             expect(fs.existsSync(path.join(dest, 'Readme.md'))).toBe(true);
             expect(fs.readFileSync(path.join(dest, 'readme.md'), 'utf8')).toBe('BODY');
         } finally {
-            restoreExit();
-            restoreStdout();
             cleanup();
         }
     });
@@ -2381,63 +2370,6 @@ describe('docPullWithConfig — content hashes', () => {
         } finally {
             restoreExit();
             restoreStdout();
-            cleanup();
-        }
-    });
-});
-
-// ---------------------------------------------------------------------------
-// bulk_read row-status guard
-// ---------------------------------------------------------------------------
-
-describe('docPullWithConfig — bulk_read row-status guard', () => {
-    it('a non-ok status row and a row missing from results are both warned + skipped; the ok row still pulls', async () => {
-        responseQueue = [
-            makeMcpSuccess({
-                folders: [],
-                docs: [
-                    { id: 1, title: 'good', properties: {} },
-                    { id: 2, title: 'broken', properties: {} },
-                    { id: 3, title: 'ghost', properties: {} },
-                ],
-            }),
-            (body: any) => {
-                const ids = body.params.arguments.items.map((i: any) => i.id);
-                expect(ids).toEqual([1, 2, 3]);
-                return makeMcpSuccess({
-                    results: [
-                        { index: 0, status: 'found', id: 1, title: 'good', folder_path: 'root', current_revision_id: 1, properties: {}, body: 'ok body' },
-                        { index: 1, status: 'error', id: 2, title: 'broken', folder_path: 'root', error: 'boom' },
-                        // id 3 ("ghost") is entirely absent from results.
-                    ],
-                });
-            },
-        ];
-
-        const { dir: tmpDest, cleanup } = makeTmpDir();
-        const dest = path.join(tmpDest, 'out');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
-        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
-
-        try {
-            const code = await runExpectingExit(() => docPullWithConfig('root', dest, {}, stubConfig()));
-            expect(code).toBe(0);
-
-            expect(fs.readFileSync(path.join(dest, 'good.md'), 'utf8')).toBe('ok body');
-            expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
-            expect(fs.existsSync(path.join(dest, 'ghost.md'))).toBe(false);
-
-            const manifest = readManifest(dest);
-            expect(Object.keys(manifest.docs)).toEqual(['good.md']);
-
-            const err = stderrLines.join('');
-            expect(err).toContain('broken');
-            expect(err).toContain('ghost');
-        } finally {
-            restoreExit();
-            restoreStdout();
-            restoreStderr();
             cleanup();
         }
     });

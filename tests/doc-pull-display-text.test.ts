@@ -233,7 +233,7 @@ describe('doc pull sanitises server-derived display text', () => {
         expectNoBanned(result.stderr);
     });
 
-    it('sanitises the bulk_read status in a skip warning', async () => {
+    it('sanitises the title on the could-not-fetch line of a doc whose bulk_read row failed', async () => {
         docsByParent = { Root: [{ id: 7, title: T }] };
         bulkRows = [{
             index: 0, status: 'error\x1b[2J', id: 7, title: T, folder_path: 'Root',
@@ -243,8 +243,8 @@ describe('doc pull sanitises server-derived display text', () => {
 
         const result = await runCli(['doc', 'pull', 'Root', out], env.home, env.cwd);
 
-        expect(result.status).toBe(0);
-        expect(result.stderr).toContain('warn: skipping doc 7 (Evil[31mRED2JX): bulk_read returned status "error[2J"');
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('error: could not fetch 1 doc(s) from the server: 7 ("Evil[31mRED2JX") — their local files and tracking were left as they were; pull again.');
         expectNoBanned(result.stdout);
         expectNoBanned(result.stderr);
     });

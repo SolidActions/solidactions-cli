@@ -18,6 +18,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { writeGlobal } from './helpers';
+import { caseInsensitiveFilesystem } from './doc-pull-inv-harness';
 
 const CLI_BINARY = path.resolve(__dirname, '../dist/index.js');
 const MANIFEST_FILE = '.solidactions-docs.json';
@@ -159,9 +160,9 @@ function runPullArgs(root: string, args: string[]): Promise<CliResult> {
     writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
     return new Promise<CliResult>((resolve, reject) => {
         const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-        delete env.SOLIDACTIONS_HOST;
-        delete env.SOLIDACTIONS_API_KEY;
-        delete env.SOLIDACTIONS_WORKSPACE_ID;
+        for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+            delete env[key];
+        }
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
@@ -189,9 +190,9 @@ function runPull(root: string, dest: string, overwrite: boolean): Promise<CliRes
     writeGlobal(home, { host: `http://127.0.0.1:${port}`, apiKey: 'test-api-key', workspaceId: 'ws-test-uuid' });
     return new Promise<CliResult>((resolve, reject) => {
         const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
-        delete env.SOLIDACTIONS_HOST;
-        delete env.SOLIDACTIONS_API_KEY;
-        delete env.SOLIDACTIONS_WORKSPACE_ID;
+        for (const key of ['SOLIDACTIONS_HOST', 'SOLIDACTIONS_API_KEY', 'SOLIDACTIONS_WORKSPACE_ID', 'DEBUG', 'NODE_DEBUG', 'FORCE_COLOR', 'SOLIDACTIONS_TEST_HOOKS', 'SOLIDACTIONS_DOC_PULL_TEST_FAULT']) {
+            delete env[key];
+        }
         const args = ['doc', 'pull', 'docs', dest, overwrite ? '--overwrite' : '--yes'];
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], { cwd: root, env });
         let stdout = '';
@@ -438,7 +439,26 @@ describe('doc pull never writes outside the destination or through a link (cli#1
 
             const result = await runPull(root, dest, false);
 
+            // A pull replaces a file through a rename, so a hard link is an independent name:
+            // page.md is the new file, and the unmodified old twin Page.md is removed.
             expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  page.md\n`);
+            expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
+            expect(fs.existsSync(path.join(dest, 'Page.md'))).toBe(false);
+            expect(Object.keys(manifestJson().docs)).toEqual(['page.md']);
+            expect(result.stderr).not.toMatch(/not tracked/);
+            expect(result.stderr).not.toMatch(/kept .*same file/);
+        });
+
+        it.skipIf(!caseInsensitiveFilesystem())('a case-only rename on one file under two names adopts instead of refusing (needs a case-insensitive filesystem; CI unit tests run on Linux)', async () => {
+            served = [{ id: 5, title: 'page', revision: 9, body: NEW5 }];
+            fs.writeFileSync(path.join(dest, 'Page.md'), OLD5);
+            seedManifest([{ rel: 'Page.md', doc: { id: 5, title: 'Page', revision: 8, body: OLD5 }, bytes: OLD5 }]);
+
+            const result = await runPull(root, dest, false);
+
+            expect(result.code).toBe(0);
+            expect(result.stdout).toBe(`pulled 1 doc → ${dest}\n  page.md\n`);
             expect(fs.readFileSync(path.join(dest, 'Page.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW5);
             expect(Object.keys(manifestJson().docs)).toEqual(['page.md']);
@@ -446,7 +466,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(result.stderr).not.toMatch(/kept .*same file/);
         });
 
-        it('a cross-alias hard link under --overwrite keeps both old paths with a warning naming the written path', async () => {
+        it('a cross-alias hard link under --overwrite writes both new names by rename and removes the unmodified old names', async () => {
             const COMMON_B = Buffer.from('# other old bytes');
             served = [
                 { id: 5, title: 'new5', revision: 9, body: NEW5 },
@@ -464,12 +484,12 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             const result = await runPull(root, dest, true);
 
             expect(result.code).toBe(0);
-            expect(result.stderr).toMatch(/! kept page\.md: it is the same file as new6\.md \(a link\)/);
-            expect(result.stderr).toMatch(/! kept other\.md: it is the same file as new5\.md \(a link\)/);
+            expect(result.stdout).toBe(`pulled 2 docs → ${dest}\n  new5.md\n  new6.md\n`);
+            expect(result.stderr).not.toMatch(/kept .*same file/);
             expect(fs.readFileSync(path.join(dest, 'new5.md'))).toEqual(NEW5);
             expect(fs.readFileSync(path.join(dest, 'new6.md'))).toEqual(NEW6B);
-            expect(fs.readFileSync(path.join(dest, 'page.md'))).toEqual(NEW6B);
-            expect(fs.readFileSync(path.join(dest, 'other.md'))).toEqual(NEW5);
+            expect(fs.existsSync(path.join(dest, 'page.md'))).toBe(false);
+            expect(fs.existsSync(path.join(dest, 'other.md'))).toBe(false);
             const docs = manifestJson().docs;
             expect(Object.keys(docs).sort()).toEqual(['new5.md', 'new6.md']);
             expect(docs['new5.md'].id).toBe(5);
@@ -562,19 +582,26 @@ describe('doc pull never writes outside the destination or through a link (cli#1
                 expect(Object.keys(manifestJson().docs)).not.toContain('pic.png');
             });
 
-            it('prints the prompt text naming the untracked-file refusal when the destination is not empty', async () => {
+            it('fails with the no-terminal line, not the prompt, when the destination is not empty and nothing can answer it', async () => {
                 fs.writeFileSync(path.join(dest, 'Note.md'), NOTE_BYTES);
+                const before = world(root);
 
                 const result = await runPullArgs(root, ['doc', 'pull', 'docs', dest]);
 
-                expect(result.stdout).toContain("Pulling overwrites tracked files; local files the folder doesn't track are refused unless --overwrite.");
+                // The prompt text itself is covered through a real terminal in tests/doc-pull-destination-checks.test.ts.
+                expect(result.code).toBe(1);
+                expect(result.stderr).toContain(`error: ${dest} is not empty and there is no terminal to confirm the pull; pass -y to pull into it.`);
+                expect(result.stdout).not.toContain('Continue?');
+                expect(world(root)).toEqual(before);
             });
         });
     });
 
     describe('an existing target that cannot be read is not owned (cli#167)', () => {
         const LOCAL = Buffer.from('# local bytes in a write-only file');
-        const isRoot = process.getuid?.() === 0; // root reads mode-0200 files, so nothing is unreadable to it
+        // Root reads mode-0200 files, so nothing is unreadable to it; Windows has no modes (spec §1.7: a visible, reasoned skip).
+        const cannotMakeUnreadable = process.getuid?.() === 0 || process.platform === 'win32';
+        const NEEDS = ' (needs a non-root user, who cannot read a mode-0200 file; Windows has no modes)';
 
         function manifestJson(): { docs: Record<string, { id: number; body_sha256: string | null }> } {
             return JSON.parse(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8'));
@@ -595,7 +622,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             served = [NOTE];
         });
 
-        it.skipIf(isRoot)('a first pull with -y refuses a write-only untracked file, naming the read error, leaving the bytes and writing no manifest', async () => {
+        it.skipIf(cannotMakeUnreadable)(`a first pull with -y refuses a write-only untracked file, naming the read error, leaving the bytes and writing no manifest${NEEDS}`, async () => {
             writeOnly('Note.md');
 
             const result = await runPull(root, dest, false);
@@ -608,7 +635,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.existsSync(path.join(dest, MANIFEST_FILE))).toBe(false);
         });
 
-        it.skipIf(isRoot)('refuses a tracked entry with no recorded hash over a write-only file, leaving the bytes', async () => {
+        it.skipIf(cannotMakeUnreadable)(`refuses a tracked entry with no recorded hash over a write-only file, leaving the bytes${NEEDS}`, async () => {
             writeOnly('Note.md');
             const manifest = JSON.parse(manifestOf([{ rel: 'Note.md', doc: NOTE, bytes: NOTE_BYTES }]));
             manifest.docs['Note.md'].body_sha256 = null;
@@ -623,7 +650,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
         });
 
-        it.skipIf(isRoot)('refuses a rename whose target is a write-only file, leaving the bytes, the old file and the manifest', async () => {
+        it.skipIf(cannotMakeUnreadable)(`refuses a rename whose target is a write-only file, leaving the bytes, the old file and the manifest${NEEDS}`, async () => {
             const OLD = Buffer.from('# page v1');
             served = [{ id: 5, title: 'Renamed', revision: 9, body: Buffer.from('# page v2') }];
             fs.writeFileSync(path.join(dest, 'Page.md'), OLD);
@@ -640,7 +667,7 @@ describe('doc pull never writes outside the destination or through a link (cli#1
             expect(fs.readFileSync(path.join(dest, MANIFEST_FILE), 'utf8')).toBe(manifestText);
         });
 
-        it.skipIf(isRoot)('replaces a write-only file under --overwrite', async () => {
+        it.skipIf(cannotMakeUnreadable)(`replaces a write-only file under --overwrite${NEEDS}`, async () => {
             writeOnly('Note.md');
 
             const result = await runPull(root, dest, true);
