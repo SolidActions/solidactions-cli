@@ -294,9 +294,11 @@ describe('spawned: an inspection error or a non-regular entry stops the pull bef
             serve: [media(1, 'new', 2), note(2)],
             faults: ['fail-rename:2'], written: [1, 2], after: 'error: cannot write note.md: EIO: i/o error, rename (test hook)\n', placed: { 'new.png': 'V2-new' },
         },
+        // Doc 9 is gone from the server: a doc still listed whose content could not be fetched keeps its name (cli#209),
+        // so no other doc is planned there.
         'different-owner fallback': {
             seed: [note(1), media(9, 'pic', 1, 'sub')],
-            serve: [{ ...media(7, 'pic', 2, 'sub'), downloadFails: true }, { ...media(9, 'old', 1, 'sub'), bulkStatus: 'not_found' }, note(2)],
+            serve: [{ ...media(7, 'pic', 2, 'sub'), downloadFails: true }, note(2)],
             faults: [], written: [1, 1], after: '', placed: { 'note.md': 'V2-note' },
         },
     };
@@ -336,7 +338,7 @@ describe('spawned: an inspection error or a non-regular entry stops the pull bef
         await h.seed(row.seed);
         h.serve(row.serve);
 
-        await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], `! doc 7 ("pic") failed to download and ${OLD} is not present locally; not tracking it — pull again later. Doc 9 ("pic") was tracked at ${OLD} before and is no longer tracked there.\nwarn: skipping doc 9 (old): bulk_read returned status "not_found"\nwarn: failed to download media for doc 7 (pic): HTTP 500\n`), ['-y'], `break-after-writes:remove:${OLD}`);
+        await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], `! doc 7 ("pic") failed to download and ${OLD} is not present locally; not tracking it — pull again later. Doc 9 ("pic") was tracked at ${OLD} before and is no longer tracked there.\nwarn: failed to download media for doc 7 (pic): HTTP 500\n`), ['-y'], `break-after-writes:remove:${OLD}`);
 
         expect(manifestOf(h.out).docs[OLD]).toBeUndefined();
         expect(Object.keys(manifestOf(h.out).docs)).toEqual(['note.md']);

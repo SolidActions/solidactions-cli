@@ -295,17 +295,20 @@ const BULK_READ_OK_STATUS = 'found';
 
 /**
  * Fetch bodies + revisions for every collected row via bulk_read, chunked at
- * CHUNK_SIZE ids. A row whose status isn't `BULK_READ_OK_STATUS` (e.g. a
- * server-side `error` or `not_found`), or a requested id absent from the
- * response entirely, is soft-skipped: a warning naming the doc, no file
- * written, no manifest entry — mirroring the media download soft-skip.
+ * CHUNK_SIZE ids. A row whose status isn't `BULK_READ_OK_STATUS` (`error`,
+ * `not_found`, an unknown or a missing status), a `found` row without a
+ * string body (no `body` key, or `null`; `""` is content), or a requested id
+ * absent from the response entirely, is a doc the server still lists but whose
+ * content could not be fetched: it is returned in `failed`, never treated as gone
+ * (cli#209). Its file and tracking are left as they were, and the pull names
+ * it on one line and exits 1.
  */
-async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: FetchedDoc[]; warnings: string[] }> {
+async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: FetchedDoc[]; failed: DocRow[] }> {
     const byId = new Map<number, DocRow>();
     for (const row of rows) byId.set(row.id, row);
 
     const fetched: FetchedDoc[] = [];
-    const warnings: string[] = [];
+    const failed: DocRow[] = [];
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
         const chunk = rows.slice(i, i + CHUNK_SIZE);
         const result = await callDocsTool(config, {
@@ -321,33 +324,26 @@ async function fetchBodies(config: Config, rows: DocRow[]): Promise<{ fetched: F
         }
 
         const resultRows = result.data?.results ?? [];
-        const seenIds = new Set<number>();
+        const fetchedIds = new Set<number>();
         for (const row of resultRows) {
             const original = byId.get(row.id);
-            if (!original) continue;
-            seenIds.add(row.id);
-
-            if (row.status !== BULK_READ_OK_STATUS) {
-                warnings.push(`warn: skipping doc ${row.id} (${shown(original.title)}): bulk_read returned status "${shown(row.status ?? 'unknown')}"`);
-                continue;
-            }
+            if (!original || row.status !== BULK_READ_OK_STATUS || typeof row.body !== 'string') continue;
+            fetchedIds.add(row.id);
 
             fetched.push({
                 ...original,
-                body: row.body ?? '',
+                body: row.body,
                 current_revision_id: row.current_revision_id ?? null,
                 properties: row.properties ?? {},
             });
         }
 
         for (const requested of chunk) {
-            if (!seenIds.has(requested.id)) {
-                warnings.push(`warn: skipping doc ${requested.id} (${shown(requested.title)}): missing from bulk_read results`);
-            }
+            if (!fetchedIds.has(requested.id)) failed.push(requested);
         }
     }
 
-    return { fetched, warnings };
+    return { fetched, failed };
 }
 
 /**
@@ -459,8 +455,10 @@ function isCollisionVariant(file: string, base: string, ext: string): boolean {
  * reallocates. Folder pulls reserve only paths whose title, directory and
  * extension stay unchanged, keeping their exact spelling regardless of list
  * order without reserving the old names of docs that move away.
+ * `heldPaths` are the tracked paths of listed docs whose content could not be
+ * fetched (cli#209): they keep their file and entry, so no doc is given one.
  */
-async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved, previousManifest?: DocsManifest | null): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
+async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDocReserved, previousManifest?: DocsManifest | null, heldPaths: string[] = []): Promise<{ planned: PlannedDoc[]; warnings: string[] }> {
     const planned: PlannedDoc[] = [];
     const warnings: string[] = [];
     const usedNamesByDir = new Map<string, Set<string>>();
@@ -468,6 +466,13 @@ async function planDocs(docs: FetchedDoc[], config: Config, reserved?: SingleDoc
         for (const [dir, names] of reserved.usedNames) {
             usedNamesByDir.set(dir, new Set(names));
         }
+    }
+    for (const rel of heldPaths) {
+        const slash = rel.lastIndexOf('/');
+        const dir = slash === -1 ? '' : rel.slice(0, slash);
+        const used = usedNamesByDir.get(dir) ?? new Set<string>();
+        used.add(rel.slice(slash + 1));
+        usedNamesByDir.set(dir, used);
     }
 
     const pathById = reserved?.pathById ?? new Map<number, string>();
@@ -742,23 +747,19 @@ async function pullInto(
         }
 
         const data = readResult.data;
-        const fetched: FetchedDoc[] = [{
-            id: data.id,
-            title: data.title,
-            relative: '',
-            docType: data.doc_type?.slug ?? null,
-            docTypeKnown: true,
-            body: data.body ?? '',
-            current_revision_id: data.current_revision_id ?? null,
-            properties: data.properties ?? {},
-        }];
+        const row: DocRow = { id: data.id, title: data.title, relative: '', docType: data.doc_type?.slug ?? null, docTypeKnown: true };
+        // An answer without a string body (no `body` key, or `null`) is a failed fetch, as in a folder pull (cli#209).
+        const hasBody = typeof data.body === 'string';
+        const fetched: FetchedDoc[] = hasBody
+            ? [{ ...row, body: data.body, current_revision_id: data.current_revision_id ?? null, properties: data.properties ?? {} }]
+            : [];
 
         // The doc's real folder, not the argument (cli#153): a later `doc push` creates
         // untracked files under the manifest's folder_path.
         const docFolder = typeof data.folder_path === 'string' ? data.folder_path : (dir === '.' ? '' : dir);
         refuseManifestClobber(previousManifest, docFolder, folderPath, destination, options);
 
-        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback, new Set([data.id]), lock);
+        await report(destination, docFolder, fetched, options, config, [], previousManifest, usedSingleDocFallback, new Set([data.id]), lock, hasBody ? [] : [row]);
         return;
     } else {
         process.stderr.write(chalk.red(`error: ${shown(listResult.code)}: ${shown(listResult.message)}\n`));
@@ -766,9 +767,9 @@ async function pullInto(
         return;
     }
 
-    const { fetched, warnings: fetchWarnings } = await fetchBodies(config, rows);
+    const { fetched, failed } = await fetchBodies(config, rows);
     const typeWarnings = await backfillDocTypes(config, fetched);
-    await report(destination, folderPath, fetched, options, config, [...fetchWarnings, ...typeWarnings], previousManifest, usedSingleDocFallback, new Set(rows.map((row) => row.id)), lock);
+    await report(destination, folderPath, fetched, options, config, typeWarnings, previousManifest, usedSingleDocFallback, new Set(rows.map((row) => row.id)), lock, failed);
 }
 
 /**
@@ -1303,6 +1304,16 @@ export function manifestProblem(destination: string, manifest: DocsManifest, out
 }
 
 /**
+ * The one line naming every listed doc whose content could not be fetched (cli#209), printed once the manifest step is
+ * done; the caller exits 1. Nothing when every doc was fetched.
+ */
+function reportFetchFailed(fetchFailed: DocRow[]): void {
+    if (fetchFailed.length === 0) return;
+    const names = fetchFailed.map((row) => `${row.id} ("${shown(row.title)}")`).join(', ');
+    process.stderr.write(chalk.red(`error: could not fetch ${fetchFailed.length} doc(s) from the server: ${names} — their local files and tracking were left as they were; pull again.\n`));
+}
+
+/**
  * The line for the error or refusal the writes stopped at, then exit 1 (spec §1.5). `tracked` says the manifest
  * recorded the files written before the stop; when it did not, the manifest's own line already said so.
  */
@@ -1336,7 +1347,15 @@ async function report(
     usedSingleDocFallback: boolean,
     listedIds: Set<number>,
     lock: HeldLock,
+    fetchFailed: DocRow[],
 ): Promise<void> {
+    // A listed doc whose content could not be fetched (cli#209) is refused: its earlier entries are carried unchanged
+    // and its file is not touched, so no other doc is planned at those paths. A doc with no earlier entry is not tracked.
+    const fetchFailedIds = new Set(fetchFailed.map((row) => row.id));
+    const heldEntries = new Map(previousManifest !== null && previousManifest.folder_path === folderPath
+        ? Object.entries(previousManifest.docs).filter(([, entry]) => fetchFailedIds.has(entry.id))
+        : []);
+
     // Single-doc fallback merging into a manifest that tracks the same folder
     // must not steal a filename another tracked doc owns (cli#153 C1): the
     // pulled doc reuses its own tracked path, and the allocator avoids every
@@ -1361,7 +1380,7 @@ async function report(
         }
         reserved = { usedNames, pathById, titleById };
     }
-    const { planned, warnings } = await planDocs(fetched, config, reserved, previousManifest);
+    const { planned, warnings } = await planDocs(fetched, config, reserved, previousManifest, [...heldEntries.keys()]);
     const seen: SeenTargets = new Map();
 
     // Two docs whose names are one entry on some filesystem (case, Unicode normalisation) can never both keep
@@ -1670,6 +1689,9 @@ async function report(
     faults.afterWrites(destination);
     const pendingWarnings: string[] = [];
     const outcomes = decideOutcomes(destination, planned, new Set(placed.map((write) => write.relPath)), stop !== null, previousManifest, folderPath, renameMoves, listedIds, pendingWarnings);
+    for (const row of fetchFailed) {
+        outcomes.push({ id: row.id, kind: 'refused', placed: new Map(), kept: new Map([...heldEntries].filter(([, entry]) => entry.id === row.id)) });
+    }
     const manifest = buildManifest(folderPath, previousManifest, outcomes, usedSingleDocFallback || stop !== null, pendingWarnings);
     const updated = `${placed.length} of ${writes.length} files were updated`;
     let manifestRecorded = false;
@@ -1690,6 +1712,7 @@ async function report(
     if (manifestRecorded) {
         for (const line of pendingWarnings) process.stderr.write(chalk.yellow(`${line}\n`));
     }
+    if (stop !== null || !manifestRecorded) reportFetchFailed(fetchFailed);
     if (stop !== null) reportStop(stop, planned, placed, writes, manifestRecorded);
     if (!manifestRecorded) process.exit(1);
 
@@ -1781,6 +1804,8 @@ async function report(
             // Rename cleanup (cli#157) already handled this path: never a
             // "deleted remotely" orphan warning for it.
             if (handledOldPaths.has(relPath)) continue;
+            // A doc the server listed in this pull was not deleted remotely, whatever its outcome (cli#209).
+            if (listedIds.has(entry.id)) continue;
 
             const absPath = path.resolve(destination, ...relPath.split('/'));
 
@@ -1808,7 +1833,8 @@ async function report(
 
     if (options.json) {
         console.log(escapeJsonDisplayText(JSON.stringify({ manifest, files, removed, kept_modified: keptModified })));
-        process.exit(0);
+        reportFetchFailed(fetchFailed);
+        process.exit(fetchFailed.length > 0 ? 1 : 0);
     }
 
     console.log(chalk.green(`pulled ${files.length} doc${files.length === 1 ? '' : 's'} → ${shown(destination)}`));
@@ -1826,7 +1852,8 @@ async function report(
             process.stderr.write(chalk.yellow('  (it is now untracked; `doc push` will re-create it)\n'));
         }
     }
-    process.exit(0);
+    reportFetchFailed(fetchFailed);
+    process.exit(fetchFailed.length > 0 ? 1 : 0);
 }
 
 /**

@@ -2376,63 +2376,6 @@ describe('docPullWithConfig — content hashes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// bulk_read row-status guard
-// ---------------------------------------------------------------------------
-
-describe('docPullWithConfig — bulk_read row-status guard', () => {
-    it('a non-ok status row and a row missing from results are both warned + skipped; the ok row still pulls', async () => {
-        responseQueue = [
-            makeMcpSuccess({
-                folders: [],
-                docs: [
-                    { id: 1, title: 'good', properties: {} },
-                    { id: 2, title: 'broken', properties: {} },
-                    { id: 3, title: 'ghost', properties: {} },
-                ],
-            }),
-            (body: any) => {
-                const ids = body.params.arguments.items.map((i: any) => i.id);
-                expect(ids).toEqual([1, 2, 3]);
-                return makeMcpSuccess({
-                    results: [
-                        { index: 0, status: 'found', id: 1, title: 'good', folder_path: 'root', current_revision_id: 1, properties: {}, body: 'ok body' },
-                        { index: 1, status: 'error', id: 2, title: 'broken', folder_path: 'root', error: 'boom' },
-                        // id 3 ("ghost") is entirely absent from results.
-                    ],
-                });
-            },
-        ];
-
-        const { dir: tmpDest, cleanup } = makeTmpDir();
-        const dest = path.join(tmpDest, 'out');
-        const restoreExit = patchProcessExit();
-        const { restore: restoreStdout } = captureStdout();
-        const { lines: stderrLines, restore: restoreStderr } = captureStderr();
-
-        try {
-            const code = await runExpectingExit(() => docPullWithConfig('root', dest, {}, stubConfig()));
-            expect(code).toBe(0);
-
-            expect(fs.readFileSync(path.join(dest, 'good.md'), 'utf8')).toBe('ok body');
-            expect(fs.existsSync(path.join(dest, 'broken.md'))).toBe(false);
-            expect(fs.existsSync(path.join(dest, 'ghost.md'))).toBe(false);
-
-            const manifest = readManifest(dest);
-            expect(Object.keys(manifest.docs)).toEqual(['good.md']);
-
-            const err = stderrLines.join('');
-            expect(err).toContain('broken');
-            expect(err).toContain('ghost');
-        } finally {
-            restoreExit();
-            restoreStdout();
-            restoreStderr();
-            cleanup();
-        }
-    });
-});
-
-// ---------------------------------------------------------------------------
 // Folder-name path traversal (sanitizeSegment)
 // ---------------------------------------------------------------------------
 

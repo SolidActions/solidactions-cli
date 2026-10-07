@@ -185,12 +185,12 @@ describe('INV-C: a kept entry whose file was edited is not kept (final review 1,
     const pic = (version: number): ServedDoc => ({ ...doc('media', 7, 'pic', version), downloadFails: version > 1 });
     const note = (version: number) => doc('md', 8, 'note', version);
 
-    it('--overwrite x a tracked media file edited locally x a failed download: the entry is dropped with the usual warning, never kept with a hash the file no longer has', async () => {
+    it('--overwrite x a tracked media file edited locally x a failed download: the entry is dropped with the usual warning, never kept with a hash the file no longer has, and the listed doc is not called deleted remotely (cli#209)', async () => {
         await h.seed([pic(1), note(1)]);
         fs.writeFileSync(path.join(h.out, 'pic.png'), 'MY EDITED PIC');
         h.serve([pic(2), note(2)]);
 
-        const result = await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], '! doc 7 ("pic") failed to download and pic.png holds a local file; not tracking it — pull again later.\nwarn: failed to download media for doc 7 (pic): HTTP 500\n! kept pic.png — deleted remotely but modified locally\n  (it is now untracked; use `solidactions doc upload` to re-create it)\n'), ['--overwrite']);
+        const result = await h.pull('folder', 'docs', pulledOk(h.out, ['note.md'], '! doc 7 ("pic") failed to download and pic.png holds a local file; not tracking it — pull again later.\nwarn: failed to download media for doc 7 (pic): HTTP 500\n'), ['--overwrite']);
 
         expect(read(h.out, 'pic.png')).toBe('MY EDITED PIC');
         expect(manifestOf(h.out).docs['pic.png']).toBeUndefined();
@@ -338,14 +338,15 @@ describe('INV-C stopped pulls report the tracking decisions they recorded (final
         expectManifestHonest(result);
     });
 
-    it('a failed download over a file the manifest tracks for a doc still listed x a failed write: still tracking that doc is reported before the error', async () => {
+    it('a failed download where a doc still listed but not fetched is tracked x a failed write: that doc keeps its file and entry, the failed download takes another name, and the could-not-fetch line comes before the error (cli#209)', async () => {
         await h.seed([doc('media', 9, 'P', 1), note(1)]);
         const otherEntry = manifestOf(h.out).docs['P.png'];
         h.serve([{ ...doc('media', 7, 'P', 2), downloadFails: true }, { ...doc('media', 9, 'old', 2), bulkStatus: 'not_found' }, note(2)]);
 
-        const result = await h.pull('folder', 'docs', failed(`! doc 7 ("P") failed to download and P.png holds doc 9's file ("P"); still tracking it as doc 9 — pull again later\n${stopLine}`), ['-y'], 'fail-rename:1');
+        const result = await h.pull('folder', 'docs', failed(`error: could not fetch 1 doc(s) from the server: 9 ("old") — their local files and tracking were left as they were; pull again.\n${stopLine}`), ['-y'], 'fail-rename:1');
 
         expect(manifestOf(h.out).docs['P.png']).toEqual(otherEntry);
+        expect(manifestOf(h.out).docs['P-2.png']).toMatchObject({ id: 7, body_sha256: null });
         expect(read(h.out, 'P.png')).toBe('V1-P');
         expectManifestHonest(result);
     });

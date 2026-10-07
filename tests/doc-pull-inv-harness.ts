@@ -40,6 +40,8 @@ export interface ServedDoc {
     downloadFails?: boolean;
     /** The `bulk_read` status for this doc (default `found`): a doc that is listed but not fetched. */
     bulkStatus?: string;
+    /** The doc's `bulk_read` row is left out of the results (`omitted`) or carries no status key (`no-status`). */
+    bulkRow?: 'omitted' | 'no-status';
     /** The MIME the media endpoints report (default `image/png`); any other one has no extension, so the file is the bare title. */
     mime?: string;
 }
@@ -246,16 +248,20 @@ export function useDocPullHarness() {
         }
         if (args.action === 'read_doc' && args.id === undefined) {
             const d = served.find((candidate) => candidate.title === args.path?.title);
-            if (!d) return mcpResult({ code: 'doc_not_found', message: 'no such doc' }, true);
+            // A doc the bulk read would not return is not read here either: left out is not found, any other failure an error.
+            if (!d || d.bulkRow === 'omitted') return mcpResult({ code: 'doc_not_found', message: 'no such doc' }, true);
+            if (d.bulkRow !== undefined || (d.bulkStatus !== undefined && d.bulkStatus !== 'found')) return mcpResult({ code: 'read_failed', message: 'read failed' }, true);
             return mcpResult({ id: d.id, title: d.title, folder_path: 'docs', body: bodyOf(d), current_revision_id: d.revision, properties: mediaProps(d) });
         }
         if (args.action === 'bulk_read') {
             const ids: number[] = (args.items ?? []).map((item: { id: number }) => item.id);
             return mcpResult({
-                results: ids.map((id, index) => {
+                results: ids.flatMap((id, index) => {
                     const d = served.find((candidate) => candidate.id === id)!;
-                    if (d.bulkStatus !== undefined && d.bulkStatus !== 'found') return { index, status: d.bulkStatus, id };
-                    return { index, status: 'found', id, title: d.title, current_revision_id: d.revision, properties: mediaProps(d), body: bodyOf(d) };
+                    if (d.bulkRow === 'omitted') return [];
+                    if (d.bulkRow === 'no-status') return [{ index, id }];
+                    if (d.bulkStatus !== undefined && d.bulkStatus !== 'found') return [{ index, status: d.bulkStatus, id }];
+                    return [{ index, status: 'found', id, title: d.title, current_revision_id: d.revision, properties: mediaProps(d), body: bodyOf(d) }];
                 }),
             });
         }

@@ -36,6 +36,7 @@ const ALLOWED: Record<string, string> = {
     updated: 'built from .length counts and a string literal where it is assigned (the manifest-not-changed lines)',
     line: 'a pendingWarnings entry, built from shown() parts where it is pushed',
     lost: 'built from shown() parts',
+    names: 'built from .id numbers and shown() titles where it is assigned (the could-not-fetch line)',
 };
 
 interface Interpolation {

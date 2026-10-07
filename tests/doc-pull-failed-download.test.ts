@@ -183,7 +183,7 @@ describe('a failed media download keeps the tracking it had', { timeout: 60_000 
         expect(fs.readFileSync(path.join(out, 'pic.png'), 'utf8')).toBe('P1');
     });
 
-    it("keeps the other doc's tracking when a failed download's path holds that doc's file and the doc is still on the server (cli#190, B kept)", async () => {
+    it("keeps the other doc's file and tracking when that doc is still listed but could not be fetched: the failed download is given another name and the pull exits 1 naming that doc (cli#190 B kept, with cli#209)", async () => {
         const tracked = seedTracked(out, 'P.png', { id: 9, title: 'old', revision: 3 }, Buffer.from('B-BYTES'));
         served = [
             { id: 7, title: 'P', revision: 70, media: Buffer.from('A-BYTES'), downloadFails: true },
@@ -192,12 +192,13 @@ describe('a failed media download keeps the tracking it had', { timeout: 60_000 
 
         const result = await runCli(root, ['doc', 'pull', 'docs', out, '-y']);
 
-        expect(result.code).toBe(0);
+        expect(result.code).toBe(1);
         expect(result.stdout).toBe(`pulled 0 docs → ${out}\n`);
-        expect(result.stderr).toContain('warn: failed to download media for doc 7 (P): HTTP 500');
-        expect(result.stderr).toContain('! doc 7 ("P") failed to download and P.png holds doc 9\'s file ("old"); still tracking it as doc 9 — pull again later');
+        expect(result.stderr).toBe('warn: failed to download media for doc 7 (P): HTTP 500\nerror: could not fetch 1 doc(s) from the server: 9 ("old") — their local files and tracking were left as they were; pull again.\n');
         expect(manifestOf(out).docs['P.png']).toEqual(tracked);
+        expect(manifestOf(out).docs['P-2.png']).toEqual({ id: 7, title: 'P', current_revision_id: 70, media: true, body_sha256: null });
         expect(fs.readFileSync(path.join(out, 'P.png'), 'utf8')).toBe('B-BYTES');
+        expect(fs.existsSync(path.join(out, 'P-2.png'))).toBe(false);
     });
 
     it('says the other doc is no longer tracked there when it is gone from the server (cli#190, B gone)', async () => {
@@ -213,8 +214,8 @@ describe('a failed media download keeps the tracking it had', { timeout: 60_000 
         expect(Object.values(manifestOf(out).docs).filter((entry) => entry.id === 9)).toEqual([]);
     });
 
-    it("does not keep the other doc's tracking when its file was edited locally: the edit survives, the entry is dropped with the usual warning (cli#190, F-M2)", async () => {
-        seedTracked(out, 'P.png', { id: 9, title: 'old', revision: 3 }, Buffer.from('B-BYTES'));
+    it("keeps the edited file and the unchanged entry of a doc still listed but not fetched: the failed download is given another name, the edit survives for the next pull to protect (cli#190 F-M2, with cli#209)", async () => {
+        const tracked = seedTracked(out, 'P.png', { id: 9, title: 'old', revision: 3 }, Buffer.from('B-BYTES'));
         fs.writeFileSync(path.join(out, 'P.png'), 'MY EDITED BYTES');
         served = [
             { id: 7, title: 'P', revision: 70, media: Buffer.from('A-BYTES'), downloadFails: true },
@@ -223,11 +224,11 @@ describe('a failed media download keeps the tracking it had', { timeout: 60_000 
 
         const result = await runCli(root, ['doc', 'pull', 'docs', out, '--overwrite']);
 
-        expect(result.code).toBe(0);
+        expect(result.code).toBe(1);
         expect(result.stdout).toBe(`pulled 0 docs → ${out}\n`);
-        expect(result.stderr).toContain('! doc 7 ("P") failed to download and P.png holds a local file; not tracking it — pull again later. Doc 9 ("old") was tracked at P.png before and is no longer tracked there.');
-        expect(result.stderr).not.toContain("still tracking it as doc 9");
-        expect(manifestOf(out).docs['P.png']).toBeUndefined();
+        expect(result.stderr).toBe('warn: failed to download media for doc 7 (P): HTTP 500\nerror: could not fetch 1 doc(s) from the server: 9 ("old") — their local files and tracking were left as they were; pull again.\n');
+        expect(manifestOf(out).docs['P.png']).toEqual(tracked);
+        expect(manifestOf(out).docs['P-2.png']).toEqual({ id: 7, title: 'P', current_revision_id: 70, media: true, body_sha256: null });
         expect(fs.readFileSync(path.join(out, 'P.png'), 'utf8')).toBe('MY EDITED BYTES');
     });
 
