@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { err, out } from '../utils/output';
 import {
     CONNECT_LINK_MAX_BINDINGS,
     ConnectLink,
@@ -20,7 +21,7 @@ export interface ConnectionConnectOptions {
 }
 
 function fail(line: string): never {
-    console.error(chalk.red(plainText(line)));
+    err(line, chalk.red);
     process.exit(1);
 }
 
@@ -89,7 +90,7 @@ export async function connectionConnect(platform: string | undefined, options: C
     const text = typeof link.text === 'string' && link.text.trim() !== ''
         ? link.text
         : `Connect link: ${link.url}\nRequest id: ${link.id}${expiry}.`;
-    console.log(plainText(text));
-    console.log('When it is done, run:');
-    console.log(plainText(`  ${waitCommandLine(plainText(link.id))}`));
+    out(text);
+    out('When it is done, run:');
+    out(`  ${waitCommandLine(plainText(link.id))}`);
 }

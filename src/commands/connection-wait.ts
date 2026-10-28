@@ -1,7 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { ConnectLink, connectLinkFailureLine, formatExpiry, plainText, shellArg, waitCommandLine } from '../utils/connect-link';
+import { ConnectLink, connectLinkFailureLine, formatExpiry, shellArg, waitCommandLine } from '../utils/connect-link';
+import { err, out } from '../utils/output';
 
 export const WAIT_POLL_INTERVAL_MS = 5_000;
 export const WAIT_DEFAULT_TIMEOUT = '15m';
@@ -102,7 +103,7 @@ function connectedPayloadProblem(link: ConnectLink): string | null {
 }
 
 function fail(line: string, code = 1): never {
-    console.error(chalk.red(plainText(line)));
+    err(line, chalk.red);
     process.exit(code);
 }
 
@@ -118,13 +119,13 @@ function retryCommand(link: ConnectLink): string {
 function printConnected(link: ConnectLink): void {
     const name = link.connection?.name ?? link.name;
     const by = link.connected_by?.name ? `, by ${link.connected_by.name}` : '';
-    console.log(plainText(`Connected: ${name} (${link.platform_name})${by}.`));
+    out(`Connected: ${name} (${link.platform_name})${by}.`);
     if (!link.bindings || link.bindings.length === 0) {
-        console.log('Bindings: none.');
+        out('Bindings: none.');
         return;
     }
     for (const binding of link.bindings) {
-        console.log(plainText(`  project ${binding.project} uses it as ${binding.var}`));
+        out(`  project ${binding.project} uses it as ${binding.var}`);
     }
 }
 
@@ -141,7 +142,7 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
 
     // Ctrl-C: the link stays open on the server; say how to pick the wait up again.
     process.once('SIGINT', () => {
-        console.error(chalk.gray(plainText(`Still waiting: resume with ${waitCommandLine(requestId)}`)));
+        err(`Still waiting: resume with ${waitCommandLine(requestId)}`, chalk.gray);
         process.exit(WAIT_EXIT_INTERRUPTED);
     });
 
@@ -220,7 +221,7 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
                 case 'requested':
                 case 'opened':
                     if (!announced) {
-                        console.log(plainText(`Waiting for someone to connect ${last.platform_name} as ${last.name} (request ${last.id}, link expires ${formatExpiry(last.expires_at)}).`));
+                        out(`Waiting for someone to connect ${last.platform_name} as ${last.name} (request ${last.id}, link expires ${formatExpiry(last.expires_at)}).`);
                         announced = true;
                     }
                     break;

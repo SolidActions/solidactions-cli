@@ -2,6 +2,7 @@ import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { plainText } from '../utils/connect-link';
+import { err, out } from '../utils/output';
 import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
 
 interface OAuthConnection {
@@ -42,11 +43,11 @@ export async function connectionList(): Promise<void> {
         const connections: OAuthConnection[] = response.data.data || [];
 
         if (connections.length === 0) {
-            console.log(chalk.gray('No connections found.'));
+            out('No connections found.', chalk.gray);
             return;
         }
 
-        console.log(chalk.blue('Connections:\n'));
+        out('Connections:\n', chalk.blue);
 
         const rows = connections.map((connection) => [
             plainText(connection.name || '?'),
@@ -59,21 +60,21 @@ export async function connectionList(): Promise<void> {
             minWidths: [24, 14, 20],
         });
 
-        console.log(chalk.gray(plainText(lines[0])));
-        console.log(chalk.gray(plainText(lines[1])));
+        out(lines[0], chalk.gray);
+        out(lines[1], chalk.gray);
         for (const line of lines.slice(2)) {
-            console.log(plainText(line));
+            out(line);
         }
 
-        console.log('');
-        console.log(chalk.gray(plainText(`${connections.length} connection(s)`)));
+        out('');
+        out(`${connections.length} connection(s)`, chalk.gray);
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red(authFailedLine(config.host)));
+            err(authFailedLine(config.host), chalk.red);
         } else if (error.response) {
-            console.error(chalk.red(plainText(formatApiFailure(error.response.status, error.response.data))));
+            err(formatApiFailure(error.response.status, error.response.data), chalk.red);
         } else {
-            console.error(chalk.red(plainText(`Connection failed: ${error.message}`)));
+            err(`Connection failed: ${error.message}`, chalk.red);
         }
         process.exit(1);
     }
