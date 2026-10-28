@@ -26,6 +26,12 @@ const CLI_OAUTH_CLIENT_ID = '9f1b6e2a-9c1e-4b6e-8f0a-6c9f2b1e7d4c';
 // the code is created (#1252).
 const CLI_SCOPES_WITH_REVEAL = 'env env:reveal deploy runs docs databases';
 
+// `connections:request` (cli#219, connect links) is granted with the token
+// like the other CLI scopes. It comes first; a server that has not
+// registered it rejects the whole request with `invalid_scope`, and the
+// next list is tried.
+const CLI_SCOPES_WITH_CONNECT_LINKS = 'env env:reveal deploy runs docs databases connections:request';
+
 // Pre-#1252 scope list, kept as the fallback for servers that haven't
 // registered `env:reveal` yet (older production, a lagging staging, a
 // self-hosted install). Passport rejects the entire device-code request with
@@ -33,6 +39,9 @@ const CLI_SCOPES_WITH_REVEAL = 'env env:reveal deploy runs docs databases';
 // `env:reveal` unconditionally would hard-break device login everywhere
 // until every server picks up the companion change.
 const CLI_SCOPES_LEGACY = 'env deploy runs docs databases';
+
+// Tried in order; each retry only on 400 `invalid_scope`.
+const CLI_SCOPE_LISTS = [CLI_SCOPES_WITH_CONNECT_LINKS, CLI_SCOPES_WITH_REVEAL, CLI_SCOPES_LEGACY];
 
 interface DeviceCodeResponse {
     device_code: string;
@@ -49,28 +58,29 @@ export interface TokenResponse {
 }
 
 /**
- * Request a device code with the full (env:reveal-including) scope list. If
- * the server doesn't yet recognize `env:reveal` it rejects the whole request
- * with 400 `invalid_scope` — retry once with the legacy scope list so login
- * still succeeds. Any other rejection (e.g. a bad client_id) still fails
- * loudly; only this specific, detectable condition is swallowed.
+ * Request a device code with the full scope list (`connections:request` and
+ * `env:reveal` included). If the server doesn't yet recognize a scope it
+ * rejects the whole request with 400 `invalid_scope` — retry with the next,
+ * shorter list (without `connections:request`, then the legacy list without
+ * `env:reveal`) so login still succeeds: at most 3 requests. Any other
+ * rejection (e.g. a bad client_id) still fails loudly; only this specific,
+ * detectable condition is swallowed.
  */
 export async function requestDeviceCode(host: string): Promise<DeviceCodeResponse> {
-    try {
-        const response = await axios.post(`${host}/oauth/device/code`, {
-            client_id: CLI_OAUTH_CLIENT_ID,
-            scope: CLI_SCOPES_WITH_REVEAL,
-        });
-        return response.data;
-    } catch (e: any) {
-        if (e?.response?.status === 400 && e.response.data?.error === 'invalid_scope') {
+    for (let i = 0; ; i++) {
+        try {
             const response = await axios.post(`${host}/oauth/device/code`, {
                 client_id: CLI_OAUTH_CLIENT_ID,
-                scope: CLI_SCOPES_LEGACY,
+                scope: CLI_SCOPE_LISTS[i],
             });
             return response.data;
+        } catch (e: any) {
+            const invalidScope = e?.response?.status === 400 && e.response.data?.error === 'invalid_scope';
+            if (invalidScope && i < CLI_SCOPE_LISTS.length - 1) {
+                continue;
+            }
+            throw e;
         }
-        throw e;
     }
 }
 

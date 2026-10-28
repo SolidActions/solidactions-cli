@@ -34,8 +34,9 @@ describe('database device-token compatibility', () => {
         // the server strips it from the token unless the user opts in. It has
         // to be requested here regardless, because a device code's scope set is
         // frozen at creation and consent can never add to it.
+        // `connections:request` joined in cli#219 (connect links).
         expect(String(requestBody?.scope).split(/\s+/).sort()).toEqual(
-            ['databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
+            ['connections:request', 'databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
         );
     });
 
