@@ -145,6 +145,7 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'oauth-action view',
     'oauth-action platforms',
     'connection list',
+    'connection wait',
     'ai init',
     'ai examples',
     'skill pull',
