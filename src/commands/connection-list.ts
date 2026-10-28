@@ -9,6 +9,7 @@ interface OAuthConnection {
     status: string;
     error_message: string | null;
     last_used_at: string | null;
+    allow_source_use?: boolean;
 }
 
 const ERROR_SNIPPET_WIDTH = 40;
@@ -22,6 +23,12 @@ function connectionStatus(connection: OAuthConnection): string {
     }
 
     return `${status} — ${truncateCell(sanitizeCell(error), ERROR_SNIPPET_WIDTH)}`;
+}
+
+function sourceUse(connection: OAuthConnection): string {
+    if (connection.allow_source_use === true) return 'yes';
+    if (connection.allow_source_use === false) return 'no';
+    return '-';
 }
 
 export async function connectionList(): Promise<void> {
@@ -45,8 +52,9 @@ export async function connectionList(): Promise<void> {
             connection.provider || '?',
             connectionStatus(connection),
             connection.last_used_at || '-',
+            sourceUse(connection),
         ]);
-        const lines = renderTable(['NAME', 'PROVIDER', 'STATUS', 'LAST USED'], rows, {
+        const lines = renderTable(['NAME', 'PROVIDER', 'STATUS', 'LAST USED', 'DATA SOURCE'], rows, {
             minWidths: [24, 14, 20],
         });
 

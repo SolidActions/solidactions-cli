@@ -85,6 +85,7 @@ describe('connectionList', () => {
                     status: 'connected',
                     error_message: null,
                     last_used_at: '2026-07-30T15:04:05.000000Z',
+                    allow_source_use: true,
                     created_at: '2026-07-29T10:00:00.000000Z',
                     connection_key: 'must-not-print',
                 },
@@ -96,6 +97,7 @@ describe('connectionList', () => {
                     status: 'error',
                     error_message: 'Refresh token expired\nReconnect this account before trying again.',
                     last_used_at: null,
+                    allow_source_use: false,
                     created_at: '2026-07-29T11:00:00.000000Z',
                     cached_access_token: 'must-not-print-either',
                 },
@@ -127,6 +129,35 @@ describe('connectionList', () => {
         expect(rendered).toContain('…');
         expect(rendered).not.toContain('trying again.');
         expect(rendered).not.toContain('must-not-print');
+
+        const lines = rendered.split('\n');
+        expect(lines.find((line) => line.includes('NAME'))).toContain('DATA SOURCE');
+        expect(lines.find((line) => line.includes('Primary Gmail'))).toMatch(/\byes\b/);
+        expect(lines.find((line) => line.includes('Team Slack'))).toMatch(/\bno\b/);
+    });
+
+    it('shows - under DATA SOURCE when an older server sends no allow_source_use field', async () => {
+        responseBody = {
+            data: [
+                {
+                    id: 'connection-3',
+                    name: 'Old Server Row',
+                    provider: 'gmail',
+                    broker: 'pica',
+                    status: 'connected',
+                    error_message: null,
+                    last_used_at: '2026-07-30T15:04:05.000000Z',
+                },
+            ],
+        };
+
+        const result = await runCli(['connection', 'list'], home, cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        const lines = result.stdout.split('\n');
+        expect(lines.find((line) => line.includes('NAME'))).toContain('DATA SOURCE');
+        expect(lines.find((line) => line.includes('Old Server Row'))).toMatch(/2026-07-30T15:04:05\.000000Z\s+-\s*$/);
     });
 
     it('reports an empty workspace without rendering a table', async () => {
