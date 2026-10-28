@@ -16,6 +16,8 @@
 
 **Issues:** cli#219 (SolidActions/solidactions-cli). Approved by Peter 2026-10-28 (ask task-approvewave-eb2a), recorded on the issue (https://github.com/SolidActions/solidactions-cli/issues/219#issuecomment-6468026862): "Approved by Peter 2026-10-28 (ask task-approvewave-eb2a), size normal: wave 2026-10-28-cli-connect-links in the CLI lane."
 
+**Plan review:** Fable task-planreviewwave-51a8, REQUEST CHANGES at b9fbd64 (no Critical). PM adjudication on plan card task-plan20261028cli-d015: (1) Ctrl-C in `wait` exits 130 with a resume line, plus a SIGINT row (Task 2 row 16, M3); (2) rows for three missing exit paths of `connect` (Task 1 rows 12-14); (3) the four minors: `status unknown (last check failed)` (Task 2 row 17), `formatExpiry` for every printed expiry (Task 1), the `requested_by` example (Wire contract), and the switch note (Task 2). A delta check by Fable follows.
+
 **Card rule (for the manager):** every developer card carries this plan's **Global Constraints** and **Wire contract** sections verbatim, plus the task's text.
 
 ## The issue, verbatim (cli#219 body, the binding scope)
@@ -39,7 +41,7 @@ From app#2181 §3.2 (the design cli#219 cites):
 
 - **M1 — binary name.** Printed commands say `solidactions …`, not `sa …`: the package ships only the `solidactions` bin (`package.json` `"bin": {"solidactions": "./dist/index.js"}`), and every existing hint in `src/` names `solidactions`. The issue's `sa` is shorthand.
 - **M2 — reconnect form.** `solidactions connection connect --reconnect NAME` exactly as cli#219 says (app#2181's older `sa connection reconnect NAME` is not added). The platform argument is optional with `--reconnect`: when omitted, the CLI reads the connection's `provider` from `GET /api/v1/connections` (the REST mint requires `platform`).
-- **M3 — wait exit codes.** 0 connected; 1 expired, cancelled, or an error; **2** the `--timeout` passed while the link is still open (the person may still click it; re-running `wait` keeps waiting). Default timeout 15m, poll every 5 s (app#2181 §3.2). `--timeout` accepts `30s`, `15m`, `1h` or bare seconds, from 1s to 24h (the link lives 24 h).
+- **M3 — wait exit codes.** 0 connected; 1 expired, cancelled, or an error; **2** the `--timeout` passed while the link is still open (the person may still click it; re-running `wait` keeps waiting). Default timeout 15m, poll every 5 s (app#2181 §3.2). `--timeout` accepts `30s`, `15m`, `1h` or bare seconds, from 1s to 24h (the link lives 24 h). **130** on Ctrl-C (SIGINT), with one line `Still waiting: resume with solidactions connection wait <id>`; the link stays open on the server (PM adjudication of the plan review, card task-plan20261028cli-d015; recorded on cli#219: https://github.com/SolidActions/solidactions-cli/issues/219#issuecomment-6468336014).
 - **M4 — open requests in `connection list`.** app#2181 §3.2 also says "`sa connection list` also shows open requests". Not built: cli#219's scope does not list it, and the server has no REST route that lists requests (only `POST` and `GET {id}`). Filed only if the PM wants it.
 - **M5 — DATA SOURCE column.** `allow_source_use` ships as a `DATA SOURCE` column with `yes` / `no`, and `-` when the server sends no such field (an older server). The app labels the switch "Allow use as a data source".
 - **M6 — device scopes.** Three scope lists tried in order, each retry only on a 400 `invalid_scope` (a server without `connections:request` registered, then one without `env:reveal`): at most 3 requests.
@@ -95,7 +97,7 @@ Status: `GET {host}/api/v1/connections/requests/{id}` (id URL-encoded) → `200`
   "expires_at": "2026-10-29T19:00:00Z",
   "url": "https://app.solidactions.com/connect/<token>",
   "text": "Connect Gmail for this workspace:\n  https://app.solidactions.com/connect/<token>\nThe link works for 24 hours and once. Request id: 01JB... (expires 2026-10-29 19:00 UTC).",
-  "requested_by": {"type": "api_token", "label": "API key \"cli\""},
+  "requested_by": {"type": "user", "label": "CLI (Pat Doe)"},
   "requested_at": "2026-10-28T19:00:00Z",
   "connection": null,
   "connected_by": null,
@@ -105,12 +107,14 @@ Status: `GET {host}/api/v1/connections/requests/{id}` (id URL-encoded) → `200`
 
 Once connected, a status read fills `connection: {id: number, name, status}`, `connected_by: {name}`, `connected_at`.
 
+`requested_by` is `{type: 'user', label: 'CLI (<name>)'}` for a device-login token and `{type: 'api_token', label: 'API key "<key name>"'}` for an API key (app `ConnectionRequestApiController.php` lines 77-88). The CLI never reads it; don't assert on it.
+
 `GET {host}/api/v1/connections` (existing, used by `connection list` and by `--reconnect` without a platform): `{data: [{id, name, provider, broker, status, error_message, last_used_at, allow_source_use: boolean, ...}]}`.
 
 ## Review Focus
 
 1. **A blip while waiting.** A 5xx, a 429 or a dropped connection during `wait` must not end the wait: it retries on the next tick, and gives up with exit 1 only after 5 failed checks in a row. Task 2 pins it (503, 503, connected → exit 0; always 503 → exit 1 after exactly 5 requests).
-2. **Exit 0 only on `connected`.** A timeout while the link is still open exits 2 and says how to keep waiting; expired and cancelled exit 1; an unknown status string exits 1 (never treated as success). Task 2 pins each.
+2. **Exit 0 only on `connected`.** A timeout while the link is still open exits 2 and says how to keep waiting; Ctrl-C exits 130 with the resume line and sends no further request; expired and cancelled exit 1; an unknown status string exits 1 (never treated as success). Task 2 pins each.
 3. **An older token.** A token minted before `connections:request` gets one plain re-login instruction from both `connect` and `wait`, never the 401 "login --global" line. Tasks 3 and 2 pin it.
 4. **Mistyped input never reaches the server.** `--bind newsletter`, `--bind :VAR`, `--bind proj:`, an 11th `--bind`, `--name` together with `--reconnect`, no `--name`, and a missing platform are refused locally with zero requests sent; `--reconnect` of a name not in the workspace sends no POST. Task 1 pins it.
 5. **Server text is printed, not executed.** A server string carrying terminal escape sequences (`\u001b]52;…`, `\u001b[2J`) is printed with the control characters removed. Tasks 1 and 2 pin it.
@@ -172,6 +176,8 @@ export function plainText(value: string): string;
 export function connectLinkPath(id?: string): string;
 /** 'solidactions connection wait <id>' */
 export function waitCommandLine(id: string): string;
+/** '2026-10-29T19:00:00Z' → '2026-10-29 19:00 UTC' (the server's own `text` format); a value Date cannot parse → plainText(value). */
+export function formatExpiry(iso: string): string;
 /** The one line for a failed request: 401 → authFailedLine(host); a response → formatApiFailure(status, data); none → 'Connection failed: <message>'. */
 export function connectLinkFailureLine(error: any, host: string): string;
 ```
@@ -180,7 +186,7 @@ export function connectLinkFailureLine(error: any, host: string): string;
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { connectLinkFailureLine, connectLinkPath, parseBinding, plainText, waitCommandLine } from '../src/utils/connect-link';
+import { connectLinkFailureLine, connectLinkPath, formatExpiry, parseBinding, plainText, waitCommandLine } from '../src/utils/connect-link';
 
 describe('parseBinding', () => {
     it('splits PROJECT:VAR at the first colon and trims', () => {
@@ -206,6 +212,14 @@ describe('connectLinkPath and waitCommandLine', () => {
     });
 });
 
+describe('formatExpiry', () => {
+    it('renders an ISO time the way the server text does', () => {
+        expect(formatExpiry('2026-10-29T19:00:00Z')).toBe('2026-10-29 19:00 UTC');
+        expect(formatExpiry('2026-10-29T19:05:59.000000Z')).toBe('2026-10-29 19:05 UTC');
+        expect(formatExpiry('not a date')).toBe('not a date');
+    });
+});
+
 describe('connectLinkFailureLine', () => {
     it('renders 401, other statuses and network errors as one line', () => {
         expect(connectLinkFailureLine({ response: { status: 401, data: {} } }, 'http://127.0.0.1:9')).toContain('Authentication failed against');
@@ -227,11 +241,15 @@ describe('connectLinkFailureLine', () => {
   8. 429 `{code: 'too_many_open_requests', message: 'This workspace already has 10 open connect links.'}` → exit 1, stderr `Failed: 429 This workspace already has 10 open connect links.`
   9. 401 → exit 1, stderr contains `Authentication failed against 127.0.0.1:`.
   10. A 201 whose `text` contains `\u001b]52;c;ZXZpbA==\u0007` and whose `id` contains `\u001b[2J` → stdout contains no `\u001b` and no `\u0007` character.
-  11. A 201 with no `text` (only `url`, `id`, `expires_at`) → stdout contains `Connect link: <url>` and `Request id: 01JBTEST (expires <expires_at>)` and the wait line.
+  11. A 201 with no `text` (only `url`, `id`, `expires_at: '2026-10-29T19:00:00Z'`) → stdout contains `Connect link: <url>` and `Request id: 01JBTEST (expires 2026-10-29 19:00 UTC)` and the wait line.
+  12. (plan review Important 2a) A 201 with body `{}` → exit 1; stderr exactly `Failed: the server answered without a connect link.\n`; stdout empty.
+  13. (plan review Important 2b) 403 `{code: 'forbidden', message: 'You cannot build automations in this workspace.'}` → exit 1; stderr exactly `Failed: 403 You cannot build automations in this workspace.\n` (no `login --device` hint: this is not `token_missing_ability`); stdout empty.
+  14. (plan review Important 2c) No server: the config's host is `http://127.0.0.1:<port>` of a server that was started, its port read, then closed before the spawn → exit 1; stderr is one line starting `Connection failed:`; stderr contains no `    at ` (no stack trace) and no `AxiosError`; stdout empty.
 
 - [ ] **Step 3: Write `src/utils/connect-link.ts`** with exactly the Produces block above. Implementation notes:
   - `plainText`: `value.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '')`.
   - `parseBinding`: refusal message `--bind must be PROJECT:VAR (got "<plainText(value)>")`.
+  - `formatExpiry`: `const d = new Date(iso); if (Number.isNaN(d.getTime())) return plainText(iso); return `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} UTC`;`
   - `connectLinkFailureLine`: `error?.response?.status === 401` → `authFailedLine(host)`; `error?.response` → `formatApiFailure(error.response.status, error.response.data)`; else `` `Connection failed: ${error?.message ?? String(error)}` ``.
 
 - [ ] **Step 4: Write `src/commands/connection-connect.ts`:**
@@ -246,6 +264,7 @@ import {
     ConnectLinkBinding,
     connectLinkFailureLine,
     connectLinkPath,
+    formatExpiry,
     parseBinding,
     plainText,
     waitCommandLine,
@@ -320,7 +339,7 @@ export async function connectionConnect(platform: string | undefined, options: C
 
     const text = typeof link.text === 'string' && link.text.trim() !== ''
         ? link.text
-        : `Connect link: ${link.url}\nRequest id: ${link.id} (expires ${link.expires_at}).`;
+        : `Connect link: ${link.url}\nRequest id: ${link.id} (expires ${formatExpiry(link.expires_at)}).`;
     console.log(plainText(text));
     console.log('When it is done, run:');
     console.log(`  ${waitCommandLine(plainText(link.id))}`);
@@ -347,7 +366,7 @@ connection
 
 - [ ] **Step 7: Static check.** `npm run build` must succeed (it also regenerates `dist/command-manifest.json`, which `tests/mutating-commands.test.ts` reads). Do not run vitest.
 
-- [ ] **Step 8: Report (do not commit).** Test paths, source paths, expected-RED table (every row fails on the base because `connection connect` and `src/utils/connect-link.ts` do not exist), the build tail. The manager commits with `git add -- <paths>` then `git commit -m "feat(connection): connect mints a connect link (cli#219)" -- <paths>`.
+- [ ] **Step 8: Report (do not commit).** Test paths, source paths, expected-RED table (every row fails on the base because `connection connect` and `src/utils/connect-link.ts` do not exist; name each row 1-14 and each pure-function test), the build tail. The manager commits with `git add -- <paths>` then `git commit -m "feat(connection): connect mints a connect link (cli#219)" -- <paths>`.
 
 ---
 
@@ -365,7 +384,7 @@ connection
 Existing tests that must stay green: `tests/mutating-commands.test.ts`, `tests/command-manifest*.test.ts`, `tests/command-tree-export.test.ts`, `tests/host-display-guard.test.ts`, `tests/connection-connect.test.ts`.
 
 **Interfaces:**
-- Consumes (from Task 1, `src/utils/connect-link.ts`): `ConnectLink`, `connectLinkFailureLine`, `connectLinkPath`, `plainText`, `waitCommandLine` — exact signatures in Task 1's Produces block.
+- Consumes (from Task 1, `src/utils/connect-link.ts`): `ConnectLink`, `connectLinkFailureLine`, `connectLinkPath`, `formatExpiry`, `plainText`, `waitCommandLine` — exact signatures in Task 1's Produces block.
 - Produces (`src/commands/connection-wait.ts`):
 
 ```ts
@@ -373,6 +392,7 @@ export const WAIT_POLL_INTERVAL_MS = 5_000;
 export const WAIT_DEFAULT_TIMEOUT = '15m';
 export const WAIT_MAX_FAILED_CHECKS = 5;
 export const WAIT_EXIT_TIMEOUT = 2;
+export const WAIT_EXIT_INTERRUPTED = 130;
 /** '30s' | '15m' | '1h' | '90' (seconds) → milliseconds; 1s..24h; else throws Error with a one-line message. */
 export function parseWaitTimeout(value: string): number;
 export interface ConnectionWaitOptions { timeout?: string }
@@ -387,7 +407,7 @@ Poll interval in tests: when `SOLIDACTIONS_TEST_HOOKS === '1'` and `SOLIDACTIONS
   3. Connected with `bindings: []` → stdout contains `Bindings: none.`
   4. `expired` (mode `connect`, platform `gmail`, name `gmail-main`) → exit 1; stderr one line containing `expired` and `solidactions connection connect gmail --name gmail-main`. Mode `reconnect` → the line contains `solidactions connection connect gmail --reconnect gmail-main`.
   5. `cancelled` → exit 1; stderr one line containing `was cancelled`.
-  6. Always `requested`, `--timeout 1s` → exit **2**; stderr one line containing `Still waiting after 1s`, `requested` and `solidactions connection wait 01JBTEST`; at least 2 requests.
+  6. Always `requested` (`expires_at: '2026-10-29T19:00:00Z'`), `--timeout 1s` → exit **2**; stderr one line containing `Still waiting after 1s`, `is requested`, `link expires 2026-10-29 19:00 UTC` and `solidactions connection wait 01JBTEST`; stdout's waiting line also shows `2026-10-29 19:00 UTC`; at least 2 requests.
   7. 503, 503, then connected → exit 0, stdout `Connected: …`.
   8. Always 503 → exit 1 after **exactly 5** requests; stderr one line starting `Failed: 503` and containing `5 failed checks in a row`.
   9. 404 `{code: 'request_not_found', message: 'Connect link not found.'}` → exit 1 after exactly 1 request; stderr `Failed: 404 Connect link not found.`
@@ -395,6 +415,8 @@ Poll interval in tests: when `SOLIDACTIONS_TEST_HOOKS === '1'` and `SOLIDACTIONS
   11. Status `"weird"` → exit 1; stderr contains `unknown status`; never exit 0.
   12. `--timeout 15 m` (invalid) → exit 1, zero requests, stderr contains `--timeout`.
   13. Connected payload whose `connection.name` contains `\u001b[2J` → stdout has no `\u001b`.
+  16. (plan review Important 1) Ctrl-C: always `requested`, `--timeout 1h`. This row needs the child handle, so use a `spawnCli` variant of `runCli` that returns `{child, done}` (`done` resolves `{stdout, stderr, status, signal}` on `close`). Poll until the server has recorded at least 1 request (give up after 5 s), then `child.kill('SIGINT')`. Assert: `status === 130` and `signal === null`; stderr contains `Still waiting: resume with solidactions connection wait 01JBTEST`; stderr has no `Failed` and no `    at `; after `close`, wait 300 ms (6 intervals) and assert the request count is unchanged. Mark it `it.skipIf(process.platform === 'win32')('… (SIGINT to a child is not deliverable on Windows; CI unit tests run on Linux)', …)`.
+  17. (plan review Minor 1) The timeout line never prints `unknown` as if it were a status. Both cases use `SOLIDACTIONS_CONNECTION_WAIT_INTERVAL_MS=400` and `--timeout 1s`, so checks run at about 0, 0.4, 0.8 and 1.0 s (at most 4 failures, under the limit of 5). (a) Queue `requested`, then 503 forever → exit 2; stderr contains `is requested`. (b) 503 forever → exit 2; stderr contains `status unknown (last check failed)` and does not contain `is unknown`.
 
   In `tests/connect-link-old-token.test.ts` (spawned; the server answers 403 `{code: 'token_missing_ability', message: "This API key does not have the 'connections:request' ability.", required_ability: 'connections:request'}`):
   14. `connection connect gmail --name gmail-main` → exit 1; stderr contains `Failed: 403`, `does not have the 'connections:request' ability` and `solidactions login --device`; stderr does not contain `Authentication failed`.
@@ -406,12 +428,13 @@ Poll interval in tests: when `SOLIDACTIONS_TEST_HOOKS === '1'` and `SOLIDACTIONS
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { ConnectLink, connectLinkFailureLine, connectLinkPath, plainText, waitCommandLine } from '../utils/connect-link';
+import { ConnectLink, connectLinkFailureLine, connectLinkPath, formatExpiry, plainText, waitCommandLine } from '../utils/connect-link';
 
 export const WAIT_POLL_INTERVAL_MS = 5_000;
 export const WAIT_DEFAULT_TIMEOUT = '15m';
 export const WAIT_MAX_FAILED_CHECKS = 5;
 export const WAIT_EXIT_TIMEOUT = 2;
+export const WAIT_EXIT_INTERRUPTED = 130;
 
 const UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000 };
 const MAX_TIMEOUT_MS = 24 * 3_600_000;
@@ -482,6 +505,13 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
     }
 
     const config = await requireConfigWithWorkspace();
+
+    // Ctrl-C: the link stays open on the server; say how to pick the wait up again.
+    process.once('SIGINT', () => {
+        console.error(chalk.gray(plainText(`Still waiting: resume with ${waitCommandLine(requestId)}`)));
+        process.exit(WAIT_EXIT_INTERRUPTED);
+    });
+
     const interval = pollIntervalMs();
     const deadline = Date.now() + timeoutMs;
     let failedChecks = 0;
@@ -504,7 +534,7 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
                 case 'requested':
                 case 'opened':
                     if (!announced) {
-                        console.log(plainText(`Waiting for someone to connect ${last.platform_name} as ${last.name} (request ${last.id}, link expires ${last.expires_at}).`));
+                        console.log(plainText(`Waiting for someone to connect ${last.platform_name} as ${last.name} (request ${last.id}, link expires ${formatExpiry(last.expires_at)}).`));
                         announced = true;
                     }
                     break;
@@ -523,23 +553,23 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
 
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-            const status = last?.status ?? 'unknown';
-            const expires = last?.expires_at ? ` (link expires ${last.expires_at})` : '';
-            fail(`Still waiting after ${timeoutText}: connect link ${requestId} is ${status}${expires}. Run ${waitCommandLine(requestId)} again to keep waiting.`, WAIT_EXIT_TIMEOUT);
+            const state = last ? `is ${last.status}` : 'status unknown (last check failed)';
+            const expires = last?.expires_at ? ` (link expires ${formatExpiry(last.expires_at)})` : '';
+            fail(`Still waiting after ${timeoutText}: connect link ${requestId} ${state}${expires}. Run ${waitCommandLine(requestId)} again to keep waiting.`, WAIT_EXIT_TIMEOUT);
         }
         await sleep(Math.min(interval, remaining));
     }
 }
 ```
 
-  Note: `fail()` inside `try` calls `process.exit`, which does not throw, so the `catch` never sees it. A `switch` case that calls `fail()` needs no `break` (tsc may want `// falls through`-free code: if it complains, add `return;` after each `fail()`).
+  Note: `fail()` inside `try` calls `process.exit`, which does not throw, so the `catch` never sees it. A `switch` case that calls `fail()` needs no `break`: `fail()` returns `never`, and this repo's `tsconfig.json` does not enable `noFallthroughCasesInSwitch`, so keep the code as shown.
 
 - [ ] **Step 3: Register** in `src/index.ts`, in the connection block after `connect`, and add `import { connectionWait } from './commands/connection-wait';`:
 
 ```ts
 connection
     .command('wait <request-id>')
-    .description('Wait until a connect link is used: exit 0 connected, 1 expired, cancelled or failed, 2 still open at --timeout')
+    .description('Wait until a connect link is used: exit 0 connected, 1 expired, cancelled or failed, 2 still open at --timeout, 130 on Ctrl-C')
     .option('--timeout <duration>', 'How long to wait, e.g. 30s, 15m, 1h', '15m')
     .action((requestId, options) => {
         connectionWait(requestId, options);
@@ -550,7 +580,7 @@ connection
 
 - [ ] **Step 5: Static check.** `npm run build` succeeds. Do not run vitest.
 
-- [ ] **Step 6: Report (do not commit).** Test paths, source paths, expected-RED table (rows 2-15 fail on the base because `connection wait` does not exist; row 14 also fails on Task 1's head without Task 3; row 1 because `parseWaitTimeout` does not exist), the build tail. The manager commits with `git commit -m "feat(connection): wait for a connect link (cli#219)" -- <paths>`.
+- [ ] **Step 6: Report (do not commit).** Test paths, source paths, expected-RED table (rows 2-17 fail on the base because `connection wait` does not exist; row 14 also fails on Task 1's head without Task 3; row 1 because `parseWaitTimeout` does not exist), the build tail. The manager commits with `git commit -m "feat(connection): wait for a connect link (cli#219)" -- <paths>`.
 
 ---
 
