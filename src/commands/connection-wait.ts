@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { ConnectLink, connectLinkFailureLine, formatExpiry, plainText, waitCommandLine } from '../utils/connect-link';
+import { ConnectLink, connectLinkFailureLine, formatExpiry, plainText, shellArg, waitCommandLine } from '../utils/connect-link';
 
 export const WAIT_POLL_INTERVAL_MS = 5_000;
 export const WAIT_DEFAULT_TIMEOUT = '15m';
@@ -41,6 +41,66 @@ function isTransient(error: any): boolean {
     return status === undefined || status === 429 || status >= 500;
 }
 
+/** True for the abort our own deadline timer fires (axios rejects with a CanceledError). */
+function isDeadlineAbort(error: any): boolean {
+    return error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError';
+}
+
+/**
+ * True only for a usable status payload: a non-null object with a string
+ * `status`, plus the fields each status prints (`name`, `platform_name`,
+ * `expires_at` for requested/opened; `name`, `platform`, `mode` for expired,
+ * feeding the retry command; `name`, `platform_name` for connected, feeding
+ * the `Connected:` line). Anything else is answered with the one-line
+ * unusable-status failure, never a retry.
+ */
+function hasUsableStatus(body: unknown): body is ConnectLink {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return false;
+    }
+    const link = body as ConnectLink;
+    if (typeof link.status !== 'string') {
+        return false;
+    }
+    if (link.status === 'requested' || link.status === 'opened') {
+        return typeof link.name === 'string' && typeof link.platform_name === 'string' && typeof link.expires_at === 'string';
+    }
+    if (link.status === 'expired') {
+        return typeof link.name === 'string' && typeof link.platform === 'string' && typeof link.mode === 'string';
+    }
+    if (link.status === 'connected') {
+        return typeof link.name === 'string' && typeof link.platform_name === 'string';
+    }
+    return true;
+}
+
+/**
+ * The `connected`-payload fields `printConnected` consumes, checked before
+ * anything is printed: `bindings` (missing means none) must be an array of
+ * objects with string `project`/`var`; `connection`/`connected_by` must be
+ * null or objects. Returns the one failure line, or null when usable.
+ */
+function connectedPayloadProblem(link: ConnectLink): string | null {
+    const id = typeof link.id === 'string' ? link.id : 'unknown';
+    if (link.bindings !== undefined && link.bindings !== null) {
+        if (!Array.isArray(link.bindings)) {
+            return `Failed: connect link ${id} answered connected with unusable bindings.`;
+        }
+        for (const binding of link.bindings) {
+            if (typeof binding !== 'object' || binding === null || typeof binding.project !== 'string' || typeof binding.var !== 'string') {
+                return `Failed: connect link ${id} answered connected with unusable bindings.`;
+            }
+        }
+    }
+    for (const key of ['connection', 'connected_by'] as const) {
+        const value = link[key];
+        if (value !== undefined && value !== null && (typeof value !== 'object' || Array.isArray(value))) {
+            return `Failed: connect link ${id} answered connected with an unusable ${key}.`;
+        }
+    }
+    return null;
+}
+
 function fail(line: string, code = 1): never {
     console.error(chalk.red(plainText(line)));
     process.exit(code);
@@ -52,7 +112,7 @@ function sleep(ms: number): Promise<void> {
 
 function retryCommand(link: ConnectLink): string {
     const flag = link.mode === 'reconnect' ? '--reconnect' : '--name';
-    return `solidactions connection connect ${link.platform} ${flag} ${link.name}`;
+    return `solidactions connection connect ${shellArg(link.platform)} ${flag} ${shellArg(link.name)}`;
 }
 
 function printConnected(link: ConnectLink): void {
@@ -91,15 +151,68 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
     let last: ConnectLink | null = null;
     let announced = false;
 
+    function failTimeout(): never {
+        const state = last ? `is ${last.status}` : 'status unknown (last check failed)';
+        const expires = last?.expires_at ? ` (link expires ${formatExpiry(last.expires_at)})` : '';
+        fail(`Still waiting after ${timeoutText}: connect link ${requestId} ${state}${expires}. Run ${waitCommandLine(requestId)} again to keep waiting.`, WAIT_EXIT_TIMEOUT);
+    }
+
     while (true) {
+        // Admission: never send a request once the deadline has passed. The
+        // sleep below wakes at the deadline at the latest, so reaching here
+        // past it means the budget is spent without another GET.
+        if (Date.now() >= deadline) {
+            failTimeout();
+        }
+        const remaining = deadline - Date.now();
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), remaining);
+        let statusResponse: { data: unknown };
         try {
-            const response = await axios.get(`${config.host}/api/v1/connections/requests/${encodeURIComponent(requestId)}`, { headers: getApiHeaders(config) });
-            failedChecks = 0;
-            last = response.data as ConnectLink;
+            // Transport only: this catch counts failed CHECKS (network, 429,
+            // 5xx) and handles the abort/timeout path. Interpreting the 200
+            // below runs outside this catch, so a payload that cannot be used
+            // can never be counted as a transient failure.
+            statusResponse = await axios.get(`${config.host}/api/v1/connections/requests/${encodeURIComponent(requestId)}`, {
+                headers: getApiHeaders(config),
+                signal: controller.signal,
+            });
+        } catch (error: any) {
+            clearTimeout(abortTimer);
+            // Our own deadline abort is the timeout, not a transient failure:
+            // the link may still be open, so keep the exit-2 resume behavior.
+            if (isDeadlineAbort(error)) {
+                failTimeout();
+            }
+            if (!isTransient(error)) {
+                fail(connectLinkFailureLine(error, config.host));
+            }
+            failedChecks += 1;
+            if (failedChecks >= WAIT_MAX_FAILED_CHECKS) {
+                fail(`${connectLinkFailureLine(error, config.host)} (gave up after ${WAIT_MAX_FAILED_CHECKS} failed checks in a row)`);
+            }
+            const after = deadline - Date.now();
+            if (after <= 0) {
+                failTimeout();
+            }
+            await sleep(Math.min(interval, after));
+            continue;
+        }
+        clearTimeout(abortTimer);
+        try {
+            if (!hasUsableStatus(statusResponse.data)) {
+                fail(`Failed: connect link ${requestId}: the server's answer has no usable status.`);
+            }
+            last = statusResponse.data;
             switch (last.status) {
-                case 'connected':
+                case 'connected': {
+                    const problem = connectedPayloadProblem(last);
+                    if (problem !== null) {
+                        fail(problem);
+                    }
                     printConnected(last);
                     return;
+                }
                 case 'expired':
                     fail(`Connect link ${last.id} expired before anyone connected ${last.name}. Ask for a new one: ${retryCommand(last)}`);
                 case 'cancelled':
@@ -114,22 +227,18 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
                 default:
                     fail(`Failed: connect link ${requestId} has an unknown status "${String(last.status)}".`);
             }
-        } catch (error: any) {
-            if (!isTransient(error)) {
-                fail(connectLinkFailureLine(error, config.host));
-            }
-            failedChecks += 1;
-            if (failedChecks >= WAIT_MAX_FAILED_CHECKS) {
-                fail(`${connectLinkFailureLine(error, config.host)} (gave up after ${WAIT_MAX_FAILED_CHECKS} failed checks in a row)`);
-            }
+        } catch {
+            // Interpreting a 200 never retries and never exits 2: any failure
+            // to use the payload is the same one-line answer as I2.
+            fail(`Failed: connect link ${requestId}: the server's answer has no usable status.`);
         }
+        // Only a fully interpreted 200 resets the consecutive-failure count.
+        failedChecks = 0;
 
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-            const state = last ? `is ${last.status}` : 'status unknown (last check failed)';
-            const expires = last?.expires_at ? ` (link expires ${formatExpiry(last.expires_at)})` : '';
-            fail(`Still waiting after ${timeoutText}: connect link ${requestId} ${state}${expires}. Run ${waitCommandLine(requestId)} again to keep waiting.`, WAIT_EXIT_TIMEOUT);
+        const after = deadline - Date.now();
+        if (after <= 0) {
+            failTimeout();
         }
-        await sleep(Math.min(interval, remaining));
+        await sleep(Math.min(interval, after));
     }
 }

@@ -41,13 +41,31 @@ export function plainText(value: string): string {
     return value.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '');
 }
 
-/** 'solidactions connection wait <id>' */
-export function waitCommandLine(id: string): string {
-    return `solidactions connection wait ${id}`;
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,.\/-]+$/;
+
+/**
+ * Quote a value for pasting into a POSIX shell command line. Values of
+ * letters, digits and a few safe punctuation marks stay bare; anything else
+ * (spaces, quotes, `;`, `&`, …) is single-quoted (`'` → `'\''`), so the
+ * suggestion still parses as the same single argument.
+ */
+export function shellArg(value: string): string {
+    if (SHELL_SAFE.test(value)) {
+        return value;
+    }
+    return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** '2026-10-29T19:00:00Z' → '2026-10-29 19:00 UTC' (the server's own `text` format); a value Date cannot parse → plainText(value). */
+/** 'solidactions connection wait <id>' (the id is quoted unless it is shell-safe, e.g. a ULID). */
+export function waitCommandLine(id: string): string {
+    return `solidactions connection wait ${shellArg(id)}`;
+}
+
+/** '2026-10-29T19:00:00Z' → '2026-10-29 19:00 UTC' (the server's own `text` format); a value Date cannot parse → plainText(value); a non-string → 'unknown'. */
 export function formatExpiry(iso: string): string {
+    if (typeof iso !== 'string') {
+        return 'unknown';
+    }
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) {
         return plainText(iso);

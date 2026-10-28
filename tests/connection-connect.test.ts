@@ -233,6 +233,63 @@ describe('connectionConnect', () => {
         expect(result.stdout).toBe('');
     });
 
+    it('skips null list members and still finds a later matching connection', async () => {
+        handler = (request) => {
+            if (request.url === '/api/v1/connections' && request.method === 'GET') {
+                return {
+                    status: 200,
+                    payload: { data: [null, { name: 'gmail-main', provider: 'gmail' }] },
+                };
+            }
+            return { status: 201, payload: connectLink201({ mode: 'reconnect' }) };
+        };
+        const result = await runCli(['connection', 'connect', '--reconnect', 'gmail-main'], home, cwd);
+
+        expect(result.status).toBe(0);
+        expect(requests).toHaveLength(2);
+        expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections' });
+        expect(requests[1]).toMatchObject({ method: 'POST', url: '/api/v1/connections/requests' });
+        expect(requests[1].body).toMatchObject({ platform: 'gmail', mode: 'reconnect' });
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
+    });
+
+    it('treats an all-null connection list as no match with one line and no POST', async () => {
+        handler = (request) => {
+            if (request.url === '/api/v1/connections' && request.method === 'GET') {
+                return { status: 200, payload: { data: [null, null] } };
+            }
+            return { status: 201, payload: connectLink201() };
+        };
+        const result = await runCli(['connection', 'connect', '--reconnect', 'gmail-main'], home, cwd);
+
+        expect(result.status).toBe(1);
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections' });
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest.trim().split('\n')).toHaveLength(1);
+        expect(rest).toContain('No connection named gmail-main');
+        expect(rest).not.toContain('    at ');
+        expect(result.stdout).toBe('');
+    });
+
+    it('quotes the name in the failed-platform-lookup hint so it pastes as one argument', async () => {
+        handler = (request) => {
+            if (request.url === '/api/v1/connections' && request.method === 'GET') {
+                return { status: 500, payload: { message: 'boom' } };
+            }
+            return { status: 201, payload: connectLink201() };
+        };
+        const result = await runCli(['connection', 'connect', '--reconnect', 'a;b&&c'], home, cwd);
+
+        expect(result.status).toBe(1);
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections' });
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest.trim().split('\n')).toHaveLength(1);
+        expect(rest).toContain(`solidactions connection connect '<platform>' --reconnect 'a;b&&c'`);
+        expect(result.stdout).toBe('');
+    });
+
     it('refuses --reconnect for an unknown name with one line pointing at connection list', async () => {
         handler = (request) => {
             if (request.url === '/api/v1/connections' && request.method === 'GET') {
@@ -323,7 +380,7 @@ describe('connectionConnect', () => {
         expect(splitWorkspaceLine(result.stderr)).toBe('');
         expect(result.stdout).not.toContain('\u001b');
         expect(result.stdout).not.toContain('\u0007');
-        expect(result.stdout).toContain('  solidactions connection wait 01JB[2JTEST');
+        expect(result.stdout).toContain(`  solidactions connection wait '01JB[2JTEST'`);
     });
 
     it('renders a fallback text when the server sends no text', async () => {

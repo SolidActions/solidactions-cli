@@ -136,6 +136,36 @@ describe('connectionList', () => {
         expect(lines.find((line) => line.includes('Team Slack'))).toMatch(/\bno\b/);
     });
 
+    it('strips terminal control bytes from server cells but keeps the visible text', async () => {
+        responseBody = {
+            data: [
+                {
+                    id: 'connection-9',
+                    name: 'visible\u001b[2J\u0007\u009bname',
+                    provider: 'gmail',
+                    broker: 'pica',
+                    status: 'error',
+                    error_message: 'bad\u001b]52;c;ZXZpbA==\u0007token\u009bleak',
+                    last_used_at: '2026-07-30T15:04:05.000000Z',
+                    allow_source_use: true,
+                },
+            ],
+        };
+
+        const result = await runCli(['connection', 'list'], home, cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(result.stdout).toContain('visible');
+        expect(result.stdout).toContain('name');
+        expect(result.stdout).toContain('bad');
+        expect(result.stdout).toContain('token');
+        expect(result.stdout).toContain('leak');
+        expect(result.stdout).not.toContain('\u001b');
+        expect(result.stdout).not.toContain('\u0007');
+        expect(result.stdout).not.toContain('\u009b');
+    });
+
     it('shows - under DATA SOURCE when an older server sends no allow_source_use field', async () => {
         responseBody = {
             data: [
@@ -225,6 +255,10 @@ function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
         delete childEnv.SOLIDACTIONS_HOST;
         delete childEnv.SOLIDACTIONS_API_KEY;
         delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        delete childEnv.DEBUG;
+        delete childEnv.NODE_DEBUG;
+        delete childEnv.FORCE_COLOR;
+        delete childEnv.SOLIDACTIONS_TEST_HOOKS;
 
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
             cwd,

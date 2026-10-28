@@ -1,6 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { plainText } from '../utils/connect-link';
 import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
 
 interface OAuthConnection {
@@ -15,14 +16,14 @@ interface OAuthConnection {
 const ERROR_SNIPPET_WIDTH = 40;
 
 function connectionStatus(connection: OAuthConnection): string {
-    const status = connection.status || '?';
+    const status = plainText(connection.status || '?');
     const error = connection.error_message?.trim();
 
     if (!error) {
         return status;
     }
 
-    return `${status} — ${truncateCell(sanitizeCell(error), ERROR_SNIPPET_WIDTH)}`;
+    return `${status} — ${truncateCell(sanitizeCell(plainText(error)), ERROR_SNIPPET_WIDTH)}`;
 }
 
 function sourceUse(connection: OAuthConnection): string {
@@ -48,10 +49,10 @@ export async function connectionList(): Promise<void> {
         console.log(chalk.blue('Connections:\n'));
 
         const rows = connections.map((connection) => [
-            connection.name || '?',
-            connection.provider || '?',
+            plainText(connection.name || '?'),
+            plainText(connection.provider || '?'),
             connectionStatus(connection),
-            connection.last_used_at || '-',
+            plainText(connection.last_used_at || '-'),
             sourceUse(connection),
         ]);
         const lines = renderTable(['NAME', 'PROVIDER', 'STATUS', 'LAST USED', 'DATA SOURCE'], rows, {

@@ -9,6 +9,7 @@ import {
     formatExpiry,
     parseBinding,
     plainText,
+    shellArg,
     waitCommandLine,
 } from '../utils/connect-link';
 
@@ -55,9 +56,11 @@ export async function connectionConnect(platform: string | undefined, options: C
             const response = await axios.get(`${config.host}/api/v1/connections`, { headers: getApiHeaders(config) });
             connections = Array.isArray(response.data?.data) ? response.data.data : [];
         } catch (error: any) {
-            fail(`${connectLinkFailureLine(error, config.host)} (looking up ${name}'s platform; give it to skip the lookup: solidactions connection connect <platform> --reconnect ${name})`);
+            fail(`${connectLinkFailureLine(error, config.host)} (looking up ${name}'s platform; give it to skip the lookup: solidactions connection connect ${shellArg('<platform>')} --reconnect ${shellArg(name)})`);
         }
-        const match = connections.find((connection) => connection.name === name);
+        const match = connections.find(
+            (connection) => typeof connection === 'object' && connection !== null && typeof connection.name === 'string' && connection.name === name,
+        );
         if (!match?.provider) {
             fail(`No connection named ${name} in this workspace; solidactions connection list shows the names.`);
         }
