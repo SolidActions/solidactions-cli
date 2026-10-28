@@ -1,6 +1,8 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { plainText } from '../utils/connect-link';
+import { err, out } from '../utils/output';
 import { renderTable, sanitizeCell, truncateCell } from '../utils/table';
 
 interface OAuthConnection {
@@ -9,19 +11,26 @@ interface OAuthConnection {
     status: string;
     error_message: string | null;
     last_used_at: string | null;
+    allow_source_use?: boolean;
 }
 
 const ERROR_SNIPPET_WIDTH = 40;
 
 function connectionStatus(connection: OAuthConnection): string {
-    const status = connection.status || '?';
+    const status = plainText(connection.status || '?');
     const error = connection.error_message?.trim();
 
     if (!error) {
         return status;
     }
 
-    return `${status} — ${truncateCell(sanitizeCell(error), ERROR_SNIPPET_WIDTH)}`;
+    return `${status} — ${truncateCell(sanitizeCell(plainText(error)), ERROR_SNIPPET_WIDTH)}`;
+}
+
+function sourceUse(connection: OAuthConnection): string {
+    if (connection.allow_source_use === true) return 'yes';
+    if (connection.allow_source_use === false) return 'no';
+    return '-';
 }
 
 export async function connectionList(): Promise<void> {
@@ -34,37 +43,38 @@ export async function connectionList(): Promise<void> {
         const connections: OAuthConnection[] = response.data.data || [];
 
         if (connections.length === 0) {
-            console.log(chalk.gray('No connections found.'));
+            out('No connections found.', chalk.gray);
             return;
         }
 
-        console.log(chalk.blue('Connections:\n'));
+        out('Connections:\n', chalk.blue);
 
         const rows = connections.map((connection) => [
-            connection.name || '?',
-            connection.provider || '?',
+            plainText(connection.name || '?'),
+            plainText(connection.provider || '?'),
             connectionStatus(connection),
-            connection.last_used_at || '-',
+            plainText(connection.last_used_at || '-'),
+            sourceUse(connection),
         ]);
-        const lines = renderTable(['NAME', 'PROVIDER', 'STATUS', 'LAST USED'], rows, {
+        const lines = renderTable(['NAME', 'PROVIDER', 'STATUS', 'LAST USED', 'DATA SOURCE'], rows, {
             minWidths: [24, 14, 20],
         });
 
-        console.log(chalk.gray(lines[0]));
-        console.log(chalk.gray(lines[1]));
+        out(lines[0], chalk.gray);
+        out(lines[1], chalk.gray);
         for (const line of lines.slice(2)) {
-            console.log(line);
+            out(line);
         }
 
-        console.log('');
-        console.log(chalk.gray(`${connections.length} connection(s)`));
+        out('');
+        out(`${connections.length} connection(s)`, chalk.gray);
     } catch (error: any) {
         if (error.response?.status === 401) {
-            console.error(chalk.red(authFailedLine(config.host)));
+            err(authFailedLine(config.host), chalk.red);
         } else if (error.response) {
-            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
+            err(formatApiFailure(error.response.status, error.response.data), chalk.red);
         } else {
-            console.error(chalk.red('Connection failed:'), error.message);
+            err(`Connection failed: ${error.message}`, chalk.red);
         }
         process.exit(1);
     }

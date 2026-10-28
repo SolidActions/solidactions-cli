@@ -85,6 +85,7 @@ describe('connectionList', () => {
                     status: 'connected',
                     error_message: null,
                     last_used_at: '2026-07-30T15:04:05.000000Z',
+                    allow_source_use: true,
                     created_at: '2026-07-29T10:00:00.000000Z',
                     connection_key: 'must-not-print',
                 },
@@ -96,6 +97,7 @@ describe('connectionList', () => {
                     status: 'error',
                     error_message: 'Refresh token expired\nReconnect this account before trying again.',
                     last_used_at: null,
+                    allow_source_use: false,
                     created_at: '2026-07-29T11:00:00.000000Z',
                     cached_access_token: 'must-not-print-either',
                 },
@@ -127,6 +129,65 @@ describe('connectionList', () => {
         expect(rendered).toContain('…');
         expect(rendered).not.toContain('trying again.');
         expect(rendered).not.toContain('must-not-print');
+
+        const lines = rendered.split('\n');
+        expect(lines.find((line) => line.includes('NAME'))).toContain('DATA SOURCE');
+        expect(lines.find((line) => line.includes('Primary Gmail'))).toMatch(/\byes\b/);
+        expect(lines.find((line) => line.includes('Team Slack'))).toMatch(/\bno\b/);
+    });
+
+    it('strips terminal control bytes from server cells but keeps the visible text', async () => {
+        responseBody = {
+            data: [
+                {
+                    id: 'connection-9',
+                    name: 'visible\u001b[2J\u0007\u009bname',
+                    provider: 'gmail',
+                    broker: 'pica',
+                    status: 'error',
+                    error_message: 'bad\u001b]52;c;ZXZpbA==\u0007token\u009bleak',
+                    last_used_at: '2026-07-30T15:04:05.000000Z',
+                    allow_source_use: true,
+                },
+            ],
+        };
+
+        const result = await runCli(['connection', 'list'], home, cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(result.stdout).toContain('visible');
+        expect(result.stdout).toContain('name');
+        expect(result.stdout).toContain('bad');
+        expect(result.stdout).toContain('token');
+        expect(result.stdout).toContain('leak');
+        expect(result.stdout).not.toContain('\u001b');
+        expect(result.stdout).not.toContain('\u0007');
+        expect(result.stdout).not.toContain('\u009b');
+    });
+
+    it('shows - under DATA SOURCE when an older server sends no allow_source_use field', async () => {
+        responseBody = {
+            data: [
+                {
+                    id: 'connection-3',
+                    name: 'Old Server Row',
+                    provider: 'gmail',
+                    broker: 'pica',
+                    status: 'connected',
+                    error_message: null,
+                    last_used_at: '2026-07-30T15:04:05.000000Z',
+                },
+            ],
+        };
+
+        const result = await runCli(['connection', 'list'], home, cwd);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        const lines = result.stdout.split('\n');
+        expect(lines.find((line) => line.includes('NAME'))).toContain('DATA SOURCE');
+        expect(lines.find((line) => line.includes('Old Server Row'))).toMatch(/2026-07-30T15:04:05\.000000Z\s+-\s*$/);
     });
 
     it('reports an empty workspace without rendering a table', async () => {
@@ -150,6 +211,19 @@ describe('connectionList', () => {
         expect(result.status).toBe(1);
         expect(result.stderr.trim()).toBe('Failed: 403 This action is unauthorized.');
         expect(result.stderr).not.toContain('vendor');
+        expect(result.stdout).not.toContain('Connections:');
+    });
+
+    it('strips terminal control bytes from a failure line but keeps the visible text', async () => {
+        responseStatus = 403;
+        responseBody = { message: 'visible\u001b[2J\u0007\u009bdenied' };
+        const result = await runCli(['connection', 'list'], home, cwd);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('visible');
+        expect(result.stderr).toContain('denied');
+        expect(result.stderr).not.toContain('\u001b');
+        expect(result.stderr).not.toContain('\u0007');
+        expect(result.stderr).not.toContain('\u009b');
         expect(result.stdout).not.toContain('Connections:');
     });
 
@@ -194,6 +268,10 @@ function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
         delete childEnv.SOLIDACTIONS_HOST;
         delete childEnv.SOLIDACTIONS_API_KEY;
         delete childEnv.SOLIDACTIONS_WORKSPACE_ID;
+        delete childEnv.DEBUG;
+        delete childEnv.NODE_DEBUG;
+        delete childEnv.FORCE_COLOR;
+        delete childEnv.SOLIDACTIONS_TEST_HOOKS;
 
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
             cwd,

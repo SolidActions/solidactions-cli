@@ -1,10 +1,11 @@
 /**
- * requestDeviceCode requests the full `env:reveal`-including scope list
- * first. Servers that haven't registered `env:reveal` (#1252 not yet
- * deployed there) reject the ENTIRE device-code request with 400
- * `invalid_scope` — this must degrade gracefully by retrying once with the
- * legacy scope list, rather than hard-breaking `solidactions login --device`
- * for every user of that server. Real in-process HTTP server, no mocks.
+ * requestDeviceCode requests the full scope list (including `env:reveal` and,
+ * since cli#219, `connections:request`) first. Servers that haven't
+ * registered one of those scopes reject the ENTIRE device-code request with
+ * 400 `invalid_scope` — this must degrade gracefully through the next scope
+ * lists (at most 3 requests), rather than hard-breaking
+ * `solidactions login --device` for every user of that server. Real
+ * in-process HTTP server, no mocks.
  */
 import http from 'http';
 import { AddressInfo } from 'net';
@@ -34,7 +35,7 @@ function startServer(
     });
 }
 
-describe('requestDeviceCode — env:reveal scope fallback', () => {
+describe('requestDeviceCode — scope fallback', () => {
     let server: http.Server | undefined;
 
     afterEach(() => {
@@ -44,29 +45,48 @@ describe('requestDeviceCode — env:reveal scope fallback', () => {
         });
     });
 
-    it('retries once with the legacy scope list when the server rejects env:reveal with invalid_scope', async () => {
+    function acceptedCode() {
+        return {
+            status: 200,
+            body: {
+                device_code: 'device-code',
+                user_code: 'USER-CODE',
+                verification_uri: 'https://example.test/device',
+                expires_in: 600,
+                interval: 5,
+            },
+        };
+    }
+
+    function invalidScope() {
+        return {
+            status: 400,
+            body: {
+                error: 'invalid_scope',
+                error_description: 'The requested scope is invalid, unknown, or malformed',
+            },
+        };
+    }
+
+    it('falls back to the legacy scope list when the server rejects env:reveal with invalid_scope', async () => {
         const started = await startServer((body) => {
-            const scope = String(body.scope);
-            if (scope.includes('env:reveal')) {
-                return {
-                    status: 400,
-                    body: {
-                        error: 'invalid_scope',
-                        error_description: 'The requested scope is invalid, unknown, or malformed',
-                        hint: 'Check the `env:reveal` scope',
-                    },
-                };
-            }
-            return {
-                status: 200,
-                body: {
-                    device_code: 'device-code',
-                    user_code: 'USER-CODE',
-                    verification_uri: 'https://example.test/device',
-                    expires_in: 600,
-                    interval: 5,
-                },
-            };
+            return String(body.scope).includes('env:reveal') ? invalidScope() : acceptedCode();
+        });
+        server = started.server;
+
+        const result = await requestDeviceCode(started.host);
+
+        expect(result.device_code).toBe('device-code');
+        expect(started.requests).toHaveLength(3);
+        expect(String(started.requests[0].scope)).toContain('env:reveal');
+        expect(String(started.requests[1].scope)).toContain('env:reveal');
+        expect(String(started.requests[2].scope)).not.toContain('env:reveal');
+        expect(String(started.requests[2].scope)).not.toContain('connections:request');
+    });
+
+    it('drops connections:request and keeps env:reveal when the server rejects only connections:request', async () => {
+        const started = await startServer((body) => {
+            return String(body.scope).includes('connections:request') ? invalidScope() : acceptedCode();
         });
         server = started.server;
 
@@ -74,8 +94,9 @@ describe('requestDeviceCode — env:reveal scope fallback', () => {
 
         expect(result.device_code).toBe('device-code');
         expect(started.requests).toHaveLength(2);
-        expect(String(started.requests[0].scope)).toContain('env:reveal');
-        expect(String(started.requests[1].scope)).not.toContain('env:reveal');
+        expect(String(started.requests[0].scope)).toContain('connections:request');
+        expect(String(started.requests[1].scope)).toContain('env:reveal');
+        expect(String(started.requests[1].scope)).not.toContain('connections:request');
     });
 
     it('makes only one request, including env:reveal, when the server accepts the full scope list', async () => {
@@ -96,6 +117,7 @@ describe('requestDeviceCode — env:reveal scope fallback', () => {
         expect(result.device_code).toBe('device-code');
         expect(started.requests).toHaveLength(1);
         expect(String(started.requests[0].scope)).toContain('env:reveal');
+        expect(String(started.requests[0].scope)).toContain('connections:request');
     });
 
     it('does not retry and rejects on a 400 for an unrelated reason (e.g. invalid_client)', async () => {

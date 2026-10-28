@@ -1,41 +1,56 @@
-import axios, { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { describe, expect, it } from 'vitest';
+import http from 'http';
+import { AddressInfo } from 'net';
+import { afterEach, describe, expect, it } from 'vitest';
 import { requestDeviceCode } from '../src/commands/device-login';
 
 describe('database device-token compatibility', () => {
+    let server: http.Server | undefined;
+
+    afterEach(() => {
+        const closing = server;
+        server = undefined;
+        return new Promise<void>((resolve, reject) => {
+            if (!closing) return resolve();
+            closing.close((err) => (err ? reject(err) : resolve()));
+        });
+    });
+
     it('requests the coarse databases scope during device authorization', async () => {
-        const originalAdapter = axios.defaults.adapter;
-        let requestBody: Record<string, unknown> | undefined;
-        axios.defaults.adapter = async (config: InternalAxiosRequestConfig): Promise<AxiosResponse> => {
-            requestBody = JSON.parse(String(config.data));
-            return {
-                status: 200,
-                statusText: 'OK',
-                headers: {},
-                config,
-                data: {
+        const requests: Record<string, unknown>[] = [];
+        server = http.createServer((req, res) => {
+            let raw = '';
+            req.on('data', (chunk) => {
+                raw += chunk;
+            });
+            req.on('end', () => {
+                requests.push(JSON.parse(raw || '{}'));
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
                     device_code: 'device-code',
                     user_code: 'USER-CODE',
                     verification_uri: 'https://example.test/device',
                     expires_in: 600,
                     interval: 5,
-                },
-            };
-        };
+                }));
+            });
+        });
+        await new Promise<void>((resolve) => {
+            server!.listen(0, '127.0.0.1', () => resolve());
+        });
+        const host = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`;
 
-        try {
-            await requestDeviceCode('https://app.solidactions.com');
-        } finally {
-            axios.defaults.adapter = originalAdapter;
-        }
+        const result = await requestDeviceCode(host);
 
+        expect(result.device_code).toBe('device-code');
+        expect(requests).toHaveLength(1);
         // `env:reveal` joined this list in #1252. It is requested, not assumed
         // granted — the consent screen shows it as a default-off checkbox and
         // the server strips it from the token unless the user opts in. It has
         // to be requested here regardless, because a device code's scope set is
         // frozen at creation and consent can never add to it.
-        expect(String(requestBody?.scope).split(/\s+/).sort()).toEqual(
-            ['databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
+        // `connections:request` joined in cli#219 (connect links).
+        expect(String(requests[0]?.scope).split(/\s+/).sort()).toEqual(
+            ['connections:request', 'databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
         );
     });
 

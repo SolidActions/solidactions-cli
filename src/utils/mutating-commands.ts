@@ -93,6 +93,8 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'role push',
     'doc push',
     'doc upload',
+    // POSTs a connect-link request (a row the workspace counts against its open-link limit).
+    'connection connect',
 ]);
 
 /** Space-joined command paths that do not mutate server state. */
@@ -143,6 +145,7 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'oauth-action view',
     'oauth-action platforms',
     'connection list',
+    'connection wait',
     'ai init',
     'ai examples',
     'skill pull',

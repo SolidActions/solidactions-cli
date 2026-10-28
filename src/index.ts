@@ -34,6 +34,8 @@ import { oauthActionSearch } from './commands/oauth-action-search';
 import { oauthActionList } from './commands/oauth-action-list';
 import { oauthActionView } from './commands/oauth-action-view';
 import { oauthActionPlatforms } from './commands/oauth-action-platforms';
+import { connectionConnect } from './commands/connection-connect';
+import { connectionWait } from './commands/connection-wait';
 import { connectionList } from './commands/connection-list';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
@@ -981,6 +983,24 @@ connection
     .description('List OAuth connections in the active workspace')
     .action(() => {
         connectionList();
+    });
+
+connection
+    .command('connect [platform]')
+    .description('Mint a connect link a person clicks to connect an app, then print it and the wait command')
+    .option('--name <name>', 'Name of the new connection')
+    .option('--reconnect <name>', 'Refresh an existing connection instead (its platform is looked up when omitted)')
+    .option('--bind <project:var>', 'Bind a project variable to the connection once it is connected (repeatable, up to 10)', (value: string, previous: string[] = []) => [...previous, value], [])
+    .action((platform, options) => {
+        connectionConnect(platform, options);
+    });
+
+connection
+    .command('wait <request-id>')
+    .description('Wait until a connect link is used: exit 0 connected, 1 expired, cancelled or failed, 2 still open at --timeout, 130 on Ctrl-C')
+    .option('--timeout <duration>', 'How long to wait, e.g. 30s, 15m, 1h', '15m')
+    .action((requestId, options) => {
+        connectionWait(requestId, options);
     });
 
 // =============================================================================

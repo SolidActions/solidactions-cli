@@ -157,9 +157,10 @@ export function augmentWorkspaceForbiddenMessage(error: any): any {
 }
 
 /**
- * Existing device tokens predate the coarse `databases` scope. Turn the app's
- * stable missing-ability response into a re-login instruction while preserving
- * its original message. Other ability failures retain their existing behavior.
+ * Existing device tokens predate the coarse `databases`, `env:reveal` and
+ * `connections:request` abilities. Turn the app's stable missing-ability
+ * response into a re-login instruction while preserving its original message.
+ * Other ability failures retain their existing behavior.
  */
 export function augmentTokenMissingAbilityMessage(error: any): any {
     const response = error?.response;
@@ -197,6 +198,22 @@ export function augmentTokenMissingAbilityMessage(error: any): any {
             ? response.data.message
             : "This session does not have the 'env:reveal' ability.";
         if (!message.includes('Settings → API keys')) {
+            response.data.message = `${message}\n\n${hint}`;
+        }
+    }
+
+    if (
+        response?.status === 403
+        && response.data?.code === 'token_missing_ability'
+        && requiredAbility === 'connections:request'
+    ) {
+        const hint = "Connect links need the 'connections:request' ability. "
+            + 'Run `solidactions login --device` again to get it, or create an API key with '
+            + "'connections:request' checked at Settings → API keys and `solidactions login` with that key.";
+        const message = typeof response.data.message === 'string' && response.data.message.length > 0
+            ? response.data.message
+            : "This session does not have the 'connections:request' ability.";
+        if (!message.includes('Connect links need')) {
             response.data.message = `${message}\n\n${hint}`;
         }
     }

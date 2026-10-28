@@ -208,6 +208,8 @@ const ALLOWLIST: Array<{ file: string; expr: string; reason: string }> = [
     { file: 'src/commands/dev.ts', expr: 'config.host', reason: 'the request URL of the variable-mappings call, not printed' },
     { file: 'src/commands/skill-run.ts', expr: 'opts.config.host', reason: 'SOLIDACTIONS_API_URL for the child process, which needs the real host' },
     { file: 'src/commands/doc-upload.ts', expr: 'authFailedLine(config.host)', reason: 'authFailedLine applies displayHost' },
+    { file: 'src/commands/connection-connect.ts', expr: 'connectLinkFailureLine(error, config.host)', reason: 'connectLinkFailureLine prints the host only through authFailedLine, which applies displayHost' },
+    { file: 'src/commands/connection-wait.ts', expr: 'connectLinkFailureLine(error, config.host)', reason: 'connectLinkFailureLine prints the host only through authFailedLine, which applies displayHost' },
     { file: 'src/commands/doc-upload.ts', expr: 'config.host', reason: 'the request URL of the media upload, assigned before the call, not printed' },
     { file: 'src/commands/deploy.ts', expr: 'projectStatusUrl(config.host, projectSlug)', reason: 'the request URL of the status poll, not printed' },
     { file: 'src/utils/database-data-plane.ts', expr: 'config.host', reason: 'the request URL passed to the injected post function, not printed' },
