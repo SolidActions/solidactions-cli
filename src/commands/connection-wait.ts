@@ -1,7 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
-import { ConnectLink, connectLinkFailureLine, connectLinkPath, formatExpiry, plainText, waitCommandLine } from '../utils/connect-link';
+import { ConnectLink, connectLinkFailureLine, formatExpiry, plainText, waitCommandLine } from '../utils/connect-link';
 
 export const WAIT_POLL_INTERVAL_MS = 5_000;
 export const WAIT_DEFAULT_TIMEOUT = '15m';
@@ -93,7 +93,7 @@ export async function connectionWait(requestId: string, options: ConnectionWaitO
 
     while (true) {
         try {
-            const response = await axios.get(`${config.host}${connectLinkPath(requestId)}`, { headers: getApiHeaders(config) });
+            const response = await axios.get(`${config.host}/api/v1/connections/requests/${encodeURIComponent(requestId)}`, { headers: getApiHeaders(config) });
             failedChecks = 0;
             last = response.data as ConnectLink;
             switch (last.status) {

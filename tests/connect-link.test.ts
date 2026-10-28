@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { connectLinkFailureLine, connectLinkPath, formatExpiry, parseBinding, plainText, waitCommandLine } from '../src/utils/connect-link';
+import { connectLinkFailureLine, formatExpiry, parseBinding, plainText, waitCommandLine } from '../src/utils/connect-link';
 
 describe('parseBinding', () => {
     it('splits PROJECT:VAR at the first colon and trims', () => {
@@ -17,10 +17,8 @@ describe('plainText', () => {
     });
 });
 
-describe('connectLinkPath and waitCommandLine', () => {
-    it('encodes the id', () => {
-        expect(connectLinkPath()).toBe('/api/v1/connections/requests');
-        expect(connectLinkPath('01JB/../x')).toBe('/api/v1/connections/requests/01JB%2F..%2Fx');
+describe('waitCommandLine', () => {
+    it('prints the wait command for the id', () => {
         expect(waitCommandLine('01JBXYZ')).toBe('solidactions connection wait 01JBXYZ');
     });
 });

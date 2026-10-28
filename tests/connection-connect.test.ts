@@ -87,6 +87,19 @@ function connectLink201(overrides: Record<string, unknown> = {}): Record<string,
     };
 }
 
+/**
+ * `connection connect` is a MUTATING command, so requireConfigWithWorkspace
+ * prints one gray `Workspace: ...` banner line on stderr before the command
+ * runs. Every row that reaches the server (or the platform lookup) asserts its
+ * old stderr expectation on the remainder past that banner; the banner
+ * assertion itself proves the mutating classification.
+ */
+function splitWorkspaceLine(stderr: string): string {
+    const lines = stderr.split('\n');
+    expect(lines[0]).toMatch(/^Workspace: workspace-1 \(workspace-1\) on http:\/\/127\.0\.0\.1:\d+$/);
+    return lines.slice(1).join('\n');
+}
+
 describe('connectionConnect', () => {
     let root: string;
     let home: string;
@@ -134,7 +147,7 @@ describe('connectionConnect', () => {
                 { project: 'crm-dev', var: 'GMAIL_KEY' },
             ],
         });
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
         expect(result.stdout).toContain('Connect Gmail for this workspace:');
         expect(result.stdout).toContain('https://app.solidactions.com/connect/token-abc');
         expect(result.stdout).toContain('When it is done, run:');
@@ -153,7 +166,7 @@ describe('connectionConnect', () => {
             mode: 'connect',
             bindings: [],
         });
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
     });
 
     it('mints a reconnect request without listing connections when the platform is given', async () => {
@@ -169,7 +182,7 @@ describe('connectionConnect', () => {
             mode: 'reconnect',
             bindings: [],
         });
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
     });
 
     it('looks up the platform from the connection list for --reconnect without a platform', async () => {
@@ -199,7 +212,7 @@ describe('connectionConnect', () => {
             mode: 'reconnect',
             bindings: [],
         });
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
     });
 
     it('treats a malformed connection list as no match with one line', async () => {
@@ -214,8 +227,9 @@ describe('connectionConnect', () => {
         expect(result.status).toBe(1);
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections' });
-        expect(result.stderr.trim().split('\n')).toHaveLength(1);
-        expect(result.stderr).toContain('No connection named gmail-main');
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest.trim().split('\n')).toHaveLength(1);
+        expect(rest).toContain('No connection named gmail-main');
         expect(result.stdout).toBe('');
     });
 
@@ -231,7 +245,7 @@ describe('connectionConnect', () => {
         expect(result.status).toBe(1);
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections' });
-        const lines = result.stderr.trim().split('\n');
+        const lines = splitWorkspaceLine(result.stderr).trim().split('\n');
         expect(lines).toHaveLength(1);
         expect(lines[0]).toContain('No connection named missing-one');
         expect(lines[0]).toContain('solidactions connection list');
@@ -254,6 +268,7 @@ describe('connectionConnect', () => {
 
         expect(result.status).toBe(1);
         expect(requests).toHaveLength(0);
+        expect(result.stderr).not.toContain('Workspace:');
         expect(result.stderr.trim().split('\n')).toHaveLength(1);
         expect(result.stderr).toContain(expected);
         expect(result.stdout).toBe('');
@@ -267,7 +282,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toBe('Failed: 422 gmail-main already exists in this workspace (status error); use reconnect\n');
+        expect(splitWorkspaceLine(result.stderr)).toBe('Failed: 422 gmail-main already exists in this workspace (status error); use reconnect\n');
         expect(result.stdout).toBe('');
     });
 
@@ -279,7 +294,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toBe('Failed: 429 This workspace already has 10 open connect links.\n');
+        expect(splitWorkspaceLine(result.stderr)).toBe('Failed: 429 This workspace already has 10 open connect links.\n');
         expect(result.stdout).toBe('');
     });
 
@@ -288,8 +303,9 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain('Authentication failed against');
-        expect(result.stderr).toContain(`127.0.0.1:${port}`);
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest).toContain('Authentication failed against');
+        expect(rest).toContain(`127.0.0.1:${port}`);
         expect(result.stdout).toBe('');
     });
 
@@ -304,7 +320,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(0);
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
         expect(result.stdout).not.toContain('\u001b');
         expect(result.stdout).not.toContain('\u0007');
         expect(result.stdout).toContain('  solidactions connection wait 01JB[2JTEST');
@@ -317,7 +333,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(0);
-        expect(result.stderr).toBe('');
+        expect(splitWorkspaceLine(result.stderr)).toBe('');
         expect(result.stdout).toContain('Connect link: https://app.solidactions.com/connect/token-abc');
         expect(result.stdout).toContain('Request id: 01JBTEST (expires 2026-10-29 19:00 UTC)');
         expect(result.stdout).toContain('  solidactions connection wait 01JBTEST');
@@ -328,7 +344,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toBe('Failed: the server answered without a connect link.\n');
+        expect(splitWorkspaceLine(result.stderr)).toBe('Failed: the server answered without a connect link.\n');
         expect(result.stdout).toBe('');
     });
 
@@ -337,8 +353,9 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toBe('Failed: the server answered without a connect link.\n');
-        expect(result.stderr).not.toContain('    at ');
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest).toBe('Failed: the server answered without a connect link.\n');
+        expect(rest).not.toContain('    at ');
         expect(result.stdout).toBe('');
     });
 
@@ -347,7 +364,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(0);
-        expect(result.stderr).not.toContain('    at ');
+        expect(splitWorkspaceLine(result.stderr)).not.toContain('    at ');
         expect(result.stdout).toContain('Connect link: https://x/connect/t');
         expect(result.stdout).toContain('Request id: 01JBNOEXP.');
         expect(result.stdout).not.toContain('expires');
@@ -362,7 +379,7 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toBe('Failed: 403 You cannot build automations in this workspace.\n');
+        expect(splitWorkspaceLine(result.stderr)).toBe('Failed: 403 You cannot build automations in this workspace.\n');
         expect(result.stdout).toBe('');
     });
 
@@ -386,10 +403,11 @@ describe('connectionConnect', () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
-        expect(result.stderr.trim().startsWith('Connection failed:')).toBe(true);
-        expect(result.stderr.trim().split('\n')).toHaveLength(1);
-        expect(result.stderr).not.toContain('    at ');
-        expect(result.stderr).not.toContain('AxiosError');
+        const rest = splitWorkspaceLine(result.stderr);
+        expect(rest.trim().startsWith('Connection failed:')).toBe(true);
+        expect(rest.trim().split('\n')).toHaveLength(1);
+        expect(rest).not.toContain('    at ');
+        expect(rest).not.toContain('AxiosError');
         expect(result.stdout).toBe('');
     });
 });

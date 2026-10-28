@@ -6,7 +6,6 @@ import {
     ConnectLink,
     ConnectLinkBinding,
     connectLinkFailureLine,
-    connectLinkPath,
     formatExpiry,
     parseBinding,
     plainText,
@@ -68,7 +67,7 @@ export async function connectionConnect(platform: string | undefined, options: C
     let link: ConnectLink;
     try {
         const response = await axios.post(
-            `${config.host}${connectLinkPath()}`,
+            `${config.host}/api/v1/connections/requests`,
             { platform: resolvedPlatform, name, mode: reconnect ? 'reconnect' : 'connect', bindings },
             { headers: getApiHeaders(config, 'application/json') },
         );

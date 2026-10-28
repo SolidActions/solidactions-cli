@@ -41,11 +41,6 @@ export function plainText(value: string): string {
     return value.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '');
 }
 
-/** '/api/v1/connections/requests' or '/api/v1/connections/requests/<encodeURIComponent(id)>'. */
-export function connectLinkPath(id?: string): string {
-    return id === undefined ? '/api/v1/connections/requests' : `/api/v1/connections/requests/${encodeURIComponent(id)}`;
-}
-
 /** 'solidactions connection wait <id>' */
 export function waitCommandLine(id: string): string {
     return `solidactions connection wait ${id}`;
