@@ -164,6 +164,16 @@ describe('connectionWait', () => {
         expect(result.stdout).toContain('  project newsletter uses it as GMAIL_KEY');
     });
 
+    it('encodes slashes and dots in the request id in the status URL', async () => {
+        queue = [{ status: 200, payload: connectedLink() }];
+        const result = await runCli(['connection', 'wait', '01JB/../x'], home, cwd, fastPollEnv());
+
+        expect(result.status).toBe(0);
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections/requests/01JB%2F..%2Fx' });
+        expect(result.stdout).toContain('Connected: gmail-main (Gmail), by Pat Doe.');
+    });
+
     it('prints Bindings: none when the link connected with no bindings', async () => {
         queue = [{ status: 200, payload: connectedLink({ bindings: [] }) }];
         const result = await runCli(['connection', 'wait', '01JBTEST'], home, cwd, fastPollEnv());

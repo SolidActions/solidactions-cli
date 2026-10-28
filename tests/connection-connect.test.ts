@@ -331,6 +331,17 @@ describe('connectionConnect', () => {
         expect(result.stdout).toBe('');
     });
 
+    it('refuses an empty --reconnect with its own line and zero requests', async () => {
+        const result = await runCli(['connection', 'connect', 'gmail', '--reconnect', ''], home, cwd);
+
+        expect(result.status).toBe(1);
+        expect(requests).toHaveLength(0);
+        expect(result.stderr).not.toContain('Workspace:');
+        expect(result.stderr.trim().split('\n')).toHaveLength(1);
+        expect(result.stderr).toContain('connection connect: --reconnect NAME needs a connection name.');
+        expect(result.stdout).toBe('');
+    });
+
     it('renders a 422 name_taken failure as one exact line', async () => {
         handler = () => ({
             status: 422,

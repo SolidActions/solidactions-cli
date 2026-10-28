@@ -59,21 +59,21 @@ export async function connectionList(): Promise<void> {
             minWidths: [24, 14, 20],
         });
 
-        console.log(chalk.gray(lines[0]));
-        console.log(chalk.gray(lines[1]));
+        console.log(chalk.gray(plainText(lines[0])));
+        console.log(chalk.gray(plainText(lines[1])));
         for (const line of lines.slice(2)) {
-            console.log(line);
+            console.log(plainText(line));
         }
 
         console.log('');
-        console.log(chalk.gray(`${connections.length} connection(s)`));
+        console.log(chalk.gray(plainText(`${connections.length} connection(s)`)));
     } catch (error: any) {
         if (error.response?.status === 401) {
             console.error(chalk.red(authFailedLine(config.host)));
         } else if (error.response) {
-            console.error(chalk.red(formatApiFailure(error.response.status, error.response.data)));
+            console.error(chalk.red(plainText(formatApiFailure(error.response.status, error.response.data))));
         } else {
-            console.error(chalk.red('Connection failed:'), error.message);
+            console.error(chalk.red(plainText(`Connection failed: ${error.message}`)));
         }
         process.exit(1);
     }

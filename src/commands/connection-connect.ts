@@ -30,6 +30,9 @@ export async function connectionConnect(platform: string | undefined, options: C
     }
     const reconnect = options.reconnect !== undefined;
     const name = (reconnect ? options.reconnect : options.name)?.trim() ?? '';
+    if (reconnect && name === '') {
+        fail('connection connect: --reconnect NAME needs a connection name.');
+    }
     if (name === '') {
         fail('connection connect: --name NAME is required (or --reconnect NAME to refresh an existing connection).');
     }
@@ -88,5 +91,5 @@ export async function connectionConnect(platform: string | undefined, options: C
         : `Connect link: ${link.url}\nRequest id: ${link.id}${expiry}.`;
     console.log(plainText(text));
     console.log('When it is done, run:');
-    console.log(`  ${waitCommandLine(plainText(link.id))}`);
+    console.log(plainText(`  ${waitCommandLine(plainText(link.id))}`));
 }

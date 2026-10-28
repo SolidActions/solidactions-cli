@@ -214,6 +214,19 @@ describe('connectionList', () => {
         expect(result.stdout).not.toContain('Connections:');
     });
 
+    it('strips terminal control bytes from a failure line but keeps the visible text', async () => {
+        responseStatus = 403;
+        responseBody = { message: 'visible\u001b[2J\u0007\u009bdenied' };
+        const result = await runCli(['connection', 'list'], home, cwd);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('visible');
+        expect(result.stderr).toContain('denied');
+        expect(result.stderr).not.toContain('\u001b');
+        expect(result.stderr).not.toContain('\u0007');
+        expect(result.stderr).not.toContain('\u009b');
+        expect(result.stdout).not.toContain('Connections:');
+    });
+
     it('names the host on a 401 (PM ruling 7)', async () => {
         responseStatus = 401;
         responseBody = { message: 'Unauthenticated.' };
