@@ -71,6 +71,28 @@ describe('pages sync', () => {
     ] as const)('formats request failure status %s transport %s body %j count %s', (httpStatus, transportError, body, sentPageCount, expected) => {
         expect(formatPagesSyncFailure({ httpStatus, transportError, body, sentPageCount })).toBe(expected);
     });
+    it.each([
+        ['superseded', [live], 'pages sync superseded: a newer deploy of this project took over'],
+        ['superseded', [], 'pages sync superseded: a newer deploy of this project took over'],
+        ['failed', [live], 'pages sync failed: pages finished but completion could not be recorded; cleanup may be incomplete: deploy again'],
+        ['failed', [], 'pages sync failed: pages finished but completion could not be recorded; cleanup may be incomplete: deploy again'],
+    ] as const)('reports stamp %s with committed pages %j and exits 1', (stamp, rows, warning) => {
+        const body = { pages: [...rows], trashed: [], trash_errors: [], stamp };
+        const input = { httpStatus: 200, transportError: false, sentPageCount: rows.length };
+
+        expect(formatPagesSummary(body.pages, body.trashed, body.trash_errors)).toEqual(rows.map(row => `page ${row.slug}: live ${row.url}`));
+        expect(formatPagesSyncFailure({ ...input, body })).toBe(warning);
+        const outcome = pagesSyncOutcome({ ...input, rows: body.pages, trashErrors: body.trash_errors, stamp: body.stamp });
+        expect(terminalExitCode({ buildFailed: false, yamlSyncFailed: false, outcome })).toBe(1);
+    });
+    it.each(['written', undefined] as const)('keeps successful deploys successful with stamp %s', (stamp) => {
+        const body = { pages: [live], trashed: [], trash_errors: [], stamp };
+        const input = { httpStatus: 200, transportError: false, sentPageCount: 1 };
+
+        expect(formatPagesSyncFailure({ ...input, body })).toBeNull();
+        const outcome = pagesSyncOutcome({ ...input, rows: body.pages, trashErrors: body.trash_errors, stamp });
+        expect(terminalExitCode({ buildFailed: false, yamlSyncFailed: false, outcome })).toBe(0);
+    });
     it.each([false, true].flatMap(buildFailed => [false, true].flatMap(yamlSyncFailed => (['ok', 'failed', 'skipped-old-server'] as PagesSyncOutcome[]).map(outcome => [buildFailed, yamlSyncFailed, outcome] as const))))(
         'returns the terminal code for build %s YAML %s outcome %s', (buildFailed, yamlSyncFailed, outcome) => {
             expect(terminalExitCode({ buildFailed, yamlSyncFailed, outcome })).toBe(buildFailed || yamlSyncFailed || outcome === 'failed' ? 1 : 0);

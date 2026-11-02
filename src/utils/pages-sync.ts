@@ -60,16 +60,22 @@ export function formatPagesSummary(rows: PagesSyncResultRow[], trashed: { slug: 
 
 export type PagesSyncOutcome = 'ok' | 'failed' | 'skipped-old-server';
 
-export function pagesSyncOutcome(input: { httpStatus: number | null; transportError: boolean; rows: PagesSyncResultRow[]; trashErrors: unknown[]; sentPageCount: number }): PagesSyncOutcome {
+export function pagesSyncOutcome(input: { httpStatus: number | null; transportError: boolean; rows: PagesSyncResultRow[]; trashErrors: unknown[]; sentPageCount: number; stamp?: string }): PagesSyncOutcome {
     if (input.transportError) return 'failed';
     if (input.httpStatus === 404 && input.sentPageCount === 0) return 'skipped-old-server';
     if (input.httpStatus === null || input.httpStatus < 200 || input.httpStatus >= 300) return 'failed';
-    return input.rows.some(row => row.status === 'error') || input.trashErrors.length > 0 ? 'failed' : 'ok';
+    return input.stamp === 'superseded' || input.stamp === 'failed' || input.rows.some(row => row.status === 'error') || input.trashErrors.length > 0 ? 'failed' : 'ok';
 }
 
 export function formatPagesSyncFailure(input: { httpStatus: number | null; transportError: boolean; body: unknown; sentPageCount: number }): string | null {
     if (input.transportError) return 'pages sync failed: could not reach the server';
-    if (input.httpStatus !== null && input.httpStatus >= 200 && input.httpStatus < 300) return null;
+    if (input.httpStatus !== null && input.httpStatus >= 200 && input.httpStatus < 300) {
+        if (input.body !== null && typeof input.body === 'object' && 'stamp' in input.body) {
+            if (input.body.stamp === 'superseded') return 'pages sync superseded: a newer deploy of this project took over';
+            if (input.body.stamp === 'failed') return 'pages sync failed: pages finished but completion could not be recorded; cleanup may be incomplete: deploy again';
+        }
+        return null;
+    }
     if (input.httpStatus === 404) return input.sentPageCount === 0 ? null : 'This server does not support pages: yet; upgrade the platform';
     if (input.body !== null && typeof input.body === 'object' && 'code' in input.body && 'message' in input.body && typeof input.body.code === 'string' && typeof input.body.message === 'string') {
         return `pages sync failed (${input.httpStatus} ${input.body.code}): ${input.body.message}`;

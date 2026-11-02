@@ -756,9 +756,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         const trashErrors = result.body?.trash_errors ?? [];
         const input = { httpStatus: result.httpStatus, transportError: result.transportError, sentPageCount: pageFiles.length };
         const failure = formatPagesSyncFailure({ ...input, body: result.body });
-        if (failure) console.error(chalk.red(failure));
         for (const line of formatPagesSummary(rows, trashed, trashErrors)) console.log(line);
-        const outcome = pagesSyncOutcome({ ...input, rows, trashErrors });
+        if (failure) console.error(chalk.red(failure));
+        const outcome = pagesSyncOutcome({ ...input, rows, trashErrors, stamp: result.body?.stamp });
         process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
     };
 
