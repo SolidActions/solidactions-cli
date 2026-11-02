@@ -6,6 +6,8 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
+import { validateItems } from '../utils/validate-items';
+import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
@@ -14,6 +16,7 @@ import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
+import { startDeployStatusPoll } from '../utils/deploy-status-poll';
 import {
     buildDeployForm,
     collectSourceMetadata,
@@ -40,7 +43,7 @@ export const SKILLS_TIP_LINES = [
  * Validate project structure before deployment.
  * Checks for required files and SDK dependency.
  */
-function validateProject(sourceDir: string): { valid: boolean; errors: string[]; warnings: string[] } {
+export function validateProject(sourceDir: string): { valid: boolean; errors: string[]; warnings: string[] } {
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -51,69 +54,91 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
         return { valid: false, errors, warnings };
     }
 
-    // Check for package.json
-    const packageJsonPath = path.join(sourceDir, 'package.json');
-    if (!fs.existsSync(packageJsonPath)) {
-        errors.push('package.json not found. Initialize with: npm init');
+    // Parse solidactions.yaml
+    let config: SolidActionsConfig;
+    try {
+        const configContent = fs.readFileSync(solidactionsPath, 'utf8');
+        config = yaml.load(configContent) as SolidActionsConfig;
+    } catch (err: any) {
+        errors.push(`Failed to parse solidactions.yaml: ${err.message}`);
         return { valid: false, errors, warnings };
     }
 
-    // Read and validate package.json
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-    const allDeps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+    const raw = (config ?? {}) as { workflows?: unknown; pages?: unknown; functions?: unknown };
+    // Presence selects the retained workflow checks: an explicit `workflows: []`
+    // still requires package.json and the SDK.
+    const hasWorkflows = Array.isArray(raw.workflows);
+    const hasPages = Array.isArray(raw.pages) && raw.pages.length > 0;
+    const hasFunctions = Array.isArray(raw.functions) && raw.functions.length > 0;
 
-    // Check for SDK - either @solidactions/sdk or bundled sdk folder
-    const hasSdkPackage = '@solidactions/sdk' in allDeps;
-    const hasBundledSdk = fs.existsSync(path.join(sourceDir, 'sdk'));
-
-    if (!hasSdkPackage && !hasBundledSdk) {
-        errors.push('Missing SDK in package.json dependencies. Run: npm install @solidactions/sdk');
+    if (config?.workflows !== undefined && !Array.isArray(config.workflows)) {
+        errors.push('Invalid solidactions.yaml: workflows section is required.');
+    } else if (!hasWorkflows && !hasPages && !hasFunctions) {
+        errors.push('solidactions.yaml must declare at least one of workflows, pages, functions.');
+        return { valid: false, errors, warnings };
     }
 
-    // Check for TypeScript config if .ts files are used
-    const srcDir = path.join(sourceDir, 'src');
-    const hasTypeScriptFiles = fs.existsSync(srcDir) &&
-        fs.readdirSync(srcDir).some(f => f.endsWith('.ts') || f.endsWith('.tsx'));
-
-    if (hasTypeScriptFiles) {
-        const tsconfigPath = path.join(sourceDir, 'tsconfig.json');
-        if (!fs.existsSync(tsconfigPath)) {
-            warnings.push('TypeScript files detected but tsconfig.json not found. Build may fail.');
+    if (hasWorkflows) {
+        // Check for package.json
+        const packageJsonPath = path.join(sourceDir, 'package.json');
+        if (!fs.existsSync(packageJsonPath)) {
+            errors.push('package.json not found. Initialize with: npm init');
+            return { valid: false, errors, warnings };
         }
-    }
 
-    // Parse and validate solidactions.yaml
-    try {
-        const configContent = fs.readFileSync(solidactionsPath, 'utf8');
-        const config = yaml.load(configContent) as SolidActionsConfig;
+        // Read and validate package.json
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        const allDeps = { ...packageJson.dependencies, ...packageJson.devDependencies };
 
-        if (!config || !config.workflows || !Array.isArray(config.workflows)) {
-            errors.push('Invalid solidactions.yaml: workflows section is required.');
-        } else {
-            // Validate each workflow
-            for (const wf of config.workflows) {
-                if (!wf.name) {
-                    errors.push(`Workflow missing required 'name' field.`);
-                    continue;
-                }
+        // Check for SDK - either @solidactions/sdk or bundled sdk folder
+        const hasSdkPackage = '@solidactions/sdk' in allDeps;
+        const hasBundledSdk = fs.existsSync(path.join(sourceDir, 'sdk'));
 
-                // Must have either command: or file:
-                if (!wf.command && !wf.file) {
-                    errors.push(`Workflow "${wf.name}": must specify either 'command:' or 'file:'.`);
-                    continue;
-                }
+        if (!hasSdkPackage && !hasBundledSdk) {
+            errors.push('Missing SDK in package.json dependencies. Run: npm install @solidactions/sdk');
+        }
 
-                // If file: is specified, verify the file exists
-                if (wf.file) {
-                    const filePath = path.join(sourceDir, wf.file);
-                    if (!fs.existsSync(filePath)) {
-                        errors.push(`Workflow "${wf.name}": file "${wf.file}" not found.`);
-                    }
+        // Check for TypeScript config if .ts files are used
+        const srcDir = path.join(sourceDir, 'src');
+        const hasTypeScriptFiles = fs.existsSync(srcDir) &&
+            fs.readdirSync(srcDir).some(f => f.endsWith('.ts') || f.endsWith('.tsx'));
+
+        if (hasTypeScriptFiles) {
+            const tsconfigPath = path.join(sourceDir, 'tsconfig.json');
+            if (!fs.existsSync(tsconfigPath)) {
+                warnings.push('TypeScript files detected but tsconfig.json not found. Build may fail.');
+            }
+        }
+
+        // Validate each workflow
+        for (const wf of config.workflows ?? []) {
+            if (typeof wf !== 'object' || wf === null) {
+                errors.push(`Workflow entry must be an object with a 'name' field.`);
+                continue;
+            }
+            if (!wf.name) {
+                errors.push(`Workflow missing required 'name' field.`);
+                continue;
+            }
+
+            // Must have either command: or file:
+            if (!wf.command && !wf.file) {
+                errors.push(`Workflow "${wf.name}": must specify either 'command:' or 'file:'.`);
+                continue;
+            }
+
+            // If file: is specified, verify the file exists
+            if (wf.file) {
+                const filePath = path.join(sourceDir, wf.file);
+                if (!fs.existsSync(filePath)) {
+                    errors.push(`Workflow "${wf.name}": file "${wf.file}" not found.`);
                 }
             }
         }
-    } catch (err: any) {
-        errors.push(`Failed to parse solidactions.yaml: ${err.message}`);
+    }
+
+    for (const itemError of validateItems(config, sourceDir)) {
+        errors.push(`${itemError.entry}.${itemError.field}: ${itemError.message}`);
     }
 
     return { valid: errors.length === 0, errors, warnings };
@@ -692,8 +717,54 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             console.log(chalk.yellow(`Git provenance hint: ${hint}`));
         }),
     );
-    if (sourceMetadata) {
+    if (sourceMetadata && yamlConfig?.workflows) {
         console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
+    }
+
+    const pageFiles = listCodePages(yamlConfig ?? {});
+    let pageBodies: Map<string, string>;
+    try {
+        pageBodies = readPageBodies(sourceDir, pageFiles);
+    } catch (error: any) {
+        console.error(chalk.red(`Failed to read page: ${error.message}`));
+        process.exit(1);
+    }
+
+    const finishDeploy = async ({ deploymentId, buildFailed }: { deploymentId: string | null; buildFailed: boolean }): Promise<never> => {
+        let yamlSyncFailed = false;
+        if (yamlConfig) {
+            try {
+                await pushYamlDeclarations(config, projectSlug, yamlConfig);
+            } catch (error: any) {
+                yamlSyncFailed = true;
+                if (error.response?.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
+                } else {
+                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                }
+            }
+        }
+        const codeRef = sourceMetadata ? {
+            branch: sourceMetadata.branch,
+            short_sha: sourceMetadata.short_sha,
+            commit_sha: sourceMetadata.commit_sha,
+            dirty: sourceMetadata.dirty,
+        } : null;
+        const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef);
+        const result = await syncPages(config, projectSlug, payload);
+        const rows = result.body?.pages ?? [];
+        const trashed = result.body?.trashed ?? [];
+        const trashErrors = result.body?.trash_errors ?? [];
+        const input = { httpStatus: result.httpStatus, transportError: result.transportError, sentPageCount: pageFiles.length };
+        const failure = formatPagesSyncFailure({ ...input, body: result.body });
+        for (const line of formatPagesSummary(rows, trashed, trashErrors)) console.log(line);
+        if (failure) console.error(chalk.red(failure));
+        const outcome = pagesSyncOutcome({ ...input, rows, trashErrors, stamp: result.body?.stamp });
+        process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
+    };
+
+    if (!yamlConfig?.workflows) {
+        return finishDeploy({ deploymentId: null, buildFailed: false });
     }
 
     // Plan the file list BEFORE creating the archive write stream so a walk error
@@ -775,112 +846,79 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             // Poll for completion
-            let attempts = 0;
-            const maxAttempts = 600; // 10 minutes of inactivity timeout
-            let lastLogLength = 0;
-
-            const poll = setInterval(async () => {
-                try {
-                    attempts++;
-                    const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
+            startDeployStatusPoll({
+                read: async () => {
+                    const response = await axios.get(projectStatusUrl(config.host, projectSlug), {
                         headers: getApiHeaders(config),
                     });
-                    const { status, build_log } = statusRes.data;
+                    return response.data;
+                },
+                schedule: (tick) => {
+                    const poll = setInterval(tick, 1000);
+                    return () => clearInterval(poll);
+                },
+                maxAttempts: 600, // 10 minutes of inactivity timeout
+                onLog: (newContent) => {
+                    process.stdout.write(chalk.gray(newContent));
+                    if (!newContent.endsWith('\n')) {
+                        process.stdout.write('\n');
+                    }
+                },
+                onWaiting: () => console.log(chalk.gray('Still waiting for build to start...')),
+                onDeployed: async () => {
+                    console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
-                    // Stream new log content
-                    if (build_log && build_log.length > lastLogLength) {
-                        const newContent = build_log.substring(lastLogLength);
-                        process.stdout.write(chalk.gray(newContent));
-                        if (!newContent.endsWith('\n')) {
-                            process.stdout.write('\n');
+                    try {
+                        const confirmedProject = await confirmDeploymentWithRetry(
+                            acceptedDeployment.deploymentId,
+                            () => fetchDeploymentConfirmation(config, projectSlug),
+                        );
+                        for (const line of formatDeploymentConfirmation(
+                            confirmedProject,
+                            acceptedDeployment.deploymentId,
+                            acceptedDeployment.sourceMetadataRejected,
+                        )) {
+                            console.log(line);
                         }
-                        lastLogLength = build_log.length;
-                        attempts = 0; // Reset timeout — build is still progressing
+                    } catch {
+                        console.log(chalk.yellow(
+                            'Build finished; server revision confirmation was unavailable.',
+                        ));
                     }
 
-                    // Periodic waiting indicator when no logs yet
-                    if (attempts > 0 && attempts % 15 === 0 && lastLogLength === 0) {
-                        console.log(chalk.gray('Still waiting for build to start...'));
+                    if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
+                        const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
+                        console.log('');
+                        console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
+                        console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                     }
 
-                    if (status === 'deployed') {
-                        clearInterval(poll);
-                        console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
-
-                        try {
-                            const confirmedProject = await confirmDeploymentWithRetry(
-                                acceptedDeployment.deploymentId,
-                                () => fetchDeploymentConfirmation(config, projectSlug),
-                            );
-                            for (const line of formatDeploymentConfirmation(
-                                confirmedProject,
-                                acceptedDeployment.deploymentId,
-                                acceptedDeployment.sourceMetadataRejected,
-                            )) {
-                                console.log(line);
-                            }
-                        } catch {
+                    if (options.paused) {
+                        console.log('');
+                        if (acceptedDeployment.schedulesPaused === true) {
+                            console.log(chalk.green('Schedules deployed paused.'));
+                            console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                        } else {
                             console.log(chalk.yellow(
-                                'Build finished; server revision confirmation was unavailable.',
+                                'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
                             ));
                         }
-
-                        // Always sync YAML declarations (registers variables and their mappings)
-                        if (yamlConfig) {
-                            try {
-                                await pushYamlDeclarations(config, projectSlug, yamlConfig);
-                            } catch (error: any) {
-                                if (error.response?.status === 401) {
-                                    console.error(chalk.red(authFailedLine(config.host)));
-                                } else {
-                                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
-                                }
-                                cleanupArchive();
-                                process.exit(1);
-                            }
-                        }
-
-                        if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
-                            const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
-                            console.log('');
-                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
-                            console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
-                        }
-
-                        if (options.paused) {
-                            console.log('');
-                            if (acceptedDeployment.schedulesPaused === true) {
-                                console.log(chalk.green('Schedules deployed paused.'));
-                                console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
-                            } else {
-                                console.log(chalk.yellow(
-                                    'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
-                                ));
-                            }
-                        }
-
-                        cleanupArchive();
-                        process.exit(0);
-                    } else if (status === 'error') {
-                        clearInterval(poll);
-                        console.error(chalk.red('\n✗ Build Failed!'));
-                        if (build_log) {
-                            console.log(chalk.yellow('\n--- Full Build Log ---'));
-                            console.log(chalk.gray(build_log));
-                            console.log(chalk.yellow('--- End Build Log ---\n'));
-                        }
-                        cleanupArchive();
-                        process.exit(1);
-                    } else if (attempts >= maxAttempts) {
-                        clearInterval(poll);
-                        console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        cleanupArchive();
-                        process.exit(1);
                     }
-                } catch {
-                    // Ignore transient errors
-                }
-            }, 1000);
+                },
+                onFailed: (build_log) => {
+                    console.error(chalk.red('\n✗ Build Failed!'));
+                    if (build_log) {
+                        console.log(chalk.yellow('\n--- Full Build Log ---'));
+                        console.log(chalk.gray(build_log));
+                        console.log(chalk.yellow('--- End Build Log ---\n'));
+                    }
+                },
+                onTimeout: () => console.error(chalk.red('\nTimeout waiting for build. It might still finish.')),
+                finalize: async (buildFailed) => {
+                    cleanupArchive();
+                    await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed });
+                },
+            });
 
         } catch (error: any) {
             console.error(chalk.red('Deployment failed:'));

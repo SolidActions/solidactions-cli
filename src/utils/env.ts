@@ -15,10 +15,19 @@ export interface ParsedEnvVar {
     databaseName: string | null;
 }
 
+export interface PageCodeEntry { id: string; name: string; file: string; home?: boolean; owner?: 'code'; sources?: Record<string, unknown>[]; }
+export interface PagePointerEntry { id: string | number; name: string; owner: 'editor'; file?: undefined; }
+export type PageEntry = PageCodeEntry | PagePointerEntry;
+export interface FunctionCodeEntry { id: string; name: string; file: string; description?: string; webhook?: boolean; webhook_auth?: 'hmac' | 'basic' | 'header' | 'none'; mcp?: boolean; mcp_tool_name?: string; timeout?: number; confirm?: boolean; input_schema?: Record<string, unknown>; owner?: 'code'; }
+export interface FunctionPointerEntry { id: string | number; name: string; owner: 'editor'; file?: undefined; }
+export type FunctionEntry = FunctionCodeEntry | FunctionPointerEntry;
+
 export interface SolidActionsConfig {
     /** Project name declared at the top of solidactions.yaml (e.g. "sdk-test"). */
     project?: string;
-    workflows: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
+    workflows?: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
+    pages?: PageEntry[];
+    functions?: FunctionEntry[];
     env?: (string | { [key: string]: string | { oauth: string } | { database: string } })[];
     deploy?: {
         exclude?: string[];
