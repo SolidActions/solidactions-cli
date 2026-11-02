@@ -16,7 +16,7 @@ import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
-import { createTerminalGate } from '../utils/terminal-gate';
+import { startDeployStatusPoll } from '../utils/deploy-status-poll';
 import {
     buildDeployForm,
     collectSourceMetadata,
@@ -846,106 +846,79 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
 
             // Poll for completion
-            let attempts = 0;
-            const maxAttempts = 600; // 10 minutes of inactivity timeout
-            let lastLogLength = 0;
-            let pollInFlight = false;
-            const terminalGate = createTerminalGate();
-
-            const poll = setInterval(async () => {
-                if (pollInFlight) return;
-                pollInFlight = true;
-                try {
-                    attempts++;
-                    const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
+            startDeployStatusPoll({
+                read: async () => {
+                    const response = await axios.get(projectStatusUrl(config.host, projectSlug), {
                         headers: getApiHeaders(config),
                     });
-                    const { status, build_log } = statusRes.data;
+                    return response.data;
+                },
+                schedule: (tick) => {
+                    const poll = setInterval(tick, 1000);
+                    return () => clearInterval(poll);
+                },
+                maxAttempts: 600, // 10 minutes of inactivity timeout
+                onLog: (newContent) => {
+                    process.stdout.write(chalk.gray(newContent));
+                    if (!newContent.endsWith('\n')) {
+                        process.stdout.write('\n');
+                    }
+                },
+                onWaiting: () => console.log(chalk.gray('Still waiting for build to start...')),
+                onDeployed: async () => {
+                    console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
-                    // Stream new log content
-                    if (build_log && build_log.length > lastLogLength) {
-                        const newContent = build_log.substring(lastLogLength);
-                        process.stdout.write(chalk.gray(newContent));
-                        if (!newContent.endsWith('\n')) {
-                            process.stdout.write('\n');
+                    try {
+                        const confirmedProject = await confirmDeploymentWithRetry(
+                            acceptedDeployment.deploymentId,
+                            () => fetchDeploymentConfirmation(config, projectSlug),
+                        );
+                        for (const line of formatDeploymentConfirmation(
+                            confirmedProject,
+                            acceptedDeployment.deploymentId,
+                            acceptedDeployment.sourceMetadataRejected,
+                        )) {
+                            console.log(line);
                         }
-                        lastLogLength = build_log.length;
-                        attempts = 0; // Reset timeout — build is still progressing
+                    } catch {
+                        console.log(chalk.yellow(
+                            'Build finished; server revision confirmation was unavailable.',
+                        ));
                     }
 
-                    // Periodic waiting indicator when no logs yet
-                    if (attempts > 0 && attempts % 15 === 0 && lastLogLength === 0) {
-                        console.log(chalk.gray('Still waiting for build to start...'));
+                    if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
+                        const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
+                        console.log('');
+                        console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
+                        console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
                     }
 
-                    if (status === 'deployed') {
-                        if (!terminalGate.claim()) return;
-                        clearInterval(poll);
-                        console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
-
-                        try {
-                            const confirmedProject = await confirmDeploymentWithRetry(
-                                acceptedDeployment.deploymentId,
-                                () => fetchDeploymentConfirmation(config, projectSlug),
-                            );
-                            for (const line of formatDeploymentConfirmation(
-                                confirmedProject,
-                                acceptedDeployment.deploymentId,
-                                acceptedDeployment.sourceMetadataRejected,
-                            )) {
-                                console.log(line);
-                            }
-                        } catch {
+                    if (options.paused) {
+                        console.log('');
+                        if (acceptedDeployment.schedulesPaused === true) {
+                            console.log(chalk.green('Schedules deployed paused.'));
+                            console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
+                        } else {
                             console.log(chalk.yellow(
-                                'Build finished; server revision confirmation was unavailable.',
+                                'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
                             ));
                         }
-
-                        if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
-                            const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
-                            console.log('');
-                            console.log(chalk.blue(`ℹ  Webhook secret: run \`solidactions webhook secret ${slugifyName(projectName) || projectName}${envFlag}\` to retrieve the generated secret.`));
-                            console.log(chalk.gray(`   Set the same value in your sender (e.g. Telegram setWebhook secret_token).`));
-                        }
-
-                        if (options.paused) {
-                            console.log('');
-                            if (acceptedDeployment.schedulesPaused === true) {
-                                console.log(chalk.green('Schedules deployed paused.'));
-                                console.log(chalk.gray(`Enable one when ready with: solidactions schedule enable ${projectSlug} <schedule-id>`));
-                            } else {
-                                console.log(chalk.yellow(
-                                    'Warning: server did not acknowledge paused schedules; verify schedules before relying on them being paused.',
-                                ));
-                            }
-                        }
-
-                        cleanupArchive();
-                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: false });
-                    } else if (status === 'error') {
-                        if (!terminalGate.claim()) return;
-                        clearInterval(poll);
-                        console.error(chalk.red('\n✗ Build Failed!'));
-                        if (build_log) {
-                            console.log(chalk.yellow('\n--- Full Build Log ---'));
-                            console.log(chalk.gray(build_log));
-                            console.log(chalk.yellow('--- End Build Log ---\n'));
-                        }
-                        cleanupArchive();
-                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: true });
-                    } else if (attempts >= maxAttempts) {
-                        if (!terminalGate.claim()) return;
-                        clearInterval(poll);
-                        console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
-                        cleanupArchive();
-                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: true });
                     }
-                } catch {
-                    // Ignore transient errors
-                } finally {
-                    pollInFlight = false;
-                }
-            }, 1000);
+                },
+                onFailed: (build_log) => {
+                    console.error(chalk.red('\n✗ Build Failed!'));
+                    if (build_log) {
+                        console.log(chalk.yellow('\n--- Full Build Log ---'));
+                        console.log(chalk.gray(build_log));
+                        console.log(chalk.yellow('--- End Build Log ---\n'));
+                    }
+                },
+                onTimeout: () => console.error(chalk.red('\nTimeout waiting for build. It might still finish.')),
+                finalize: async (buildFailed) => {
+                    cleanupArchive();
+                    await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed });
+                },
+            });
 
         } catch (error: any) {
             console.error(chalk.red('Deployment failed:'));
