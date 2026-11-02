@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { validateItems } from '../utils/validate-items';
+import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
@@ -715,8 +716,54 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             console.log(chalk.yellow(`Git provenance hint: ${hint}`));
         }),
     );
-    if (sourceMetadata) {
+    if (sourceMetadata && yamlConfig?.workflows) {
         console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
+    }
+
+    const pageFiles = listCodePages(yamlConfig ?? {});
+    let pageBodies: Map<string, string>;
+    try {
+        pageBodies = readPageBodies(sourceDir, pageFiles);
+    } catch (error: any) {
+        console.error(chalk.red(`Failed to read page: ${error.message}`));
+        process.exit(1);
+    }
+
+    const finishDeploy = async ({ deploymentId, buildFailed }: { deploymentId: string | null; buildFailed: boolean }): Promise<never> => {
+        let yamlSyncFailed = false;
+        if (yamlConfig) {
+            try {
+                await pushYamlDeclarations(config, projectSlug, yamlConfig);
+            } catch (error: any) {
+                yamlSyncFailed = true;
+                if (error.response?.status === 401) {
+                    console.error(chalk.red(authFailedLine(config.host)));
+                } else {
+                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
+                }
+            }
+        }
+        const codeRef = sourceMetadata ? {
+            branch: sourceMetadata.branch,
+            short_sha: sourceMetadata.short_sha,
+            commit_sha: sourceMetadata.commit_sha,
+            dirty: sourceMetadata.dirty,
+        } : null;
+        const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef);
+        const result = await syncPages(config, projectSlug, payload);
+        const rows = result.body?.pages ?? [];
+        const trashed = result.body?.trashed ?? [];
+        const trashErrors = result.body?.trash_errors ?? [];
+        const input = { httpStatus: result.httpStatus, transportError: result.transportError, sentPageCount: pageFiles.length };
+        const failure = formatPagesSyncFailure({ ...input, body: result.body });
+        if (failure) console.error(chalk.red(failure));
+        for (const line of formatPagesSummary(rows, trashed, trashErrors)) console.log(line);
+        const outcome = pagesSyncOutcome({ ...input, rows, trashErrors });
+        process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
+    };
+
+    if (!yamlConfig?.workflows) {
+        return finishDeploy({ deploymentId: null, buildFailed: false });
     }
 
     // Plan the file list BEFORE creating the archive write stream so a walk error
@@ -848,21 +895,6 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             ));
                         }
 
-                        // Always sync YAML declarations (registers variables and their mappings)
-                        if (yamlConfig) {
-                            try {
-                                await pushYamlDeclarations(config, projectSlug, yamlConfig);
-                            } catch (error: any) {
-                                if (error.response?.status === 401) {
-                                    console.error(chalk.red(authFailedLine(config.host)));
-                                } else {
-                                    console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
-                                }
-                                cleanupArchive();
-                                process.exit(1);
-                            }
-                        }
-
                         if (yamlConfig && shouldPrintWebhookSecretNotice(yamlConfig.workflows ?? [])) {
                             const envFlag = environment !== 'dev' ? ` -e ${environment}` : '';
                             console.log('');
@@ -883,7 +915,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         }
 
                         cleanupArchive();
-                        process.exit(0);
+                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: false });
                     } else if (status === 'error') {
                         clearInterval(poll);
                         console.error(chalk.red('\n✗ Build Failed!'));
@@ -893,12 +925,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                             console.log(chalk.yellow('--- End Build Log ---\n'));
                         }
                         cleanupArchive();
-                        process.exit(1);
+                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: true });
                     } else if (attempts >= maxAttempts) {
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
                         cleanupArchive();
-                        process.exit(1);
+                        await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: true });
                     }
                 } catch {
                     // Ignore transient errors
