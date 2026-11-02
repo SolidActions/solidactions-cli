@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
+import { validateItems } from '../utils/validate-items';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
@@ -40,7 +41,7 @@ export const SKILLS_TIP_LINES = [
  * Validate project structure before deployment.
  * Checks for required files and SDK dependency.
  */
-function validateProject(sourceDir: string): { valid: boolean; errors: string[]; warnings: string[] } {
+export function validateProject(sourceDir: string): { valid: boolean; errors: string[]; warnings: string[] } {
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -51,69 +52,91 @@ function validateProject(sourceDir: string): { valid: boolean; errors: string[];
         return { valid: false, errors, warnings };
     }
 
-    // Check for package.json
-    const packageJsonPath = path.join(sourceDir, 'package.json');
-    if (!fs.existsSync(packageJsonPath)) {
-        errors.push('package.json not found. Initialize with: npm init');
+    // Parse solidactions.yaml
+    let config: SolidActionsConfig;
+    try {
+        const configContent = fs.readFileSync(solidactionsPath, 'utf8');
+        config = yaml.load(configContent) as SolidActionsConfig;
+    } catch (err: any) {
+        errors.push(`Failed to parse solidactions.yaml: ${err.message}`);
         return { valid: false, errors, warnings };
     }
 
-    // Read and validate package.json
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-    const allDeps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+    const raw = (config ?? {}) as { workflows?: unknown; pages?: unknown; functions?: unknown };
+    // Presence selects the retained workflow checks: an explicit `workflows: []`
+    // still requires package.json and the SDK.
+    const hasWorkflows = Array.isArray(raw.workflows);
+    const hasPages = Array.isArray(raw.pages) && raw.pages.length > 0;
+    const hasFunctions = Array.isArray(raw.functions) && raw.functions.length > 0;
 
-    // Check for SDK - either @solidactions/sdk or bundled sdk folder
-    const hasSdkPackage = '@solidactions/sdk' in allDeps;
-    const hasBundledSdk = fs.existsSync(path.join(sourceDir, 'sdk'));
-
-    if (!hasSdkPackage && !hasBundledSdk) {
-        errors.push('Missing SDK in package.json dependencies. Run: npm install @solidactions/sdk');
+    if (config?.workflows !== undefined && !Array.isArray(config.workflows)) {
+        errors.push('Invalid solidactions.yaml: workflows section is required.');
+    } else if (!hasWorkflows && !hasPages && !hasFunctions) {
+        errors.push('solidactions.yaml must declare at least one of workflows, pages, functions.');
+        return { valid: false, errors, warnings };
     }
 
-    // Check for TypeScript config if .ts files are used
-    const srcDir = path.join(sourceDir, 'src');
-    const hasTypeScriptFiles = fs.existsSync(srcDir) &&
-        fs.readdirSync(srcDir).some(f => f.endsWith('.ts') || f.endsWith('.tsx'));
-
-    if (hasTypeScriptFiles) {
-        const tsconfigPath = path.join(sourceDir, 'tsconfig.json');
-        if (!fs.existsSync(tsconfigPath)) {
-            warnings.push('TypeScript files detected but tsconfig.json not found. Build may fail.');
+    if (hasWorkflows) {
+        // Check for package.json
+        const packageJsonPath = path.join(sourceDir, 'package.json');
+        if (!fs.existsSync(packageJsonPath)) {
+            errors.push('package.json not found. Initialize with: npm init');
+            return { valid: false, errors, warnings };
         }
-    }
 
-    // Parse and validate solidactions.yaml
-    try {
-        const configContent = fs.readFileSync(solidactionsPath, 'utf8');
-        const config = yaml.load(configContent) as SolidActionsConfig;
+        // Read and validate package.json
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        const allDeps = { ...packageJson.dependencies, ...packageJson.devDependencies };
 
-        if (!config || !config.workflows || !Array.isArray(config.workflows)) {
-            errors.push('Invalid solidactions.yaml: workflows section is required.');
-        } else {
-            // Validate each workflow
-            for (const wf of config.workflows) {
-                if (!wf.name) {
-                    errors.push(`Workflow missing required 'name' field.`);
-                    continue;
-                }
+        // Check for SDK - either @solidactions/sdk or bundled sdk folder
+        const hasSdkPackage = '@solidactions/sdk' in allDeps;
+        const hasBundledSdk = fs.existsSync(path.join(sourceDir, 'sdk'));
 
-                // Must have either command: or file:
-                if (!wf.command && !wf.file) {
-                    errors.push(`Workflow "${wf.name}": must specify either 'command:' or 'file:'.`);
-                    continue;
-                }
+        if (!hasSdkPackage && !hasBundledSdk) {
+            errors.push('Missing SDK in package.json dependencies. Run: npm install @solidactions/sdk');
+        }
 
-                // If file: is specified, verify the file exists
-                if (wf.file) {
-                    const filePath = path.join(sourceDir, wf.file);
-                    if (!fs.existsSync(filePath)) {
-                        errors.push(`Workflow "${wf.name}": file "${wf.file}" not found.`);
-                    }
+        // Check for TypeScript config if .ts files are used
+        const srcDir = path.join(sourceDir, 'src');
+        const hasTypeScriptFiles = fs.existsSync(srcDir) &&
+            fs.readdirSync(srcDir).some(f => f.endsWith('.ts') || f.endsWith('.tsx'));
+
+        if (hasTypeScriptFiles) {
+            const tsconfigPath = path.join(sourceDir, 'tsconfig.json');
+            if (!fs.existsSync(tsconfigPath)) {
+                warnings.push('TypeScript files detected but tsconfig.json not found. Build may fail.');
+            }
+        }
+
+        // Validate each workflow
+        for (const wf of config.workflows ?? []) {
+            if (typeof wf !== 'object' || wf === null) {
+                errors.push(`Workflow entry must be an object with a 'name' field.`);
+                continue;
+            }
+            if (!wf.name) {
+                errors.push(`Workflow missing required 'name' field.`);
+                continue;
+            }
+
+            // Must have either command: or file:
+            if (!wf.command && !wf.file) {
+                errors.push(`Workflow "${wf.name}": must specify either 'command:' or 'file:'.`);
+                continue;
+            }
+
+            // If file: is specified, verify the file exists
+            if (wf.file) {
+                const filePath = path.join(sourceDir, wf.file);
+                if (!fs.existsSync(filePath)) {
+                    errors.push(`Workflow "${wf.name}": file "${wf.file}" not found.`);
                 }
             }
         }
-    } catch (err: any) {
-        errors.push(`Failed to parse solidactions.yaml: ${err.message}`);
+    }
+
+    for (const itemError of validateItems(config, sourceDir)) {
+        errors.push(`${itemError.entry}.${itemError.field}: ${itemError.message}`);
     }
 
     return { valid: errors.length === 0, errors, warnings };
