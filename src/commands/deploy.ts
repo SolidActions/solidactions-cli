@@ -16,6 +16,7 @@ import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
 import { createTarArchive } from '../utils/tar-archive';
+import { createTerminalGate } from '../utils/terminal-gate';
 import {
     buildDeployForm,
     collectSourceMetadata,
@@ -848,8 +849,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             let attempts = 0;
             const maxAttempts = 600; // 10 minutes of inactivity timeout
             let lastLogLength = 0;
+            let pollInFlight = false;
+            const terminalGate = createTerminalGate();
 
             const poll = setInterval(async () => {
+                if (pollInFlight) return;
+                pollInFlight = true;
                 try {
                     attempts++;
                     const statusRes = await axios.get(projectStatusUrl(config.host, projectSlug), {
@@ -874,6 +879,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     }
 
                     if (status === 'deployed') {
+                        if (!terminalGate.claim()) return;
                         clearInterval(poll);
                         console.log(chalk.green(`\n✓ Deployed to ${projectSlug}${envLabel}!`));
 
@@ -917,6 +923,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         cleanupArchive();
                         await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: false });
                     } else if (status === 'error') {
+                        if (!terminalGate.claim()) return;
                         clearInterval(poll);
                         console.error(chalk.red('\n✗ Build Failed!'));
                         if (build_log) {
@@ -927,6 +934,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                         cleanupArchive();
                         await finishDeploy({ deploymentId: acceptedDeployment.deploymentId, buildFailed: true });
                     } else if (attempts >= maxAttempts) {
+                        if (!terminalGate.claim()) return;
                         clearInterval(poll);
                         console.error(chalk.red('\nTimeout waiting for build. It might still finish.'));
                         cleanupArchive();
@@ -934,6 +942,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                     }
                 } catch {
                     // Ignore transient errors
+                } finally {
+                    pollInFlight = false;
                 }
             }, 1000);
 
