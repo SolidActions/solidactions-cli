@@ -100,6 +100,10 @@ export function formatFunctionsSyncFailure(input: { httpStatus: number | null; t
     if (input.body !== null && typeof input.body === 'object' && 'code' in input.body && 'message' in input.body && typeof input.body.code === 'string' && typeof input.body.message === 'string') {
         return `functions sync failed (${input.httpStatus} ${input.body.code}): ${input.body.message}`;
     }
+    // Laravel's own validation 422 carries `message` and `errors` but no `code`.
+    if (input.body !== null && typeof input.body === 'object' && 'message' in input.body && typeof input.body.message === 'string') {
+        return `functions sync failed (HTTP ${input.httpStatus}): ${input.body.message}`;
+    }
     return `functions sync failed (HTTP ${input.httpStatus})`;
 }
 

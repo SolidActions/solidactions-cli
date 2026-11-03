@@ -86,6 +86,11 @@ describe('functions sync', () => {
         [422, false, { code: 'invalid', message: 'Bad request' }, 1, 'functions sync failed (422 invalid): Bad request'],
         [409, false, { code: 'deploy_conflict', message: "Another deploy of this project's functions is running. Try again when it finishes." }, 1, "functions sync failed (409 deploy_conflict): Another deploy of this project's functions is running. Try again when it finishes."],
         [503, false, { code: 'functions_disabled', message: 'Fast functions are off on this stack.' }, 1, 'functions sync failed (503 functions_disabled): Fast functions are off on this stack.'],
+        [422, false, { message: 'Basic auth for functions arrives with the secret surface in a later release; use hmac, header or none for now.', errors: { 'functions.0.webhook_auth': ['Basic auth for functions arrives with the secret surface in a later release; use hmac, header or none for now.'] } }, 1, 'functions sync failed (HTTP 422): Basic auth for functions arrives with the secret surface in a later release; use hmac, header or none for now.'],
+        [500, false, { message: 'Server Error' }, 1, 'functions sync failed (HTTP 500): Server Error'],
+        [422, false, { errors: { 'functions.0.webhook_auth': ['x'] } }, 1, 'functions sync failed (HTTP 422)'],
+        [422, false, { message: 42, errors: {} }, 1, 'functions sync failed (HTTP 422)'],
+        [422, false, { message: ['not', 'a', 'string'] }, 1, 'functions sync failed (HTTP 422)'],
     ] as const)('formats request failure status %s transport %s body %j count %s', (httpStatus, transportError, body, sentFunctionCount, expected) => {
         expect(formatFunctionsSyncFailure({ httpStatus, transportError, body, sentFunctionCount })).toBe(expected);
     });
