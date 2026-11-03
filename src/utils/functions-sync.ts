@@ -66,7 +66,7 @@ export function formatFunctionsSummary(rows: FunctionSyncResultRow[], retired: {
             ? `function ${row.id}: error ${row.error!.code}: ${row.error!.message}`
             : `function ${row.id}: ${row.status}${row.webhook_url === null ? '' : ` ${row.webhook_url}`}`),
         ...retired.map(row => `function ${row.id}: retired`),
-        ...retireErrors.map(row => `function ${row.id}: could not retire: ${row.error.code}: ${row.error.message}`),
+        ...retireErrors.map(row => `function ${row.id}: retired, its script delete failed and will retry: ${row.error.message}`),
     ];
 }
 
@@ -82,7 +82,7 @@ export function functionsSyncOutcome(input: { httpStatus: number | null; transpo
     if (input.httpStatus === 404 && input.sentFunctionCount === 0) return 'skipped-old-server';
     if (input.httpStatus === 503 && input.sentFunctionCount === 0 && responseBodyCode(input.body) === 'functions_disabled') return 'skipped-old-server';
     if (input.httpStatus === null || input.httpStatus < 200 || input.httpStatus >= 300) return 'failed';
-    return input.rows.some(row => row.status === 'error') || input.retireErrors.length > 0 ? 'failed' : 'ok';
+    return input.rows.some(row => row.status === 'error') ? 'failed' : 'ok';
 }
 
 /** Joins the functions and pages outcomes for the deploy exit code. */

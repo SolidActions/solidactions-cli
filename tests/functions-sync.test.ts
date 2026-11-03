@@ -44,7 +44,7 @@ describe('functions sync', () => {
             functions: [{ ...functions[0], source: 'src-hi' }, { ...functions[1], source: 'src-rich' }],
         });
     });
-    it('formats live, unchanged, function error, retired and retire error lines in order', () => {
+    it('formats live, unchanged, function error, retired and retired-but-delete-will-retry lines in order', () => {
         expect(formatFunctionsSummary(
             [live, { ...live, id: 'bare', webhook_url: null }, unchanged, failed],
             [{ id: 'old' }],
@@ -55,7 +55,7 @@ describe('functions sync', () => {
             'function hello: unchanged https://example.com/api/webhook/token123',
             'function enrich: error compile_failed: Line 3: unexpected token',
             'function old: retired',
-            'function stuck: could not retire: deploy_failed: Cloudflare refused',
+            'function stuck: retired, its script delete failed and will retry: Cloudflare refused',
         ]);
     });
     it.each([
@@ -70,7 +70,10 @@ describe('functions sync', () => {
         [503, false, { code: 'something_else', message: 'Try again later.' }, [], [], 0, 'failed'],
         [null, true, null, [], [], 1, 'failed'],
         [200, false, null, [failed], [], 1, 'failed'],
-        [200, false, null, [live], [{ id: 'stuck' }], 1, 'failed'],
+        [200, false, null, [live], [{ id: 'stuck' }], 1, 'ok'],
+        [200, false, null, [], [{ id: 'stuck' }], 0, 'ok'],
+        [200, false, null, [failed], [{ id: 'stuck' }], 1, 'failed'],
+        [500, false, null, [], [{ id: 'stuck' }], 1, 'failed'],
         [200, false, null, [live], [], 1, 'ok'],
         [200, false, null, [unchanged], [], 1, 'ok'],
     ] as const)('classifies status %s transport %s body %j rows %j retire errors %j count %s as %s', (httpStatus, transportError, body, rows, retireErrors, sentFunctionCount, expected) => {
