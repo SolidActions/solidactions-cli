@@ -8,6 +8,7 @@ import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { validateItems } from '../utils/validate-items';
 import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
+import { buildFunctionsSyncPayload, formatFunctionsSummary, formatFunctionsSyncFailure, functionsSyncOutcome, joinSyncOutcomes, listCodeFunctions, readFunctionSources, syncFunctions } from '../utils/functions-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
@@ -730,6 +731,35 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         process.exit(1);
     }
 
+    const codeRef = sourceMetadata ? {
+        branch: sourceMetadata.branch,
+        short_sha: sourceMetadata.short_sha,
+        commit_sha: sourceMetadata.commit_sha,
+        dirty: sourceMetadata.dirty,
+    } : null;
+
+    // Functions sync runs before the workflow archive build (spec 3.1): the
+    // server compiles and uploads each code function on its own. Editor
+    // pointers are never sent (listCodeFunctions skips them).
+    const functionFiles = listCodeFunctions(yamlConfig ?? {});
+    let functionSources: Map<string, string>;
+    try {
+        functionSources = readFunctionSources(sourceDir, functionFiles);
+    } catch (error: any) {
+        console.error(chalk.red(`Failed to read function: ${error.message}`));
+        process.exit(1);
+    }
+    const functionsPayload = buildFunctionsSyncPayload(functionFiles, functionSources, codeRef);
+    const functionsResult = await syncFunctions(config, projectSlug, functionsPayload);
+    const functionRows = functionsResult.body?.functions ?? [];
+    const retiredFunctions = functionsResult.body?.retired ?? [];
+    const retireErrors = functionsResult.body?.retire_errors ?? [];
+    const functionsInput = { httpStatus: functionsResult.httpStatus, transportError: functionsResult.transportError, sentFunctionCount: functionFiles.length };
+    const functionsFailure = formatFunctionsSyncFailure({ ...functionsInput, body: functionsResult.body });
+    for (const line of formatFunctionsSummary(functionRows, retiredFunctions, retireErrors)) console.log(line);
+    if (functionsFailure) console.error(chalk.red(functionsFailure));
+    const functionsOutcome = functionsSyncOutcome({ ...functionsInput, body: functionsResult.body, rows: functionRows, retireErrors });
+
     const finishDeploy = async ({ deploymentId, buildFailed }: { deploymentId: string | null; buildFailed: boolean }): Promise<never> => {
         let yamlSyncFailed = false;
         if (yamlConfig) {
@@ -744,12 +774,6 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 }
             }
         }
-        const codeRef = sourceMetadata ? {
-            branch: sourceMetadata.branch,
-            short_sha: sourceMetadata.short_sha,
-            commit_sha: sourceMetadata.commit_sha,
-            dirty: sourceMetadata.dirty,
-        } : null;
         const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef);
         const result = await syncPages(config, projectSlug, payload);
         const rows = result.body?.pages ?? [];
@@ -759,7 +783,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         const failure = formatPagesSyncFailure({ ...input, body: result.body });
         for (const line of formatPagesSummary(rows, trashed, trashErrors)) console.log(line);
         if (failure) console.error(chalk.red(failure));
-        const outcome = pagesSyncOutcome({ ...input, rows, trashErrors, stamp: result.body?.stamp });
+        const pagesOutcome = pagesSyncOutcome({ ...input, rows, trashErrors, stamp: result.body?.stamp });
+        const outcome = joinSyncOutcomes(functionsOutcome, pagesOutcome);
         process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
     };
 
