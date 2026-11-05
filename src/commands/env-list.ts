@@ -85,6 +85,10 @@ export async function envList(projectName?: string, options: EnvListOptions = {}
                             || mapping.yaml_default_workspace_database_name
                             || 'Database';
                     }
+                } else if (mapping.source_type === 'docs_node') {
+                    value = '-';
+                    type = 'docs';
+                    source = mapping.yaml_default_docs_path || 'Docs';
                 } else if (mapping.global_variable_key) {
                     type = 'global';
                     source = mapping.global_variable_key;

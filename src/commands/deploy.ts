@@ -302,6 +302,7 @@ interface SyncYamlWarning {
     reason?: string;
     key?: string;
     name?: string;
+    message?: string;
     [key: string]: unknown;
 }
 
@@ -335,6 +336,15 @@ export function formatSyncYamlWarnings(warnings: unknown): string[] {
             }
         }
 
+        // Docs warnings carry their own full sentence; print it as is.
+        if (
+            (warning?.reason === 'docs_path_not_found' || warning?.reason === 'docs_not_granted')
+            && typeof warning.message === 'string'
+            && warning.message !== ''
+        ) {
+            return warning.message;
+        }
+
         return `${envName} → unresolved (${warning?.reason ?? 'unknown reason'})`;
     });
 }
@@ -364,6 +374,7 @@ export async function pushYamlDeclarations(
         yaml_default_global_key: v.mappedTo,
         yaml_default_oauth_name: v.oauthName,
         yaml_default_database_name: v.databaseName,
+        yaml_default_docs_path: v.docsPath,
         source: 'yaml' as const,
     }));
 
@@ -394,7 +405,11 @@ export async function pushYamlDeclarations(
     for (const warning of warnings) {
         console.log(chalk.yellow(`  ⚠ ${warning}`));
     }
-    if (warnings.length > 0) {
+    // A docs warning does not hold the variable back (it still arrives, with
+    // level "none"), so the footer is only true when some warning is not a docs one.
+    const hasNonDocsWarning = Array.isArray(rawWarnings)
+        && rawWarnings.some((w: SyncYamlWarning) => w?.reason !== 'docs_path_not_found' && w?.reason !== 'docs_not_granted');
+    if (hasNonDocsWarning) {
         console.log(chalk.yellow("  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies)."));
     }
 }

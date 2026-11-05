@@ -20,7 +20,7 @@ describe('parseYamlEnvVars: database form', () => {
         const config = configWithEnv([{ MYDB: { database: 'analytics' } }]);
         const parsed = parseYamlEnvVars(config);
         expect(parsed).toEqual([
-            { key: 'MYDB', mappedTo: null, oauthName: null, databaseName: 'analytics' },
+            { key: 'MYDB', mappedTo: null, oauthName: null, databaseName: 'analytics', docsPath: null },
         ]);
     });
 
@@ -33,10 +33,10 @@ describe('parseYamlEnvVars: database form', () => {
         ]);
         const parsed = parseYamlEnvVars(config);
         expect(parsed).toEqual([
-            { key: 'PLAIN_VAR', mappedTo: null, oauthName: null, databaseName: null },
-            { key: 'MAPPED', mappedTo: 'GLOBAL_KEY', oauthName: null, databaseName: null },
-            { key: 'GCAL', mappedTo: null, oauthName: 'Google Calendar', databaseName: null },
-            { key: 'MYDB', mappedTo: null, oauthName: null, databaseName: 'analytics' },
+            { key: 'PLAIN_VAR', mappedTo: null, oauthName: null, databaseName: null, docsPath: null },
+            { key: 'MAPPED', mappedTo: 'GLOBAL_KEY', oauthName: null, databaseName: null, docsPath: null },
+            { key: 'GCAL', mappedTo: null, oauthName: 'Google Calendar', databaseName: null, docsPath: null },
+            { key: 'MYDB', mappedTo: null, oauthName: null, databaseName: 'analytics', docsPath: null },
         ]);
     });
 
