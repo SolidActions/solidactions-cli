@@ -7,7 +7,8 @@ import yaml from 'js-yaml';
 import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { validateItems } from '../utils/validate-items';
-import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
+import { buildAppSyncPayload, emptyColourWarnings, formatAppSync, syncApp } from '../utils/app-sync';
+import { buildPagesSyncPayload,formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { buildFunctionsSyncPayload, formatFunctionsSummary, formatFunctionsSyncFailure, functionsSyncOutcome, joinSyncOutcomes, listCodeFunctions, readFunctionSources, syncFunctions } from '../utils/functions-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
@@ -789,6 +790,15 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 }
             }
         }
+        for (const warning of emptyColourWarnings(yamlConfig?.app)) console.log(chalk.yellow(warning));
+        const appResult = await syncApp(config, projectSlug, buildAppSyncPayload(yamlConfig ?? {}));
+        const appSummary = formatAppSync(appResult, yamlConfig?.app != null);
+        if (appResult.httpStatus === 401) console.error(chalk.red(authFailedLine(config.host)));
+        for (const line of appSummary.lines) {
+            if (appSummary.failed) console.error(chalk.red(line));
+            else console.log(line.startsWith('✓') ? chalk.green(line) : line);
+        }
+        yamlSyncFailed = yamlSyncFailed || appSummary.failed;
         const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef);
         const result = await syncPages(config, projectSlug, payload);
         const rows = result.body?.pages ?? [];

@@ -23,6 +23,8 @@ export type PageEntry = PageCodeEntry | PagePointerEntry;
 export interface FunctionCodeEntry { id: string; name: string; file: string; description?: string; webhook?: boolean; webhook_auth?: 'hmac' | 'basic' | 'header' | 'none'; mcp?: boolean; mcp_tool_name?: string; timeout?: number; confirm?: boolean; input_schema?: Record<string, unknown>; owner?: 'code'; }
 export interface FunctionPointerEntry { id: string | number; name: string; owner: 'editor'; file?: undefined; }
 export type FunctionEntry = FunctionCodeEntry | FunctionPointerEntry;
+export interface AppPaletteBlock { sidebar_bg?: string | null; sidebar_fg?: string | null; accent?: string | null; mark?: string | null; }
+export interface AppBlock { sidebar?: 'shown' | 'hidden'; theme?: { light?: AppPaletteBlock | null; dark?: AppPaletteBlock | null } | null; }
 
 export interface SolidActionsConfig {
     /** Project name declared at the top of solidactions.yaml (e.g. "sdk-test"). */
@@ -30,6 +32,7 @@ export interface SolidActionsConfig {
     workflows?: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
     pages?: PageEntry[];
     functions?: FunctionEntry[];
+    app?: AppBlock;
     env?: (string | { [key: string]: string | { oauth: string } | { database: string } | { docs: string } })[];
     deploy?: {
         exclude?: string[];
