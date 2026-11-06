@@ -23,6 +23,9 @@ import { SolidActionsConfig } from '../src/utils/env';
 
 let server: http.Server;
 let port: number;
+
+const DOCS_NOT_GRANTED_MESSAGE = 'App: social-stats has no access to Content/Posts; share it through the docs access API or the MCP access tool (workflows_guide topic docs-access)';
+const DOCS_NOT_FOUND_MESSAGE = 'no folder or doc at Content/Drafts';
 let lastRequest: { path: string; body: any } | null = null;
 
 /** Patch console.log to capture output lines (matches tests/doc-push.test.ts). */
@@ -63,6 +66,49 @@ beforeAll(async () => {
                             env_name: 'ANALYTICS_DB',
                             reason: 'workspace_database_not_found_in_workspace',
                             name: 'does-not-exist',
+                        },
+                    ],
+                }));
+                return;
+            }
+            if (req.url?.includes('/projects/mixed-warn-project/')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    message: 'YAML declarations synced.',
+                    count: 2,
+                    warnings: [
+                        {
+                            env_name: 'POSTS',
+                            reason: 'docs_not_granted',
+                            path: 'Content/Posts',
+                            message: DOCS_NOT_GRANTED_MESSAGE,
+                        },
+                        {
+                            env_name: 'ANALYTICS_DB',
+                            reason: 'workspace_database_not_found_in_workspace',
+                            name: 'does-not-exist',
+                        },
+                    ],
+                }));
+                return;
+            }
+            if (req.url?.includes('/projects/docs-warn-project/')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    message: 'YAML declarations synced.',
+                    count: 2,
+                    warnings: [
+                        {
+                            env_name: 'POSTS',
+                            reason: 'docs_not_granted',
+                            path: 'Content/Posts',
+                            message: DOCS_NOT_GRANTED_MESSAGE,
+                        },
+                        {
+                            env_name: 'DRAFTS',
+                            reason: 'docs_path_not_found',
+                            path: 'Content/Drafts',
+                            message: DOCS_NOT_FOUND_MESSAGE,
                         },
                     ],
                 }));
@@ -110,6 +156,37 @@ describe('pushYamlDeclarations: database declarations carried through', () => {
                     yaml_default_global_key: null,
                     yaml_default_oauth_name: null,
                     yaml_default_database_name: 'analytics',
+                    yaml_default_docs_path: null,
+                    source: 'yaml',
+                },
+            ],
+        });
+    });
+
+    it('POSTs yaml_default_docs_path for a `docs:` YAML declaration, and null on every other kind', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: ['PLAIN_VAR', { POSTS: { docs: 'Content/Posts' } }],
+        };
+
+        await pushYamlDeclarations(config(), 'my-project', yamlConfig);
+
+        expect(lastRequest?.body).toEqual({
+            declarations: [
+                {
+                    env_name: 'PLAIN_VAR',
+                    yaml_default_global_key: null,
+                    yaml_default_oauth_name: null,
+                    yaml_default_database_name: null,
+                    yaml_default_docs_path: null,
+                    source: 'yaml',
+                },
+                {
+                    env_name: 'POSTS',
+                    yaml_default_global_key: null,
+                    yaml_default_oauth_name: null,
+                    yaml_default_database_name: null,
+                    yaml_default_docs_path: 'Content/Posts',
                     source: 'yaml',
                 },
             ],
@@ -167,6 +244,34 @@ describe('formatSyncYamlWarnings', () => {
             { env_name: 'ANALYTICS_DB', reason: 'workspace_database_not_found_in_workspace', name: 'does-not-exist' },
         ]);
         expect(lines).toEqual(['ANALYTICS_DB → no workspace database named "does-not-exist"']);
+    });
+
+    it('prints the server message of a docs_not_granted warning as is', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'POSTS', reason: 'docs_not_granted', path: 'Content/Posts', message: DOCS_NOT_GRANTED_MESSAGE },
+        ]);
+        expect(lines).toEqual([DOCS_NOT_GRANTED_MESSAGE]);
+    });
+
+    it('prints the server message of a docs_path_not_found warning as is', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'DRAFTS', reason: 'docs_path_not_found', path: 'Content/Drafts', message: DOCS_NOT_FOUND_MESSAGE },
+        ]);
+        expect(lines).toEqual([DOCS_NOT_FOUND_MESSAGE]);
+    });
+
+    it('falls back to the generic line when a docs warning arrives without its message', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'POSTS', reason: 'docs_not_granted', path: 'Content/Posts' },
+        ]);
+        expect(lines).toEqual(['POSTS → unresolved (docs_not_granted)']);
+    });
+
+    it('still prints the generic line for an unknown reason that carries a message', () => {
+        const lines = formatSyncYamlWarnings([
+            { env_name: 'FUTURE_VAR', reason: 'some_future_reason_not_yet_known', message: 'a message we do not print' },
+        ]);
+        expect(lines).toEqual(['FUTURE_VAR → unresolved (some_future_reason_not_yet_known)']);
     });
 
     it('formats multiple warnings in order', () => {
@@ -237,6 +342,47 @@ describe('pushYamlDeclarations: prints sync-yaml warnings from the response body
         // sees (shop rule "commit the golden check", app#547/#1150 R1).
         expect(capture.lines).toEqual([
             'Synced 1 YAML env declarations (1 unresolved)',
+            '  ⚠ ANALYTICS_DB → no workspace database named "does-not-exist"',
+            "  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies).",
+        ]);
+    });
+
+    it('prints only docs warnings in the same yellow line shape, with the server message as is and no footer', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: [{ POSTS: { docs: 'Content/Posts' } }, { DRAFTS: { docs: 'Content/Drafts' } }],
+        };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'docs-warn-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        expect(capture.lines).toEqual([
+            'Synced 2 YAML env declarations (2 unresolved)',
+            `  ⚠ ${DOCS_NOT_GRANTED_MESSAGE}`,
+            `  ⚠ ${DOCS_NOT_FOUND_MESSAGE}`,
+        ]);
+    });
+
+    it('prints the footer once when a docs warning comes with a database warning', async () => {
+        const yamlConfig: SolidActionsConfig = {
+            workflows: [],
+            env: [{ POSTS: { docs: 'Content/Posts' } }, { ANALYTICS_DB: { database: 'does-not-exist' } }],
+        };
+        const capture = captureStdout();
+
+        try {
+            await pushYamlDeclarations(config(), 'mixed-warn-project', yamlConfig);
+        } finally {
+            capture.restore();
+        }
+
+        expect(capture.lines).toEqual([
+            'Synced 2 YAML env declarations (2 unresolved)',
+            `  ⚠ ${DOCS_NOT_GRANTED_MESSAGE}`,
             '  ⚠ ANALYTICS_DB → no workspace database named "does-not-exist"',
             "  These variables won't get a value from this declaration until the named resource exists (a value set in the dashboard still applies).",
         ]);

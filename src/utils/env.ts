@@ -7,12 +7,14 @@ import yaml from 'js-yaml';
  *   - TEST_ENV_VAR                    -> { key: "TEST_ENV_VAR", mappedTo: null }
  *   - MAPPED_SECRET: JIMBO            -> { key: "MAPPED_SECRET", mappedTo: "JIMBO" }
  *   - DATABASE_URL: DATABASE_URL      -> { key: "DATABASE_URL", mappedTo: "DATABASE_URL" }
+ *   - POSTS: { docs: "Content/Posts" } -> { key: "POSTS", docsPath: "Content/Posts" }
  */
 export interface ParsedEnvVar {
     key: string;
     mappedTo: string | null;
     oauthName: string | null;
     databaseName: string | null;
+    docsPath: string | null;
 }
 
 export interface PageCodeEntry { id: string; name: string; file: string; home?: boolean; owner?: 'code'; sources?: Record<string, unknown>[]; }
@@ -28,7 +30,7 @@ export interface SolidActionsConfig {
     workflows?: { id?: string; name: string; command?: string; file?: string; enabled?: boolean; trigger?: string; webhook?: { auth?: string; method?: string | string[]; mode?: string; timeout?: number } }[];
     pages?: PageEntry[];
     functions?: FunctionEntry[];
-    env?: (string | { [key: string]: string | { oauth: string } | { database: string } })[];
+    env?: (string | { [key: string]: string | { oauth: string } | { database: string } | { docs: string } })[];
     deploy?: {
         exclude?: string[];
         gitignore?: boolean;
@@ -82,6 +84,7 @@ export function parseEnvFile(filePath: string): Map<string, string> {
  *   - VAR_NAME: GLOBAL              -> { key: "VAR_NAME", mappedTo: "GLOBAL" }
  *   - VAR_NAME:\n    oauth: "Name"    -> { key: "VAR_NAME", oauthName: "Name" }
  *   - VAR_NAME:\n    database: "Name" -> { key: "VAR_NAME", databaseName: "Name" }
+ *   - VAR_NAME:\n    docs: "Folder/Path" -> { key: "VAR_NAME", docsPath: "Folder/Path" }
  */
 export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
     const parsedVars: ParsedEnvVar[] = [];
@@ -93,10 +96,10 @@ export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
     for (const item of config.env) {
         if (typeof item === 'string') {
             // Simple string: - VAR_NAME (declared only, needs configuration)
-            parsedVars.push({ key: item, mappedTo: null, oauthName: null, databaseName: null });
+            parsedVars.push({ key: item, mappedTo: null, oauthName: null, databaseName: null, docsPath: null });
         } else if (typeof item === 'object' && item !== null) {
             // Object: - VAR_NAME: GLOBAL_NAME, - VAR_NAME: { oauth: connection-name },
-            // or - VAR_NAME: { database: database-name }
+            // - VAR_NAME: { database: database-name }, or - VAR_NAME: { docs: folder/or/doc/path }
             const keys = Object.keys(item);
             if (keys.length === 1) {
                 const key = keys[0];
@@ -105,14 +108,19 @@ export function parseYamlEnvVars(config: SolidActionsConfig): ParsedEnvVar[] {
                     if (typeof value.oauth !== 'string' || !value.oauth) {
                         throw new Error(`Invalid env config for ${key}: 'oauth' must be a non-empty string`);
                     }
-                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth, databaseName: null });
+                    parsedVars.push({ key, mappedTo: null, oauthName: value.oauth, databaseName: null, docsPath: null });
                 } else if (typeof value === 'object' && value !== null && 'database' in value) {
                     if (typeof value.database !== 'string' || !value.database) {
                         throw new Error(`Invalid env config for ${key}: 'database' must be a non-empty string`);
                     }
-                    parsedVars.push({ key, mappedTo: null, oauthName: null, databaseName: value.database });
+                    parsedVars.push({ key, mappedTo: null, oauthName: null, databaseName: value.database, docsPath: null });
+                } else if (typeof value === 'object' && value !== null && 'docs' in value) {
+                    if (typeof value.docs !== 'string' || !value.docs.trim()) {
+                        throw new Error(`Invalid env config for ${key}: 'docs' must be a non-empty string`);
+                    }
+                    parsedVars.push({ key, mappedTo: null, oauthName: null, databaseName: null, docsPath: value.docs });
                 } else {
-                    parsedVars.push({ key, mappedTo: value || null, oauthName: null, databaseName: null });
+                    parsedVars.push({ key, mappedTo: value || null, oauthName: null, databaseName: null, docsPath: null });
                 }
             }
         }

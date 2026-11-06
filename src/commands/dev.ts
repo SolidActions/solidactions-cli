@@ -662,6 +662,11 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
             // carry credentials), so counting it here would report a healthy
             // mapping as "had no value in this env and was skipped" (#140).
             databaseMappings.push(pv);
+        } else if (pv.source_type === 'docs_node' && pv.resolved_value != null) {
+            // A docs binding arrives as the run-env JSON ({path, kind, id, level}),
+            // the same string a deployed run reads; pass it through, never count
+            // it as dropped.
+            vars[pv.env_name] = pv.resolved_value;
         } else if (pv.resolved_value != null) {
             vars[pv.env_name] = pv.resolved_value;
         } else if (pv.is_secret) {
