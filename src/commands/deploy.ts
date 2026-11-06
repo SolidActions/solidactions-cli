@@ -8,7 +8,7 @@ import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { validateItems } from '../utils/validate-items';
 import { buildAppSyncPayload, emptyColourWarnings, formatAppSync, syncApp } from '../utils/app-sync';
-import { buildPagesSyncPayload,formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
+import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { buildFunctionsSyncPayload, formatFunctionsSummary, formatFunctionsSyncFailure, functionsSyncOutcome, joinSyncOutcomes, listCodeFunctions, readFunctionSources, syncFunctions } from '../utils/functions-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
