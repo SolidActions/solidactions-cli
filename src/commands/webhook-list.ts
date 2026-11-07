@@ -10,6 +10,14 @@ interface WebhookListOptions {
     format?: string;
 }
 
+export function webhookListParams(options: Pick<WebhookListOptions, 'showSecrets'>): Record<string, string> {
+    const params: Record<string, string> = { include: 'functions' };
+    if (options.showSecrets) {
+        params.show_secrets = 'true';
+    }
+    return params;
+}
+
 export async function webhookList(projectName: string, options: WebhookListOptions = {}) {
     const format = options.format ?? 'table';
     if (format !== 'table' && format !== 'json') {
@@ -27,10 +35,7 @@ export async function webhookList(projectName: string, options: WebhookListOptio
 
     try {
         const projectSlug = await resolveProjectSlug(config, projectName, environment);
-        const params: Record<string, any> = {};
-        if (options.showSecrets) {
-            params.show_secrets = 'true';
-        }
+        const params = webhookListParams(options);
 
         const response = await axios.get(`${config.host}/api/v1/projects/${projectSlug}/webhooks`, {
             headers: getApiHeaders(config),

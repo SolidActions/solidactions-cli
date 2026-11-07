@@ -49,11 +49,11 @@ describe('webhook enabled-state formatting', () => {
     it('adds a STATE table column with retired > off > blocked > on precedence', () => {
         const lines = formatTable(rows, { showSecrets: false }).map(plain);
 
-        expect(lines[0]).toMatch(/^WORKFLOW\s+STATE\s+URL$/);
+        expect(lines[0]).toMatch(/^NAME\s+KIND\s+STATE\s+URL$/);
         expect(lines.find((line) => line.includes('retired-flow'))).toContain('retired');
-        expect(lines.find((line) => line.includes('off-flow'))).toMatch(/off-flow\s+off\s+/);
+        expect(lines.find((line) => line.includes('off-flow'))).toMatch(/off-flow\s+workflow\s+off\s+/);
         expect(lines.find((line) => line.includes('blocked-flow'))).toContain('blocked (project off)');
-        expect(lines.find((line) => line.includes('on-flow'))).toMatch(/on-flow\s+on\s+/);
+        expect(lines.find((line) => line.includes('on-flow'))).toMatch(/on-flow\s+workflow\s+on\s+/);
     });
 
     it('uses the neutral shared workflow-state helper for the same dataset', () => {

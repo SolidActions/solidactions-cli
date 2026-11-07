@@ -4,23 +4,39 @@ import { authFailedLine, formatApiFailure, getApiHeaders, lookupProjectFamilyEnv
 import { resolveProjectSlug } from '../utils/project-ref';
 
 interface SecretRow {
+    kind?: string;
     workflow_name?: string;
     webhook_secret?: string;
 }
 
+function workflowRowsOnly(rows: SecretRow[]): SecretRow[] {
+    return rows.filter((r) => r.kind !== 'function');
+}
+
 export function formatSecretOutput(rows: SecretRow[], workflowFilter?: string): string {
+    const workflows = workflowRowsOnly(rows);
     if (workflowFilter) {
-        const match = rows.find((r) => r.workflow_name === workflowFilter);
+        const match = workflows.find((r) => r.workflow_name === workflowFilter);
         if (!match) return `No webhook named "${workflowFilter}" found.`;
         return match.webhook_secret ?? '(secret not returned — check your access level)';
     }
-    if (rows.length === 1) {
-        return rows[0].webhook_secret ?? '(secret not returned — check your access level)';
+    if (workflows.length === 1) {
+        return workflows[0].webhook_secret ?? '(secret not returned — check your access level)';
     }
-    const lines = rows.map(
+    const lines = workflows.map(
         (r) => `${(r.workflow_name ?? '?').padEnd(32)}${r.webhook_secret ?? '(none)'}`
     );
     return ['WORKFLOW'.padEnd(32) + 'SECRET', '-'.repeat(80), ...lines].join('\n');
+}
+
+export function formatSecretJson(rows: SecretRow[], workflowFilter?: string): string {
+    const workflows = workflowRowsOnly(rows);
+    const out = workflowFilter
+        ? workflows
+              .filter((r) => r.workflow_name === workflowFilter)
+              .map((r) => ({ workflow: r.workflow_name, secret: r.webhook_secret }))
+        : workflows.map((r) => ({ workflow: r.workflow_name, secret: r.webhook_secret }));
+    return JSON.stringify(out, null, 2);
 }
 
 interface WebhookSecretOptions {
@@ -53,7 +69,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
             params: { show_secrets: 'true' },
         });
 
-        const rows: SecretRow[] = response.data.data ?? [];
+        const rows: SecretRow[] = workflowRowsOnly(response.data.data ?? []);
 
         if (rows.length === 0) {
             console.error(
@@ -65,12 +81,7 @@ export async function webhookSecret(projectName: string, options: WebhookSecretO
         }
 
         if (format === 'json') {
-            const out = options.workflow
-                ? rows
-                      .filter((r) => r.workflow_name === options.workflow)
-                      .map((r) => ({ workflow: r.workflow_name, secret: r.webhook_secret }))
-                : rows.map((r) => ({ workflow: r.workflow_name, secret: r.webhook_secret }));
-            console.log(JSON.stringify(out, null, 2));
+            console.log(formatSecretJson(rows, options.workflow));
             return;
         }
 
