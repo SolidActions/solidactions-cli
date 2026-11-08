@@ -14,6 +14,7 @@ import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorks
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
 import { planDeployFiles } from '../utils/deploy-ignore';
+import { baseWireValue, readSandboxBase, writeSandboxBase } from '../utils/sandbox-base';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
@@ -861,8 +862,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             for await (const chunk of fs.createReadStream(archivePath)) {
                 hash.update(chunk);
             }
-            archiveMd5 = hash.digest('hex');
+            const uploadedArchiveMd5 = hash.digest('hex');
+            archiveMd5 = uploadedArchiveMd5;
             const form = buildDeployForm(archivePath, sourceMetadata);
+            const base = readSandboxBase(sourceDir);
+            const guardedBase = base?.slug === projectSlug ? base : null;
+            if (guardedBase) {
+                form.append('base_source_hash', baseWireValue(guardedBase));
+            }
             if (!yamlConfig?.workflows) {
                 form.append('build', '0');
             }
@@ -883,6 +890,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            if (guardedBase) {
+                if (deployResponse.data?.source_hash === uploadedArchiveMd5) {
+                    writeSandboxBase(sourceDir, { source_hash: uploadedArchiveMd5, slug: guardedBase.slug, restored_at: new Date().toISOString() });
+                } else {
+                    console.log(chalk.yellow('The server stored different bytes than this deploy uploaded; base.json was left unchanged.'));
+                }
+            }
             if (!yamlConfig?.workflows) {
                 console.log(chalk.green('Source archived.'));
                 cleanupArchive();
@@ -984,7 +998,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         } catch (error: any) {
             console.error(chalk.red('Deployment failed:'));
             if (error.response) {
-                if (error.response.status === 404) {
+                if (error.response.status === 409 && error.response.data?.code === 'stale_base') {
+                    console.error(chalk.red(`The dev copy moved since you pulled. Run "solidactions pull ${projectSlug} . --yes" and redo your change.`));
+                } else if (error.response.status === 404) {
                     console.error("Project not found.");
                 } else if (error.response.status === 401) {
                     console.error(chalk.red(authFailedLine(config.host)));

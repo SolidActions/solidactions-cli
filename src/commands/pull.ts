@@ -9,6 +9,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { resolveProjectSlug } from '../utils/project-ref';
+import { isAppSandbox, writeSandboxBase } from '../utils/sandbox-base';
 
 export async function pull(projectName: string, destPath?: string, options: { yes?: boolean } = {}) {
     const config = await requireConfigWithWorkspace();
@@ -71,6 +72,11 @@ export async function pull(projectName: string, destPath?: string, options: { ye
                 },
             })
         );
+
+        const sourceHash = response.headers['x-source-hash'];
+        if (isAppSandbox() && typeof sourceHash === 'string') {
+            writeSandboxBase(destination, { source_hash: sourceHash, slug: projectSlug, restored_at: new Date().toISOString() });
+        }
 
         console.log(chalk.green(`Project "${projectName}" pulled successfully!`));
     } catch (error: any) {
