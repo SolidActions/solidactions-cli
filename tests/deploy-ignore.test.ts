@@ -31,6 +31,25 @@ describe('isHardDenied (Layer 1)', () => {
         expect(isHardDenied('src/.env')).toBe(true);
     });
 
+    it('hard-denies .solidactions directories at any depth but keeps sibling names', () => {
+        const root = makeTmpDir();
+        try {
+            writeFile(root, '.solidactions/config.json', 'secret');
+            writeFile(root, '.solidactions/base.json', 'base');
+            writeFile(root, 'sub/.solidactions/base.json', 'nested');
+            writeFile(root, '.env.local', 'secret');
+            writeFile(root, '.solidactions-skill.json', 'keep');
+            const { files } = planDeployFiles(root, null);
+            expect(files).toContain('.solidactions-skill.json');
+            expect(files).not.toContain('.solidactions/config.json');
+            expect(files).not.toContain('.solidactions/base.json');
+            expect(files).not.toContain('sub/.solidactions/base.json');
+            expect(files).not.toContain('.env.local');
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it('denies the deploy artifacts', () => {
         expect(isHardDenied('.steps-deploy.tar.gz')).toBe(true);
         expect(isHardDenied('.steps-deploy.zip')).toBe(true);

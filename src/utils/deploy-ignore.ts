@@ -26,10 +26,11 @@ export const DEFAULT_DEPLOY_IGNORES: string[] = [
  * re-includable by any matcher negation. Covers:
  *   - `.env` and any `.env.*` (secret-leak fix). Anchored so `.envrc` and
  *     `environment.ts` do NOT match.
+ *   - `.solidactions` (local CLI state at any depth).
  *   - `.steps-deploy.tar.gz` / `.steps-deploy.zip` (our own deploy artifacts,
  *     written into sourceDir while we walk).
  */
-export const HARD_DENY_BASENAMES: RegExp = /^(?:\.env(?:$|\..*)|\.steps-deploy\.(?:tar\.gz|zip))$/;
+export const HARD_DENY_BASENAMES: RegExp = /^(?:\.env(?:$|\..*)|\.solidactions|\.steps-deploy\.(?:tar\.gz|zip))$/;
 
 /**
  * True if a path is hard-denied (Layer 1). Checked before the matcher so that

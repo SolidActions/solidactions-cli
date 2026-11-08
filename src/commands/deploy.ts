@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
@@ -33,6 +33,8 @@ import {
     formatDeploymentRevision,
     type ProjectDeploymentDetail,
 } from './project-view';
+
+export let archiveMd5: string | null = null;
 
 /** Printed when a deploy target has no SolidActions skill files installed. */
 export const SKILLS_TIP_LINES = [
@@ -813,10 +815,6 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
     };
 
-    if (!yamlConfig?.workflows) {
-        return finishDeploy({ deploymentId: null, buildFailed: false });
-    }
-
     // Plan the file list BEFORE creating the archive write stream so a walk error
     // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
     let plan: ReturnType<typeof planDeployFiles>;
@@ -859,7 +857,15 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
+            const hash = createHash('md5');
+            for await (const chunk of fs.createReadStream(archivePath)) {
+                hash.update(chunk);
+            }
+            archiveMd5 = hash.digest('hex');
             const form = buildDeployForm(archivePath, sourceMetadata);
+            if (!yamlConfig?.workflows) {
+                form.append('build', '0');
+            }
             if (options.paused) {
                 form.append('paused', '1');
             }
@@ -877,6 +883,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            if (!yamlConfig?.workflows) {
+                console.log(chalk.green('Source archived.'));
+                cleanupArchive();
+                return await finishDeploy({ deploymentId: null, buildFailed: false });
+            }
             const acceptedDeployment = parseDeployAcceptance(deployResponse.data);
             if (acceptedDeployment.sourceMetadataRejected) {
                 console.log(chalk.yellow(
