@@ -17,6 +17,8 @@ let uploadedHash = '';
 let syncBodies: Record<string, unknown>[] = [];
 let requests: string[] = [];
 let rejectSync = false;
+let rejectYaml = false;
+let yamlBodies: Record<string, unknown>[] = [];
 
 beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -29,6 +31,10 @@ beforeAll(async () => {
             if (req.method === 'PUT' && req.url?.endsWith('/functions/sync')) {
                 syncBodies.push(JSON.parse(body.toString()));
                 if (rejectSync) { res.writeHead(409); res.end(JSON.stringify({ code: 'stale_base', message: 'remote base moved' })); return; }
+                res.end(JSON.stringify({}));
+            } else if (req.method === 'POST' && req.url?.endsWith('/variable-mappings/sync-yaml')) {
+                yamlBodies.push(JSON.parse(body.toString()));
+                if (rejectYaml) { res.writeHead(409); res.end(JSON.stringify({ code: 'stale_base', message: 'remote base moved' })); return; }
                 res.end(JSON.stringify({}));
             } else if (req.method === 'POST' && req.url?.endsWith('/deploy')) {
                 posts.push(body);
@@ -68,8 +74,8 @@ function setup(base?: string) {
     return { root, home, basePath: path.join(root, '.solidactions/base.json') };
 }
 
-async function invoke(root: string, home: string) {
-    const script = `require(process.argv[1]).deploy('base-project', process.argv[2], {env:'production', gitMetadata:false});`;
+async function invoke(root: string, home: string, configOnly = false) {
+    const script = `require(process.argv[1]).deploy('base-project', process.argv[2], {env:'production', gitMetadata:false, configOnly:${configOnly}});`;
     const child = spawn(process.execPath, ['-e', script, path.resolve('dist/commands/deploy.js'), root], {
         env: { ...process.env, HOME: home, SOLIDACTIONS_HOST: `http://127.0.0.1:${port}`, SOLIDACTIONS_API_KEY: 'test-key', SOLIDACTIONS_WORKSPACE_ID: 'ws-1', FORCE_COLOR: '0' },
     });
@@ -82,11 +88,11 @@ async function invoke(root: string, home: string) {
 
 const base = (source_hash: string | null, project = slug) => JSON.stringify({ source_hash, slug: project, restored_at: '2020-01-01T00:00:00.000Z' });
 async function scenario(initial: string | undefined, mode: typeof reply = 'match', times = 1) {
-    const dirs = setup(initial); posts = []; syncBodies = []; requests = []; rejectSync = false; reply = mode; uploadedHash = '';
+    const dirs = setup(initial); posts = []; syncBodies = []; yamlBodies = []; requests = []; rejectSync = false; rejectYaml = false; reply = mode; uploadedHash = '';
     try {
         const runs = [];
         for (let i = 0; i < times; i++) runs.push(await invoke(dirs.root, dirs.home));
-        return { runs, posts: [...posts], syncBodies: [...syncBodies], hash: uploadedHash, contents: fs.existsSync(dirs.basePath) ? fs.readFileSync(dirs.basePath, 'utf8') : null };
+        return { runs, posts: [...posts], syncBodies: [...syncBodies], yamlBodies: [...yamlBodies], hash: uploadedHash, contents: fs.existsSync(dirs.basePath) ? fs.readFileSync(dirs.basePath, 'utf8') : null };
     } finally {
         fs.rmSync(dirs.root, { recursive: true, force: true });
         fs.rmSync(dirs.home, { recursive: true, force: true });
@@ -105,6 +111,7 @@ describe('deploy sandbox base', () => {
         expect(result.runs[0].stdout).toContain('Source archived.');
         expect(result.posts).toHaveLength(1); expect(field(result.posts[0])).toBe(wire);
         expect(result.syncBodies[0].base_source_hash).toBe(wire);
+        expect(result.yamlBodies).toHaveLength(1); expect(result.yamlBodies[0]).not.toHaveProperty('base_source_hash');
         expect(result.hash).toMatch(/^[a-f0-9]{32}$/);
         expect(JSON.parse(result.contents!)).toEqual({ source_hash: result.hash, slug, restored_at: expect.any(String) });
         expect(JSON.parse(result.contents!).restored_at).not.toBe('2020-01-01T00:00:00.000Z');
@@ -134,17 +141,49 @@ describe('deploy sandbox base', () => {
         expect(result.syncBodies).toHaveLength(1); expect(result.syncBodies[0]).not.toHaveProperty('base_source_hash');
     }, 20_000);
 
-    it('stops at a stale function sync and prints the server message', async () => {
+    it('stops at a stale function sync and prints the exact pull command', async () => {
         const dirs = setup(base(oldHash)); posts = []; syncBodies = []; requests = []; rejectSync = true;
         try {
             const result = await invoke(dirs.root, dirs.home);
             expect(syncBodies).toHaveLength(1); expect(syncBodies[0].base_source_hash).toBe(oldHash);
-            expect(result.exit).toBe(1); expect(result.stderr.trim()).toBe('remote base moved');
+            expect(result.exit).toBe(1); expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions pull ${slug} . --yes" and redo your change.`);
             expect(result.stdout).not.toContain('Source archived.');
             expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`PUT /api/v1/projects/${slug}/functions/sync`]);
             expect(posts).toHaveLength(0); expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(base(oldHash));
         } finally {
             rejectSync = false;
+            fs.rmSync(dirs.root, { recursive: true, force: true }); fs.rmSync(dirs.home, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    it('sends the guarded base on stale config-only and stops with the exact pull command', async () => {
+        const original = base(oldHash); const dirs = setup(original);
+        posts = []; syncBodies = []; yamlBodies = []; requests = []; rejectSync = false; rejectYaml = true;
+        try {
+            expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(original);
+            const result = await invoke(dirs.root, dirs.home, true);
+            expect(yamlBodies).toHaveLength(1); expect(yamlBodies[0].base_source_hash).toBe(oldHash);
+            expect(result.exit).toBe(1);
+            expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions pull ${slug} . --yes" and redo your change.`);
+            expect(result.stdout).not.toContain('Config synced');
+            expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`POST /api/v1/projects/${slug}/variable-mappings/sync-yaml`]);
+            expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(original);
+        } finally {
+            rejectYaml = false;
+            fs.rmSync(dirs.root, { recursive: true, force: true }); fs.rmSync(dirs.home, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    it('sends no base on config-only without a sandbox base', async () => {
+        const dirs = setup(); posts = []; syncBodies = []; yamlBodies = []; requests = []; rejectSync = false; rejectYaml = false;
+        try {
+            expect(fs.existsSync(dirs.basePath)).toBe(false);
+            const result = await invoke(dirs.root, dirs.home, true);
+            expect(result.exit).toBe(0); expect(result.stderr).toBe(''); expect(result.stdout).toContain('Config synced');
+            expect(yamlBodies).toHaveLength(1); expect(yamlBodies[0]).not.toHaveProperty('base_source_hash');
+            expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`POST /api/v1/projects/${slug}/variable-mappings/sync-yaml`]);
+            expect(fs.existsSync(dirs.basePath)).toBe(false);
+        } finally {
             fs.rmSync(dirs.root, { recursive: true, force: true }); fs.rmSync(dirs.home, { recursive: true, force: true });
         }
     }, 20_000);

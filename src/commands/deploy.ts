@@ -368,7 +368,8 @@ export function formatSyncYamlWarnings(warnings: unknown): string[] {
 export async function pushYamlDeclarations(
     config: { host: string; apiKey: string; workspaceId?: string },
     projectSlug: string,
-    yamlConfig: SolidActionsConfig
+    yamlConfig: SolidActionsConfig,
+    baseSourceHash?: string,
 ): Promise<void> {
     const parsedVars = parseYamlEnvVars(yamlConfig);
 
@@ -384,7 +385,7 @@ export async function pushYamlDeclarations(
 
     const response = await axios.post(
         `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
-        { declarations },
+        { declarations, ...(baseSourceHash !== undefined ? { base_source_hash: baseSourceHash } : {}) },
         {
             headers: getApiHeaders(config, 'application/json'),
         }
@@ -707,6 +708,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     }
 
+    const base = readSandboxBase(sourceDir);
+    const guardedBase = base?.slug === projectSlug ? base : null;
+    const guardedBaseWire = guardedBase ? baseWireValue(guardedBase) : null;
+    const staleBaseLine = () => `The dev copy moved since you pulled. Run "solidactions pull ${projectSlug} . --yes" and redo your change.`;
+
     // --config-only: sync YAML env declarations without building
     if (options.configOnly) {
         if (!yamlConfig) {
@@ -715,9 +721,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
 
         try {
-            await pushYamlDeclarations(config, projectSlug, yamlConfig);
+            await pushYamlDeclarations(config, projectSlug, yamlConfig, guardedBaseWire ?? undefined);
         } catch (error: any) {
-            if (error.response?.status === 401) {
+            if (error.response?.status === 409 && error.response.data?.code === 'stale_base') {
+                console.error(chalk.red(staleBaseLine()));
+            } else if (error.response?.status === 401) {
                 console.error(chalk.red(authFailedLine(config.host)));
             } else {
                 console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
@@ -768,14 +776,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.error(chalk.red(`Failed to read function: ${error.message}`));
         process.exit(1);
     }
-    const base = readSandboxBase(sourceDir);
-    const guardedBase = base?.slug === projectSlug ? base : null;
-    const guardedBaseWire = guardedBase ? baseWireValue(guardedBase) : null;
     const functionsPayload = buildFunctionsSyncPayload(functionFiles, functionSources, codeRef);
     if (guardedBaseWire !== null) functionsPayload.base_source_hash = guardedBaseWire;
     const functionsResult = await syncFunctions(config, projectSlug, functionsPayload);
     if (functionsResult.httpStatus === 409 && functionsResult.body?.code === 'stale_base') {
-        console.error(chalk.red(functionsResult.body.message));
+        console.error(chalk.red(staleBaseLine()));
         process.exit(1);
     }
     const functionRows = functionsResult.body?.functions ?? [];
@@ -1005,7 +1010,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             console.error(chalk.red('Deployment failed:'));
             if (error.response) {
                 if (error.response.status === 409 && error.response.data?.code === 'stale_base') {
-                    console.error(chalk.red(`The dev copy moved since you pulled. Run "solidactions pull ${projectSlug} . --yes" and redo your change.`));
+                    console.error(chalk.red(staleBaseLine()));
                 } else if (error.response.status === 404) {
                     console.error("Project not found.");
                 } else if (error.response.status === 401) {
