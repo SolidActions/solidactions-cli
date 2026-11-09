@@ -768,8 +768,16 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.error(chalk.red(`Failed to read function: ${error.message}`));
         process.exit(1);
     }
+    const base = readSandboxBase(sourceDir);
+    const guardedBase = base?.slug === projectSlug ? base : null;
+    const guardedBaseWire = guardedBase ? baseWireValue(guardedBase) : null;
     const functionsPayload = buildFunctionsSyncPayload(functionFiles, functionSources, codeRef);
+    if (guardedBaseWire !== null) functionsPayload.base_source_hash = guardedBaseWire;
     const functionsResult = await syncFunctions(config, projectSlug, functionsPayload);
+    if (functionsResult.httpStatus === 409 && functionsResult.body?.code === 'stale_base') {
+        console.error(chalk.red(functionsResult.body.message));
+        process.exit(1);
+    }
     const functionRows = functionsResult.body?.functions ?? [];
     const retiredFunctions = functionsResult.body?.retired ?? [];
     const retireErrors = functionsResult.body?.retire_errors ?? [];
@@ -865,10 +873,8 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             const uploadedArchiveMd5 = hash.digest('hex');
             archiveMd5 = uploadedArchiveMd5;
             const form = buildDeployForm(archivePath, sourceMetadata);
-            const base = readSandboxBase(sourceDir);
-            const guardedBase = base?.slug === projectSlug ? base : null;
-            if (guardedBase) {
-                form.append('base_source_hash', baseWireValue(guardedBase));
+            if (guardedBaseWire !== null) {
+                form.append('base_source_hash', guardedBaseWire);
             }
             if (!yamlConfig?.workflows) {
                 form.append('build', '0');

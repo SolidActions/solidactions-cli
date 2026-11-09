@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 
 export interface SandboxBase {
     source_hash: string | null;
@@ -29,7 +30,25 @@ export function readSandboxBase(dir: string): SandboxBase | null {
 export function writeSandboxBase(dir: string, base: SandboxBase): void {
     const target = path.join(dir, SANDBOX_BASE_PATH);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, JSON.stringify(base));
+    const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
+    let fd: number | undefined;
+    let owned = false;
+    try {
+        fd = fs.openSync(temporary, 'wx', 0o600);
+        owned = true;
+        fs.writeFileSync(fd, JSON.stringify(base));
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fd = undefined;
+        fs.renameSync(temporary, target);
+        owned = false;
+    } finally {
+        try {
+            if (fd !== undefined) fs.closeSync(fd);
+        } finally {
+            if (owned) fs.unlinkSync(temporary);
+        }
+    }
 }
 
 export function baseWireValue(base: SandboxBase): string {

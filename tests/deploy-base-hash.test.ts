@@ -1,6 +1,6 @@
 /** Local app server seam accepted in app docs/decisions.md:1174 (chief mail fa9f7607). */
 import * as http from 'http';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -14,6 +14,9 @@ let port: number;
 let posts: Buffer[] = [];
 let reply: 'match' | 'different' | 'stale' = 'match';
 let uploadedHash = '';
+let syncBodies: Record<string, unknown>[] = [];
+let requests: string[] = [];
+let rejectSync = false;
 
 beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -22,7 +25,12 @@ beforeAll(async () => {
         req.on('end', () => {
             const body = Buffer.concat(chunks);
             res.setHeader('Content-Type', 'application/json');
-            if (req.method === 'POST' && req.url?.endsWith('/deploy')) {
+            requests.push(`${req.method} ${req.url}`);
+            if (req.method === 'PUT' && req.url?.endsWith('/functions/sync')) {
+                syncBodies.push(JSON.parse(body.toString()));
+                if (rejectSync) { res.writeHead(409); res.end(JSON.stringify({ code: 'stale_base', message: 'remote base moved' })); return; }
+                res.end(JSON.stringify({}));
+            } else if (req.method === 'POST' && req.url?.endsWith('/deploy')) {
                 posts.push(body);
                 const boundary = (req.headers['content-type'] ?? '').match(/boundary=(.+)$/)?.[1];
                 const source = body.indexOf(Buffer.from('name="source"'));
@@ -74,11 +82,11 @@ async function invoke(root: string, home: string) {
 
 const base = (source_hash: string | null, project = slug) => JSON.stringify({ source_hash, slug: project, restored_at: '2020-01-01T00:00:00.000Z' });
 async function scenario(initial: string | undefined, mode: typeof reply = 'match', times = 1) {
-    const dirs = setup(initial); posts = []; reply = mode; uploadedHash = '';
+    const dirs = setup(initial); posts = []; syncBodies = []; requests = []; rejectSync = false; reply = mode; uploadedHash = '';
     try {
         const runs = [];
         for (let i = 0; i < times; i++) runs.push(await invoke(dirs.root, dirs.home));
-        return { runs, posts: [...posts], hash: uploadedHash, contents: fs.existsSync(dirs.basePath) ? fs.readFileSync(dirs.basePath, 'utf8') : null };
+        return { runs, posts: [...posts], syncBodies: [...syncBodies], hash: uploadedHash, contents: fs.existsSync(dirs.basePath) ? fs.readFileSync(dirs.basePath, 'utf8') : null };
     } finally {
         fs.rmSync(dirs.root, { recursive: true, force: true });
         fs.rmSync(dirs.home, { recursive: true, force: true });
@@ -96,6 +104,7 @@ describe('deploy sandbox base', () => {
         expect(result.runs[0].exit).toBe(0); expect(result.runs[0].stderr).toBe('');
         expect(result.runs[0].stdout).toContain('Source archived.');
         expect(result.posts).toHaveLength(1); expect(field(result.posts[0])).toBe(wire);
+        expect(result.syncBodies[0].base_source_hash).toBe(wire);
         expect(result.hash).toMatch(/^[a-f0-9]{32}$/);
         expect(JSON.parse(result.contents!)).toEqual({ source_hash: result.hash, slug, restored_at: expect.any(String) });
         expect(JSON.parse(result.contents!).restored_at).not.toBe('2020-01-01T00:00:00.000Z');
@@ -114,6 +123,7 @@ describe('deploy sandbox base', () => {
         expect(result.runs.map(run => run.exit)).toEqual([0, 0]);
         expect(result.runs.every(run => run.stderr === '' && run.stdout.includes('Source archived.'))).toBe(true);
         expect(result.posts).toHaveLength(2); expect(result.posts.map(field)).toEqual([null, null]); expect(result.contents).toBeNull();
+        expect(result.syncBodies).toHaveLength(2); expect(result.syncBodies.every(body => !('base_source_hash' in body))).toBe(true);
     }, 20_000);
 
     it.each([['other slug', base(oldHash, 'other')], ['malformed JSON', '{bad json'], ['invalid hash', base('not-md5')], ['missing timestamp', JSON.stringify({ slug, source_hash: oldHash })]] as const)('leaves a %s base byte-identical and sends no guard', async (_label, original) => {
@@ -121,6 +131,39 @@ describe('deploy sandbox base', () => {
         expect(result.runs[0].exit).toBe(0); expect(result.runs[0].stderr).toBe('');
         expect(result.runs[0].stdout).toContain('Source archived.'); expect(result.posts).toHaveLength(1);
         expect(field(result.posts[0])).toBeNull(); expect(result.contents).toBe(original);
+        expect(result.syncBodies).toHaveLength(1); expect(result.syncBodies[0]).not.toHaveProperty('base_source_hash');
+    }, 20_000);
+
+    it('stops at a stale function sync and prints the server message', async () => {
+        const dirs = setup(base(oldHash)); posts = []; syncBodies = []; requests = []; rejectSync = true;
+        try {
+            const result = await invoke(dirs.root, dirs.home);
+            expect(syncBodies).toHaveLength(1); expect(syncBodies[0].base_source_hash).toBe(oldHash);
+            expect(result.exit).toBe(1); expect(result.stderr.trim()).toBe('remote base moved');
+            expect(result.stdout).not.toContain('Source archived.');
+            expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`PUT /api/v1/projects/${slug}/functions/sync`]);
+            expect(posts).toHaveLength(0); expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(base(oldHash));
+        } finally {
+            rejectSync = false;
+            fs.rmSync(dirs.root, { recursive: true, force: true }); fs.rmSync(dirs.home, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    it.skipIf(process.platform === 'win32')('retains the guard on resumed deploy after an interrupted write', async () => {
+        const dirs = setup(base(oldHash)); posts = []; syncBodies = []; requests = []; rejectSync = false; reply = 'stale';
+        try {
+            const script = `process.on('SIGXFSZ', () => {}); try { require(process.argv[1]).writeSandboxBase(process.argv[2], {source_hash:'${'b'.repeat(32)}',slug:'${slug}',restored_at:'later'}); process.exit(2); } catch (e) { console.log(e.code); }`;
+            const failed = spawnSync('bash', ['-c', 'ulimit -f 0; exec "$@"', 'bash', process.execPath, '-e', script, path.resolve('dist/utils/sandbox-base.js'), dirs.root], { encoding: 'utf8' });
+            expect(failed.status).toBe(0); expect(failed.stdout.trim()).toBe('EFBIG');
+            expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(base(oldHash));
+            const result = await invoke(dirs.root, dirs.home);
+            expect(syncBodies).toHaveLength(1); expect(syncBodies[0].base_source_hash).toBe(oldHash);
+            expect(posts).toHaveLength(1); expect(field(posts[0])).toBe(oldHash);
+            expect(result.exit).toBe(1); expect(result.stderr).toContain('The dev copy moved since you pulled.');
+            expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(base(oldHash));
+        } finally {
+            fs.rmSync(dirs.root, { recursive: true, force: true }); fs.rmSync(dirs.home, { recursive: true, force: true });
+        }
     }, 20_000);
 
     it('warns and preserves the guarded base when the server hash differs', async () => {
