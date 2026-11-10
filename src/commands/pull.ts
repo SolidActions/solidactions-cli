@@ -68,7 +68,9 @@ export async function pull(projectName: string, destPath?: string, options: { ye
                 // version of the `tar` package).
                 filter: (entryPath) => {
                     const top = entryPath.split('/')[0];
-                    return top === 'tenantcode' && !/\/sa-nocache-[0-9a-f-]+$/.test(entryPath);
+                    // Belt and braces with the server strip: never lay the
+                    // server-managed .solidactions/ down, at any depth.
+                    return top === 'tenantcode' && !/\/sa-nocache-[0-9a-f-]+$/.test(entryPath) && !entryPath.split('/').includes('.solidactions');
                 },
             })
         );

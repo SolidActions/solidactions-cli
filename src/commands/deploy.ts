@@ -711,7 +711,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     const base = readSandboxBase(sourceDir);
     const guardedBase = base?.slug === projectSlug ? base : null;
     const guardedBaseWire = guardedBase ? baseWireValue(guardedBase) : null;
-    const staleBaseLine = () => `The dev copy moved since you pulled. Run "solidactions pull ${projectSlug} . --yes" and redo your change.`;
+    const staleBaseLine = () => `The dev copy moved since you pulled. Run "solidactions project pull ${projectSlug} . --yes" and redo your change.`;
 
     // --config-only: sync YAML env declarations without building
     if (options.configOnly) {

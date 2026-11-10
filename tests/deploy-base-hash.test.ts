@@ -121,7 +121,7 @@ describe('deploy sandbox base', () => {
         const original = base(oldHash); const result = await scenario(original, 'stale');
         expect(result.posts).toHaveLength(1); expect(field(result.posts[0])).toBe(oldHash);
         expect(result.runs[0].exit).toBe(1);
-        expect(result.runs[0].stderr).toContain(`The dev copy moved since you pulled. Run "solidactions pull ${slug} . --yes" and redo your change.`);
+        expect(result.runs[0].stderr).toContain(`The dev copy moved since you pulled. Run "solidactions project pull ${slug} . --yes" and redo your change.`);
         expect(result.runs[0].stdout).not.toContain('Source archived.'); expect(result.contents).toBe(original);
     }, 20_000);
 
@@ -146,7 +146,7 @@ describe('deploy sandbox base', () => {
         try {
             const result = await invoke(dirs.root, dirs.home);
             expect(syncBodies).toHaveLength(1); expect(syncBodies[0].base_source_hash).toBe(oldHash);
-            expect(result.exit).toBe(1); expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions pull ${slug} . --yes" and redo your change.`);
+            expect(result.exit).toBe(1); expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions project pull ${slug} . --yes" and redo your change.`);
             expect(result.stdout).not.toContain('Source archived.');
             expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`PUT /api/v1/projects/${slug}/functions/sync`]);
             expect(posts).toHaveLength(0); expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(base(oldHash));
@@ -164,7 +164,7 @@ describe('deploy sandbox base', () => {
             const result = await invoke(dirs.root, dirs.home, true);
             expect(yamlBodies).toHaveLength(1); expect(yamlBodies[0].base_source_hash).toBe(oldHash);
             expect(result.exit).toBe(1);
-            expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions pull ${slug} . --yes" and redo your change.`);
+            expect(result.stderr.trim()).toBe(`The dev copy moved since you pulled. Run "solidactions project pull ${slug} . --yes" and redo your change.`);
             expect(result.stdout).not.toContain('Config synced');
             expect(requests.filter(request => !request.startsWith('GET '))).toEqual([`POST /api/v1/projects/${slug}/variable-mappings/sync-yaml`]);
             expect(fs.readFileSync(dirs.basePath, 'utf8')).toBe(original);
