@@ -17,7 +17,11 @@ beforeAll(async () => {
         const chunks: Buffer[] = [];
         tar.on('data', (chunk: Buffer) => chunks.push(chunk));
         tar.on('error', reject); tar.on('end', () => resolve(Buffer.concat(chunks)));
-        tar.append('hello', { name: 'tenantcode/page.html' }); void tar.finalize();
+        tar.append('hello', { name: 'tenantcode/page.html' });
+        tar.append('nested', { name: 'tenantcode/nested/keep.txt' });
+        tar.append('{"source_hash":"deadbeef"}', { name: 'tenantcode/.solidactions/base.json' });
+        tar.append('{}', { name: 'tenantcode/nested/.solidactions/deep.json' });
+        void tar.finalize();
     });
     expect(archive.length).toBeGreaterThan(0);
     server = http.createServer((req, res) => {
@@ -47,7 +51,7 @@ async function run(sandbox: boolean, hasHash: boolean) {
         child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
         const exit = await new Promise<number | null>((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
         const basePath = path.join(destination, '.solidactions/base.json');
-        return { stdout, stderr, exit, requests: [...requests], page: fs.readFileSync(path.join(destination, 'page.html'), 'utf8'), directory: fs.existsSync(path.dirname(basePath)), base: fs.existsSync(basePath) ? JSON.parse(fs.readFileSync(basePath, 'utf8')) : null };
+        return { stdout, stderr, exit, requests: [...requests], page: fs.readFileSync(path.join(destination, 'page.html'), 'utf8'), keep: fs.readFileSync(path.join(destination, 'nested/keep.txt'), 'utf8'), deep: fs.existsSync(path.join(destination, 'nested/.solidactions/deep.json')), directory: fs.existsSync(path.dirname(basePath)), base: fs.existsSync(basePath) ? JSON.parse(fs.readFileSync(basePath, 'utf8')) : null };
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -56,6 +60,7 @@ describe('pull sandbox base', () => {
         const result = await run(sandbox, hasHash);
         expect(result.exit).toBe(0); expect(result.stderr).toBe(''); expect(result.stdout).toContain('pulled successfully');
         expect(result.requests).toContain('GET /api/v1/projects/resolved-slug/source'); expect(result.page).toBe('hello');
+        expect(result.keep).toBe('nested'); expect(result.deep).toBe(false);
         if (sandbox && hasHash) {
             expect(result.base).toEqual({ source_hash: hash, slug: 'resolved-slug', restored_at: expect.any(String) });
         } else {
