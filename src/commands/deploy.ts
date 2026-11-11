@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import axios from 'axios';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
@@ -14,6 +14,7 @@ import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorks
 import type { Config } from '../utils/config';
 import { displayHost } from '../utils/host-display';
 import { planDeployFiles } from '../utils/deploy-ignore';
+import { baseWireValue, readSandboxBase, writeSandboxBase } from '../utils/sandbox-base';
 import { buildProjectSlug, slugifyName } from '../utils/slug';
 import { getProjectBySlugOrCanonical } from '../utils/project-ref';
 import { hasSolidActionsSkills } from '../utils/skills';
@@ -33,6 +34,8 @@ import {
     formatDeploymentRevision,
     type ProjectDeploymentDetail,
 } from './project-view';
+
+export let archiveMd5: string | null = null;
 
 /** Printed when a deploy target has no SolidActions skill files installed. */
 export const SKILLS_TIP_LINES = [
@@ -365,7 +368,8 @@ export function formatSyncYamlWarnings(warnings: unknown): string[] {
 export async function pushYamlDeclarations(
     config: { host: string; apiKey: string; workspaceId?: string },
     projectSlug: string,
-    yamlConfig: SolidActionsConfig
+    yamlConfig: SolidActionsConfig,
+    baseSourceHash?: string,
 ): Promise<void> {
     const parsedVars = parseYamlEnvVars(yamlConfig);
 
@@ -381,7 +385,7 @@ export async function pushYamlDeclarations(
 
     const response = await axios.post(
         `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
-        { declarations },
+        { declarations, ...(baseSourceHash !== undefined ? { base_source_hash: baseSourceHash } : {}) },
         {
             headers: getApiHeaders(config, 'application/json'),
         }
@@ -704,6 +708,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
     }
 
+    const base = readSandboxBase(sourceDir);
+    const guardedBase = base?.slug === projectSlug ? base : null;
+    const guardedBaseWire = guardedBase ? baseWireValue(guardedBase) : null;
+    const staleBaseLine = () => `The dev copy moved since you pulled. Run "solidactions project pull ${projectSlug} . --yes" and redo your change.`;
+
     // --config-only: sync YAML env declarations without building
     if (options.configOnly) {
         if (!yamlConfig) {
@@ -712,9 +721,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
 
         try {
-            await pushYamlDeclarations(config, projectSlug, yamlConfig);
+            await pushYamlDeclarations(config, projectSlug, yamlConfig, guardedBaseWire ?? undefined);
         } catch (error: any) {
-            if (error.response?.status === 401) {
+            if (error.response?.status === 409 && error.response.data?.code === 'stale_base') {
+                console.error(chalk.red(staleBaseLine()));
+            } else if (error.response?.status === 401) {
                 console.error(chalk.red(authFailedLine(config.host)));
             } else {
                 console.error(chalk.red(`Config sync FAILED: ${error.response?.data?.message || error.message}`));
@@ -766,7 +777,12 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         process.exit(1);
     }
     const functionsPayload = buildFunctionsSyncPayload(functionFiles, functionSources, codeRef);
+    if (guardedBaseWire !== null) functionsPayload.base_source_hash = guardedBaseWire;
     const functionsResult = await syncFunctions(config, projectSlug, functionsPayload);
+    if (functionsResult.httpStatus === 409 && functionsResult.body?.code === 'stale_base') {
+        console.error(chalk.red(staleBaseLine()));
+        process.exit(1);
+    }
     const functionRows = functionsResult.body?.functions ?? [];
     const retiredFunctions = functionsResult.body?.retired ?? [];
     const retireErrors = functionsResult.body?.retire_errors ?? [];
@@ -813,10 +829,6 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         process.exit(terminalExitCode({ buildFailed, yamlSyncFailed, outcome }));
     };
 
-    if (!yamlConfig?.workflows) {
-        return finishDeploy({ deploymentId: null, buildFailed: false });
-    }
-
     // Plan the file list BEFORE creating the archive write stream so a walk error
     // (permission error, unreadable dir) aborts cleanly with no orphan tarball.
     let plan: ReturnType<typeof planDeployFiles>;
@@ -859,7 +871,19 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.gray(`Archived ${archive.pointer()} total bytes`));
 
         try {
+            const hash = createHash('md5');
+            for await (const chunk of fs.createReadStream(archivePath)) {
+                hash.update(chunk);
+            }
+            const uploadedArchiveMd5 = hash.digest('hex');
+            archiveMd5 = uploadedArchiveMd5;
             const form = buildDeployForm(archivePath, sourceMetadata);
+            if (guardedBaseWire !== null) {
+                form.append('base_source_hash', guardedBaseWire);
+            }
+            if (!yamlConfig?.workflows) {
+                form.append('build', '0');
+            }
             if (options.paused) {
                 form.append('paused', '1');
             }
@@ -877,6 +901,18 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
             });
+            if (guardedBase) {
+                if (deployResponse.data?.source_hash === uploadedArchiveMd5) {
+                    writeSandboxBase(sourceDir, { source_hash: uploadedArchiveMd5, slug: guardedBase.slug, restored_at: new Date().toISOString() });
+                } else {
+                    console.log(chalk.yellow('The server stored different bytes than this deploy uploaded; base.json was left unchanged.'));
+                }
+            }
+            if (!yamlConfig?.workflows) {
+                console.log(chalk.green('Source archived.'));
+                cleanupArchive();
+                return await finishDeploy({ deploymentId: null, buildFailed: false });
+            }
             const acceptedDeployment = parseDeployAcceptance(deployResponse.data);
             if (acceptedDeployment.sourceMetadataRejected) {
                 console.log(chalk.yellow(
@@ -973,7 +1009,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         } catch (error: any) {
             console.error(chalk.red('Deployment failed:'));
             if (error.response) {
-                if (error.response.status === 404) {
+                if (error.response.status === 409 && error.response.data?.code === 'stale_base') {
+                    console.error(chalk.red(staleBaseLine()));
+                } else if (error.response.status === 404) {
                     console.error("Project not found.");
                 } else if (error.response.status === 401) {
                     console.error(chalk.red(authFailedLine(config.host)));

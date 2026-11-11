@@ -45,6 +45,7 @@ export function readFunctionSources(sourceDir: string, functions: CodeFunction[]
 }
 
 export interface FunctionsSyncPayload {
+    base_source_hash?: string;
     code_ref: { branch: string | null; short_sha: string | null; commit_sha: string | null; dirty: boolean | null } | null;
     functions: (CodeFunction & { source: string })[];
 }
