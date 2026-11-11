@@ -5,12 +5,17 @@ import type { SolidActionsConfig } from './env';
 import type { Config } from './config';
 import { getApiHeaders } from './api';
 import { isPagePointer } from './validate-items';
+import type { PageBundle } from './page-bundle';
+import { bundlePage, PageBundleError } from './page-bundle';
+
+export type PageLanguage = 'html' | 'tsx';
 
 export interface PageFile {
     slug: string;
     name: string;
     path: string;
     kind: 'visual' | 'dashboard';
+    language: PageLanguage;
     home: boolean;
     sources?: Record<string, unknown>[];
 }
@@ -21,6 +26,7 @@ export function listCodePages(config: SolidActionsConfig): PageFile[] {
         name: page.name,
         path: page.file,
         kind: page.file.endsWith('.html') ? 'visual' : 'dashboard',
+        language: page.file.endsWith('.tsx') ? 'tsx' : 'html',
         home: page.home ?? false,
         ...(page.sources === undefined ? {} : { sources: page.sources }),
     }));
@@ -30,14 +36,35 @@ export function readPageBodies(sourceDir: string, pages: PageFile[]): Map<string
     return new Map(pages.map(page => [page.slug, fs.readFileSync(path.join(sourceDir, page.path), 'utf8')]));
 }
 
+export async function bundleCodePages(sourceDir: string, pages: PageFile[]): Promise<{ bundles: Map<string, PageBundle>; errors: string[] }> {
+    const bundles = new Map<string, PageBundle>();
+    const errors: string[] = [];
+    for (const page of pages.filter(candidate => candidate.language === 'tsx')) {
+        try {
+            bundles.set(page.slug, await bundlePage(path.join(sourceDir, page.path), sourceDir));
+        } catch (error: any) {
+            const lines = String(error?.message ?? 'bundle failed').split('\n');
+            errors.push(`page ${page.slug} (${page.path}): ${lines[0]}`, ...lines.slice(1).map(line => `  ${line}`));
+        }
+    }
+    return { bundles, errors };
+}
+
 export interface PagesSyncPayload {
     deployment_id: string | null;
     code_ref: { branch: string | null; short_sha: string | null; commit_sha: string | null; dirty: boolean | null } | null;
-    pages: (PageFile & { body: string })[];
+    pages: (PageFile & { body: string; source_files?: Record<string, string>; compiled?: string; compiled_css?: string; compiler_version?: string })[];
 }
 
-export function buildPagesSyncPayload(pages: PageFile[], bodies: Map<string, string>, deploymentId: string | null, codeRef: PagesSyncPayload['code_ref']): PagesSyncPayload {
-    return { deployment_id: deploymentId, code_ref: codeRef, pages: pages.map(page => ({ ...page, body: bodies.get(page.slug)! })) };
+export function buildPagesSyncPayload(pages: PageFile[], bodies: Map<string, string>, deploymentId: string | null, codeRef: PagesSyncPayload['code_ref'], bundles?: Map<string, PageBundle>): PagesSyncPayload {
+    return {
+        deployment_id: deploymentId,
+        code_ref: codeRef,
+        pages: pages.map(page => {
+            const bundle = bundles?.get(page.slug);
+            return { ...page, body: bodies.get(page.slug)!, ...(bundle === undefined ? {} : { source_files: bundle.sources, compiled: bundle.compiled, compiled_css: bundle.compiledCss, compiler_version: bundle.compilerVersion }) };
+        }),
+    };
 }
 
 export interface PagesSyncResultRow {
