@@ -90,7 +90,16 @@ function isOutsideRoot(relative: string): boolean {
 }
 
 function describe(message: Message, projectDir: string): string {
-    const fromMain = message.location?.file === MAIN || message.location?.file === '<stdin>';
+    // esbuild keeps the returning plugin's name on a plugin error
+    // (probed on 0.28.2: pluginName "sa-capture"/"sa-platform", id "").
+    // A plugin error is classified by what it IS — its own text — never
+    // by where it is reported: the entry's outside-root refusal is
+    // reported from the virtual sa-page:main import, where a
+    // location-based rule misreads it as a missing default export.
+    const pluginError = message.pluginName === 'sa-platform' || message.pluginName === 'sa-capture';
+    const reportedFromMain = message.location?.file === MAIN || message.location?.file === '<stdin>';
+    if (pluginError && reportedFromMain) return message.text;
+    const fromMain = reportedFromMain;
     const computed = message.id === 'unsupported-dynamic-import' || message.id === 'unsupported-require-call';
     const text = fromMain ? NO_DEFAULT_EXPORT : computed ? COMPUTED_SPECIFIER : message.text;
     if (fromMain || !message.location?.file) return text;
