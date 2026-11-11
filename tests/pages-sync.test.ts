@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildPagesSyncPayload, bundleCodePages, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, terminalExitCode } from '../src/utils/pages-sync';
-import type { PageFile, PagesSyncOutcome, PagesSyncResultRow } from '../src/utils/pages-sync';
+import type { PageFile, PagesSyncOutcome, PagesSyncPayload, PagesSyncResultRow } from '../src/utils/pages-sync';
 import { validatesAgainstAppMain } from './helpers/pages-sync-main-rules';
 
 const pages: PageFile[] = [
@@ -49,12 +49,12 @@ describe('pages sync', () => {
     });
     it('adds bundle fields to bundled pages only, keeping the data sources', () => {
         const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
-        const bodies = new Map([['home', 'html'], ['board', 'tsx']]);
-        const bundles = new Map([['board', { compiled: 'C', compiledCss: 'S', sources: { 'pages/board.tsx': 'T' }, compilerVersion: '0.28.2' }]]);
+        const bodies = new Map([['home', 'html'], ['board', 'stale-tsx']]);
+        const bundles = new Map([['board', { compiled: 'C', compiledCss: 'S', sources: { 'pages/board.tsx': 'T' }, compilerVersion: '0.28.2', entrySource: 'ENTRY_SRC' }]]);
 
         const payload = buildPagesSyncPayload(pages, bodies, null, ref, bundles);
 
-        expect(payload.pages[1]).toEqual({ ...pages[1], body: 'tsx', source_files: { 'pages/board.tsx': 'T' }, compiled: 'C', compiled_css: 'S', compiler_version: '0.28.2' });
+        expect(payload.pages[1]).toEqual({ ...pages[1], body: 'ENTRY_SRC', source_files: { 'pages/board.tsx': 'T' }, compiled: 'C', compiled_css: 'S', compiler_version: '0.28.2' });
         expect(payload.pages[1].sources).toEqual([{ key: 'sales' }]);
         for (const key of ['source_files', 'compiled', 'compiled_css', 'compiler_version'] as const) {
             expect(key in payload.pages[0]).toBe(false);
@@ -100,16 +100,13 @@ describe('pages sync', () => {
         }
     });
     it('still validates against the pinned app rules with bundles, and the helper catches a file map under sources', () => {
-        // The pinned rules require sources.*.kind (R1), so this row's
-        // fixture carries kind 'sql': the shared fixture's kind-less entry
-        // predates the guard and would not validate against main either.
         const guarded: PageFile[] = [
             { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
-            { slug: 'board', name: 'Board', path: 'pages/board.tsx', kind: 'dashboard', language: 'tsx', home: false, sources: [{ key: 'sales', kind: 'sql' }] },
+            { slug: 'board', name: 'Board', path: 'pages/board.tsx', kind: 'dashboard', language: 'tsx', home: false, sources: [{ key: 'sales', kind: 'sql', database: 'main', sql: 'select 1' }] },
         ];
         const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
         const bodies = new Map([['home', 'html'], ['board', 'tsx']]);
-        const bundles = new Map([['board', { compiled: 'C', compiledCss: 'S', sources: { 'pages/board.tsx': 'T' }, compilerVersion: '0.28.2' }]]);
+        const bundles = new Map([['board', { compiled: 'C', compiledCss: 'S', sources: { 'pages/board.tsx': 'T' }, compilerVersion: '0.28.2', entrySource: 'T' }]]);
 
         expect(validatesAgainstAppMain(buildPagesSyncPayload(guarded, bodies, null, ref))).toEqual([]);
         expect(validatesAgainstAppMain(buildPagesSyncPayload(guarded, bodies, null, ref, bundles))).toEqual([]);
@@ -117,6 +114,168 @@ describe('pages sync', () => {
         const withBundles = buildPagesSyncPayload(guarded, bodies, null, ref, bundles);
         const badPages = withBundles.pages.map(page => page.slug === 'board' ? { ...page, sources: { 'a.ts': 'x' } } : page);
         expect(validatesAgainstAppMain({ ...withBundles, pages: badPages }).length).toBeGreaterThan(0);
+    });
+    it('rejects duplicate slugs under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const dup: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+            { slug: 'home', name: 'Other', path: 'pages/other.html', kind: 'visual', language: 'html', home: false },
+        ];
+        const payload = buildPagesSyncPayload(dup, new Map([['home', 'a']]), null, ref);
+        expect(payload.pages).toHaveLength(2);
+        expect(validatesAgainstAppMain(payload).length).toBeGreaterThan(0);
+    });
+    it('rejects two home pages under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const twoHomes: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: true },
+        ];
+        const payload = buildPagesSyncPayload(twoHomes, new Map([['home', 'a'], ['board', 'b']]), null, ref);
+        expect(validatesAgainstAppMain(payload).length).toBeGreaterThan(0);
+    });
+    it('rejects an empty name and an empty path under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        const emptyName = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, ref);
+        emptyName.pages[0].name = '';
+        expect(validatesAgainstAppMain(emptyName).length).toBeGreaterThan(0);
+        const emptyPath = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, ref);
+        emptyPath.pages[0].path = '';
+        expect(validatesAgainstAppMain(emptyPath).length).toBeGreaterThan(0);
+    });
+    it('rejects sql sources with neither or both of database and connection', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: true, sources: [{ key: 'sales', kind: 'sql' }] },
+        ];
+        const neither = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        expect(validatesAgainstAppMain(neither).length).toBeGreaterThan(0);
+        const both = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        both.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', connection: 'other' }];
+        expect(validatesAgainstAppMain(both).length).toBeGreaterThan(0);
+    });
+    it('rejects a pegs source carrying a database under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: true, sources: [{ key: 'k', kind: 'pegs', database: 'main' }] },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref)).length).toBeGreaterThan(0);
+    });
+    it('rejects a body over 1048576 bytes under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(base, new Map([['home', 'x'.repeat(1048577)]]), null, ref)).length).toBeGreaterThan(0);
+    });
+    it('rejects an empty or whitespace-only body under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        const empty = buildPagesSyncPayload(base, new Map([['home', '']]), null, ref);
+        expect(empty.pages[0].body).toBe('');
+        expect(validatesAgainstAppMain(empty).length).toBeGreaterThan(0);
+        const blank = buildPagesSyncPayload(base, new Map([['home', '   ']]), null, ref);
+        expect(blank.pages[0].body).toBe('   ');
+        expect(validatesAgainstAppMain(blank).length).toBeGreaterThan(0);
+    });
+    it('accepts a map of valid pages under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: false },
+        ];
+        const payload = buildPagesSyncPayload(base, new Map([['home', 'a'], ['board', 'b']]), null, ref);
+        expect(payload.pages).toHaveLength(2);
+        const mapped = { ...payload, pages: { a: payload.pages[0], b: payload.pages[1] } };
+        expect(validatesAgainstAppMain(mapped)).toEqual([]);
+    });
+    it('rejects kind tsx and more than 50 sources under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        const badKind = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, ref);
+        (badKind.pages[0] as unknown as Record<string, unknown>).kind = 'tsx';
+        expect(validatesAgainstAppMain(badKind).length).toBeGreaterThan(0);
+        const many = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, ref);
+        many.pages[0].sources = Array.from({ length: 51 }, (_, n) => ({ key: `k${n}`, kind: 'sql', database: 'main' }));
+        expect(validatesAgainstAppMain(many).length).toBeGreaterThan(0);
+    });
+    it('rejects a non-UUID deployment_id under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        const payload = buildPagesSyncPayload(base, new Map([['home', 'a']]), 'dep-1', ref);
+        expect(payload.deployment_id).toBe('dep-1');
+        expect(validatesAgainstAppMain(payload).length).toBeGreaterThan(0);
+        const good = buildPagesSyncPayload(base, new Map([['home', 'a']]), '123e4567-e89b-12d3-a456-426614174000', ref);
+        expect(validatesAgainstAppMain(good)).toEqual([]);
+    });
+    it('rejects wrong code_ref field types under the pinned app rules', () => {
+        const base: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+        ];
+        const badBranch = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, { branch: 5, short_sha: null, commit_sha: null, dirty: null } as unknown as PagesSyncPayload['code_ref']);
+        expect(validatesAgainstAppMain(badBranch).length).toBeGreaterThan(0);
+        const badDirty = buildPagesSyncPayload(base, new Map([['home', 'a']]), null, { branch: null, short_sha: null, commit_sha: null, dirty: 'maybe' } as unknown as PagesSyncPayload['code_ref']);
+        expect(validatesAgainstAppMain(badDirty).length).toBeGreaterThan(0);
+    });
+    it('rejects source value types and limits under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: true, sources: [{ key: 'sales', kind: 'sql', database: 'main', sql: 'select 1' }] },
+        ];
+        const longSql = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        longSql.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', sql: 'x'.repeat(65536) }];
+        expect(validatesAgainstAppMain(longSql).length).toBeGreaterThan(0);
+        const negativeTtl = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        negativeTtl.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', cache_ttl_seconds: -1 }];
+        expect(validatesAgainstAppMain(negativeTtl).length).toBeGreaterThan(0);
+        const limitZero = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        limitZero.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', limit: 0 }];
+        expect(validatesAgainstAppMain(limitZero).length).toBeGreaterThan(0);
+        const limitHigh = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        limitHigh.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', limit: 501 }];
+        expect(validatesAgainstAppMain(limitHigh).length).toBeGreaterThan(0);
+        const badBoard = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        badBoard.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', pegboard_id: 'not-a-uuid' }];
+        expect(validatesAgainstAppMain(badBoard).length).toBeGreaterThan(0);
+        const longAction = buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref);
+        longAction.pages[0].sources = [{ key: 'sales', kind: 'sql', database: 'main', action: 'x'.repeat(129) }];
+        expect(validatesAgainstAppMain(longAction).length).toBeGreaterThan(0);
+    });
+    it('rejects home yes but accepts 1 and 1 as a home under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const yesHome: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: 'yes' as unknown as boolean },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(yesHome, new Map([['home', 'a']]), null, ref)).length).toBeGreaterThan(0);
+        const oneHome: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: 1 as unknown as boolean },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(oneHome, new Map([['home', 'a']]), null, ref))).toEqual([]);
+        const stringOneHome: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: '1' as unknown as boolean },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(stringOneHome, new Map([['home', 'a']]), null, ref))).toEqual([]);
+        const twoHomes: PageFile[] = [
+            { slug: 'home', name: 'Home', path: 'pages/home.html', kind: 'visual', language: 'html', home: true },
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: '1' as unknown as boolean },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(twoHomes, new Map([['home', 'a'], ['board', 'b']]), null, ref)).length).toBeGreaterThan(0);
+    });
+    it('accepts associative params and a numeric-string cache ttl under the pinned app rules', () => {
+        const ref = { branch: 'main', short_sha: 'abc', commit_sha: 'abcdef', dirty: false };
+        const base: PageFile[] = [
+            { slug: 'board', name: 'Board', path: 'pages/board.html', kind: 'dashboard', language: 'html', home: true, sources: [{ key: 'sales', kind: 'sql', database: 'main', params: { region: 'eu' }, cache_ttl_seconds: '5' as unknown as number }] },
+        ];
+        expect(validatesAgainstAppMain(buildPagesSyncPayload(base, new Map([['board', 'b']]), null, ref))).toEqual([]);
     });
     it('formats live, page error, trash and trash error lines in order', () => {
         expect(formatPagesSummary([live, { ...live, slug: 'no-url', url: null }, failed], [{ slug: 'old', id: 3 }], [{ slug: 'stuck', error: { code: 'denied', message: 'No access' } }])).toEqual([

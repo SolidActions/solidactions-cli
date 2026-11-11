@@ -649,4 +649,97 @@ export default function Board(): React.ReactElement {
             remove();
         }
     });
+
+    // I1: the entry file is captured at compile time; an equal-length edit
+    // in the window between compilation and result assembly must not change
+    // the published compiled/sources/entrySource snapshot.
+    it('keeps the captured snapshot when the entry changes after compilation', async () => {
+        const { root, remove } = makeProject();
+        try {
+            const origEntry = `import React from 'react';\n\nexport const ENTRY_MARK = 'ORIG_ENTRY_AAAA';\n\nexport default function Board(): React.ReactElement {\n    return <div>{ENTRY_MARK}</div>;\n}\n`;
+            const rewrittenEntry = origEntry.replace('ORIG_ENTRY_AAAA', 'ORIG_ENTRY_BBBB');
+            expect(rewrittenEntry.length).toBe(origEntry.length);
+            writeFile(root, 'pages/board.tsx', origEntry);
+
+            const bundle = await bundlePage('pages/board.tsx', root, {
+                afterBundle: () => {
+                    writeFile(root, 'pages/board.tsx', rewrittenEntry);
+                },
+            });
+
+            expect(bundle.compiled).toContain('ORIG_ENTRY_AAAA');
+            expect(bundle.compiled).not.toContain('ORIG_ENTRY_BBBB');
+            expect(bundle.sources['pages/board.tsx']).toBe(origEntry);
+            expect(bundle.entrySource).toBe(origEntry);
+            expect(fs.readFileSync(path.join(root, 'pages/board.tsx'), 'utf8')).toBe(rewrittenEntry);
+        } finally {
+            remove();
+        }
+    });
+
+    // I1: the same snapshot binding holds for a dependency file.
+    it('keeps the captured snapshot when a dependency changes after compilation', async () => {
+        const { root, remove } = makeProject();
+        try {
+            const origDep = `export const DEP_MARK = 'ORIG_DEP_AAAA';\n`;
+            const rewrittenDep = origDep.replace('ORIG_DEP_AAAA', 'ORIG_DEP_BBBB');
+            expect(rewrittenDep.length).toBe(origDep.length);
+            const origEntry = `import React from 'react';\nimport { DEP_MARK } from '../lib/x';\n\nexport default function Board(): React.ReactElement {\n    return <div>{DEP_MARK}</div>;\n}\n`;
+            writeFile(root, 'lib/x.ts', origDep);
+            writeFile(root, 'pages/board.tsx', origEntry);
+
+            const bundle = await bundlePage('pages/board.tsx', root, {
+                afterBundle: () => {
+                    writeFile(root, 'lib/x.ts', rewrittenDep);
+                },
+            });
+
+            expect(bundle.compiled).toContain('ORIG_DEP_AAAA');
+            expect(bundle.compiled).not.toContain('ORIG_DEP_BBBB');
+            expect(bundle.sources['lib/x.ts']).toBe(origDep);
+            expect(bundle.entrySource).toBe(origEntry);
+            expect(fs.readFileSync(path.join(root, 'lib/x.ts'), 'utf8')).toBe(rewrittenDep);
+        } finally {
+            remove();
+        }
+    });
+
+    // I1: esbuild 0.28.2 loads .txt with its default text loader (one-off
+    // probe output is in the fix report), but .txt is not in the capture
+    // map, so the uncaptured-input guard — not esbuild — refuses it.
+    // Removing the guard changes this message.
+    it('refuses a project input with an unsupported file type', async () => {
+        const { root, remove } = makeProject();
+        try {
+            writeFile(root, 'lib/note.txt', 'plain note\n');
+            const error = await rejectsWith(`import React from 'react';\nimport note from '../lib/note.txt';\n\nexport default function Board(): React.ReactElement {\n    return <div>{String(note)}</div>;\n}\n`, root);
+
+            expect(error.message).toContain('lib/note.txt: unsupported file type for a page');
+        } finally {
+            remove();
+        }
+    });
+
+    // I1: *.module.css keeps esbuild's default local-css behavior through the
+    // capture plugin (scoped class names, e.g. `.box` in m.module.css becomes
+    // `.m_box` — the same output esbuild produces without the plugin).
+    it('bundles a module stylesheet with scoped class names', async () => {
+        const { root, remove } = makeProject();
+        try {
+            writeFile(root, 'lib/m.module.css', '.box{color:red}\n');
+            writeFile(
+                root,
+                'pages/board.tsx',
+                `import React from 'react';\nimport '../lib/m.module.css';\n\nexport default function Board(): React.ReactElement {\n    return <div />;\n}\n`,
+            );
+
+            const bundle = await bundlePage('pages/board.tsx', root);
+
+            expect(bundle.compiledCss).toContain('.m_box');
+            expect(bundle.compiledCss).toMatch(/color:\s*red/);
+            expect(bundle.sources['lib/m.module.css']).toBe('.box{color:red}\n');
+        } finally {
+            remove();
+        }
+    });
 });

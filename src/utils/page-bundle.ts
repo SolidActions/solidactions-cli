@@ -13,6 +13,7 @@ export interface PageBundle {
     compiledCss: string;
     sources: Record<string, string>;
     compilerVersion: string;
+    entrySource: string;
 }
 
 export class PageBundleError extends Error {}
@@ -50,6 +51,31 @@ function toPosix(value: string): string {
     return value.split(path.sep).join('/').replace(/\\/g, '/');
 }
 
+type CaptureLoader = 'ts' | 'tsx' | 'js' | 'jsx' | 'json' | 'css' | 'local-css';
+
+function loaderForExtension(ext: string): Exclude<CaptureLoader, 'local-css'> | null {
+    switch (ext) {
+        case '.ts':
+        case '.mts':
+        case '.cts':
+            return 'ts';
+        case '.tsx':
+            return 'tsx';
+        case '.js':
+        case '.mjs':
+        case '.cjs':
+            return 'js';
+        case '.jsx':
+            return 'jsx';
+        case '.json':
+            return 'json';
+        case '.css':
+            return 'css';
+        default:
+            return null;
+    }
+}
+
 // True when a project-relative path escapes the project root. A leading
 // `..` path component means outside; a mere `..` prefix does not (files
 // like `lib/..shared.ts` or dirs like `..lib/` are valid project paths).
@@ -70,7 +96,8 @@ function describe(message: Message, projectDir: string): string {
     return `${file}:${message.location.line}:${message.location.column}: ${text}`;
 }
 
-export async function bundlePage(entryPath: string, projectDir: string): Promise<PageBundle> {
+export async function bundlePage(entryPath: string, projectDir: string, hooks?: { afterBundle?: () => void | Promise<void> }): Promise<PageBundle> {
+    // test seam: the window between compilation and result assembly
     const root = path.resolve(projectDir);
     const entry = path.resolve(root, entryPath);
     // esbuild keys metafile inputs by real path: an entry reached through
@@ -80,6 +107,35 @@ export async function bundlePage(entryPath: string, projectDir: string): Promise
     const realRoot = fs.realpathSync(root);
     const realEntry = fs.existsSync(entry) ? fs.realpathSync(entry) : entry;
     const entryKey = toPosix(path.relative(realRoot, realEntry));
+    const capturedByAbs = new Map<string, string>();
+    const capturePlugin: Plugin = {
+        name: 'sa-capture',
+        setup(b) {
+            b.onLoad({ filter: /.*/, namespace: 'file' }, (args) => {
+                if (toPosix(args.path).split('/').includes('node_modules')) return null;
+                // esbuild defaults *.module.css to the local-css loader (scoped
+                // class names); return the same loader so capture is behavior-preserving.
+                const loader: CaptureLoader | null = args.path.endsWith('.module.css')
+                    ? 'local-css'
+                    : loaderForExtension(path.extname(args.path));
+                if (loader === null) return null;
+                let text: string;
+                try {
+                    text = fs.readFileSync(args.path, 'utf8');
+                } catch {
+                    throw new PageBundleError(`${toPosix(path.relative(root, args.path))}: could not be read while it was being bundled; deploy again`);
+                }
+                let absReal: string;
+                try {
+                    absReal = fs.realpathSync(args.path);
+                } catch {
+                    absReal = args.path;
+                }
+                capturedByAbs.set(absReal, text);
+                return { contents: text, loader };
+            });
+        },
+    };
     let result;
     try {
         result = await build({
@@ -106,13 +162,15 @@ export async function bundlePage(entryPath: string, projectDir: string): Promise
             jsxFragment: 'React.Fragment',
             logOverride: { 'unsupported-dynamic-import': 'error', 'unsupported-require-call': 'error' },
             tsconfigRaw: { compilerOptions: { verbatimModuleSyntax: true } },
-            plugins: [platformPlugin()],
+            plugins: [platformPlugin(), capturePlugin],
         });
     } catch (error) {
+        if (error instanceof PageBundleError) throw error;
         const errors = (error as { errors?: Message[] }).errors;
         if (!Array.isArray(errors) || errors.length === 0) throw new PageBundleError(String((error as Error).message ?? 'bundle failed'));
         throw new PageBundleError([...new Set(errors.slice(0, 20).map(message => describe(message, root)))].join('\n'));
     }
+    await hooks?.afterBundle?.();
     // The resolved entry is checked against the project root before the
     // format check: an entry symlink pointing outside (even to a CommonJS
     // file, even across Windows drives) is an outside-the-project refusal,
@@ -133,13 +191,23 @@ export async function bundlePage(entryPath: string, projectDir: string): Promise
             throw new PageBundleError(`${toPosix(key)}: imported from outside the project directory; a page can only import files inside its project`);
         }
         if (posix.split('/').includes('node_modules')) continue;
-        const text = fs.readFileSync(path.join(root, relative), 'utf8');
-        if (Buffer.byteLength(text) !== result.metafile.inputs[key].bytes) throw new PageBundleError(`${posix}: changed while it was being bundled; deploy again`);
+        const resolved = path.resolve(root, key);
+        let absReal = resolved;
+        try {
+            absReal = fs.realpathSync(resolved);
+        } catch {
+            absReal = resolved;
+        }
+        const text = capturedByAbs.get(absReal) ?? capturedByAbs.get(resolved);
+        if (text === undefined) throw new PageBundleError(`${posix}: unsupported file type for a page`);
         sources[posix] = text;
         totalBytes += Buffer.byteLength(text);
     }
     if (Object.keys(sources).length > SOURCES_MAX_FILES) throw new PageBundleError(`the page reads ${Object.keys(sources).length} project files, over the ${SOURCES_MAX_FILES} file limit`);
     if (totalBytes > SOURCES_MAX_BYTES) throw new PageBundleError(`the page's project files total ${totalBytes} bytes, over the 1 MiB (${SOURCES_MAX_BYTES} bytes) limit`);
+
+    const entrySource = capturedByAbs.get(realEntry);
+    if (entrySource === undefined) throw new PageBundleError(`${entryKey}: unsupported file type for a page`);
 
     const js = result.outputFiles.find(file => file.path.endsWith('.js'))?.text ?? '';
     const css = result.outputFiles.find(file => file.path.endsWith('.css'))?.text ?? '';
@@ -147,5 +215,5 @@ export async function bundlePage(entryPath: string, projectDir: string): Promise
     if (/<\/script/i.test(compiled)) throw new PageBundleError('the compiled page contains "</script", which would end the script tag it is served in; split the string (for example "<\\/script")');
     const size = Buffer.byteLength(compiled);
     if (size > COMPILED_LIMIT_BYTES) throw new PageBundleError(`the compiled page is ${size} bytes, over the 2 MiB (${COMPILED_LIMIT_BYTES} bytes) limit`);
-    return { compiled, compiledCss: css, sources, compilerVersion: esbuildVersion };
+    return { compiled, compiledCss: css, sources, compilerVersion: esbuildVersion, entrySource };
 }

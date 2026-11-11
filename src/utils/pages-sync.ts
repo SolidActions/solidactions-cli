@@ -62,7 +62,8 @@ export function buildPagesSyncPayload(pages: PageFile[], bodies: Map<string, str
         code_ref: codeRef,
         pages: pages.map(page => {
             const bundle = bundles?.get(page.slug);
-            return { ...page, body: bodies.get(page.slug)!, ...(bundle === undefined ? {} : { source_files: bundle.sources, compiled: bundle.compiled, compiled_css: bundle.compiledCss, compiler_version: bundle.compilerVersion }) };
+            if (bundle === undefined) return { ...page, body: bodies.get(page.slug)! };
+            return { ...page, body: bundle.entrySource, source_files: bundle.sources, compiled: bundle.compiled, compiled_css: bundle.compiledCss, compiler_version: bundle.compilerVersion };
         }),
     };
 }

@@ -771,7 +771,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     let pageBodies: Map<string, string>;
     try {
-        pageBodies = readPageBodies(sourceDir, pageFiles);
+        pageBodies = readPageBodies(sourceDir, pageFiles.filter(page => !bundledPages.has(page.slug)));
     } catch (error: any) {
         console.error(chalk.red(`Failed to read page: ${error.message}`));
         process.exit(1);

@@ -20,6 +20,11 @@ let requests: { method: string; url: string; body: Buffer; contentType: string }
 let sourceDir = '';
 let projectMissing = false;
 let notFoundServed = 0;
+let rewriteEntryOnLookup = false;
+let rewriteEntryText = '';
+let entryRewritten = false;
+const DEPLOYMENT_UUID = '123e4567-e89b-12d3-a456-426614174000';
+const devSlug = `${project}-dev`;
 
 const BOARD_TSX = `import React from 'react';
 import { formatTitle } from '../lib/format';
@@ -51,10 +56,21 @@ beforeAll(async () => {
                 } else {
                     res.end(JSON.stringify({ slug: project, status: 'deployed' }));
                 }
+            } else if (req.method === 'GET' && url === `/api/v1/projects/${devSlug}`) {
+                // Post-bundling environment lookup (deploy runs with -e dev):
+                // bundling already finished, so rewriting here lands in the
+                // network-await window between compilation and the body read.
+                if (rewriteEntryOnLookup && !entryRewritten && sourceDir !== '') {
+                    fs.writeFileSync(path.join(sourceDir, 'pages/board.tsx'), rewriteEntryText);
+                    entryRewritten = true;
+                }
+                res.end(JSON.stringify({ slug: devSlug, status: 'deployed' }));
+            } else if (req.method === 'GET' && url.startsWith(`/api/v1/projects/${project}`)) {
+                res.end(JSON.stringify({ slug: devSlug, status: 'deployed', deployment_matches_deployed_hash: true, latest_successful_deployment: { id: DEPLOYMENT_UUID, status: 'succeeded' } }));
             } else if (req.method === 'POST' && url === '/api/v1/projects') {
                 res.end(JSON.stringify({ slug: project }));
             } else if (req.method === 'POST' && url.endsWith('/deploy')) {
-                res.end(JSON.stringify({ stored: true, source_hash: 'a'.repeat(32), deployment_id: 'dep-1' }));
+                res.end(JSON.stringify({ stored: true, source_hash: 'a'.repeat(32), deployment_id: DEPLOYMENT_UUID }));
             } else if (req.method === 'PUT' && url.endsWith('/functions/sync')) {
                 res.end(JSON.stringify({ functions: [], retired: [], retire_errors: [] }));
             } else if (req.method === 'PUT' && url.endsWith('/pages/sync')) {
@@ -110,6 +126,67 @@ function fixture(variant: 'full' | 'broken' | 'oversize' | 'html-only'): string 
     expect(fs.existsSync(path.join(root, 'pages/board.tsx'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'pages/about.html'))).toBe(true);
     return root;
+}
+
+const HOLD_ORIG_TSX = `import React from 'react';
+import { formatTitle } from '../lib/format';
+import { mark } from 'fake-chart';
+
+export const HOLD_MARK = 'HOLD_ORIG_AAAA';
+
+export default function Board(): React.ReactElement {
+    return <div>{formatTitle('board')}{mark}{HOLD_MARK}</div>;
+}
+`;
+
+const HOLD_REWRITTEN_TSX = HOLD_ORIG_TSX.replace('HOLD_ORIG_AAAA', 'HOLD_ORIG_BBBB');
+
+function holdFixture(kind: 'pages' | 'workflow'): string {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sa-code-pages-hold-')));
+    writeFile(root, 'pages/board.tsx', HOLD_ORIG_TSX);
+    writeFile(root, 'lib/format.ts', FORMAT_TS);
+    writeFile(root, 'node_modules/fake-chart/package.json', '{"name":"fake-chart","version":"1.0.0","main":"index.js"}');
+    writeFile(root, 'node_modules/fake-chart/index.js', `import './style.css';\nexport const mark = 'FAKE_CHART_MARK';\n`);
+    writeFile(root, 'node_modules/fake-chart/style.css', '.fake{color:red}\n');
+    writeFile(root, 'pages/about.html', ABOUT_HTML);
+    const pagesYaml = '  - id: board\n    name: Board\n    file: pages/board.tsx\n    home: true\n    sources:\n      - key: sales\n        kind: sql\n        database: main\n        sql: select 1\n  - id: about\n    name: About\n    file: pages/about.html\n';
+    const yaml = kind === 'pages' ? `pages:\n${pagesYaml}` : `workflows:\n  - name: noop\n    command: "true"\npages:\n${pagesYaml}`;
+    writeFile(root, 'solidactions.yaml', yaml);
+    writeFile(root, 'package.json', JSON.stringify({ name: 'fixture', dependencies: { '@solidactions/sdk': '^0.7.3' } }));
+    expect(fs.existsSync(path.join(root, 'pages/board.tsx'))).toBe(true);
+    expect(HOLD_REWRITTEN_TSX.length).toBe(HOLD_ORIG_TSX.length);
+    return root;
+}
+
+async function runHold(kind: 'pages' | 'workflow') {
+    sourceDir = holdFixture(kind);
+    requests = [];
+    projectMissing = false;
+    notFoundServed = 0;
+    rewriteEntryOnLookup = true;
+    rewriteEntryText = HOLD_REWRITTEN_TSX;
+    entryRewritten = false;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-code-pages-home-'));
+    const modulePath = path.resolve('dist/commands/deploy.js');
+    const script = `const command = require(process.argv[1]); command.deploy('code-pages-project', process.argv[2], { env: 'dev', gitMetadata: false });`;
+    try {
+        const child = spawn(process.execPath, ['-e', script, modulePath, sourceDir], {
+            env: { ...process.env, HOME: home, SOLIDACTIONS_HOST: `http://127.0.0.1:${port}`, SOLIDACTIONS_API_KEY: 'test-key', SOLIDACTIONS_WORKSPACE_ID: 'workspace-1', FORCE_COLOR: '0' },
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });
+        child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+        const exit = await new Promise<number | null>((resolve, reject) => {
+            child.on('error', reject);
+            child.on('close', resolve);
+        });
+        return { stdout, stderr, exit, requests: [...requests], entryRewritten };
+    } finally {
+        rewriteEntryOnLookup = false;
+        fs.rmSync(sourceDir, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+    }
 }
 
 async function run(
@@ -251,4 +328,54 @@ describe('deploy code pages end to end', () => {
         }
         expect(validatesAgainstAppMain(body)).toEqual([]);
     }, 60_000);
+
+    // I1 HOLD-window (store-only): the deploy runs with -e dev, so the
+    // fake server answers the first (production) GET untouched and rewrites
+    // the tsx entry when serving the SECOND project GET (the `<slug>-dev`
+    // environment lookup, which the CLI performs only after bundling).
+    // The published pages sync payload must carry one captured version.
+    it('ships one captured version when the entry changes during project lookup (store-only)', async () => {
+        const result = await runHold('pages');
+        expect(result.entryRewritten).toBe(true);
+        const prodIdx = result.requests.findIndex((r) => r.method === 'GET' && r.url === `/api/v1/projects/${project}`);
+        const devIdx = result.requests.findIndex((r) => r.method === 'GET' && r.url === `/api/v1/projects/${project}-dev`);
+        expect(prodIdx).toBeGreaterThanOrEqual(0);
+        expect(devIdx).toBeGreaterThan(prodIdx);
+        expect(result.exit).toBe(0);
+        expect(result.stderr).toBe('');
+        const puts = result.requests.filter((r) => r.method === 'PUT' && r.url.endsWith('/pages/sync'));
+        expect(puts).toHaveLength(1);
+        const body = pagesSyncBody(puts[0]);
+        const board = body.pages.find((page: any) => page.slug === 'board');
+        expect(board.body).toBe(HOLD_ORIG_TSX);
+        expect(board.source_files['pages/board.tsx']).toBe(HOLD_ORIG_TSX);
+        expect(board.compiled).toContain('HOLD_ORIG_AAAA');
+        expect(board.compiled).not.toContain('HOLD_ORIG_BBBB');
+        expect(board.body).not.toContain('HOLD_ORIG_BBBB');
+        expect(validatesAgainstAppMain(body)).toEqual([]);
+    }, 60_000);
+
+    // I1 HOLD-window (workflow): same second-GET rewrite and
+    // captured-version contract through the workflow completion path
+    // (archive POST, status poll, finalizer sync).
+    it('ships one captured version when the entry changes during project lookup (workflow)', async () => {
+        const result = await runHold('workflow');
+        expect(result.entryRewritten).toBe(true);
+        const prodIdx = result.requests.findIndex((r) => r.method === 'GET' && r.url === `/api/v1/projects/${project}`);
+        const devIdx = result.requests.findIndex((r) => r.method === 'GET' && r.url === `/api/v1/projects/${project}-dev`);
+        expect(prodIdx).toBeGreaterThanOrEqual(0);
+        expect(devIdx).toBeGreaterThan(prodIdx);
+        expect(result.exit).toBe(0);
+        expect(result.stderr).toBe('');
+        const puts = result.requests.filter((r) => r.method === 'PUT' && r.url.endsWith('/pages/sync'));
+        expect(puts).toHaveLength(1);
+        const body = pagesSyncBody(puts[0]);
+        const board = body.pages.find((page: any) => page.slug === 'board');
+        expect(board.body).toBe(HOLD_ORIG_TSX);
+        expect(board.source_files['pages/board.tsx']).toBe(HOLD_ORIG_TSX);
+        expect(board.compiled).toContain('HOLD_ORIG_AAAA');
+        expect(board.compiled).not.toContain('HOLD_ORIG_BBBB');
+        expect(board.body).not.toContain('HOLD_ORIG_BBBB');
+        expect(validatesAgainstAppMain(body)).toEqual([]);
+    }, 120_000);
 });
