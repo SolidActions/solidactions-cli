@@ -90,8 +90,7 @@ export function bundlePage(entryPath: string, projectDir: string): Promise<PageB
 // src/utils/pages-sync.ts  (Task 2 produces; Task 3 observes on the wire)
 export type PageLanguage = 'html' | 'tsx';
 // PageFile gains: language: PageLanguage
-export type PageBundler = (entryPath: string, projectDir: string) => Promise<PageBundle>;
-export function bundleCodePages(sourceDir: string, pages: PageFile[], bundler?: PageBundler): Promise<{ bundles: Map<string, PageBundle>; errors: string[] }>;
+export function bundleCodePages(sourceDir: string, pages: PageFile[]): Promise<{ bundles: Map<string, PageBundle>; errors: string[] }>;
 // errors line format: `page <slug> (<path>): <first line of the failure>` then each further line indented two spaces
 export function buildPagesSyncPayload(pages: PageFile[], bodies: Map<string, string>, deploymentId: string | null, codeRef: PagesSyncPayload['code_ref'], bundles?: Map<string, PageBundle>): PagesSyncPayload;
 ```
@@ -290,7 +289,7 @@ Expected-RED table for the reviewer: every row fails on the base only because `s
 
 **Interfaces:**
 - Consumes: `bundlePage`, `PageBundle`, `PageBundleError` (Frozen contract, Task 1).
-- Produces: the Frozen contract's `pages-sync.ts` block, and `validatesAgainstAppMain(payload): string[]` (returns the list of rule violations; `[]` means valid) from the helper.
+- Produces: the Frozen contract's `pages-sync.ts` block (no `bundler` parameter and no `PageBundler` type: Ruling in the ledger), and `validatesAgainstAppMain(payload): string[]` (returns the list of rule violations; `[]` means valid) from the helper.
 
 - [ ] **Step 1: Write the helper** `tests/helpers/pages-sync-main-rules.ts`: a pinned copy of the rules in app `app/Http/Requests/PagesSyncRequest.php` at app main blob `16571244ff0d9de5adf94dac069ccb187d864867` (last changed 2026-11-02, commit 3033cc4a). Header comment names that blob; if app#2653 changes the rules, the helper is updated deliberately.
 
@@ -328,14 +327,12 @@ export function validatesAgainstAppMain(payload: any): string[] {
 - [ ] **Step 2: Edit `src/utils/pages-sync.ts`.** (a) `import type { PageBundle } from './page-bundle'; import { bundlePage, PageBundleError } from './page-bundle';`. (b) `export type PageLanguage = 'html' | 'tsx';` and `PageFile.language: PageLanguage`; `listCodePages` sets `language: page.file.endsWith('.tsx') ? 'tsx' : 'html'` placed right after `kind` (a `.tsx` file keeps `kind: 'dashboard'`, `.html` keeps `'visual'`; the order of keys in the object does not matter to `toEqual`). (c) add:
 
 ```ts
-export type PageBundler = (entryPath: string, projectDir: string) => Promise<PageBundle>;
-
-export async function bundleCodePages(sourceDir: string, pages: PageFile[], bundler: PageBundler = bundlePage): Promise<{ bundles: Map<string, PageBundle>; errors: string[] }> {
+export async function bundleCodePages(sourceDir: string, pages: PageFile[]): Promise<{ bundles: Map<string, PageBundle>; errors: string[] }> {
     const bundles = new Map<string, PageBundle>();
     const errors: string[] = [];
     for (const page of pages.filter(candidate => candidate.language === 'tsx')) {
         try {
-            bundles.set(page.slug, await bundler(path.join(sourceDir, page.path), sourceDir));
+            bundles.set(page.slug, await bundlePage(path.join(sourceDir, page.path), sourceDir));
         } catch (error: any) {
             const lines = String(error?.message ?? 'bundle failed').split('\n');
             errors.push(`page ${page.slug} (${page.path}): ${lines[0]}`, ...lines.slice(1).map(line => `  ${line}`));
@@ -366,8 +363,8 @@ and pass `bundled.bundles` as the 5th argument of the `buildPagesSyncPayload(...
 |---|---|---|
 | 1 | `listCodePages` language | `.html` → `html`, `.tsx` → `tsx` |
 | 2 | payload with a bundle for `board` (`{compiled:'C', compiledCss:'S', sources:{'pages/board.tsx':'T'}, compilerVersion:'0.28.2'}`) | page `board` equals `{...pages[1], body:'tsx', source_files:{'pages/board.tsx':'T'}, compiled:'C', compiled_css:'S', compiler_version:'0.28.2'}` and still carries `sources: [{key:'sales'}]` (the data sources, not the file map); page `home` has none of the four keys (`'compiled' in page` false) |
-| 3 | `bundleCodePages` with a fake bundler that throws `new PageBundleError('pages/board.tsx:3:1: boom\nsecond')` for `board` | `errors` equals `['page board (pages/board.tsx): pages/board.tsx:3:1: boom', '  second']`; `bundles` is empty; the `html` page is never passed to the bundler (fake records its calls) |
-| 4 | `bundleCodePages` with two tsx pages, one fails | the other page's failure is also reported (all pages are tried), `errors` names both slugs |
+| 3 | `bundleCodePages` on a real temp project (no injected bundler: ruling, the real bundler is cheap and the shop forbids stand-ins) with a tsx page `board` whose file has a syntax error on line 3 plus an `.html` page | `errors[0]` starts with `page board (pages/board.tsx): pages/board.tsx:3:`; `bundles` is empty; the `html` page produces no error and no bundle |
+| 4 | `bundleCodePages` on a real temp project with two tsx pages that both fail (one syntax error, one importing `react/jsx-runtime`), and a third valid tsx page | `errors` names both failing slugs (all pages are tried), `bundles` holds exactly the valid page |
 | 5 | old-server guard | `validatesAgainstAppMain(buildPagesSyncPayload(pages, bodies, null, ref, bundles))` returns `[]` for the fixture with and without bundles; and returns a non-empty list for a payload that puts the file map under `sources` (`{...page, sources: {'a.ts':'x'}}`) — proves the helper would have caught R1 |
 
 Expected-RED table: rows 1-5 fail on the base because `language`, `bundleCodePages`, the fifth parameter and the helper do not exist (row 5's last assertion fails on the base for the missing helper import, not for a behaviour).
