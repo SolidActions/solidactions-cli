@@ -8,10 +8,11 @@ import prompts from 'prompts';
 import { SolidActionsConfig, parseYamlEnvVars } from '../utils/env';
 import { validateItems } from '../utils/validate-items';
 import { buildAppSyncPayload, emptyColourWarnings, formatAppSync, syncApp } from '../utils/app-sync';
-import { buildPagesSyncPayload, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
+import { buildPagesSyncPayload, bundleCodePages, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { buildFunctionsSyncPayload, formatFunctionsSummary, formatFunctionsSyncFailure, functionsSyncOutcome, joinSyncOutcomes, listCodeFunctions, readFunctionSources, syncFunctions } from '../utils/functions-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import type { Config } from '../utils/config';
+import type { PageBundle } from '../utils/page-bundle';
 import { displayHost } from '../utils/host-display';
 import { planDeployFiles } from '../utils/deploy-ignore';
 import { baseWireValue, readSandboxBase, writeSandboxBase } from '../utils/sandbox-base';
@@ -646,6 +647,25 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
 
     console.log(chalk.green('✓ Project structure validated'));
 
+    // Bundle tsx code pages before any project lookup or creation: a page
+    // that fails to bundle must not create a remote project (or sync
+    // anything); nothing is uploaded on this path. --config-only syncs
+    // YAML env declarations without building and never touches pages, so
+    // it skips bundling (a broken tsx page must not block a config-only
+    // sync); the empty map keeps the later payload call compiling on
+    // that path (unreachable after the early return below).
+    const pageFiles = listCodePages(yamlConfig ?? {});
+    let bundledPages: Map<string, PageBundle> = new Map();
+    if (!options.configOnly) {
+        const bundled = await bundleCodePages(sourceDir, pageFiles);
+        if (bundled.errors.length > 0) {
+            console.error(chalk.red('Page bundling failed; nothing was uploaded:'));
+            for (const line of bundled.errors) console.error(chalk.red(line));
+            process.exit(1);
+        }
+        bundledPages = bundled.bundles;
+    }
+
     // Check if the target environment's project record exists; create if needed.
     // For production deploys where we already confirmed existence above, reuse
     // the cached slug to avoid a duplicate GET.
@@ -749,10 +769,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         console.log(chalk.gray(`Revision to upload (client-reported): ${formatRevisionSummary(sourceMetadata)}`));
     }
 
-    const pageFiles = listCodePages(yamlConfig ?? {});
     let pageBodies: Map<string, string>;
     try {
-        pageBodies = readPageBodies(sourceDir, pageFiles);
+        pageBodies = readPageBodies(sourceDir, pageFiles.filter(page => !bundledPages.has(page.slug)));
     } catch (error: any) {
         console.error(chalk.red(`Failed to read page: ${error.message}`));
         process.exit(1);
@@ -815,7 +834,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             else console.log(line.startsWith('✓') ? chalk.green(line) : line);
         }
         yamlSyncFailed = yamlSyncFailed || appSummary.failed;
-        const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef);
+        const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef, bundledPages);
         const result = await syncPages(config, projectSlug, payload);
         const rows = result.body?.pages ?? [];
         const trashed = result.body?.trashed ?? [];
