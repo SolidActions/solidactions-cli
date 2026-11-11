@@ -344,7 +344,7 @@ export async function bundleCodePages(sourceDir: string, pages: PageFile[]): Pro
 
 (d) `buildPagesSyncPayload` gets the optional 5th parameter and maps each page to `{ ...page, body: bodies.get(page.slug)!, ...(bundle === undefined ? {} : { source_files: bundle.sources, compiled: bundle.compiled, compiled_css: bundle.compiledCss, compiler_version: bundle.compilerVersion }) }` where `bundle = bundles.get(page.slug)`. The payload type's `pages` element type gains the four optional fields.
 
-- [ ] **Step 3: Edit `src/commands/deploy.ts`.** Import `bundleCodePages`. Directly after the `readPageBodies` try/catch (the block that ends before `const codeRef`), add:
+- [ ] **Step 3: Edit `src/commands/deploy.ts`.** Import `bundleCodePages`. **Placement (manager ruling after the Task 2 review: the first-deploy project creation is a POST, so bundling must run before it):** put the call, its error printing and `process.exit(1)` immediately after `console.log(chalk.green('✓ Project structure validated'));` (before the project lookup/creation try block that starts `let projectSlug = projectName;`), using `listCodePages(yamlConfig ?? {})` there (move that one call up; `readPageBodies` may stay where it is). Add:
 
 ```ts
     const bundled = await bundleCodePages(sourceDir, pageFiles);
@@ -395,6 +395,7 @@ Fixture (`fixture(variant)` in a temp dir, removed in `finally`): `solidactions.
 | 1 | clean deploy | exit 0, stderr `''`; exactly one `PUT .../pages/sync`; its parsed body: page `board` has `language:'tsx'`, `kind:'dashboard'`, `body` equal to the entry file text, `compiled` starting `globalThis.__saPlatform.define(`, `compiled_css` containing `.fake`, `compiler_version:'0.28.2'`, `Object.keys(source_files).sort()` equal `['lib/format.ts','pages/board.tsx']`, `sources` equal to the yaml data-source list (still an array of objects); page `about` has `language:'html'` and none of `compiled`, `compiled_css`, `compiler_version`, `source_files`; `validatesAgainstAppMain(body)` is `[]` (old-server guard) |
 | 2 | functions sync order | the pages sync happens after the archive POST as in `deploy-archive-every` (unchanged behaviour): `requests.findIndex(PUT pages/sync)` is greater than the index of the `POST .../deploy` |
 | 3 | one page fails to bundle (`lib/format.ts` replaced with an import of `react/jsx-runtime`) | exit 1; stderr contains `Page bundling failed; nothing was uploaded:` and `page board (pages/board.tsx):` and `react/jsx-runtime`; **`requests` contains no `PUT` or `POST` request at all** (no functions sync, no archive, no pages sync) |
+| 3b | first deploy (the fake server answers the project GET with 404 so the CLI would create the project, run with `environment: 'production'`) and a page that fails to bundle | exit 1; same stderr lines as row 3; **no `POST` at all**, so no project was created (ruling from the Task 2 review: bundling runs right after "Project structure validated", before the project lookup/creation) |
 | 4 | output over 2 MiB (a `lib/big.ts` as in Task 1 row 15) | exit 1; stderr contains `page board` and `over the 2 MiB (2097152 bytes) limit`; no PUT/POST |
 | 5 | html-only project (yaml without the tsx page) | exit 0; pages sync body has no `compiled` key on any page, `language:'html'`, and `validatesAgainstAppMain` `[]` |
 
