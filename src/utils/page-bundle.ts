@@ -51,7 +51,7 @@ function toPosix(value: string): string {
     return value.split(path.sep).join('/').replace(/\\/g, '/');
 }
 
-type CaptureLoader = 'ts' | 'tsx' | 'js' | 'jsx' | 'json' | 'css' | 'local-css';
+type CaptureLoader = 'ts' | 'tsx' | 'js' | 'jsx' | 'json' | 'css' | 'local-css' | 'text';
 
 function loaderForExtension(ext: string): Exclude<CaptureLoader, 'local-css'> | null {
     switch (ext) {
@@ -71,6 +71,8 @@ function loaderForExtension(ext: string): Exclude<CaptureLoader, 'local-css'> | 
             return 'json';
         case '.css':
             return 'css';
+        case '.txt':
+            return 'text';
         default:
             return null;
     }
@@ -96,23 +98,92 @@ function describe(message: Message, projectDir: string): string {
     return `${file}:${message.location.line}:${message.location.column}: ${text}`;
 }
 
+// Source assembly is a pure function of the bytes captured during the
+// build and the build's metafile: it walks the captured map (keyed by the
+// exact path esbuild passed to onLoad) and the metafile decides which of
+// those paths were part of the build. Nothing here may consult the live
+// tree, so a file replaced after compilation cannot change the published
+// snapshot. The sweep row `keeps source assembly free of filesystem
+// calls` pins that shape at the source level.
+export function assembleSources(
+    captured: ReadonlyMap<string, string>,
+    metafile: { inputs: Record<string, { format?: string }> },
+    realRoot: string,
+    entryKey: string,
+): { sources: Record<string, string>; entrySource: string } {
+    if (metafile.inputs[entryKey]?.format !== 'esm') throw new PageBundleError(NO_DEFAULT_EXPORT);
+    const builtKeys = new Set(Object.keys(metafile.inputs).map(toPosix));
+    const sources: Record<string, string> = {};
+    let totalBytes = 0;
+    for (const [absPath, text] of captured) {
+        const key = toPosix(path.relative(realRoot, absPath));
+        if (key.split('/').includes('node_modules')) continue;
+        if (!builtKeys.has(key)) continue;
+        sources[key] = text;
+        totalBytes += Buffer.byteLength(text);
+    }
+    for (const key of Object.keys(metafile.inputs)) {
+        if (key.startsWith(`${PLATFORM_NAMESPACE}:`) || key === MAIN || key === '<stdin>') continue;
+        const posix = toPosix(key);
+        // An absolute key is never skipped as node_modules: outside-root
+        // is the outside refusal, inside-root is an unexpected-path refusal.
+        if (path.isAbsolute(key) || /^[A-Za-z]:[\\/]/.test(key) || posix.startsWith('/')) {
+            if (isOutsideRoot(path.relative(realRoot, key))) {
+                throw new PageBundleError(`${posix}: imported from outside the project directory; a page can only import files inside its project`);
+            }
+            throw new PageBundleError(`${posix}: unexpected absolute input path`);
+        }
+        // Containment first: a `..`-prefixed key is never skipped as
+        // node_modules, it is a refusal.
+        if (isOutsideRoot(path.relative(realRoot, path.resolve(realRoot, key)))) {
+            throw new PageBundleError(`${toPosix(key)}: imported from outside the project directory; a page can only import files inside its project`);
+        }
+        if (posix.split('/').includes('node_modules')) continue;
+        if (!(posix in sources)) throw new PageBundleError(`${posix}: unsupported file type for a page`);
+    }
+    if (Object.keys(sources).length > SOURCES_MAX_FILES) throw new PageBundleError(`the page reads ${Object.keys(sources).length} project files, over the ${SOURCES_MAX_FILES} file limit`);
+    if (totalBytes > SOURCES_MAX_BYTES) throw new PageBundleError(`the page's project files total ${totalBytes} bytes, over the 1 MiB (${SOURCES_MAX_BYTES} bytes) limit`);
+    const entrySource = sources[entryKey];
+    if (entrySource === undefined) throw new PageBundleError(`${entryKey}: unsupported file type for a page`);
+    return { sources, entrySource };
+}
+
 export async function bundlePage(entryPath: string, projectDir: string, hooks?: { afterBundle?: () => void | Promise<void> }): Promise<PageBundle> {
     // test seam: the window between compilation and result assembly
     const root = path.resolve(projectDir);
     const entry = path.resolve(root, entryPath);
-    // esbuild keys metafile inputs by real path: an entry reached through
-    // a symlink (including a symlinked project root, as on macOS) must be
-    // looked up by its resolved location. A missing entry keeps the lexical
-    // path so the refusal below reports it exactly as before.
+    // The root and entry are resolved ONCE before the build: realRoot is
+    // the compilation directory and realEntry feeds the entry key. No
+    // project path is resolved again after the build starts. A missing
+    // entry keeps the lexical path so the refusal below reports it exactly
+    // as before.
     const realRoot = fs.realpathSync(root);
     const realEntry = fs.existsSync(entry) ? fs.realpathSync(entry) : entry;
     const entryKey = toPosix(path.relative(realRoot, realEntry));
-    const capturedByAbs = new Map<string, string>();
+    // Keyed by the exact path esbuild passes to onLoad: the association
+    // between a compiled input and its bytes is fixed at capture time and
+    // never re-resolved from the live tree.
+    const captured = new Map<string, string>();
     const capturePlugin: Plugin = {
         name: 'sa-capture',
         setup(b) {
             b.onLoad({ filter: /.*/, namespace: 'file' }, (args) => {
-                if (toPosix(args.path).split('/').includes('node_modules')) return null;
+                // The containment check runs for every loaded file, even
+                // under node_modules, before a single byte is read: a real
+                // path outside the root is refused naming its path (this
+                // deliberately refuses hoisted/workspace packages resolving
+                // above the project root), and its bytes never reach esbuild.
+                let real: string;
+                try {
+                    real = fs.realpathSync(args.path);
+                } catch {
+                    throw new PageBundleError(`${toPosix(path.relative(root, args.path))}: could not resolve the real path; deploy again`);
+                }
+                const outsideRelative = path.relative(realRoot, real);
+                if (isOutsideRoot(outsideRelative)) {
+                    return { errors: [{ text: `${toPosix(outsideRelative)}: imported from outside the project directory; a page can only import files inside its project` }] };
+                }
+                if (toPosix(real).split('/').includes('node_modules')) return null;
                 // esbuild defaults *.module.css to the local-css loader (scoped
                 // class names); return the same loader so capture is behavior-preserving.
                 const loader: CaptureLoader | null = args.path.endsWith('.module.css')
@@ -125,13 +196,7 @@ export async function bundlePage(entryPath: string, projectDir: string, hooks?: 
                 } catch {
                     throw new PageBundleError(`${toPosix(path.relative(root, args.path))}: could not be read while it was being bundled; deploy again`);
                 }
-                let absReal: string;
-                try {
-                    absReal = fs.realpathSync(args.path);
-                } catch {
-                    absReal = args.path;
-                }
-                capturedByAbs.set(absReal, text);
+                captured.set(args.path, text);
                 return { contents: text, loader };
             });
         },
@@ -145,7 +210,7 @@ export async function bundlePage(entryPath: string, projectDir: string, hooks?: 
                 sourcefile: MAIN,
                 loader: 'js',
             },
-            absWorkingDir: root,
+            absWorkingDir: realRoot,
             outdir: path.join(root, '.sa-page-out'),
             bundle: true,
             write: false,
@@ -171,43 +236,18 @@ export async function bundlePage(entryPath: string, projectDir: string, hooks?: 
         throw new PageBundleError([...new Set(errors.slice(0, 20).map(message => describe(message, root)))].join('\n'));
     }
     await hooks?.afterBundle?.();
-    // The resolved entry is checked against the project root before the
-    // format check: an entry symlink pointing outside (even to a CommonJS
+    // The resolved entry is checked against the project root before
+    // assembly: an entry symlink pointing outside (even to a CommonJS
     // file, even across Windows drives) is an outside-the-project refusal,
     // not a missing default export. A missing entry keeps its lexical
-    // in-project key and still reports the no-default-export message below.
+    // in-project key and still reports the no-default-export message from
+    // assembly below.
     if (isOutsideRoot(path.relative(realRoot, realEntry))) {
         throw new PageBundleError(`${entryKey}: imported from outside the project directory; a page can only import files inside its project`);
     }
-    if (result.metafile.inputs[entryKey]?.format !== 'esm') throw new PageBundleError(NO_DEFAULT_EXPORT);
-
-    const sources: Record<string, string> = {};
-    let totalBytes = 0;
-    for (const key of Object.keys(result.metafile.inputs)) {
-        if (key.startsWith(`${PLATFORM_NAMESPACE}:`) || key === MAIN || key === '<stdin>') continue;
-        const relative = path.relative(root, path.resolve(root, key));
-        const posix = toPosix(relative);
-        if (isOutsideRoot(relative)) {
-            throw new PageBundleError(`${toPosix(key)}: imported from outside the project directory; a page can only import files inside its project`);
-        }
-        if (posix.split('/').includes('node_modules')) continue;
-        const resolved = path.resolve(root, key);
-        let absReal = resolved;
-        try {
-            absReal = fs.realpathSync(resolved);
-        } catch {
-            absReal = resolved;
-        }
-        const text = capturedByAbs.get(absReal) ?? capturedByAbs.get(resolved);
-        if (text === undefined) throw new PageBundleError(`${posix}: unsupported file type for a page`);
-        sources[posix] = text;
-        totalBytes += Buffer.byteLength(text);
-    }
-    if (Object.keys(sources).length > SOURCES_MAX_FILES) throw new PageBundleError(`the page reads ${Object.keys(sources).length} project files, over the ${SOURCES_MAX_FILES} file limit`);
-    if (totalBytes > SOURCES_MAX_BYTES) throw new PageBundleError(`the page's project files total ${totalBytes} bytes, over the 1 MiB (${SOURCES_MAX_BYTES} bytes) limit`);
-
-    const entrySource = capturedByAbs.get(realEntry);
-    if (entrySource === undefined) throw new PageBundleError(`${entryKey}: unsupported file type for a page`);
+    // entrySource, sources and compiled all come from the same pre-build
+    // capture: assembly reads only the captured map and the metafile.
+    const { sources, entrySource } = assembleSources(captured, result.metafile, realRoot, entryKey);
 
     const js = result.outputFiles.find(file => file.path.endsWith('.js'))?.text ?? '';
     const css = result.outputFiles.find(file => file.path.endsWith('.css'))?.text ?? '';
