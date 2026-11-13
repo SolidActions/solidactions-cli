@@ -496,6 +496,7 @@ project
     .option('--create', 'Create environment project if it doesn\'t exist')
     .option('--config-only', 'Sync YAML env declarations without building/deploying')
     .option('--paused', 'Deploy with all YAML-declared schedules initially paused')
+    .option('--override-source-of-truth', 'Deploy from a sandbox even though the app\'s source of truth is git; the app shows as drifted until you mark it reconciled or flip its source of truth to SolidActions')
     .option('--no-cache', 'Force a fresh build, bypassing all build caches')
     .option('--force-rebuild', 'Force a fresh build, bypassing all build caches (alias for --no-cache)')
     .option(

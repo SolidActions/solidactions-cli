@@ -11,6 +11,7 @@ import { buildAppSyncPayload, emptyColourWarnings, formatAppSync, syncApp } from
 import { buildPagesSyncPayload, bundleCodePages, formatPagesSummary, formatPagesSyncFailure, listCodePages, pagesSyncOutcome, readPageBodies, syncPages, terminalExitCode } from '../utils/pages-sync';
 import { buildFunctionsSyncPayload, formatFunctionsSummary, formatFunctionsSyncFailure, functionsSyncOutcome, joinSyncOutcomes, listCodeFunctions, readFunctionSources, syncFunctions } from '../utils/functions-sync';
 import { authFailedLine, formatApiFailure, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
+import { driftWarningLines, sourceOfTruthRefusal, withOverrideSourceOfTruth } from '../utils/source-of-truth';
 import type { Config } from '../utils/config';
 import type { PageBundle } from '../utils/page-bundle';
 import { displayHost } from '../utils/host-display';
@@ -174,6 +175,7 @@ interface DeployOptions {
     noCache?: boolean;
     gitMetadata?: boolean;
     paused?: boolean;
+    overrideSourceOfTruth?: boolean;
 }
 
 export function projectStatusUrl(host: string, projectSlug: string): string {
@@ -371,6 +373,7 @@ export async function pushYamlDeclarations(
     projectSlug: string,
     yamlConfig: SolidActionsConfig,
     baseSourceHash?: string,
+    overrideSourceOfTruth?: boolean,
 ): Promise<void> {
     const parsedVars = parseYamlEnvVars(yamlConfig);
 
@@ -386,7 +389,7 @@ export async function pushYamlDeclarations(
 
     const response = await axios.post(
         `${config.host}/api/v1/projects/${projectSlug}/variable-mappings/sync-yaml`,
-        { declarations, ...(baseSourceHash !== undefined ? { base_source_hash: baseSourceHash } : {}) },
+        withOverrideSourceOfTruth({ declarations, ...(baseSourceHash !== undefined ? { base_source_hash: baseSourceHash } : {}) }, overrideSourceOfTruth),
         {
             headers: getApiHeaders(config, 'application/json'),
         }
@@ -741,10 +744,13 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
 
         try {
-            await pushYamlDeclarations(config, projectSlug, yamlConfig, guardedBaseWire ?? undefined);
+            await pushYamlDeclarations(config, projectSlug, yamlConfig, guardedBaseWire ?? undefined, options.overrideSourceOfTruth);
         } catch (error: any) {
+            const refusal = sourceOfTruthRefusal(error.response?.status, error.response?.data);
             if (error.response?.status === 409 && error.response.data?.code === 'stale_base') {
                 console.error(chalk.red(staleBaseLine()));
+            } else if (refusal !== null) {
+                console.error(chalk.red(refusal));
             } else if (error.response?.status === 401) {
                 console.error(chalk.red(authFailedLine(config.host)));
             } else {
@@ -797,9 +803,14 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
     }
     const functionsPayload = buildFunctionsSyncPayload(functionFiles, functionSources, codeRef);
     if (guardedBaseWire !== null) functionsPayload.base_source_hash = guardedBaseWire;
-    const functionsResult = await syncFunctions(config, projectSlug, functionsPayload);
+    const functionsResult = await syncFunctions(config, projectSlug, withOverrideSourceOfTruth(functionsPayload, options.overrideSourceOfTruth));
     if (functionsResult.httpStatus === 409 && functionsResult.body?.code === 'stale_base') {
         console.error(chalk.red(staleBaseLine()));
+        process.exit(1);
+    }
+    const functionsRefusal = sourceOfTruthRefusal(functionsResult.httpStatus, functionsResult.body);
+    if (functionsRefusal !== null) {
+        console.error(chalk.red(functionsRefusal));
         process.exit(1);
     }
     const functionRows = functionsResult.body?.functions ?? [];
@@ -815,7 +826,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         let yamlSyncFailed = false;
         if (yamlConfig) {
             try {
-                await pushYamlDeclarations(config, projectSlug, yamlConfig);
+                await pushYamlDeclarations(config, projectSlug, yamlConfig, undefined, options.overrideSourceOfTruth);
             } catch (error: any) {
                 yamlSyncFailed = true;
                 if (error.response?.status === 401) {
@@ -826,7 +837,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             }
         }
         for (const warning of emptyColourWarnings(yamlConfig?.app)) console.log(chalk.yellow(warning));
-        const appResult = await syncApp(config, projectSlug, buildAppSyncPayload(yamlConfig ?? {}));
+        const appResult = await syncApp(config, projectSlug, withOverrideSourceOfTruth(buildAppSyncPayload(yamlConfig ?? {}), options.overrideSourceOfTruth));
         const appSummary = formatAppSync(appResult, yamlConfig?.app != null);
         if (appResult.httpStatus === 401) console.error(chalk.red(authFailedLine(config.host)));
         for (const line of appSummary.lines) {
@@ -835,7 +846,7 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         }
         yamlSyncFailed = yamlSyncFailed || appSummary.failed;
         const payload = buildPagesSyncPayload(pageFiles, pageBodies, deploymentId, codeRef, bundledPages);
-        const result = await syncPages(config, projectSlug, payload);
+        const result = await syncPages(config, projectSlug, withOverrideSourceOfTruth(payload, options.overrideSourceOfTruth));
         const rows = result.body?.pages ?? [];
         const trashed = result.body?.trashed ?? [];
         const trashErrors = result.body?.trash_errors ?? [];
@@ -906,6 +917,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
             if (options.paused) {
                 form.append('paused', '1');
             }
+            if (options.overrideSourceOfTruth === true) {
+                form.append('override_source_of_truth', '1');
+            }
 
             console.log(chalk.yellow('Uploading...'));
             if (process.env.SOLIDACTIONS_DEPLOY_DEBUG === '1') {
@@ -926,6 +940,9 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
                 } else {
                     console.log(chalk.yellow('The server stored different bytes than this deploy uploaded; base.json was left unchanged.'));
                 }
+            }
+            for (const line of driftWarningLines(deployResponse.data)) {
+                console.log(chalk.yellow(line));
             }
             if (!yamlConfig?.workflows) {
                 console.log(chalk.green('Source archived.'));
@@ -1028,8 +1045,11 @@ export async function deploy(projectName: string, sourcePath?: string, options: 
         } catch (error: any) {
             console.error(chalk.red('Deployment failed:'));
             if (error.response) {
+                const refusal = sourceOfTruthRefusal(error.response.status, error.response.data);
                 if (error.response.status === 409 && error.response.data?.code === 'stale_base') {
                     console.error(chalk.red(staleBaseLine()));
+                } else if (refusal !== null) {
+                    console.error(chalk.red(refusal));
                 } else if (error.response.status === 404) {
                     console.error("Project not found.");
                 } else if (error.response.status === 401) {
