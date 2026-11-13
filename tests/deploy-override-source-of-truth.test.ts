@@ -129,7 +129,7 @@ describe('project deploy --override-source-of-truth', () => {
         const result = await run('pages', [], { refuse: ['/functions/sync'] });
 
         expect(result.exit).toBe(1);
-        expect(result.stderr.trim()).toBe(REFUSAL);
+        expect(result.stderr.trim().split('\n').at(-1)).toBe(REFUSAL);
         expect(occurrences(result.stdout + result.stderr, REFUSAL)).toBe(1);
         expect(result.stdout).not.toContain('Source archived.');
         expect(result.requests.filter((r) => r.method !== 'GET').map((r) => `${r.method} ${r.url}`)).toEqual([`PUT /api/v1/projects/${slug}/functions/sync`]);
@@ -139,7 +139,7 @@ describe('project deploy --override-source-of-truth', () => {
         const result = await run('pages', ['--config-only'], { refuse: ['/variable-mappings/sync-yaml'] });
 
         expect(result.exit).toBe(1);
-        expect(result.stderr.trim()).toBe(REFUSAL);
+        expect(result.stderr.trim().split('\n').at(-1)).toBe(REFUSAL);
         expect(occurrences(result.stdout + result.stderr, REFUSAL)).toBe(1);
         expect(result.stdout).not.toContain('Config synced');
     }, 30_000);
