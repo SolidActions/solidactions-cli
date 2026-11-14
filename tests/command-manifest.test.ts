@@ -296,6 +296,7 @@ describe('buildCommandManifest — the real solidactions program', () => {
         expect(deploy.options.find((o) => o.long === '--env')!.short).toBe('-e');
         expect(deploy.options.find((o) => o.long === '--create')).toBeDefined();
         expect(deploy.options.find((o) => o.long === '--no-cache')!.negated).toBe(true);
+        expect(deploy.options.find((o) => o.long === '--override-source-of-truth')!.negated).toBe(false);
         expect(deploy.options.find((o) => o.long === '--help')).toBeDefined();
         expect(deploy.arguments.map((a) => a.name)).toEqual(['project-name', 'path']);
 

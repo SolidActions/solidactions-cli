@@ -331,6 +331,10 @@ revision after the build. Use `--no-git-metadata` or
 `SOLIDACTIONS_NO_GIT_METADATA=1` to opt out. Deploying a non-Git directory
 continues normally without revision metadata.
 
+### Source of truth and sandbox deploys
+
+Every app records whether `git` or `solidactions` owns its source (Settings, "Source of truth"). When the source of truth is git, a deploy made from a sandbox (with its project-scoped token) is refused with `source_of_truth_git`; deploys from your laptop or CI are never refused. To deploy from the sandbox anyway, pass `--override-source-of-truth`: the CLI sends it on every call the deploy makes (functions, config, pages, app settings and the source archive). The deploy is stored and the app shows as drifted until you mark it reconciled in the app's settings or flip its source of truth to SolidActions. While an app is drifted, every deploy prints `Warning: this app is drifted: deployed outside git since <date>. Mark it reconciled in the app's settings, or flip its source of truth to SolidActions.` Apps whose source of truth is SolidActions never warn or refuse.
+
 ### Env declarations (`solidactions.yaml`)
 
 Declare the variables a workflow needs with an `env:` list in `solidactions.yaml`. Each entry uses one of four forms:
@@ -369,7 +373,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 | Command | Key Flags | Description |
 |---------|-----------|-------------|
 | `project create <name>` | `-e` | Create an empty project (no source/build); `-e` defaults to `production` |
-| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused |
+| `project deploy <name> [path]` | `-e`, `--create`, `--config-only`, `--paused`, `--override-source-of-truth`, `--no-git-metadata` | Deploy or sync config only; optionally land YAML schedules paused; deploy from a sandbox over a git-owned app |
 | `project enable <project>` | `-e` (default `dev`) | Allow new starts through this project gate |
 | `project disable <project>` | `-e` (default `dev`) | Block new root starts without cancelling existing roots |
 | `project view <project>` | `-e` (default `dev`), `--json` | View status, `Enabled: on|off`, and client-reported deployed revision, incl. an `N behind origin/<branch> at deploy` drift clause when the deployment is behind the default branch |

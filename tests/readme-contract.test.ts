@@ -57,6 +57,14 @@ describe('public README setup contract', () => {
         expect(COMMAND_TAXONOMY).toMatch(/workflow[\s\S]*single-resource[\s\S]*`view`/i);
     });
 
+    it('documents the source-of-truth override flag in the command table and its own section', () => {
+        expect(README).toContain('`--override-source-of-truth`');
+        expect(README).toContain('### Source of truth and sandbox deploys');
+        expect(README).toContain('source_of_truth_git');
+        expect(README).toContain('Warning: this app is drifted: deployed outside git since');
+        expect(markdownSection(README, '### project')).toContain('--override-source-of-truth');
+    });
+
     it('documents project view default-dev targeting and exact-suffix migration', () => {
         expect(README).toContain('`project view <project>` | `-e` (default `dev`)');
         expect(README).toMatch(/omitting\s+`--env` targets dev/);
