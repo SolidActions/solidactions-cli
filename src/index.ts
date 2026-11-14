@@ -76,10 +76,13 @@ import {
     databaseOptimize,
     databasePull,
     databaseQuery,
+    databaseRollback,
     databaseSchema,
     databaseShow,
     databaseUndelete,
+    databaseVersions,
     databaseWake,
+    parseStrictPositiveInteger,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { databaseExport } from './commands/database-export';
@@ -121,6 +124,50 @@ program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
     .version(pkg.version);
+
+// Commander lets the root claim `--version` anywhere on the line, which would
+// turn `database pull <name> --version <n>` into "print the CLI version". The
+// root flag therefore yields to a subcommand that declares the same flag: the
+// command the arguments name (global options skipped, including the value of
+// one that takes a value) owns `--version` when it declares it, and the root
+// keeps it everywhere else, as before. A root `--version` that comes before the
+// subcommand path ends the walk: the root keeps it (`--version database pull x`
+// prints the CLI version, as before this wave).
+// (`Option.is` is commander's flag matcher; its typings do not declare it.)
+type FlagMatcher = { is: (arg: string) => boolean };
+
+function takesGlobalOptionValue(root: Command, arg: string): boolean {
+    return root.options.some((option) => (option.required || option.optional) && (option as unknown as FlagMatcher).is(arg));
+}
+
+function resolveNamedCommand(root: Command, args: string[], isRootVersionFlag: (arg: string) => boolean): Command {
+    let command = root;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--' || isRootVersionFlag(arg)) break;
+        if (arg.length > 1 && arg.startsWith('-')) {
+            if (takesGlobalOptionValue(root, arg)) i++;
+            continue;
+        }
+        const next = command.commands.find((candidate) => candidate.name() === arg || candidate.aliases().includes(arg));
+        if (!next) break;
+        command = next;
+    }
+    return command;
+}
+
+const rootVersionOption = program.options.find((option) => option.long === '--version') as unknown as FlagMatcher | undefined;
+if (rootVersionOption) {
+    const matchesFlag = rootVersionOption.is.bind(rootVersionOption);
+    let namedCommand: Command = program;
+    rootVersionOption.is = (arg: string) =>
+        matchesFlag(arg) && !(namedCommand !== program && namedCommand.options.some((option) => (option as unknown as FlagMatcher).is(arg)));
+    const parseRootOptions = program.parseOptions.bind(program);
+    program.parseOptions = (args: string[]) => {
+        namedCommand = resolveNamedCommand(program, args, matchesFlag);
+        return parseRootOptions(args);
+    };
+}
 
 // Long form is --workspace-override (NOT --workspace) — `login` already owns
 // `--workspace` for its own purpose (set the workspace at login time), and
@@ -262,7 +309,7 @@ driver): https://www.solidactions.com/docs/workspace-databases/`);
 database
     .command('list')
     .description('List workspace databases')
-    .option('--kind <kind>', 'Filter by kind: libsql or duckdb')
+    .option('--kind <kind>', 'Filter by kind: libsql, duckdb or duckdb_file')
     .option('--json', 'Output as JSON')
     .action(async (options) => {
         await databaseList(options);
@@ -272,7 +319,7 @@ database
     .command('create')
     .description('Create a workspace database')
     .argument('<name>', 'Database name')
-    .option('--kind <kind>', 'Database kind: libsql (default) or duckdb', 'libsql')
+    .option('--kind <kind>', 'Database kind: libsql (default), duckdb or duckdb_file (a DuckDB database file that workflows open, change and publish)', 'libsql')
     .option('--from <file.sql>', 'Import a SQL file after creation')
     .option('--no-wait', 'Do not wait for analytical (duckdb) provisioning to finish')
     .option('--json', 'Output as JSON')
@@ -356,8 +403,34 @@ database
     .argument('[path]', 'Destination path')
     .option('-y, --yes', 'Overwrite without confirmation')
     .option('--writable', 'Open a foreground writable session')
+    .option('--version <n>', 'DuckDB databases: pull this published version instead of the latest', (value) => parseStrictPositiveInteger(value))
+    .addHelpText('after', `
+A DuckDB database (--kind duckdb_file) is saved to .solidactions/databases/<name>.duckdb
+unless you give a path. Pulling it needs Node 22.15 or newer. List its versions with
+\`solidactions database versions <name>\`.`)
     .action(async (name, destination, options) => {
         await databasePull(name, destination, options);
+    });
+
+database
+    .command('versions')
+    .description('List the published versions of a DuckDB database, newest first')
+    .argument('<name>', 'Database name')
+    .option('--limit <n>', 'How many versions to list (1-200)', (value) => parseStrictPositiveInteger(value))
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseVersions(name, options);
+    });
+
+database
+    .command('rollback')
+    .description('Make an earlier published version of a DuckDB database the current one')
+    .argument('<name>', 'Database name')
+    .argument('<version>', 'Version number to roll back to')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, version, options) => {
+        await databaseRollback(name, version, options);
     });
 
 database

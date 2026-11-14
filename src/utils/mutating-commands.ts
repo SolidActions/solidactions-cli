@@ -42,6 +42,8 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'database exec',
     'database import',
     'database push',
+    // Makes an earlier published version of a DuckDB database the current one.
+    'database rollback',
     'database ingest',
     // Export creates durable operation rows and temporary R2 objects and may
     // wake billed compute, even though authorization is read-capability based.
@@ -109,6 +111,8 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
     'database show',
     'database schema',
     'database query',
+    // Lists published versions; changes nothing.
+    'database versions',
     // `connect` never calls the server's admission gate — it is a pure,
     // synchronous read of the database row (no side effects at all).
     'database connect',

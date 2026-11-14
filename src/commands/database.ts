@@ -37,15 +37,22 @@ import {
     runPreparedDatabaseImport,
 } from '../utils/database-sql-import-runner';
 import { renderTable } from '../utils/table';
+import {
+    DuckdbLinkExpiredError,
+    DuckdbPullObject,
+    downloadDuckdbObject,
+    zstdDecompressAvailable,
+} from '../utils/database-download';
 import { defaultIngestBatchId, ingestFormatFromExtension } from '../utils/database-ingest-digest';
 
-export type DatabaseKind = 'libsql' | 'duckdb';
+export type DatabaseKind = 'libsql' | 'duckdb' | 'duckdb_file';
 export type DatabaseActivity = 'active' | 'idle' | 'idle_no_credit' | 'waking' | 'optimizing';
 
-export interface DatabaseRecord {
+/** libSQL (standard) and analytical DuckDB rows. */
+export interface ManagedDatabaseRecord {
     id?: string;
     name: string;
-    kind: DatabaseKind;
+    kind: 'libsql' | 'duckdb';
     status: string;
     activity?: DatabaseActivity;
     deleted_at: string | null;
@@ -59,6 +66,22 @@ export interface DatabaseRecord {
     created_at?: string;
     updated_at?: string;
 }
+
+/** A DuckDB database file that workflows open, change and publish as numbered versions. */
+export interface DuckdbFileDatabaseRecord {
+    id?: string;
+    name: string;
+    kind: 'duckdb_file';
+    status: string;
+    bytes: number;
+    cap_bytes: number;
+    latest_version: number | null;
+    last_published_at: string | null;
+    deleted_at: string | null;
+    purge_at: string | null;
+}
+
+export type DatabaseRecord = ManagedDatabaseRecord | DuckdbFileDatabaseRecord;
 
 export interface DatabaseQuota {
     used: number;
@@ -120,6 +143,17 @@ interface DatabaseDumpOptions {
 interface DatabasePullOptions {
     yes?: boolean;
     writable?: boolean;
+    version?: number;
+}
+
+interface DatabaseVersionsOptions {
+    limit?: number;
+    json?: boolean;
+}
+
+interface DatabaseRollbackOptions {
+    yes?: boolean;
+    json?: boolean;
 }
 
 interface DatabaseImportOptions {
@@ -143,6 +177,8 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     monotonicNow?: () => number;
     abortSignal?: AbortSignal;
     sleep?: (milliseconds: number) => Promise<void>;
+    /** Whether this Node can decompress zstd; defaults to a check of `zlib`. */
+    zstdAvailable?: boolean;
     put?: (
         url: string,
         body: fs.ReadStream | Buffer,
@@ -168,6 +204,7 @@ interface ResolvedCommandDependencies {
     controlPlaneTimeoutMs: number | undefined;
     dataPlaneTimeoutMs: number;
     sleep: (milliseconds: number) => Promise<void>;
+    zstdAvailable: boolean;
     put: NonNullable<DatabaseCommandDependencies['put']>;
 }
 
@@ -214,6 +251,7 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
         sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => {
             setTimeout(resolve, milliseconds);
         })),
+        zstdAvailable: dependencies.zstdAvailable ?? zstdDecompressAvailable(),
         put: dependencies.put ?? axios.put,
     };
 }
@@ -234,7 +272,40 @@ function clientDependencies(dependencies: ResolvedCommandDependencies): Database
     };
 }
 
+function stableDuckdbFileRecord(database: DuckdbFileDatabaseRecord): DuckdbFileDatabaseRecord {
+    if (
+        (database.id !== undefined && typeof database.id !== 'string')
+        || typeof database.name !== 'string'
+        || typeof database.status !== 'string'
+        || typeof database.bytes !== 'number'
+        || typeof database.cap_bytes !== 'number'
+        || (database.latest_version !== null && typeof database.latest_version !== 'number')
+        || (database.last_published_at !== null && typeof database.last_published_at !== 'string')
+        || (database.deleted_at !== null && typeof database.deleted_at !== 'string')
+        || (database.purge_at !== null && typeof database.purge_at !== 'string')
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        ...(database.id === undefined ? {} : { id: database.id }),
+        name: database.name,
+        kind: 'duckdb_file',
+        status: database.status,
+        bytes: database.bytes,
+        cap_bytes: database.cap_bytes,
+        latest_version: database.latest_version,
+        last_published_at: database.last_published_at,
+        deleted_at: database.deleted_at,
+        purge_at: database.purge_at,
+    };
+}
+
 function stableDatabaseRecord(database: DatabaseRecord | null | undefined): DatabaseRecord {
+    if (database && database.kind === 'duckdb_file') {
+        return stableDuckdbFileRecord(database);
+    }
+
     if (
         !database
         || (database.id !== undefined && typeof database.id !== 'string')
@@ -267,7 +338,7 @@ function stableDatabaseRecord(database: DatabaseRecord | null | undefined): Data
     // A missing or unrecognized `kind` is rejected above (upstream_unavailable)
     // rather than defaulted — silently treating an unknown kind as 'libsql'
     // would make analytical-only refusals (read-only, dump) fail open (#1700 R10).
-    const kind: DatabaseKind = database.kind;
+    const kind = database.kind;
 
     return {
         ...(database.id === undefined ? {} : { id: database.id }),
@@ -319,17 +390,31 @@ function stableListResponse(data: DatabaseListResponse): DatabaseListResponse {
 }
 
 function databaseRows(databases: DatabaseRecord[]): string[][] {
-    return databases.map((database) => [
-        database.name,
-        database.kind,
-        database.status,
-        database.kind === 'duckdb' ? (database.activity ?? '-') : '-',
-        database.kind === 'duckdb'
-            ? `${formatByteSize(database.size_bytes)} / ${formatByteSize(database.size_limit_bytes ?? 0)}`
-            : String(database.size_bytes),
-        database.deleted_at ?? '-',
-        database.purge_at ?? '-',
-    ]);
+    return databases.map((database) => {
+        if (database.kind === 'duckdb_file') {
+            return [
+                database.name,
+                database.kind,
+                database.status,
+                '-',
+                `${formatByteSize(database.bytes)} / ${formatByteSize(database.cap_bytes)}`,
+                database.deleted_at ?? '-',
+                database.purge_at ?? '-',
+            ];
+        }
+
+        return [
+            database.name,
+            database.kind,
+            database.status,
+            database.kind === 'duckdb' ? (database.activity ?? '-') : '-',
+            database.kind === 'duckdb'
+                ? `${formatByteSize(database.size_bytes)} / ${formatByteSize(database.size_limit_bytes ?? 0)}`
+                : String(database.size_bytes),
+            database.deleted_at ?? '-',
+            database.purge_at ?? '-',
+        ];
+    });
 }
 
 function renderDatabaseTable(databases: DatabaseRecord[]): string {
@@ -658,6 +743,10 @@ function renderAnalyticalSchema(schema: AnalyticalSchemaResponse): string {
     }).join('\n\n');
 }
 
+function databaseRecordSizeBytes(database: DatabaseRecord): number {
+    return database.kind === 'duckdb_file' ? database.bytes : database.size_bytes;
+}
+
 /** "1.2 GiB", "512.0 MiB", "900 B" — used by `show`, `list`, and `ingest`. */
 export function formatByteSize(bytes: number): string {
     // Binary (1024-based) division — the units must say Gi/Mi/Ki, not G/M/K
@@ -677,6 +766,7 @@ interface DatabaseShowOptions {
 // The analytical (DuckDB) kind is Beta on every surface — this label is the
 // canonical rendering; standard (libSQL) rows keep the plain kind value.
 function kindLabel(kind: DatabaseKind): string {
+    if (kind === 'duckdb_file') return 'DuckDB (analytics)';
     return kind === 'duckdb' ? 'Analytical · DuckDB (Beta)' : kind;
 }
 
@@ -686,6 +776,12 @@ function renderShow(database: DatabaseRecord): string {
         `Kind: ${kindLabel(database.kind)}`,
         `Status: ${database.status}`,
     ];
+    if (database.kind === 'duckdb_file') {
+        lines.push(`Size: ${formatByteSize(database.bytes)} of ${formatByteSize(database.cap_bytes)}`);
+        lines.push(`Latest version: ${database.latest_version ?? 'none'}`);
+        lines.push(`Last published: ${database.last_published_at ?? 'never'}`);
+        return lines.join('\n');
+    }
     if (database.kind === 'duckdb') {
         lines.push(`Activity: ${database.activity ?? 'unknown'}`);
         lines.push(`Size: ${formatByteSize(database.size_bytes)} of ${formatByteSize(database.size_limit_bytes ?? 0)}`);
@@ -1164,6 +1260,10 @@ async function finalizeReplica(
     await io.filesystem.rename(temp, target);
 }
 
+function isKnownKindOption(kind: DatabaseKind | undefined): boolean {
+    return kind === undefined || kind === 'libsql' || kind === 'duckdb' || kind === 'duckdb_file';
+}
+
 export async function databaseListWithConfig(
     options: DatabaseListOptions,
     config: Config,
@@ -1173,10 +1273,10 @@ export async function databaseListWithConfig(
     // The server's `list` operation takes no `kind` parameter — CliDatabaseRequest
     // prohibits it on anything but `create` — so the filter is applied here,
     // client-side, against the full row set.
-    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+    if (!isKnownKindOption(options.kind)) {
         throw new DatabaseOperationError(
             'invalid_kind',
-            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+            `--kind must be "libsql", "duckdb" or "duckdb_file" (received "${options.kind}").`,
         );
     }
 
@@ -1208,13 +1308,19 @@ export async function databaseCreateWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
-    if (options.kind !== undefined && options.kind !== 'libsql' && options.kind !== 'duckdb') {
+    if (!isKnownKindOption(options.kind)) {
         throw new DatabaseOperationError(
             'invalid_kind',
-            `--kind must be "libsql" or "duckdb" (received "${options.kind}").`,
+            `--kind must be "libsql", "duckdb" or "duckdb_file" (received "${options.kind}").`,
         );
     }
-    const kind: DatabaseKind = options.kind === 'duckdb' ? 'duckdb' : 'libsql';
+    const kind: DatabaseKind = options.kind === 'duckdb' || options.kind === 'duckdb_file' ? options.kind : 'libsql';
+    if (kind === 'duckdb_file' && options.from) {
+        throw new DatabaseOperationError(
+            'invalid_flag_combination',
+            '--from is not supported with --kind duckdb_file; SQL import only applies to libsql databases.',
+        );
+    }
     if (kind === 'duckdb' && options.from) {
         // C-2: reject before the create POST. An analytical database is a
         // billable, org-quota-scoped resource (1 per org on Free) — letting
@@ -1346,7 +1452,25 @@ export async function refuseIfAnalytical(
     verb: 'exec' | 'sqlite-only',
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
-    const row = await requestDatabaseRecord(name, config, dependencies);
+    refuseIfAnalyticalRow(await requestDatabaseRecord(name, config, dependencies), name, verb);
+}
+
+// The same refusal for a caller that already holds the `show` row, so it does
+// not ask the server twice.
+function refuseIfAnalyticalRow(row: DatabaseRecord, name: string, verb: 'exec' | 'sqlite-only'): void {
+    if (row.kind === 'duckdb_file') {
+        if (verb === 'exec') {
+            throw new DatabaseOperationError(
+                'read_only',
+                `read-only: "${name}" is a DuckDB database — change it from a workflow: open, change, publish.`,
+            );
+        }
+
+        throw new DatabaseOperationError(
+            'kind_mismatch',
+            `"${name}" is a DuckDB database — use \`database pull\`, \`database versions\` and \`database rollback\` with it.`,
+        );
+    }
     if (row.kind !== 'duckdb') return;
 
     if (verb === 'exec') {
@@ -1481,6 +1605,19 @@ export async function databaseUndeleteWithConfig(
     io.stdout(renderMutation('undelete', data.database));
 }
 
+// `query` and `schema` on a DuckDB database file are the app's to answer (it
+// says `not_available` until queries ship). The answer is relayed as the
+// error; a success body would be a contract the CLI does not know yet, so it
+// is refused as an invalid response rather than guessed at.
+async function requestDuckdbFileNotAvailable(
+    config: Config,
+    body: Record<string, unknown>,
+    io: ResolvedCommandDependencies,
+): Promise<never> {
+    await requestDatabaseOperation<unknown>(config, body, requestDependencies(io));
+    throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+}
+
 export async function databaseSchemaWithConfig(
     name: string,
     options: DatabaseSchemaOptions,
@@ -1489,6 +1626,10 @@ export async function databaseSchemaWithConfig(
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
     const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb_file') {
+        await requestDuckdbFileNotAvailable(config, { operation: 'schema', name }, io);
+    }
 
     if (row.kind === 'duckdb') {
         // Read-intent, served from the cached catalog — never wakes a
@@ -1634,6 +1775,10 @@ export async function databaseQueryWithConfig(
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
     const row = await requestDatabaseRecord(name, config, dependencies);
+
+    if (row.kind === 'duckdb_file') {
+        await requestDuckdbFileNotAvailable(config, { operation: 'query', name, sql }, io);
+    }
 
     if (row.kind === 'duckdb') {
         if (options.limit !== undefined && (Number.isNaN(options.limit) || options.limit < 1 || options.limit > ANALYTICAL_QUERY_ROW_LIMIT_CLI_MAX)) {
@@ -2121,7 +2266,21 @@ export async function databasePullWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
-    await refuseIfAnalytical(config, name, 'sqlite-only', io);
+    if (options.version !== undefined && !isPositiveInteger(options.version)) {
+        throw new DatabaseOperationError('invalid_version', '--version must be a whole number of 1 or more.');
+    }
+
+    const row = await requestDatabaseRecord(name, config, io);
+    if (row.kind === 'duckdb_file') {
+        return databaseDuckdbFilePullWithConfig(name, destination, options, config, io);
+    }
+    if (options.version !== undefined) {
+        throw new DatabaseOperationError(
+            'invalid_flag_combination',
+            '--version is only for DuckDB databases; a standard database has no numbered versions.',
+        );
+    }
+    refuseIfAnalyticalRow(row, name, 'sqlite-only');
     if (options.writable) {
         return databaseWritablePullWithConfig(name, destination, options, config, io);
     }
@@ -2277,6 +2436,278 @@ export async function databasePullWithConfig(
     }
 }
 
+function isPositiveInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * The one parser for a whole number of 1 or more typed on the command line
+ * (`--version`, `--limit`, rollback's version). Anything else (`1e0`, `0x2`,
+ * ` 3 `, `0`, `-1`, `abc`) is NaN, which the command then refuses before it
+ * sends a request.
+ */
+export function parseStrictPositiveInteger(value: string): number {
+    return /^[1-9][0-9]*$/.test(value) ? Number(value) : Number.NaN;
+}
+
+interface DuckdbPullUrlResponse extends DuckdbPullObject {
+    version: number;
+}
+
+function stableDuckdbPullUrl(data: DuckdbPullUrlResponse, requestedVersion: number | undefined): DuckdbPullUrlResponse {
+    if (
+        !data
+        || typeof data.url !== 'string'
+        || !/^https?:\/\//i.test(data.url)
+        || !isPositiveInteger(data.version)
+        || (requestedVersion !== undefined && data.version !== requestedVersion)
+        || !Number.isSafeInteger(data.bytes) || data.bytes < 0
+        || !Number.isSafeInteger(data.stored_bytes) || data.stored_bytes < 0
+        || typeof data.sha256 !== 'string'
+        || !/^[0-9a-f]{64}$/.test(data.sha256)
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        url: data.url,
+        version: data.version,
+        bytes: data.bytes,
+        stored_bytes: data.stored_bytes,
+        sha256: data.sha256,
+    };
+}
+
+async function databaseDuckdbFilePullWithConfig(
+    name: string,
+    destination: string | undefined,
+    options: DatabasePullOptions,
+    config: Config,
+    io: ResolvedCommandDependencies,
+): Promise<void> {
+    if (options.writable) {
+        throw new DatabaseOperationError(
+            'invalid_flag_combination',
+            '--writable is only for standard databases; a DuckDB database is a file you pull and open locally.',
+        );
+    }
+    if (!io.zstdAvailable) {
+        throw new DatabaseOperationError(
+            'zstd_unsupported',
+            `Pulling a DuckDB database needs Node 22.15 or newer. This is Node ${process.version}.`,
+        );
+    }
+
+    const target = resolveDatabaseDestination(
+        io,
+        destination,
+        path.join('.solidactions', 'databases', `${safeDatabaseStem(name)}.duckdb`),
+    );
+
+    try {
+        // A write-ahead file left beside the target belongs to whatever had the old
+        // database open; DuckDB would replay it against the file pulled here. Refused
+        // even with --yes, and before any request.
+        if (await anyPathExists(io.filesystem, [`${target}.wal`])) {
+            throw new DatabaseOperationError(
+                'target_has_wal',
+                `A DuckDB write-ahead file sits beside ${displayDestination(io, target)}. Close the program that has the database open (or remove ${displayDestination(io, `${target}.wal`)}) and run the pull again.`,
+            );
+        }
+        if (!await confirmFileOverwrite(target, options, io)) return;
+
+        // A refused link (expired) is replaced by a fresh one once; a second
+        // refusal is a failed download, never a loop.
+        let temp: string | undefined;
+        let pulled: DuckdbPullUrlResponse | undefined;
+        for (let attempt = 0; attempt < 2 && !temp; attempt += 1) {
+            const object = stableDuckdbPullUrl(await requestDatabaseOperation<DuckdbPullUrlResponse>(
+                config,
+                { operation: 'pull_url', name, ...(options.version === undefined ? {} : { version: options.version }) },
+                requestDependencies(io),
+            ), options.version);
+            try {
+                temp = await downloadDuckdbToTemp(io, target, object);
+                pulled = object;
+            } catch (error) {
+                if (!(error instanceof DuckdbLinkExpiredError)) throw error;
+            }
+        }
+        if (!temp || !pulled) {
+            throw new DatabaseOperationError('download_failed', 'The database download link was refused. Try again.');
+        }
+
+        try {
+            await assertNoSymlinkComponents(io.filesystem, temp);
+            await assertNoSymlinkComponents(io.filesystem, target);
+            await io.filesystem.rename(temp, target);
+        } catch (error) {
+            await removeOwnedFiles(io.filesystem, [temp]);
+            throw error;
+        }
+        io.stdout(`Database saved to ${displayDestination(io, target)} (version ${pulled.version}, ${pulled.bytes} bytes)`);
+    } catch (error) {
+        throw freshSafeFileError(error);
+    }
+}
+
+// Streams one verified download into a freshly reserved sibling temp file
+// (mode 0644: DuckDB writes a WAL beside the file, unlike the read-only libsql
+// replica) and returns its path; on any failure the temp file is removed.
+async function downloadDuckdbToTemp(
+    io: ResolvedCommandDependencies,
+    target: string,
+    object: DuckdbPullUrlResponse,
+): Promise<string> {
+    const { temp, handle } = await reserveDestinationTemp(io, target);
+    try {
+        await downloadDuckdbObject(object, handle.createWriteStream(), io.dataPlaneTimeoutMs);
+        await handle.close();
+        await io.filesystem.chmod(temp, 0o644);
+        return temp;
+    } catch (error) {
+        try {
+            await handle.close();
+        } catch {
+            // The write stream closes the handle itself once it has finished or failed.
+        }
+        await removeOwnedFiles(io.filesystem, [temp]);
+        throw error;
+    }
+}
+
+interface DatabaseVersionRecord {
+    version: number;
+    state: string;
+    bytes: number;
+    stored_bytes: number;
+    published_at: string | null;
+    run_uuid: string | null;
+    latest: boolean;
+}
+
+interface DatabaseVersionsResponse {
+    database: DatabaseRecord;
+    versions: DatabaseVersionRecord[];
+}
+
+function stableVersionsResponse(data: DatabaseVersionsResponse): DatabaseVersionsResponse {
+    if (!data || !Array.isArray(data.versions)) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        database: stableDatabaseRecord(data.database),
+        versions: data.versions.map((entry) => {
+            if (
+                !entry
+                || !isPositiveInteger(entry.version)
+                || typeof entry.state !== 'string'
+                || typeof entry.bytes !== 'number'
+                || typeof entry.stored_bytes !== 'number'
+                || (entry.published_at !== null && typeof entry.published_at !== 'string')
+                || (entry.run_uuid !== null && typeof entry.run_uuid !== 'string')
+                || typeof entry.latest !== 'boolean'
+            ) {
+                throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+            }
+            return {
+                version: entry.version,
+                state: entry.state,
+                bytes: entry.bytes,
+                stored_bytes: entry.stored_bytes,
+                published_at: entry.published_at,
+                run_uuid: entry.run_uuid,
+                latest: entry.latest,
+            };
+        }),
+    };
+}
+
+const VERSIONS_LIMIT_MAX = 200;
+
+export async function databaseVersionsWithConfig(
+    name: string,
+    options: DatabaseVersionsOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    if (options.limit !== undefined && (!isPositiveInteger(options.limit) || options.limit > VERSIONS_LIMIT_MAX)) {
+        throw new DatabaseOperationError(
+            'invalid_limit',
+            `--limit must be a whole number between 1 and ${VERSIONS_LIMIT_MAX} (received "${options.limit}").`,
+        );
+    }
+
+    const data = stableVersionsResponse(await requestDatabaseOperation<DatabaseVersionsResponse>(
+        config,
+        { operation: 'versions', name, ...(options.limit === undefined ? {} : { limit: options.limit }) },
+        requestDependencies(io),
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, data);
+        return;
+    }
+
+    if (data.versions.length === 0) {
+        io.stdout('No published versions yet.');
+        return;
+    }
+
+    io.stdout(renderTable(
+        ['VERSION', 'PUBLISHED', 'SIZE', 'RUN'],
+        data.versions.map((entry) => [
+            entry.latest ? `${entry.version} (latest)` : String(entry.version),
+            entry.published_at ?? '-',
+            formatByteSize(entry.bytes),
+            entry.run_uuid ?? '-',
+        ]),
+    ).join('\n'));
+}
+
+export async function databaseRollbackWithConfig(
+    name: string,
+    version: string,
+    options: DatabaseRollbackOptions,
+    config: Config,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    const io = resolveDependencies(dependencies);
+    const versionNumber = parseStrictPositiveInteger(version);
+    if (!isPositiveInteger(versionNumber)) {
+        throw new DatabaseOperationError('invalid_version', 'The version must be a whole number of 1 or more.');
+    }
+
+    if (!options.yes) {
+        if (options.json || !io.isTTY) {
+            throw new DatabaseOperationError(
+                'confirmation_required',
+                'Rolling back a database requires --yes in JSON or non-interactive mode.',
+            );
+        }
+
+        if (!await io.confirm(`Roll back database "${name}" to version ${versionNumber}?`)) {
+            io.stdout('Cancelled.');
+            return;
+        }
+    }
+
+    const data = stableDatabaseResponse(await requestDatabaseOperation<DatabaseMutationResponse>(
+        config,
+        { operation: 'rollback', name, version: versionNumber },
+        requestDependencies(io),
+    ));
+
+    if (options.json) {
+        writeJson(io.stdout, data);
+        return;
+    }
+
+    io.stdout(`Database "${data.database.name}" rolled back to version ${versionNumber}.\n${renderDatabaseTable([data.database])}`);
+}
+
 export async function databaseList(
     options: DatabaseListOptions,
     dependencies: DatabaseCommandDependencies = {},
@@ -2358,6 +2789,23 @@ export async function databasePull(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     await databasePullWithConfig(name, destination, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databaseVersions(
+    name: string,
+    options: DatabaseVersionsOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseVersionsWithConfig(name, options, await requireConfigWithWorkspace(), dependencies);
+}
+
+export async function databaseRollback(
+    name: string,
+    version: string,
+    options: DatabaseRollbackOptions,
+    dependencies: DatabaseCommandDependencies = {},
+): Promise<void> {
+    await databaseRollbackWithConfig(name, version, options, await requireConfigWithWorkspace(), dependencies);
 }
 
 export async function databaseImport(
@@ -2753,7 +3201,7 @@ export async function databaseDropTableWithConfig(
         return;
     }
 
-    io.stdout(`Dropped table "${table}" from "${name}". Size is now ${formatByteSize(data.database.size_bytes)}.`);
+    io.stdout(`Dropped table "${table}" from "${name}". Size is now ${formatByteSize(databaseRecordSizeBytes(data.database))}.`);
 }
 
 export async function databaseDropTable(
