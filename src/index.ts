@@ -76,10 +76,13 @@ import {
     databaseOptimize,
     databasePull,
     databaseQuery,
+    databaseRollback,
     databaseSchema,
     databaseShow,
     databaseUndelete,
+    databaseVersions,
     databaseWake,
+    parseStrictPositiveInteger,
 } from './commands/database';
 import { databasePush } from './commands/database-push';
 import { databaseExport } from './commands/database-export';
@@ -121,6 +124,19 @@ program
     .name('solidactions')
     .description('SolidActions CLI - Deploy and manage workflow automation')
     .version(pkg.version);
+
+// Commander lets the root claim `--version` anywhere on the line, which would
+// turn `database pull <name> --version <n>` into "print the CLI version". Keep
+// the root flag working where it is meant to be used (the first argument) and
+// leave every later `--version` to the subcommand that declares it.
+// (`Option.is` is commander's flag matcher; its typings do not declare it.)
+const rootVersionOption = program.options.find((option) => option.long === '--version') as
+    | { is: (arg: string) => boolean }
+    | undefined;
+if (rootVersionOption) {
+    const matchesFlag = rootVersionOption.is.bind(rootVersionOption);
+    rootVersionOption.is = (arg: string) => matchesFlag(arg) && process.argv[2] === arg;
+}
 
 // Long form is --workspace-override (NOT --workspace) — `login` already owns
 // `--workspace` for its own purpose (set the workspace at login time), and
@@ -262,7 +278,7 @@ driver): https://www.solidactions.com/docs/workspace-databases/`);
 database
     .command('list')
     .description('List workspace databases')
-    .option('--kind <kind>', 'Filter by kind: libsql or duckdb')
+    .option('--kind <kind>', 'Filter by kind: libsql, duckdb or duckdb_file')
     .option('--json', 'Output as JSON')
     .action(async (options) => {
         await databaseList(options);
@@ -272,7 +288,7 @@ database
     .command('create')
     .description('Create a workspace database')
     .argument('<name>', 'Database name')
-    .option('--kind <kind>', 'Database kind: libsql (default) or duckdb', 'libsql')
+    .option('--kind <kind>', 'Database kind: libsql (default), duckdb or duckdb_file (a DuckDB database file that workflows open, change and publish)', 'libsql')
     .option('--from <file.sql>', 'Import a SQL file after creation')
     .option('--no-wait', 'Do not wait for analytical (duckdb) provisioning to finish')
     .option('--json', 'Output as JSON')
@@ -356,8 +372,34 @@ database
     .argument('[path]', 'Destination path')
     .option('-y, --yes', 'Overwrite without confirmation')
     .option('--writable', 'Open a foreground writable session')
+    .option('--version <n>', 'DuckDB databases: pull this published version instead of the latest', (value) => parseStrictPositiveInteger(value))
+    .addHelpText('after', `
+A DuckDB database (--kind duckdb_file) is saved to .solidactions/databases/<name>.duckdb
+unless you give a path. Pulling it needs Node 22.15 or newer. List its versions with
+\`solidactions database versions <name>\`.`)
     .action(async (name, destination, options) => {
         await databasePull(name, destination, options);
+    });
+
+database
+    .command('versions')
+    .description('List the published versions of a DuckDB database, newest first')
+    .argument('<name>', 'Database name')
+    .option('--limit <n>', 'How many versions to list (1-200)', (value) => parseStrictPositiveInteger(value))
+    .option('--json', 'Output as JSON')
+    .action(async (name, options) => {
+        await databaseVersions(name, options);
+    });
+
+database
+    .command('rollback')
+    .description('Make an earlier published version of a DuckDB database the current one')
+    .argument('<name>', 'Database name')
+    .argument('<version>', 'Version number to roll back to')
+    .option('-y, --yes', 'Skip confirmation')
+    .option('--json', 'Output as JSON')
+    .action(async (name, version, options) => {
+        await databaseRollback(name, version, options);
     });
 
 database
