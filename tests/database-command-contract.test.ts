@@ -18,7 +18,9 @@ const COMMANDS = [
     { verb: 'query', args: [['name', true], ['sql', true]], options: ['--limit', '--json'] },
     { verb: 'exec', args: [['name', true], ['sql', true]], options: ['--yes', '--json'] },
     { verb: 'dump', args: [['name', true], ['file', false]], options: ['--yes'] },
-    { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable'] },
+    { verb: 'pull', args: [['name', true], ['path', false]], options: ['--yes', '--writable', '--version'] },
+    { verb: 'versions', args: [['name', true]], options: ['--limit', '--json'] },
+    { verb: 'rollback', args: [['name', true], ['version', true]], options: ['--yes', '--json'] },
     { verb: 'import', args: [['name', true], ['file.sql', true]], options: ['--yes', '--resume'] },
     { verb: 'push', args: [['database', true], ['file.db', true]], options: ['--yes'] },
     { verb: 'ingest', args: [['name', true], ['file', true]], options: ['--table', '--mode', '--batch-id', '--json'] },
@@ -29,7 +31,7 @@ const COMMANDS = [
     { verb: 'wake', args: [['name', true]], options: ['--json'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait', '--output', '--replace'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait', '--output', '--replace', '--version'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first

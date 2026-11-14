@@ -124,6 +124,11 @@ solidactions database optimize analytics --wait --json
 solidactions database connect analytics --json
 solidactions database wake analytics --json
 solidactions database query analytics "select category, sum(amount) from events group by 1" --limit 1000 --json
+solidactions database create metrics --kind duckdb_file --json
+solidactions database pull metrics
+solidactions database pull metrics ./metrics.duckdb --version 2 --yes
+solidactions database versions metrics --limit 20 --json
+solidactions database rollback metrics 2 --yes --json
 ```
 
 `--json` produces machine-readable output where supported. `delete`, `exec`,
@@ -141,6 +146,19 @@ after creation. Analytical verbs — `ingest`, `export`, `drop-table`, `optimize
 `connect`, `wake` — only work against a `duckdb` database. `dump`, `pull`,
 `push`, `import`, and `exec` are for the standard (SQLite) kind only and
 refuse an analytical name with a one-line hint.
+
+`create --kind duckdb_file` makes a DuckDB database file that your workflows
+open, change and publish as numbered versions; it has no `--from`, `ingest` or
+`exec` (change it from a workflow). `pull <name> [path]` downloads the latest
+published version as a plain DuckDB file (default
+`.solidactions/databases/<name>.duckdb`; `--version <n>` picks an older one;
+needs Node 22.15 or newer), verifies its size and checksum, and refuses a
+download that does not match. It also refuses to pull over a target that has a
+`<path>.wal` write-ahead file beside it, even with `--yes`: close the program
+that has the database open (or remove that file) and pull again. `versions <name>` lists the published versions,
+newest first, and `rollback <name> <version>` makes an earlier one current
+after a `--yes` confirmation. `query` and `schema` answer that queries on
+DuckDB databases arrive with the next release.
 
 `ingest --mode replace` overwrites a table's contents with no `--yes` prompt
 (unlike `drop-table`, which is a separate, rarer, schema-shaped operation) —
