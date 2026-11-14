@@ -126,16 +126,47 @@ program
     .version(pkg.version);
 
 // Commander lets the root claim `--version` anywhere on the line, which would
-// turn `database pull <name> --version <n>` into "print the CLI version". Keep
-// the root flag working where it is meant to be used (the first argument) and
-// leave every later `--version` to the subcommand that declares it.
+// turn `database pull <name> --version <n>` into "print the CLI version". The
+// root flag therefore yields to a subcommand that declares the same flag: the
+// command the arguments name (global options skipped, including the value of
+// one that takes a value) owns `--version` when it declares it, and the root
+// keeps it everywhere else, as before. A root `--version` that comes before the
+// subcommand path ends the walk: the root keeps it (`--version database pull x`
+// prints the CLI version, as before this wave).
 // (`Option.is` is commander's flag matcher; its typings do not declare it.)
-const rootVersionOption = program.options.find((option) => option.long === '--version') as
-    | { is: (arg: string) => boolean }
-    | undefined;
+type FlagMatcher = { is: (arg: string) => boolean };
+
+function takesGlobalOptionValue(root: Command, arg: string): boolean {
+    return root.options.some((option) => (option.required || option.optional) && (option as unknown as FlagMatcher).is(arg));
+}
+
+function resolveNamedCommand(root: Command, args: string[], isRootVersionFlag: (arg: string) => boolean): Command {
+    let command = root;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--' || isRootVersionFlag(arg)) break;
+        if (arg.length > 1 && arg.startsWith('-')) {
+            if (takesGlobalOptionValue(root, arg)) i++;
+            continue;
+        }
+        const next = command.commands.find((candidate) => candidate.name() === arg || candidate.aliases().includes(arg));
+        if (!next) break;
+        command = next;
+    }
+    return command;
+}
+
+const rootVersionOption = program.options.find((option) => option.long === '--version') as unknown as FlagMatcher | undefined;
 if (rootVersionOption) {
     const matchesFlag = rootVersionOption.is.bind(rootVersionOption);
-    rootVersionOption.is = (arg: string) => matchesFlag(arg) && process.argv[2] === arg;
+    let namedCommand: Command = program;
+    rootVersionOption.is = (arg: string) =>
+        matchesFlag(arg) && !(namedCommand !== program && namedCommand.options.some((option) => (option as unknown as FlagMatcher).is(arg)));
+    const parseRootOptions = program.parseOptions.bind(program);
+    program.parseOptions = (args: string[]) => {
+        namedCommand = resolveNamedCommand(program, args, matchesFlag);
+        return parseRootOptions(args);
+    };
 }
 
 // Long form is --workspace-override (NOT --workspace) — `login` already owns
