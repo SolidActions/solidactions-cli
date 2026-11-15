@@ -97,6 +97,8 @@ export const MUTATING_COMMANDS: ReadonlySet<string> = new Set([
     'doc upload',
     // POSTs a connect-link request (a row the workspace counts against its open-link limit).
     'connection connect',
+    // Mints a preview session row (counts against the workspace's mint limit); the link itself changes nothing until it is opened.
+    'app preview',
 ]);
 
 /** Space-joined command paths that do not mutate server state. */

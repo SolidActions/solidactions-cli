@@ -37,6 +37,7 @@ import { oauthActionPlatforms } from './commands/oauth-action-platforms';
 import { connectionConnect } from './commands/connection-connect';
 import { connectionWait } from './commands/connection-wait';
 import { connectionList } from './commands/connection-list';
+import { appPreview } from './commands/app-preview';
 import { workspacesList, workspaceSet } from './commands/workspaces';
 import { skillPush } from './commands/skill-push';
 import { skillPublish } from './commands/skill-publish';
@@ -1075,6 +1076,29 @@ connection
     .option('--timeout <duration>', 'How long to wait, e.g. 30s, 15m, 1h', '15m')
     .action((requestId, options) => {
         connectionWait(requestId, options);
+    });
+
+// =============================================================================
+// app <subcommand>
+// =============================================================================
+
+const app = program.command('app').description('Try an app before it ships');
+
+app
+    .command('preview')
+    .description("Print a one-time link that opens an app's dev copy in your own browser, no login")
+    .argument('<app>', 'App name, or the slug of any of its environment rows')
+    .option('--page <id>', "Open this page first (the page's numeric doc id)")
+    .addHelpText('after', `
+The link opens the app's dev copy only, never production, as you. It works once and
+must be opened within 60 seconds. The session ends after 3 minutes without use or
+10 minutes in all; ask again for a new link when it ends. The CLI does not open a browser.
+
+For agents: before you call an app change done, run this, open the link in your own
+browser and try the app on the dev copy (open pages, press buttons, fill forms).
+Deploy to dev first: solidactions project deploy <app> . -e dev`)
+    .action(async (appName, options) => {
+        await appPreview(appName, options);
     });
 
 // =============================================================================

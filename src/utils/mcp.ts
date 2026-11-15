@@ -250,6 +250,11 @@ export async function callCrewsTool(config: Config, toolName: string, args: Reco
     return callMcpTool(config, UNIFIED_MCP_PATH, toolName, args);
 }
 
+/** Call the projects_sandbox MCP tool (the app's dev-copy actions: exec, status, clear, promote, preview_link). */
+export async function callProjectsSandbox(config: Config, args: Record<string, unknown>): Promise<McpToolResult> {
+    return callMcpTool(config, UNIFIED_MCP_PATH, 'projects_sandbox', args);
+}
+
 // Current catalog (solidactions-app ToolCatalog.php): the public docs tool depends on the action.
 // Call sites send the public action names, so only the tool is routed (no action/param renames).
 // Only actions the CLI actually sends are routed; anything else throws in resolveDocsCall.

@@ -125,4 +125,20 @@ describe('public README setup contract', () => {
         expect(guidance).toContain('DatabaseVar.readOnly');
         expect(guidance).toMatch(/typed.*DatabaseVar/i);
     });
+
+    it('documents app preview: the command, --page, the one-time link, the session limits and the agent step', () => {
+        // README is the file-level constant already read at the top of this test file.
+        expect(README.includes('### app\n')).toBe(true);
+        const section = README.slice(README.indexOf('### app\n'), README.indexOf('### workspace\n'));
+
+        expect(section).toContain('`app preview <app>`');
+        expect(section).toContain('`--page <id>`');
+        expect(section).toContain('dev copy');
+        expect(section).toContain('60 seconds');
+        expect(section).toContain('3 minutes');
+        expect(section).toContain('10 minutes');
+        expect(section).toContain('does not open a browser');
+        expect(section).toContain('before calling an app change done');
+        expect(section).toContain('solidactions project deploy <app> . -e dev');
+    });
 });

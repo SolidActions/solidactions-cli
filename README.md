@@ -555,6 +555,18 @@ You do **not** need `--overwrite` to keep an edited file whose doc was deleted o
 
 **`doc pull` refuses to replace another folder's manifest.** If the destination already tracks a different folder, pulling into it would leave the previously tracked files untracked — and untracked files are not protected from being overwritten by a later pull. `pull` refuses (exit 1, before anything is written) and names both folders. Pull into a different directory, or pass `--overwrite` to replace the manifest anyway. This also covers the single-doc pull path, whose one-entry manifest would otherwise clobber a folder's.
 
+### app
+
+| Command | Key Flags | Description |
+|---------|-----------|-------------|
+| `app preview <app>` | `--page <id>` | Print a one-time link that opens the app's dev copy in your own browser, no login |
+
+`app preview` asks the server for a link and prints it on its own line. The CLI does not open a browser. The link opens the app's **dev copy** only (never production) as you, and only if you may deploy the app. It works once and must be opened within 60 seconds; the session ends after 3 minutes without use or 10 minutes in all, and you ask again for a new link when it ends. `--page <id>` opens one page of the app first (the page's numeric doc id).
+
+If the dev copy shares a database with production, the command prints a warning naming the databases; the link is still issued. A refusal (the app is unknown, it has no dev copy, the page is not part of it, previews are switched off for the workspace, too many links asked for) prints a plain message and exits non-zero.
+
+**For agents:** before calling an app change done, deploy it to dev (`solidactions project deploy <app> . -e dev`), run `solidactions app preview <app>`, open the link in your own browser and try the app (open pages, press buttons, fill forms).
+
 ### workspace
 
 | Command | Description |
