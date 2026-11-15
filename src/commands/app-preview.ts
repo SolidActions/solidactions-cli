@@ -66,8 +66,8 @@ export async function appPreview(app: string, options: AppPreviewOptions): Promi
     }
 
     out(`Preview link for ${project} (dev copy):`);
-    // Same style as the device-login URL: two-space indent, blue underline, the link alone on its line.
-    out('  ' + data.link, chalk.blue.underline);
+    // Same style as the device-login URL: two-space indent, blue underline on the URL only (src/commands/device-login.ts).
+    out('  ' + data.link, (s) => '  ' + chalk.blue.underline(s.slice(2)));
     if (typeof data.note === 'string' && data.note !== '') {
         out(data.note);
     }

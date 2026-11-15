@@ -145,10 +145,9 @@ describe('appPreview', () => {
             name: 'projects_sandbox',
             arguments: { action: 'preview_link', project: 'my-app' },
         });
-        const lines = result.stdout.split('\n');
-        expect(lines[0]).toBe('Preview link for my-app (dev copy):');
-        expect(lines[1]).toBe('  https://app.solidactions.com/preview/tok_abc123');
-        expect(result.stdout).toContain(note);
+        expect(result.stdout).toBe(
+            ['Preview link for my-app (dev copy):', '  https://app.solidactions.com/preview/tok_abc123', note, ''].join('\n'),
+        );
         expect(splitWorkspaceLine(result.stderr)).toBe('');
     });
 
@@ -318,6 +317,20 @@ describe('appPreview', () => {
 
         expect(result.status).toBe(1);
         expect(requests).toHaveLength(1);
+        // authFailedLine(host) in src/utils/api.ts: `Authentication failed against ${displayHost(host)}. Run "solidactions login --global" to re-configure.`
+        expect(splitWorkspaceLine(result.stderr)).toContain(
+            `Authentication failed against http://127.0.0.1:${port}. Run "solidactions login --global" to re-configure.`,
+        );
+        expect(result.stdout).toBe('');
+    });
+
+    it('refuses a blank app name locally with one line and zero requests', async () => {
+        const result = await runCli(['app', 'preview', '  '], home, cwd);
+
+        expect(result.status).toBe(1);
+        expect(requests).toHaveLength(0);
+        expect(result.stderr).not.toContain('Workspace:');
+        expect(result.stderr).toBe('app preview: give the app name, e.g. solidactions app preview my-app.\n');
         expect(result.stdout).toBe('');
     });
 
@@ -367,6 +380,11 @@ function runCli(args: string[], home: string, cwd: string): Promise<CliResult> {
         delete childEnv.NODE_DEBUG;
         delete childEnv.FORCE_COLOR;
         delete childEnv.SOLIDACTIONS_TEST_HOOKS;
+        // Switch off the agent-freshness nudge system (background update check + network
+        // egress, src/utils/agent-freshness.ts): without this, a second CLI run reusing
+        // the same HOME prints an `AGENT NOTE: ... outdated` line before the Workspace
+        // banner and breaks splitWorkspaceLine.
+        childEnv.SOLIDACTIONS_NO_AGENT_NUDGES = '1';
 
         const child = childProcess.spawn(process.execPath, [CLI_BINARY, ...args], {
             cwd,
