@@ -50,7 +50,7 @@ Automation that does not need to write a config file can set
 
 ### Verify the generated AI tooling
 
-`solidactions init` installs all five current SolidActions skills plus the SDK
+`solidactions init` installs all six current SolidActions skills plus the SDK
 reference:
 
 - `solidactions-getting-started`
@@ -58,6 +58,7 @@ reference:
 - `solidactions-deploy-and-config`
 - `solidactions-oauth-actions`
 - `solidactions-crew-skills`
+- `solidactions-functions`
 
 For `--claude`, skills are written to `.claude/skills/`; for `--agents`, they
 are written to `.agents/skills/`. Each skill is a flat `solidactions-*.md` file.
@@ -583,7 +584,7 @@ If the dev copy shares a database with production, the command prints a warning 
 | `ai init` | `--claude`, `--agents`, `--update` | Install or refresh AI skills and SDK reference in an **existing** project (use `init` for new projects) |
 | `ai examples [names...]` | `--all`, `--overwrite` | Install example workflows |
 
-`ai init` installs five auto-activating SolidActions skills and a
+`ai init` installs six auto-activating SolidActions skills and a
 full SDK reference into your project:
 
 - Skills go to `.claude/skills/` (for `--claude` / Claude Code) or

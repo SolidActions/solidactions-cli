@@ -10,6 +10,7 @@ describe('SolidActions generated skill manifest', () => {
             'solidactions-deploy-and-config',
             'solidactions-oauth-actions',
             'solidactions-crew-skills',
+            'solidactions-functions',
         ]);
     });
 
