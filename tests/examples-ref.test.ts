@@ -27,7 +27,7 @@ const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-
 
 describe('EXAMPLES_REF', () => {
     it('pins the merged examples mainline that carries the functions skill (cli#249, repinned per the #1146 release contract)', () => {
-        expect(EXAMPLES_REF).toBe('fefdb901b7fd25e887c38e39d0af7db78ad00885');
+        expect(EXAMPLES_REF).toBe('0dd65bab7724b104e8bb21396f9397012f45a82c');
     });
 
     it('moves past the pin that predates the workspace-database Drizzle example (#140)', () => {

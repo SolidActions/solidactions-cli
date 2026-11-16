@@ -35,4 +35,4 @@
  * repin EXAMPLES_REF to the examples repo's merged mainline SHA and verify the
  * exact ref during the release ritual.
  */
-export const EXAMPLES_REF = 'fefdb901b7fd25e887c38e39d0af7db78ad00885';
+export const EXAMPLES_REF = '0dd65bab7724b104e8bb21396f9397012f45a82c';
