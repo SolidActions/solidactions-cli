@@ -23,6 +23,22 @@ describe('functions sync', () => {
             { id: 'enrich', name: 'Enrich', file: 'functions/enrich.ts', timeout: 20, confirm: true, input_schema: { type: 'object' } },
         ] })).toEqual(functions);
     });
+    it('passes confirm_text through, only when the yaml sets it', () => {
+        expect(listCodeFunctions({ functions: [
+            { id: 'ask', name: 'Ask', file: 'functions/ask.ts', confirm: true, confirm_text: 'Send the weekly report to everyone?' },
+            { id: 'plain', name: 'Plain', file: 'functions/plain.ts', confirm: true },
+        ] })).toEqual([
+            { id: 'ask', name: 'Ask', file: 'functions/ask.ts', confirm: true, confirm_text: 'Send the weekly report to everyone?' },
+            { id: 'plain', name: 'Plain', file: 'functions/plain.ts', confirm: true },
+        ]);
+    });
+    it('sends confirm_text in the sync payload and leaves it out when absent', () => {
+        const ask: CodeFunction = { id: 'ask', name: 'Ask', file: 'functions/ask.ts', confirm: true, confirm_text: 'Sure?' };
+        const plain: CodeFunction = { id: 'plain', name: 'Plain', file: 'functions/plain.ts' };
+        const payload = buildFunctionsSyncPayload([ask, plain], new Map([['ask', 'a'], ['plain', 'p']]), null);
+        expect(payload.functions[0]).toEqual({ ...ask, source: 'a' });
+        expect(Object.keys(payload.functions[1])).not.toContain('confirm_text');
+    });
     it('lists no functions when the section is absent', () => {
         expect(listCodeFunctions({})).toEqual([]);
     });

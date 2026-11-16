@@ -20,7 +20,7 @@ export interface ParsedEnvVar {
 export interface PageCodeEntry { id: string; name: string; file: string; home?: boolean; owner?: 'code'; sources?: Record<string, unknown>[]; }
 export interface PagePointerEntry { id: string | number; name: string; owner: 'editor'; file?: undefined; }
 export type PageEntry = PageCodeEntry | PagePointerEntry;
-export interface FunctionCodeEntry { id: string; name: string; file: string; description?: string; webhook?: boolean; webhook_auth?: 'hmac' | 'basic' | 'header' | 'none'; mcp?: boolean; mcp_tool_name?: string; timeout?: number; confirm?: boolean; input_schema?: Record<string, unknown>; owner?: 'code'; }
+export interface FunctionCodeEntry { id: string; name: string; file: string; description?: string; webhook?: boolean; webhook_auth?: 'hmac' | 'basic' | 'header' | 'none'; mcp?: boolean; mcp_tool_name?: string; timeout?: number; confirm?: boolean; confirm_text?: string; input_schema?: Record<string, unknown>; owner?: 'code'; }
 export interface FunctionPointerEntry { id: string | number; name: string; owner: 'editor'; file?: undefined; }
 export type FunctionEntry = FunctionCodeEntry | FunctionPointerEntry;
 export interface AppPaletteBlock { sidebar_bg?: string | null; sidebar_fg?: string | null; accent?: string | null; mark?: string | null; }

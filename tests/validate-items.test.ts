@@ -367,6 +367,44 @@ describe('validateItems', () => {
         });
     });
 
+    it('accepts a confirm_text of 255 characters and refuses 256, counting characters not bytes', () => {
+        const dir = makeTmpDir();
+        writeFile(dir, 'functions/hook.ts', 'export async function run() {}');
+        // Precondition: the file is valid, so only the confirm_text rule fires.
+        expect(fs.existsSync(path.join(dir, 'functions/hook.ts'))).toBe(true);
+        const withText = (confirmText: string): SolidActionsConfig => ({
+            functions: [{ id: 'hook', name: 'Hook', file: 'functions/hook.ts', confirm: true, confirm_text: confirmText }],
+        });
+        const accepted = 'é'.repeat(255);
+        expect(Buffer.byteLength(accepted)).toBe(510);
+        expect(validateItems(withText(accepted), dir)).toEqual([]);
+        const errors = validateItems(withText('é'.repeat(256)), dir);
+        expect(errors).toEqual([{
+            entry: 'functions[hook]',
+            field: 'confirm_text',
+            message: 'functions[hook].confirm_text: confirm_text must be a string of at most 255 characters (got 256 characters).',
+        }]);
+    });
+
+    it('rejects a confirm_text that is not a string', () => {
+        const dir = makeTmpDir();
+        writeFile(dir, 'functions/hook.ts', 'export async function run() {}');
+        // Precondition: the file is valid, so only the confirm_text rule fires.
+        expect(fs.existsSync(path.join(dir, 'functions/hook.ts'))).toBe(true);
+        const entry = {
+            id: 'hook',
+            name: 'Hook',
+            file: 'functions/hook.ts',
+            confirm_text: 7,
+        } as unknown as FunctionCodeEntry;
+        const errors = validateItems({ functions: [entry] }, dir);
+        expect(errors).toEqual([{
+            entry: 'functions[hook]',
+            field: 'confirm_text',
+            message: 'functions[hook].confirm_text: confirm_text must be a string of at most 255 characters (got 7).',
+        }]);
+    });
+
     it('rejects 51 functions', () => {
         const dir = makeTmpDir();
         writeFile(dir, 'functions/a.ts', 'export async function run() {}');

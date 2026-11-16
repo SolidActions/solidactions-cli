@@ -169,6 +169,11 @@ export function validateItems(config: SolidActionsConfig, sourceDir: string): It
         if (webhookAuth !== undefined && (typeof webhookAuth !== 'string' || !WEBHOOK_AUTHS.includes(webhookAuth))) {
             errors.push({ entry: entryLabel, field: 'webhook_auth', message: `${entryLabel}.webhook_auth: webhook_auth must be one of hmac, basic, header, none (got ${JSON.stringify(webhookAuth)}).` });
         }
+        const confirmText = (entry as { confirm_text?: unknown }).confirm_text;
+        if (confirmText !== undefined && (typeof confirmText !== 'string' || [...confirmText].length > 255)) {
+            const got = typeof confirmText === 'string' ? `${[...confirmText].length} characters` : JSON.stringify(confirmText);
+            errors.push({ entry: entryLabel, field: 'confirm_text', message: `${entryLabel}.confirm_text: confirm_text must be a string of at most 255 characters (got ${got}).` });
+        }
     });
 
     return errors;
