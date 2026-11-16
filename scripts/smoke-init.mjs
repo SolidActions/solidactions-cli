@@ -57,6 +57,7 @@ const skillNames = [
   'solidactions-deploy-and-config',
   'solidactions-oauth-actions',
   'solidactions-crew-skills',
+  'solidactions-functions',
 ];
 const scaffoldFiles = [
   'package.json',

@@ -13,6 +13,7 @@ export const SOLIDACTIONS_SKILL_NAMES = [
     'solidactions-deploy-and-config',
     'solidactions-oauth-actions',
     'solidactions-crew-skills',
+    'solidactions-functions',
 ] as const;
 
 const EXAMPLES_OWNER = 'SolidActions';
