@@ -10,7 +10,7 @@
 
 **Spec:** No spec file. The design is the audit comment on `task-auditdoagents-4f85` (gaps 1, 2, 3, 5, 6, 7 as ranked there; gaps 3 and 4 name the app's guide and manifest and are the app half), the approval ask `task-starttheagent-aed8` and the wave card `task-wavecliagentdocs-60d9` (pieces 1-3). Source text for every fact: the app guide `app/Mcp/Tools/WorkflowsGuideTool.php` on app `origin/main` (read at plan time at `f56c1e596`; developers read it with `git -C /home/mercer/projects/solid/solidactions-app show origin/main:app/Mcp/Tools/WorkflowsGuideTool.php`, read only, never touch that checkout), and the other app files each task names.
 
-**Issues:** `cli#251` ("examples: bump pinned CLI manifest, drop app preview allowlist, two skill wording fixes (from cli#249)") and `cli#253` ("examples skills: app page guidance and a no-dev path for the preview rule (from cli#249 cleanroom)"), both sanctioned by Peter's go on approval ask `task-starttheagent-aed8` ("Go, size normal", 2026-11-16T03:44Z). The wave card is `task-wavecliagentdocs-60d9`; the plan card is `task-plancliagentdocs-d421`. The wave's pieces (1) examples skills, (2) CLI `confirm_text` and repin and (3) public docs come from the wave card description; pieces (2, first half) and (3) have no GitHub issue of their own (see Rulings).
+**Issues:** `cli#254` ("confirm_text from solidactions.yaml", filed by the PM after plan-close, mail 12ae56cc, 2026-11-16T03:50Z; Task 4), `cli#251` ("examples: bump pinned CLI manifest, drop app preview allowlist, two skill wording fixes (from cli#249)") and `cli#253` ("examples skills: app page guidance and a no-dev path for the preview rule (from cli#249 cleanroom)"), both sanctioned by Peter's go on approval ask `task-starttheagent-aed8` ("Go, size normal", 2026-11-16T03:44Z). The wave card is `task-wavecliagentdocs-60d9`; the plan card is `task-plancliagentdocs-d421`. The wave's pieces (1) examples skills, (2) CLI `confirm_text` and repin and (3) public docs come from the wave card description; pieces (2, first half) and (3) have no GitHub issue of their own (see Rulings).
 
 ## Global Constraints
 
@@ -45,6 +45,8 @@ Verify data: the CLI smoke and cleanroom run the CLI built from this branch (`np
 
 ## Rulings (plan)
 
+- **PM rulings after plan-close (mail 12ae56cc, chief, 2026-11-16T03:50Z, binding):** (a) clones OK; (b) the release is v3.38.0, so "CLI 3.38 or newer" stands; (c) cli#254 was filed for `confirm_text` from yaml: add it to the wave's issues in the PR body (the metadata `issues` carries `cli#254`); (d) the troubleshooting source exists, app release v0.285.0 notes (#2697): "A wait-mode caller with a short timeout may see a timeout while the retries run (up to about 2 minutes); it should not resubmit." and "re-queues itself after 10 s, 30 s and 90 s"; a missing image is not retried. Task 6 uses those words; (e) the v3.37.0 pin is right; (f) Peter ruled dashboards go away, so the "Make this an app" section is DROPPED: Task 7 no longer touches `site/src/pages/docs/dashboards/index.astro`. These override any older line in this plan (Review Focus 7, the Task 6 "omit" instruction, the Task 7 dashboards text, the earlier ruling "wait-mode caller should not resubmit is omitted").
+
 - **Ruling: repo split and merge order (wave card).** Clones live at `/home/mercer/projects/solid/__wave-cli-a/solidactions-examples` and `/home/mercer/projects/solid/__wave-cli-a/solidactions-marketing`, branch `wave/2026-11-15-cli-agent-docs` cut from `origin/main` (examples `0dd65ba`, marketing `2155b6f`); the wave card text names this location, so the plan-time clones are the build-time clones. Developers never push and have no GitHub auth; the manager pushes each satellite branch and opens its PR, confirms head and registered checks, and records PR numbers on the wave card. Satellite commits are the manager's, by explicit paths (`git -C <clone> add -- <paths>` then `git -C <clone> commit -m ... -- <paths>`). The PM removes the clones after release. Cost if wrong: the PM names another location before dispatch.
 - **Ruling: manifest pin goes to v3.37.0 (the latest release), not v3.36.0 (the issue tried 3.36.0).** v3.37.0 is released and is what an agent on a fresh install will have; the validator then agrees with what `ai init` users run. Cost if wrong: Task 1 repeats with another tag; no other task depends on the number.
 - **Ruling: Task 1 runs first and Tasks 2 and 3 wait for it to be committed.** The validator `check-content.mjs` flags every `solidactions ...` span the pinned manifest lacks (`--override-source-of-truth` is new since v3.6.0), so Tasks 2 and 3 can only prove their text against the NEW manifest. Cost if wrong: Tasks 2 and 3 would have to allowlist spans and Task 1 remove them again.
@@ -67,7 +69,7 @@ Verify data: the CLI smoke and cleanroom run the CLI built from this branch (`np
 | 1 | examples | cli#251 (items 1, 2) | none |
 | 2 | examples | cli#251 (3a, 4), cli#253 (2), wave card piece 1 | Task 1 committed |
 | 3 | examples | cli#251 (3b), cli#253 (1, 3), wave card piece 1 | Task 1 committed |
-| 4 | cli (slot) | wave card piece 2 | none |
+| 4 | cli (slot) | cli#254, wave card piece 2 | none |
 | 5 | cli (slot) | cli#251, cli#253 (repin) | Tasks 1, 2, 3 committed, pushed and MERGED by the PM; Task 4 committed |
 | 6 | marketing | wave card piece 3 | none |
 | 7 | marketing | wave card piece 3 | none |
@@ -171,7 +173,7 @@ Grep pasted at plan time (every reader of the pin): `grep -rn "guidance_cli_vers
 
 ---
 
-### Task 4: send `confirm_text` from `solidactions.yaml` (CLI slot, wave card piece 2)
+### Task 4: send `confirm_text` from `solidactions.yaml` (CLI slot, cli#254, wave card piece 2)
 
 **Files (file scope, CLI slot `/home/mercer/projects/solid/solidactions-cli/__worktrees/wave-a`; the only paths this task may touch):**
 - Modify: `src/utils/functions-sync.ts` (interface `CodeFunction` lines 8-19: add `confirm_text?: string;` after `confirm`; `listCodeFunctions` lines 22-40: add `...(fn.confirm_text === undefined ? {} : { confirm_text: fn.confirm_text }),` after the `confirm` line)
@@ -285,7 +287,7 @@ Grep pasted at plan time: `grep -rn "0dd65bab" --exclude-dir=node_modules --excl
 
 **Content requirements** (model the page structure and tone on the page's own existing sections, and on `site/src/pages/docs/functions/index.astro`; read each target page and `site/src/components/` first; no new route, no new component, no `docs-contract.json` change):
 - `projects/index.astro`: (a) a section "Try the app before you call it done": an AI (or you) asks for a preview link with `solidactions app preview <app> [--page <id>]` (CLI 3.36 or newer) or the MCP `projects_sandbox` action `preview_link`; it opens the app's dev copy, never production; the link works once, within 60 seconds; the session ends after 3 minutes idle or 10 minutes; a page call from a preview carries `SA_PREVIEW=1` so a function skips real side effects such as sending mail (these facts are the cli#247 ruling text and the guide's "The three doors" paragraph, quoted in `docs/superpowers/plans/2026-11-15-cli-functions-docs.md` Global Constraints; the developer reads that file in the CLI slot); (b) a section "Who owns an app's source": the Source of truth facts as plain prose (Settings, "Source of truth"; `git` or `solidactions`; a sandbox deploy over a git-owned app is refused with `source_of_truth_git`; `--override-source-of-truth`; drifted until reconciled; deploys from a laptop or CI are never refused).
-- `troubleshooting.astro`: a section "A run could not start" listing the four codes with their sentences (copied from the contract line, the sentence a customer sees) and what to do (run it again; for `image_not_ready` try again in a minute or deploy the project again), plus the retry: the platform starts a never-started run again by itself after 10 s, 30 s and 90 s, then fails it with the sentence. Do NOT write "wait-mode caller should not resubmit" (Ruling, Review Focus 7); name it in the report.
+- `troubleshooting.astro`: a section "A run could not start" listing the four codes with their sentences (copied from the contract line, the sentence a customer sees) and what to do (run it again; for `image_not_ready` try again in a minute or deploy the project again), plus the retry: the platform starts a never-started run again by itself after 10 s, 30 s and 90 s, then fails it with the sentence. Also write, in plain words from the PM's source (app release v0.285.0 notes, #2697): a wait-mode caller with a short timeout may see a timeout while the retries run (up to about 2 minutes), and it should not resubmit; and a missing image (`image_not_ready`) is not retried by the platform. Where this conflicts with the contract line's "fails it with the sentence after the third retry" for `image_not_ready`, the PM's words win: do not say `image_not_ready` is retried.
 - `connect-ai.astro`: a section "Name your agent": on the consent screen you type a name for the agent being connected ("Steve", "Billy"); each name is its own agent; left blank it is the app's default connection; the same app with the same name replaces that connection (a reconnect); a different app using a name you already have is refused with "{name}" is already the name of one of your agents ({app name}). Pick another name.; Settings, Agents lists one row per agent with rename, revoke and last used; new tool areas reach old connections by default, except an area you left unticked (decision 5); and "Reconnect to add them": when a connection lacks tool areas the agent says "Not turned on for this connection: {areas}. A person can add them by connecting the app again and ticking them." (decision 8). Read the spec's decisions and state only what they say; name nothing the spec lists as out of this wave (decision 11).
 
 - [ ] **Step 1: Read the sources and the three pages.**
@@ -296,19 +298,17 @@ Grep pasted at plan time: `grep -rn "0dd65bab" --exclude-dir=node_modules --excl
 
 ---
 
-### Task 7: functions and dashboards pages (marketing repo, wave card piece 3)
+### Task 7: functions page (marketing repo, wave card piece 3; the dashboards section is dropped by PM ruling, see Rulings)
 
 **Files (file scope, marketing checkout; the only paths this task may touch):**
 - Modify: `site/src/pages/docs/functions/index.astro` (after, batch, confirm text)
-- Modify: `site/src/pages/docs/dashboards/index.astro` ("Make this an app")
 
 **Interfaces:**
-- Consumes: the frozen "Function extras facts" and "yaml key `confirm_text`" lines; for dashboards, app `app/Mcp/Catalog/CatalogDescriptions.php` line 33 (`dashboards_manage`: "convert copies a dashboard into a new app (a loss report first, then acknowledge: true; converting needs a person — an agent converts as its connection's human authorizer)") and the UI strings in `resources/js/components/Dashboards/__tests__/show-convert.test.tsx` (the button "Make this an app", shown to a manager); the developer reads the app's convert flow code (`git -C /home/mercer/projects/solid/solidactions-app grep -n "convert" origin/main -- app/Domains/Dashboards resources/js/components/Dashboards`, read only) and states only what the code and the description support (the copy is a copy: the original dashboard stays; the loss report is shown first).
+- Consumes: the frozen "Function extras facts" and "yaml key `confirm_text`" lines. (The dashboards "Make this an app" section is dropped: PM ruling, Rulings.)
 - Produces: nothing.
 
 **Content requirements:** model on the existing sections of each page (the functions page already has a confirm paragraph at line 128 and a page-grant paragraph; extend, do not duplicate):
 - `functions/index.astro`: (a) "Start a workflow after you answer": `after: true`, with the trade-off exactly as the contract (including the "Not started" run list and the below-400 rule); (b) "Several statements in one call": `batch`, 1 to 50, one round trip, not atomic, `statement N`; (c) confirm text: the existing confirm paragraph gains `confirm_text` (255 characters, shown above the standard line, only while `confirm` is true) and how to set it: in the app's editor, over MCP (`functions_manage`), or in `solidactions.yaml` with CLI 3.38 or newer.
-- `dashboards/index.astro`: a section "Turn a dashboard into an app": the button "Make this an app" (people who can manage the dashboard), what the loss report is, that the dashboard is copied into a new app and the original stays, and that an AI agent converts as the person who connected it.
 
 - [ ] **Step 1: Read the sources and both pages.**
 - [ ] **Step 2: Make the edits.**
