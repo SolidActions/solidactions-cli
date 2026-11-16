@@ -25,9 +25,9 @@
  * users. If solidactions-examples ever starts publishing tags in step with the
  * SDK, replace this with a derivation the way sdk-version.ts does.
  *
- * Currently: the merged solidactions-examples mainline that includes the
- * functions skill (`content/skills/solidactions-functions.md`), the
- * `function-echo` example and the preview rule (cli#249). It also still
+ * Currently: the merged solidactions-examples mainline of wave cli-agent-docs
+ * (examples PR #37: manifest v3.37.0, function extras, source of truth, app
+ * pages, preview fallback; cli#251, cli#253). It also still
  * includes ex#34 "workspace-database + Drizzle example", which is what makes
  * `ai examples` able to install workspace-database-drizzle (the runnable
  * connect + drizzle-kit-migration example #140 exists to point people at).
@@ -35,4 +35,4 @@
  * repin EXAMPLES_REF to the examples repo's merged mainline SHA and verify the
  * exact ref during the release ritual.
  */
-export const EXAMPLES_REF = '0dd65bab7724b104e8bb21396f9397012f45a82c';
+export const EXAMPLES_REF = '24134f376885fd02c2633c1253b691524ee6a58e';

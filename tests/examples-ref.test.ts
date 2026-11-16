@@ -26,8 +26,8 @@ const PRE_DRIZZLE_EXAMPLE_REF = '5eaaaab417ef510401618b814a1eedf238752057';
 const RELEASE_SMOKE = fs.readFileSync(path.resolve(__dirname, '../scripts/smoke-init.mjs'), 'utf8');
 
 describe('EXAMPLES_REF', () => {
-    it('pins the merged examples mainline that carries the functions skill (cli#249, repinned per the #1146 release contract)', () => {
-        expect(EXAMPLES_REF).toBe('0dd65bab7724b104e8bb21396f9397012f45a82c');
+    it('pins the merged examples mainline of wave cli-agent-docs (examples PR #37; cli#251, cli#253, repinned per the #1146 release contract)', () => {
+        expect(EXAMPLES_REF).toBe('24134f376885fd02c2633c1253b691524ee6a58e');
     });
 
     it('moves past the pin that predates the workspace-database Drizzle example (#140)', () => {
