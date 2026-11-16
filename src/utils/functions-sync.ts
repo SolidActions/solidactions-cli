@@ -16,6 +16,7 @@ export interface CodeFunction {
     mcp_tool_name?: string;
     timeout?: number;
     confirm?: boolean;
+    confirm_text?: string;
     input_schema?: Record<string, unknown>;
 }
 
@@ -35,6 +36,7 @@ export function listCodeFunctions(config: SolidActionsConfig): CodeFunction[] {
             ...(fn.mcp_tool_name === undefined ? {} : { mcp_tool_name: fn.mcp_tool_name }),
             ...(fn.timeout === undefined ? {} : { timeout: fn.timeout }),
             ...(fn.confirm === undefined ? {} : { confirm: fn.confirm }),
+            ...(fn.confirm_text === undefined ? {} : { confirm_text: fn.confirm_text }),
             ...(fn.input_schema === undefined ? {} : { input_schema: fn.input_schema }),
         };
     });
