@@ -8,6 +8,7 @@ import { Transform } from 'stream';
 import { authFailedLine, getApiHeaders, requireConfigWithWorkspace } from '../utils/api';
 import { Config } from '../utils/config';
 import { DatabaseOperationError } from '../utils/database-data-plane';
+import { analyticalVerbKindMismatch } from '../utils/database-kind-refusal';
 import { requestDatabaseRecord } from './database';
 
 export interface DatabaseExportOptions {
@@ -387,7 +388,8 @@ export async function databaseExportWithConfig(
     if (options.resume && options.wait === false) throw new ExportCommandError('invalid_arguments', '--no-wait cannot be combined with --resume. Resume waits for and downloads the existing export.');
 
     const database = await requestDatabaseRecord(name, config);
-    if (database.kind !== 'duckdb') throw new ExportCommandError('kind_mismatch', `"${name}" is not an analytical database — \`database export\` only works on analytical (duckdb) databases.`);
+    const exportRefusal = analyticalVerbKindMismatch(name, database, 'export');
+    if (exportRefusal) throw new ExportCommandError(exportRefusal.code, exportRefusal.message);
 
     let metadata: ExportMetadata;
     if (options.resume) {

@@ -100,6 +100,7 @@ active workspace. The complete command surface is:
 
 ```bash
 solidactions database list --json
+solidactions database list --include-deleted --json
 solidactions database create analytics --from backup.sql --json
 solidactions database delete analytics --yes --json
 solidactions database undelete analytics --json
@@ -136,7 +137,9 @@ solidactions database rollback metrics 2 --yes --json
 `dump` overwrites, `pull` overwrites, `drop-table`, and `import` prompt before
 changing data; use `--yes` only when that change is already approved. A
 database `delete` is a soft-delete, and its output shows the purge clock
-during which `undelete` can restore it (either kind).
+during which `undelete` can restore it (either kind). A deleted database
+stays visible to `database list --include-deleted` until it is purged;
+the default `database list` shows live databases only.
 
 `create --kind` defaults to the standard (SQLite) kind; pass `--kind duckdb`
 for an analytical database (waits for provisioning unless `--no-wait`).
@@ -150,7 +153,12 @@ refuse an analytical name with a one-line hint.
 
 `create --kind duckdb_file` makes a DuckDB database file that your workflows
 open, change and publish as numbered versions; it has no `--from`, `ingest` or
-`exec` (change it from a workflow). `pull <name> [path]` downloads the latest
+`exec` (change it from a workflow). Open it from a workflow with `openAnalytics`
+from `@solidactions/sdk` 0.11.0 or newer (add `@duckdb/node-api` as a normal
+dependency). The analytical verbs — `ingest`, `export`, `drop-table`,
+`optimize`, `connect` and `wake` — do not apply to it: they are refused with
+`kind_mismatch`, naming the kind and pointing at `query`, `schema`, `pull`,
+`versions` and `rollback`. `pull <name> [path]` downloads the latest
 published version as a plain DuckDB file (default
 `.solidactions/databases/<name>.duckdb`; `--version <n>` picks an older one;
 needs Node 22.15 or newer), verifies its size and checksum, and refuses a
@@ -158,8 +166,7 @@ download that does not match. It also refuses to pull over a target that has a
 `<path>.wal` write-ahead file beside it, even with `--yes`: close the program
 that has the database open (or remove that file) and pull again. `versions <name>` lists the published versions,
 newest first, and `rollback <name> <version>` makes an earlier one current
-after a `--yes` confirmation. `query` and `schema` answer that queries on
-DuckDB databases arrive with the next release.
+after a `--yes` confirmation. `query` and `schema` read the latest published version (read-only SQL on that version; `--limit` asks for fewer rows, and the server caps the rows it returns, 1000 by default) and answer `no_published_version` until a workflow has published one.
 
 `ingest --mode replace` overwrites a table's contents with no `--yes` prompt
 (unlike `drop-table`, which is a separate, rarer, schema-shaped operation) —
@@ -371,7 +378,7 @@ env:
 - A global key, an `oauth:` name, and a `database:` name are **mutually exclusive**: bind each variable to exactly one. The platform enforces that server-side (HTTP 422), but do not rely on seeing that error: through CLI v3.6.0 the YAML parser keeps only the first form it recognizes — `oauth:` beats `database:` — so a declaration carrying both deploys silently as the wrong binding instead of failing.
 - `project deploy` (including `--config-only`) syncs the *complete* `env:` list to the server on every run. Any previously YAML-sourced mapping whose name no longer appears in the list is deleted — removing or emptying `env:` prunes those mappings on the next deploy. Only mappings that were never YAML-declared survive: overriding a YAML-declared variable with `env set`/`env map` doesn't change its provenance, so removing its declaration still deletes the mapping.
 - Create the workspace database first with `solidactions database create <name>` or in the web UI. Workspace-database bindings require `@solidactions/sdk >=0.8.0`.
-- For a `database:` entry, the workflow receives a typed `DatabaseVar` at `ctx.vars.<NAME>` at runtime, typically wrapped with the SDK's `createDatabaseClient()`. The private transport payload uses `read_only`; SDK 0.8.0+ normalizes it to the public `DatabaseVar.readOnly` property. Use the typed SDK object rather than parsing the transport payload. See the SDK reference's [Workspace Databases](https://github.com/SolidActions/solidactions-ts-sdk/blob/main/docs/sdk-reference.md#workspace-databases) section for details.
+- For a standard (libSQL) database, the workflow receives a typed `DatabaseVar` at `ctx.vars.<NAME>` at runtime, typically wrapped with the SDK's `createDatabaseClient()`; a `duckdb_file` database instead gets a plain database id string for `openAnalytics` (see the DuckDB database file paragraph above; needs `@solidactions/sdk` 0.11.0 or newer). The private transport payload uses `read_only`; SDK 0.8.0+ normalizes it to the public `DatabaseVar.readOnly` property. Use the typed SDK object rather than parsing the transport payload. See the SDK reference's [Workspace Databases](https://github.com/SolidActions/solidactions-ts-sdk/blob/main/docs/sdk-reference.md#workspace-databases) section for details.
 
 ## Commands
 

@@ -66,7 +66,33 @@ describe('database --help — cross-reference to the run-time access path', () =
         // help that said "JSON" would send an agent to write a JSON.parse that
         // throws on an object.
         const help = databaseHelp();
-        expect(help).toContain('{name, url, token, readOnly}');
+        // Commander wraps `database --help` at 80 columns on a pipe, so the
+        // shape may span two lines (`token,` and `readOnly}` land apart);
+        // match across the wrap.
+        expect(help).toMatch(/\{name, url, token,\s+readOnly\}/);
         expect(help).toContain('createDatabaseClient()');
+    });
+
+    it('names the DuckDB database file kind and how a workflow opens it', () => {
+        const help = databaseHelp();
+        expect(help).toContain('duckdb_file');
+        expect(help).toContain('openAnalytics');
+        // Commander wraps `database --help` at 80 columns on a pipe, so a
+        // multi-word phrase may span two lines; match across the wrap.
+        expect(help).toMatch(/@solidactions\/sdk\s+0\.11\.0\s+or\s+newer/);
+        expect(help).toMatch(/database\s+pull/);
+    });
+
+    it('points delete and undelete at database list --include-deleted', () => {
+        const help = databaseHelp();
+        // Commander wraps the subcommand descriptions at 80 columns on a
+        // pipe (`database list` and `--include-deleted` land on separate
+        // lines), so match each entry across the wrap. Anchor on the command
+        // columns: '  delete [options]' (two leading spaces) does not match
+        // inside '  undelete [options]'.
+        const deleteEntry = help.slice(help.indexOf('  delete [options]'), help.indexOf('  undelete [options]'));
+        expect(deleteEntry).toMatch(/database list\s+--include-deleted/);
+        const undeleteEntry = help.slice(help.indexOf('  undelete [options]'), help.indexOf('  schema [options]'));
+        expect(undeleteEntry).toMatch(/database list\s+--include-deleted/);
     });
 });

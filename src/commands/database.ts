@@ -28,6 +28,7 @@ import {
     withDatabaseClient,
 } from '../utils/database-data-plane';
 import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
+import { analyticalVerbKindMismatch } from '../utils/database-kind-refusal';
 import { DatabaseSqlStatementAccumulator } from '../utils/database-sql-import';
 export { parseDatabaseImportSql } from '../utils/database-sql-import';
 import {
@@ -103,6 +104,7 @@ interface DatabaseMutationResponse {
 
 interface DatabaseListOptions {
     kind?: DatabaseKind;
+    includeDeleted?: boolean;
     json?: boolean;
 }
 
@@ -743,6 +745,53 @@ function renderAnalyticalSchema(schema: AnalyticalSchemaResponse): string {
     }).join('\n\n');
 }
 
+interface DuckdbFileSchemaTable { name: string; columns: Array<{ name: string; type: string }> }
+interface DuckdbFileSchemaResponse { tables: DuckdbFileSchemaTable[]; note?: string }
+
+function stableDuckdbFileSchemaColumn(column: { name: string; type: string }): { name: string; type: string } {
+    if (!column || typeof column.name !== 'string' || typeof column.type !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { name: column.name, type: column.type };
+}
+
+function stableDuckdbFileSchema(data: DuckdbFileSchemaResponse): DuckdbFileSchemaResponse {
+    if (!data || !Array.isArray(data.tables)) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    const tables = data.tables.map((table) => {
+        if (!table || typeof table.name !== 'string' || !Array.isArray(table.columns)) {
+            throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+        }
+        return {
+            name: table.name,
+            columns: table.columns.map(stableDuckdbFileSchemaColumn),
+        };
+    });
+
+    if (data.note === undefined) {
+        return { tables };
+    }
+    if (typeof data.note !== 'string') {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+    return { tables, note: data.note };
+}
+
+function renderDuckdbFileSchema(schema: DuckdbFileSchemaResponse): string {
+    if (schema.tables.length === 0) {
+        return 'No tables.';
+    }
+
+    const rendered = schema.tables.map((table) => {
+        const columns = table.columns.map((column) => `${column.name} (${column.type})`).join(', ');
+        return `${table.name}\n  ${columns}`;
+    }).join('\n\n');
+
+    return schema.note === undefined ? rendered : `${rendered}\n\n${schema.note}`;
+}
+
 function databaseRecordSizeBytes(database: DatabaseRecord): number {
     return database.kind === 'duckdb_file' ? database.bytes : database.size_bytes;
 }
@@ -1286,12 +1335,18 @@ export async function databaseListWithConfig(
         requestDependencies(io),
     ));
 
+    // The server returns soft-deleted rows (`deleted_at` set) for every kind;
+    // the default view hides them in the table and in `--json`, and
+    // `--include-deleted` shows them with their DELETED AT and PURGE AT.
+    const visible = options.includeDeleted === true
+        ? data.databases
+        : data.databases.filter((database) => database.deleted_at === null);
     const databases = options.kind
-        ? data.databases.filter((database) => database.kind === options.kind)
-        : data.databases;
+        ? visible.filter((database) => database.kind === options.kind)
+        : visible;
 
     if (options.json) {
-        writeJson(io.stdout, options.kind ? { ...data, databases } : data);
+        writeJson(io.stdout, { ...data, databases });
         return;
     }
 
@@ -1300,6 +1355,10 @@ export async function databaseListWithConfig(
 
 const CREATE_POLL_INTERVAL_MS = 2_000;
 const CREATE_POLL_TIMEOUT_MS = 5 * 60_000;
+
+// Frozen contract 4 (wave cli-duckdb, Task 4): printed after the table,
+// non-JSON only, for `--kind duckdb_file`.
+const DUCKDB_FILE_CREATE_HINT = 'Open it from a workflow with openAnalytics from @solidactions/sdk 0.11.0 or newer; add @duckdb/node-api as a normal dependency (npm install @duckdb/node-api, not --save-dev). Run `solidactions database --help` for the rest.';
 
 export async function databaseCreateWithConfig(
     name: string,
@@ -1419,6 +1478,9 @@ export async function databaseCreateWithConfig(
     }
 
     io.stdout(renderMutation('create', data.database));
+    if (data.database.kind === 'duckdb_file') {
+        io.stdout(DUCKDB_FILE_CREATE_HINT);
+    }
 }
 
 // The "call show first, branch on `.kind`" helper every later analytical verb
@@ -1605,19 +1667,6 @@ export async function databaseUndeleteWithConfig(
     io.stdout(renderMutation('undelete', data.database));
 }
 
-// `query` and `schema` on a DuckDB database file are the app's to answer (it
-// says `not_available` until queries ship). The answer is relayed as the
-// error; a success body would be a contract the CLI does not know yet, so it
-// is refused as an invalid response rather than guessed at.
-async function requestDuckdbFileNotAvailable(
-    config: Config,
-    body: Record<string, unknown>,
-    io: ResolvedCommandDependencies,
-): Promise<never> {
-    await requestDatabaseOperation<unknown>(config, body, requestDependencies(io));
-    throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
-}
-
 export async function databaseSchemaWithConfig(
     name: string,
     options: DatabaseSchemaOptions,
@@ -1628,7 +1677,19 @@ export async function databaseSchemaWithConfig(
     const row = await requestDatabaseRecord(name, config, dependencies);
 
     if (row.kind === 'duckdb_file') {
-        await requestDuckdbFileNotAvailable(config, { operation: 'schema', name }, io);
+        const schema = stableDuckdbFileSchema(await requestDatabaseOperation<DuckdbFileSchemaResponse>(
+            config,
+            { operation: 'schema', name },
+            requestDependencies(io),
+        ));
+
+        if (options.json) {
+            writeJson(io.stdout, schema);
+            return;
+        }
+
+        io.stdout(renderDuckdbFileSchema(schema));
+        return;
     }
 
     if (row.kind === 'duckdb') {
@@ -1701,6 +1762,29 @@ function stableAnalyticalQueryResult(data: AnalyticalQueryResult): AnalyticalQue
         rows: data.rows.map((row) => [...row]),
         truncated: data.truncated,
         elapsed_ms: data.elapsed_ms,
+    };
+}
+
+interface DuckdbFileQueryResult { columns: string[]; rows: unknown[][]; row_count: number; truncated: boolean }
+
+function stableDuckdbFileQueryResult(data: DuckdbFileQueryResult): DuckdbFileQueryResult {
+    if (
+        !data
+        || !Array.isArray(data.columns)
+        || !data.columns.every((column) => typeof column === 'string')
+        || !Array.isArray(data.rows)
+        || !data.rows.every((row) => Array.isArray(row))
+        || typeof data.row_count !== 'number'
+        || typeof data.truncated !== 'boolean'
+    ) {
+        throw new DatabaseOperationError('upstream_unavailable', 'The database response was invalid.');
+    }
+
+    return {
+        columns: [...data.columns],
+        rows: data.rows.map((row) => [...row]),
+        row_count: data.row_count,
+        truncated: data.truncated,
     };
 }
 
@@ -1777,7 +1861,37 @@ export async function databaseQueryWithConfig(
     const row = await requestDatabaseRecord(name, config, dependencies);
 
     if (row.kind === 'duckdb_file') {
-        await requestDuckdbFileNotAvailable(config, { operation: 'query', name, sql }, io);
+        // The server clamps the rows it returns (`max(1, min($rowLimit ?? $rowCap, $rowCap))`),
+        // so the CLI validates `>= 1` and integer only — never the 10,000 analytical bound.
+        if (options.limit !== undefined && (Number.isNaN(options.limit) || !Number.isInteger(options.limit) || options.limit < 1)) {
+            throw new DatabaseOperationError(
+                'invalid_limit',
+                `--limit must be a whole number of 1 or more (received "${options.limit}").`,
+            );
+        }
+
+        const body: Record<string, unknown> = { operation: 'query', name, sql };
+        if (options.limit !== undefined) {
+            body.row_limit = options.limit;
+        }
+        const result = stableDuckdbFileQueryResult(await requestDatabaseOperation<DuckdbFileQueryResult>(
+            config,
+            body,
+            requestDependencies(io),
+        ));
+
+        if (options.json) {
+            writeJson(io.stdout, result);
+            return;
+        }
+
+        io.stdout(result.columns.length > 0
+            ? renderTable(result.columns, result.rows.map((resultRow) => resultRow.map(formatAnalyticalQueryValue))).join('\n')
+            : 'No rows returned.');
+        if (result.truncated) {
+            io.stdout(`(truncated at ${result.row_count} rows)`);
+        }
+        return;
     }
 
     if (row.kind === 'duckdb') {
@@ -2950,11 +3064,9 @@ export async function databaseIngestWithConfig(
     const format = ingestFormatFromExtension(file);
 
     const row = await requestDatabaseRecord(name, config, dependencies);
-    if (row.kind !== 'duckdb') {
-        throw new DatabaseOperationError(
-            'kind_mismatch',
-            `"${name}" is not an analytical database — \`database ingest\` only loads data into analytical (duckdb) databases.`,
-        );
+    const ingestRefusal = analyticalVerbKindMismatch(name, row, 'ingest');
+    if (ingestRefusal) {
+        throw ingestRefusal;
     }
     if (!row.id) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was missing its id.');
@@ -3099,16 +3211,15 @@ export async function databaseIngest(
 
 // Analytical-only guard shared by drop-table/optimize/connect/wake (mirrors
 // `databaseIngestWithConfig`'s own check): unlike `refuseIfAnalytical`, which
-// refuses an analytical name on the SQLite-only verbs, these four verbs only
-// ever operate on the analytical (duckdb) kind, so a libsql name is the
-// refusal — before any operation-specific request goes out.
+// refuses an analytical name on the SQLite-only verbs, these verbs only ever
+// operate on the analytical (duckdb) kind, so any other kind is the refusal —
+// before any operation-specific request goes out. A DuckDB database file gets
+// the sentence naming the kind (Frozen contract 3).
 function refuseUnlessAnalytical(name: string, row: DatabaseRecord, verb: string): void {
-    if (row.kind === 'duckdb') return;
-
-    throw new DatabaseOperationError(
-        'kind_mismatch',
-        `"${name}" is not an analytical database — \`database ${verb}\` only works on analytical (duckdb) databases.`,
-    );
+    const refusal = analyticalVerbKindMismatch(name, row, verb);
+    if (refusal) {
+        throw refusal;
+    }
 }
 
 /**
