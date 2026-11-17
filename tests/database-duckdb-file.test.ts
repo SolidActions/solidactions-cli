@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
     databaseConnectWithConfig,
     databaseCreateWithConfig,
+    databaseDropTableWithConfig,
     databaseExecWithConfig,
     databaseIngestWithConfig,
     databaseListWithConfig,
@@ -209,6 +210,96 @@ describe('duckdb_file rows on create, list and show', () => {
             expect(all.text()).toContain('12.0 KiB / 1.0 GiB');
             expect(filtered.text()).toContain('metrics');
             expect(filtered.text()).not.toContain('orders');
+        });
+    });
+
+    it('list hides soft-deleted rows by default in the table and in --json, and --include-deleted shows all four', async () => {
+        const archivedFile = duckdbFileRow({ name: 'archived', deleted_at: '2026-11-14T10:00:00Z', purge_at: '2026-12-14T10:00:00Z' });
+        const retiredLibsql = { ...libsqlRow, name: 'retired', deleted_at: '2026-11-14T10:00:00Z', purge_at: '2026-12-14T10:00:00Z' };
+        const body = {
+            databases: [libsqlRow, duckdbFileRow(), archivedFile, retiredLibsql],
+            quota: { libsql: { used: 1, limit: 5, scope: 'workspace' }, duckdb: { used: 0, limit: 1, scope: 'org' } },
+        };
+        await scenario(() => ({ json: body }), async (remote) => {
+            const table = output();
+            const tableJson = output();
+            const withDeleted = output();
+            const withDeletedJson = output();
+
+            await databaseListWithConfig({}, config(remote.origin), { stdout: table.stdout });
+            await databaseListWithConfig({ json: true }, config(remote.origin), { stdout: tableJson.stdout });
+            await databaseListWithConfig({ includeDeleted: true } as never, config(remote.origin), { stdout: withDeleted.stdout });
+            await databaseListWithConfig({ includeDeleted: true, json: true } as never, config(remote.origin), { stdout: withDeletedJson.stdout });
+
+            expect(table.text()).toContain('orders');
+            expect(table.text()).toContain('metrics');
+            expect(table.text()).not.toContain('archived');
+            expect(table.text()).not.toContain('retired');
+            expect(table.text()).not.toContain('2026-11-14');
+            expect(JSON.parse(tableJson.text()).databases.map((row: { name: string }) => row.name).sort()).toEqual(['metrics', 'orders']);
+
+            expect(withDeleted.text()).toContain('orders');
+            expect(withDeleted.text()).toContain('metrics');
+            expect(withDeleted.text()).toContain('archived');
+            expect(withDeleted.text()).toContain('retired');
+            expect(withDeleted.text()).toContain('2026-11-14T10:00:00Z');
+            expect(withDeleted.text()).toContain('2026-12-14T10:00:00Z');
+            expect(JSON.parse(withDeletedJson.text()).databases).toHaveLength(4);
+
+            expect(table.text()).toContain('Quota: libsql 1 / 5 (workspace)');
+            expect(table.text()).not.toContain('http');
+        });
+    });
+
+    it('list --kind duckdb_file combines with the default hide and with --include-deleted', async () => {
+        const archivedFile = duckdbFileRow({ name: 'archived', deleted_at: '2026-11-14T10:00:00Z', purge_at: '2026-12-14T10:00:00Z' });
+        const retiredLibsql = { ...libsqlRow, name: 'retired', deleted_at: '2026-11-14T10:00:00Z', purge_at: '2026-12-14T10:00:00Z' };
+        const body = {
+            databases: [libsqlRow, duckdbFileRow(), archivedFile, retiredLibsql],
+            quota: { libsql: { used: 1, limit: 5, scope: 'workspace' }, duckdb: { used: 0, limit: 1, scope: 'org' } },
+        };
+        await scenario(() => ({ json: body }), async (remote) => {
+            const kindOnly = output();
+            const kindWithDeleted = output();
+
+            await databaseListWithConfig({ kind: 'duckdb_file', json: true } as never, config(remote.origin), { stdout: kindOnly.stdout });
+            await databaseListWithConfig({ kind: 'duckdb_file', includeDeleted: true, json: true } as never, config(remote.origin), { stdout: kindWithDeleted.stdout });
+
+            expect(JSON.parse(kindOnly.text()).databases.map((row: { name: string }) => row.name)).toEqual(['metrics']);
+            expect(JSON.parse(kindWithDeleted.text()).databases.map((row: { name: string }) => row.name).sort()).toEqual(['archived', 'metrics']);
+        });
+    });
+
+    it('create --kind duckdb_file prints the openAnalytics hint after the table, and --json stays exactly the app row', async () => {
+        await scenario(() => ({ json: { database: duckdbFileRow({ status: 'provisioning' }) } }), async (remote) => {
+            const out = output();
+
+            await databaseCreateWithConfig(NAME, { kind: 'duckdb_file' as never }, config(remote.origin), { stdout: out.stdout });
+
+            expect(remote.calls).toHaveLength(1);
+            expect(out.text()).toContain('Database "metrics" created.');
+            expect(out.text()).toContain('openAnalytics from @solidactions/sdk 0.11.0 or newer');
+            expect(out.text()).toContain('@duckdb/node-api');
+            expect(out.text().indexOf('Database "metrics" created.')).toBeLessThan(out.text().indexOf('openAnalytics'));
+        });
+        await scenario(() => ({ json: { database: duckdbFileRow() } }), async (remote) => {
+            const out = output();
+
+            await databaseCreateWithConfig(NAME, { kind: 'duckdb_file' as never, json: true }, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).not.toContain('openAnalytics');
+            expect(JSON.parse(out.text())).toEqual({ database: duckdbFileRow() });
+        });
+    });
+
+    it('create --kind libsql prints no DuckDB hint (control)', async () => {
+        await scenario(() => ({ json: { database: libsqlRow } }), async (remote) => {
+            const out = output();
+
+            await databaseCreateWithConfig('orders', { kind: 'libsql' }, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toContain('Database "orders" created.');
+            expect(out.text()).not.toContain('openAnalytics');
         });
     });
 
@@ -912,6 +1003,9 @@ describe('query, schema and exec on a duckdb_file database', () => {
     });
 });
 
+const duckdbFileMismatch = (verb: string) =>
+    `"${NAME}" is a DuckDB database file — \`database ${verb}\` does not apply to it. Read it with \`database query\` and \`database schema\`; download it with \`database pull\`; see its history with \`database versions\` and \`database rollback\`.`;
+
 describe('analytical-only verbs on a duckdb_file database', () => {
     it.each([
         ['wake', (remote: Remote) => databaseWakeWithConfig(NAME, {}, config(remote.origin), { stdout: () => undefined })],
@@ -919,9 +1013,23 @@ describe('analytical-only verbs on a duckdb_file database', () => {
         ['optimize', (remote: Remote) => databaseOptimizeWithConfig(NAME, {}, config(remote.origin), { stdout: () => undefined })],
         ['ingest', (remote: Remote) => databaseIngestWithConfig(NAME, 'data.csv', { table: 'events' }, config(remote.origin), { stdout: () => undefined })],
         ['export', (remote: Remote) => databaseExportWithConfig(NAME, {}, config(remote.origin), { stdout: () => undefined, stderr: () => undefined })],
-    ])('%s gets the existing kind_mismatch refusal and sends nothing but show', async (_verb, invoke) => {
+        ['drop-table', (remote: Remote) => databaseDropTableWithConfig(NAME, 'events', { yes: true }, config(remote.origin), { stdout: () => undefined })],
+    ])('%s on a duckdb_file database is refused with the kind sentence and sends nothing but show', async (verb, invoke) => {
         await scenario(database(() => ({ status: 500, json: { code: 'unexpected', message: 'unexpected' } })), async (remote) => {
-            await expect(invoke(remote)).rejects.toMatchObject({ code: 'kind_mismatch' });
+            await expect(invoke(remote)).rejects.toMatchObject({ code: 'kind_mismatch', message: duckdbFileMismatch(verb) });
+
+            expect(remote.operations()).toEqual(['show']);
+        });
+    });
+
+    it.each([
+        ['ingest', `"orders" is not an analytical database — \`database ingest\` only loads data into analytical (duckdb) databases.`,
+            (remote: Remote) => databaseIngestWithConfig('orders', 'data.csv', { table: 'events' }, config(remote.origin), { stdout: () => undefined })],
+        ['wake', `"orders" is not an analytical database — \`database wake\` only works on analytical (duckdb) databases.`,
+            (remote: Remote) => databaseWakeWithConfig('orders', {}, config(remote.origin), { stdout: () => undefined })],
+    ])('%s on a libsql database keeps the old kind_mismatch sentence (control)', async (_verb, message, invoke) => {
+        await scenario(database(() => ({ status: 500, json: { code: 'unexpected', message: 'unexpected' } }), { ...libsqlRow }), async (remote) => {
+            await expect(invoke(remote)).rejects.toMatchObject({ code: 'kind_mismatch', message });
 
             expect(remote.operations()).toEqual(['show']);
         });

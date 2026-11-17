@@ -298,8 +298,18 @@ list <project>\` shows it), and run locally with:
 credentials live from SolidActions — short-lived, held in memory, never written
 to a file — so Drizzle, @libsql/client and drizzle-kit work locally exactly as
 they do in a deployed workflow, which gets the same credentials automatically.
-In your workflow the variable arrives as {name, url, token, readOnly} — pass it
-straight to createDatabaseClient(), or to @libsql/client / Drizzle.
+For a standard (libSQL) database, the variable arrives as {name, url, token,
+readOnly} — pass it straight to createDatabaseClient(), or to @libsql/client /
+Drizzle.
+
+A DuckDB database file (--kind duckdb_file) is a different kind: bind it with
+database: "<database name>" in solidactions.yaml the same way (the run env
+carries its database id string), then open it in a workflow with openAnalytics
+from @solidactions/sdk 0.11.0 or newer (add @duckdb/node-api as a normal
+dependency: npm install @duckdb/node-api, not --save-dev). Read it with
+\`solidactions database query\` and \`solidactions database schema\`, download
+it with \`solidactions database pull\`, and list and restore versions with
+\`solidactions database versions\` and \`solidactions database rollback\`.
 
 'database import' is for BULK DATA LOADING only (pushing a .sql file into a
 database). It is not how code reads or writes a database at run time.
@@ -311,6 +321,7 @@ database
     .command('list')
     .description('List workspace databases')
     .option('--kind <kind>', 'Filter by kind: libsql, duckdb or duckdb_file')
+    .option('--include-deleted', 'Include deleted databases (they can be restored with database undelete until they are purged)')
     .option('--json', 'Output as JSON')
     .action(async (options) => {
         await databaseList(options);
@@ -339,7 +350,7 @@ database
 
 database
     .command('delete')
-    .description('Delete a workspace database')
+    .description('Delete a workspace database (soft-delete: database list --include-deleted still shows it until purged; restore with database undelete)')
     .argument('<name>', 'Database name')
     .option('-y, --yes', 'Skip confirmation')
     .option('--json', 'Output as JSON')
@@ -349,7 +360,7 @@ database
 
 database
     .command('undelete')
-    .description('Restore a deleted workspace database')
+    .description('Restore a deleted workspace database (find it with database list --include-deleted)')
     .argument('<name>', 'Database name')
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {

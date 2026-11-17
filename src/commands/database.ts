@@ -28,6 +28,7 @@ import {
     withDatabaseClient,
 } from '../utils/database-data-plane';
 import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
+import { analyticalVerbKindMismatch } from '../utils/database-kind-refusal';
 import { DatabaseSqlStatementAccumulator } from '../utils/database-sql-import';
 export { parseDatabaseImportSql } from '../utils/database-sql-import';
 import {
@@ -103,6 +104,7 @@ interface DatabaseMutationResponse {
 
 interface DatabaseListOptions {
     kind?: DatabaseKind;
+    includeDeleted?: boolean;
     json?: boolean;
 }
 
@@ -1333,12 +1335,18 @@ export async function databaseListWithConfig(
         requestDependencies(io),
     ));
 
+    // The server returns soft-deleted rows (`deleted_at` set) for every kind;
+    // the default view hides them in the table and in `--json`, and
+    // `--include-deleted` shows them with their DELETED AT and PURGE AT.
+    const visible = options.includeDeleted === true
+        ? data.databases
+        : data.databases.filter((database) => database.deleted_at === null);
     const databases = options.kind
-        ? data.databases.filter((database) => database.kind === options.kind)
-        : data.databases;
+        ? visible.filter((database) => database.kind === options.kind)
+        : visible;
 
     if (options.json) {
-        writeJson(io.stdout, options.kind ? { ...data, databases } : data);
+        writeJson(io.stdout, { ...data, databases });
         return;
     }
 
@@ -1347,6 +1355,10 @@ export async function databaseListWithConfig(
 
 const CREATE_POLL_INTERVAL_MS = 2_000;
 const CREATE_POLL_TIMEOUT_MS = 5 * 60_000;
+
+// Frozen contract 4 (wave cli-duckdb, Task 4): printed after the table,
+// non-JSON only, for `--kind duckdb_file`.
+const DUCKDB_FILE_CREATE_HINT = 'Open it from a workflow with openAnalytics from @solidactions/sdk 0.11.0 or newer; add @duckdb/node-api as a normal dependency (npm install @duckdb/node-api, not --save-dev). Run `solidactions database --help` for the rest.';
 
 export async function databaseCreateWithConfig(
     name: string,
@@ -1466,6 +1478,9 @@ export async function databaseCreateWithConfig(
     }
 
     io.stdout(renderMutation('create', data.database));
+    if (data.database.kind === 'duckdb_file') {
+        io.stdout(DUCKDB_FILE_CREATE_HINT);
+    }
 }
 
 // The "call show first, branch on `.kind`" helper every later analytical verb
@@ -3049,11 +3064,9 @@ export async function databaseIngestWithConfig(
     const format = ingestFormatFromExtension(file);
 
     const row = await requestDatabaseRecord(name, config, dependencies);
-    if (row.kind !== 'duckdb') {
-        throw new DatabaseOperationError(
-            'kind_mismatch',
-            `"${name}" is not an analytical database — \`database ingest\` only loads data into analytical (duckdb) databases.`,
-        );
+    const ingestRefusal = analyticalVerbKindMismatch(name, row, 'ingest');
+    if (ingestRefusal) {
+        throw ingestRefusal;
     }
     if (!row.id) {
         throw new DatabaseOperationError('upstream_unavailable', 'The database response was missing its id.');
@@ -3198,16 +3211,15 @@ export async function databaseIngest(
 
 // Analytical-only guard shared by drop-table/optimize/connect/wake (mirrors
 // `databaseIngestWithConfig`'s own check): unlike `refuseIfAnalytical`, which
-// refuses an analytical name on the SQLite-only verbs, these four verbs only
-// ever operate on the analytical (duckdb) kind, so a libsql name is the
-// refusal — before any operation-specific request goes out.
+// refuses an analytical name on the SQLite-only verbs, these verbs only ever
+// operate on the analytical (duckdb) kind, so any other kind is the refusal —
+// before any operation-specific request goes out. A DuckDB database file gets
+// the sentence naming the kind (Frozen contract 3).
 function refuseUnlessAnalytical(name: string, row: DatabaseRecord, verb: string): void {
-    if (row.kind === 'duckdb') return;
-
-    throw new DatabaseOperationError(
-        'kind_mismatch',
-        `"${name}" is not an analytical database — \`database ${verb}\` only works on analytical (duckdb) databases.`,
-    );
+    const refusal = analyticalVerbKindMismatch(name, row, verb);
+    if (refusal) {
+        throw refusal;
+    }
 }
 
 /**

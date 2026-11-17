@@ -100,6 +100,7 @@ active workspace. The complete command surface is:
 
 ```bash
 solidactions database list --json
+solidactions database list --include-deleted --json
 solidactions database create analytics --from backup.sql --json
 solidactions database delete analytics --yes --json
 solidactions database undelete analytics --json
@@ -136,7 +137,9 @@ solidactions database rollback metrics 2 --yes --json
 `dump` overwrites, `pull` overwrites, `drop-table`, and `import` prompt before
 changing data; use `--yes` only when that change is already approved. A
 database `delete` is a soft-delete, and its output shows the purge clock
-during which `undelete` can restore it (either kind).
+during which `undelete` can restore it (either kind). A deleted database
+stays visible to `database list --include-deleted` until it is purged;
+the default `database list` shows live databases only.
 
 `create --kind` defaults to the standard (SQLite) kind; pass `--kind duckdb`
 for an analytical database (waits for provisioning unless `--no-wait`).
@@ -150,7 +153,12 @@ refuse an analytical name with a one-line hint.
 
 `create --kind duckdb_file` makes a DuckDB database file that your workflows
 open, change and publish as numbered versions; it has no `--from`, `ingest` or
-`exec` (change it from a workflow). `pull <name> [path]` downloads the latest
+`exec` (change it from a workflow). Open it from a workflow with `openAnalytics`
+from `@solidactions/sdk` 0.11.0 or newer (add `@duckdb/node-api` as a normal
+dependency). The analytical verbs — `ingest`, `export`, `drop-table`,
+`optimize`, `connect` and `wake` — do not apply to it: they are refused with
+`kind_mismatch`, naming the kind and pointing at `query`, `schema`, `pull`,
+`versions` and `rollback`. `pull <name> [path]` downloads the latest
 published version as a plain DuckDB file (default
 `.solidactions/databases/<name>.duckdb`; `--version <n>` picks an older one;
 needs Node 22.15 or newer), verifies its size and checksum, and refuses a

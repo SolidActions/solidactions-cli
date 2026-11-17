@@ -158,7 +158,7 @@ function tableRow(output: string, match: string): string[] {
 }
 
 describe('database lifecycle control-plane contract', () => {
-    it('lists active and deleted rows with stable fields and quota in the shared table style', async () => {
+    it('lists live rows by default and every row with --include-deleted, with stable fields and quota in the shared table style', async () => {
         const databaseListWithConfig = await requireExport('databaseListWithConfig');
         const test = harness(LIST_RESPONSE);
 
@@ -173,11 +173,19 @@ describe('database lifecycle control-plane contract', () => {
         expect(output).toMatch(/DELETED/i);
         expect(output).toMatch(/PURGE/i);
         expect(output).toContain('Analytics');
-        expect(output).toContain('Retired');
+        expect(output).not.toContain('Retired');
         expect(output).toContain('1234');
         expect(output).toContain(ACTIVE.status);
-        expect(output).toContain(DELETED.deleted_at);
-        expect(output).toContain(DELETED.purge_at);
+        expect(output).not.toContain(DELETED.deleted_at);
+        expect(test.stderr).toEqual([]);
+
+        const stdoutBeforeIncludedCall = test.stdout.length;
+        await databaseListWithConfig({ includeDeleted: true } as any, CONFIG, test.dependencies);
+        const withDeleted = test.stdout.slice(stdoutBeforeIncludedCall).join('\n');
+        expect(withDeleted).toContain('Analytics');
+        expect(withDeleted).toContain('Retired');
+        expect(withDeleted).toContain(DELETED.deleted_at);
+        expect(withDeleted).toContain(DELETED.purge_at);
         expect(test.stderr).toEqual([]);
     });
 
@@ -229,15 +237,24 @@ describe('database lifecycle control-plane contract', () => {
         expect(test.calls).toEqual([]);
     });
 
-    it('writes the complete list response as JSON with no decoration', async () => {
+    it('writes the live rows as JSON by default and the complete list response with --include-deleted', async () => {
         const databaseListWithConfig = await requireExport('databaseListWithConfig');
         const test = harness(LIST_RESPONSE);
 
         await databaseListWithConfig({ json: true }, CONFIG, test.dependencies);
 
-        expect(JSON.parse(test.stdout.join('\n'))).toEqual(LIST_RESPONSE);
+        expect(JSON.parse(test.stdout.join('\n'))).toEqual({
+            databases: [ACTIVE, ANALYTICAL],
+            quota: LIST_RESPONSE.quota,
+        });
         expect(test.stderr).toEqual([]);
         expect(test.stdout.join('\n')).not.toMatch(/Databases:|Quota:|\u001b\[/);
+
+        const beforeIncluded = test.stdout.length;
+        await databaseListWithConfig({ includeDeleted: true, json: true } as any, CONFIG, test.dependencies);
+
+        expect(JSON.parse(test.stdout.slice(beforeIncluded).join('\n'))).toEqual(LIST_RESPONSE);
+        expect(test.stderr).toEqual([]);
     });
 
     it('filters JSON output to the matching kind while keeping the full quota', async () => {
