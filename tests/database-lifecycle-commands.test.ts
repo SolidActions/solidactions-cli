@@ -858,8 +858,8 @@ describe('database lifecycle real CLI registration', () => {
 
         expect(result.code).toBe(0);
         expect(result.stderr).toContain('AGENT NOTE: CLI 1.33.0 outdated (9.8.7 available)');
-        expect(result.stdout).toBe(`${JSON.stringify(LIST_RESPONSE, null, 2)}\n`);
-        expect(JSON.parse(result.stdout)).toEqual(LIST_RESPONSE);
+        expect(result.stdout).toBe(`${JSON.stringify({ databases: [ACTIVE, ANALYTICAL], quota: LIST_RESPONSE.quota }, null, 2)}\n`);
+        expect(JSON.parse(result.stdout)).toEqual({ databases: [ACTIVE, ANALYTICAL], quota: LIST_RESPONSE.quota });
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({
             method: 'POST',

@@ -31,7 +31,7 @@ const COMMANDS = [
     { verb: 'wake', args: [['name', true]], options: ['--json'] },
 ] as const;
 
-const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait', '--output', '--replace', '--version'];
+const CRITICAL_OPTIONS = ['--json', '--from', '--yes', '--writable', '--resume', '--kind', '--include-deleted', '--no-wait', '--limit', '--table', '--mode', '--batch-id', '--wait', '--output', '--replace', '--version'];
 
 function loadProgram(): any {
     expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first
