@@ -57,9 +57,9 @@ describe('sdkRefFromRange', () => {
 // ---------------------------------------------------------------------------
 
 describe('sdkDocsRef', () => {
-    it('pins bundled SDK documentation to the first docs-capable release (ctx.docs, #230)', () => {
-        expect(declaredSdkRange).toBe('^0.10.0');
-        expect(sdkDocsRef()).toBe('v0.10.0');
+    it('pins bundled SDK documentation to the first docs-capable release (ctx.docs, #230) and the DuckDB file API (cli#246)', () => {
+        expect(declaredSdkRange).toBe('^0.11.1');
+        expect(sdkDocsRef()).toBe('v0.11.1');
     });
 
     it('derives the ref from the @solidactions/sdk range declared in package.json', () => {
