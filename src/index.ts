@@ -370,7 +370,7 @@ database
     .description('Run a read-only SQL query')
     .argument('<name>', 'Database name')
     .argument('<sql>', 'SQL query')
-    .option('--limit <n>', 'Row cap for analytical queries (max 10000)', (value) => parseInt(value, 10))
+    .option('--limit <n>', 'Maximum rows to return (analytical databases: up to 10000; DuckDB database files: the server caps it, 1000 by default)', (value) => parseInt(value, 10))
     .option('--json', 'Output as JSON')
     .action(async (name, sql, options) => {
         await databaseQuery(name, sql, options);

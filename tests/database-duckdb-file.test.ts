@@ -667,15 +667,236 @@ describe.skipIf(!hasZstd)('database pull of a duckdb_file database (real zstd) [
 });
 
 describe('query, schema and exec on a duckdb_file database', () => {
-    it.each([
-        ['query', (name: string, remote: Remote) => databaseQueryWithConfig(name, 'select 1', {}, config(remote.origin), { stdout: () => undefined })],
-        ['schema', (name: string, remote: Remote) => databaseSchemaWithConfig(name, {}, config(remote.origin), { stdout: () => undefined })],
-    ])('%s relays the app not_available answer and never mints a data-plane credential', async (operation, invoke) => {
-        const message = 'Queries on DuckDB databases arrive with the next release.';
-        await scenario(database((op) => (op === operation ? { status: 422, json: { code: 'not_available', message } } : { status: 500, json: { code: 'unexpected', message: op } })), async (remote) => {
-            await expect(invoke(NAME, remote)).rejects.toMatchObject({ code: 'not_available', message, status: 422 });
+    const SQL = 'select day, total_cents from daily_totals order by day';
+    const QUERY_BODY = {
+        columns: ['day', 'total_cents'],
+        rows: [['2026-11-01', 1250], ['2026-11-02', 980]],
+        row_count: 2,
+        truncated: false,
+    };
+    const SCHEMA_BODY = {
+        tables: [
+            { name: 'daily_totals', columns: [{ name: 'day', type: 'VARCHAR' }, { name: 'total_cents', type: 'INTEGER' }] },
+            { name: 'events', columns: [{ name: 'id', type: 'BIGINT' }] },
+        ],
+    };
+    const unexpected = (operation: string) => ({ status: 500, json: { code: 'unexpected', message: operation } });
 
-            expect(remote.operations()).toEqual(['show', operation]);
+    it('query renders the app rows as a human table and sends no row_limit without --limit', async () => {
+        await scenario(database((op) => (op === 'query' ? { json: QUERY_BODY } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(remote.operations()).toEqual(['show', 'query']);
+            expect(remote.calls[1].body).toEqual({ operation: 'query', name: NAME, sql: SQL });
+            expect(out.text()).toContain('day');
+            expect(out.text()).toContain('total_cents');
+            expect(out.text()).toContain('2026-11-01');
+            expect(out.text()).toContain('1250');
+            expect(out.text()).toContain('2026-11-02');
+            expect(out.text()).toContain('980');
+        });
+    });
+
+    it('query with --limit 5 sends row_limit 5', async () => {
+        await scenario(database((op) => (op === 'query' ? { json: QUERY_BODY } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, { limit: 5 }, config(remote.origin), { stdout: out.stdout });
+
+            expect(remote.operations()).toEqual(['show', 'query']);
+            expect(remote.calls[1].body).toEqual({ operation: 'query', name: NAME, sql: SQL, row_limit: 5 });
+        });
+    });
+
+    it.each([0, -1, Number.NaN])('query with --limit %s throws invalid_limit and sends nothing but show', async (limit) => {
+        await scenario(database((op) => unexpected(op)), async (remote: Remote) => {
+            await expect(databaseQueryWithConfig(NAME, SQL, { limit }, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code: 'invalid_limit' });
+
+            expect(remote.operations()).toEqual(['show']);
+        });
+    });
+
+    it('query prints NULL for a null cell and JSON text for a nested cell', async () => {
+        const body = { columns: ['label', 'meta'], rows: [[null, { source: 'web' }]], row_count: 1, truncated: false };
+        await scenario(database((op) => (op === 'query' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toContain('NULL');
+            expect(out.text()).toContain('{"source":"web"}');
+            expect(out.text()).not.toContain('[object Object]');
+        });
+    });
+
+    it('query with truncated true prints (truncated at 2 rows) as the last line', async () => {
+        await scenario(database((op) => (op === 'query' ? { json: { ...QUERY_BODY, truncated: true } } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: out.stdout });
+
+            const lines = out.text().split('\n');
+            expect(lines[lines.length - 1]).toBe('(truncated at 2 rows)');
+        });
+    });
+
+    it('query --json prints exactly the validated columns, rows, row_count and truncated', async () => {
+        await scenario(database((op) => (op === 'query' ? { json: QUERY_BODY } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, { json: true }, config(remote.origin), { stdout: out.stdout });
+
+            expect(JSON.parse(out.text())).toEqual(QUERY_BODY);
+        });
+    });
+
+    it('query with no columns prints No rows returned.', async () => {
+        const body = { columns: [], rows: [], row_count: 0, truncated: false };
+        await scenario(database((op) => (op === 'query' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toBe('No rows returned.');
+        });
+    });
+
+    it.each(['no_published_version', 'feature_disabled'])('query relays the app %s answer with its code and message (control)', async (code) => {
+        const message = `the app says ${code}`;
+        await scenario(database((op) => (op === 'query' ? { status: 422, json: { code, message } } : unexpected(op))), async (remote: Remote) => {
+            await expect(databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code, message, status: 422 });
+
+            expect(remote.operations()).toEqual(['show', 'query']);
+        });
+    });
+
+    it('query fails closed on a success body without rows (control)', async () => {
+        const body = { columns: QUERY_BODY.columns, row_count: QUERY_BODY.row_count, truncated: QUERY_BODY.truncated };
+        await scenario(database((op) => (op === 'query' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            await expect(databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code: 'upstream_unavailable', message: 'The database response was invalid.' });
+
+            expect(remote.operations()).toEqual(['show', 'query']);
+        });
+    });
+
+    it('query renders a well-formed query body (twin of the missing-rows control)', async () => {
+        const body = { columns: ['n'], rows: [[7]], row_count: 1, truncated: false };
+        await scenario(database((op) => (op === 'query' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, { json: true }, config(remote.origin), { stdout: out.stdout });
+
+            expect(JSON.parse(out.text())).toEqual(body);
+        });
+    });
+
+    it('query fails closed when row_count is a string (control)', async () => {
+        const body = { ...QUERY_BODY, row_count: 'two' };
+        await scenario(database((op) => (op === 'query' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            await expect(databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code: 'upstream_unavailable', message: 'The database response was invalid.' });
+
+            expect(remote.operations()).toEqual(['show', 'query']);
+        });
+    });
+
+    it('query renders a body whose row_count is a number (twin of the row_count control)', async () => {
+        await scenario(database((op) => (op === 'query' ? { json: QUERY_BODY } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toContain('2026-11-01');
+            expect(out.text()).toContain('980');
+        });
+    });
+
+    it('show itself answering feature_disabled relays the app code before any query is sent (control)', async () => {
+        const message = 'DuckDB databases are not switched on for this server yet.';
+        await scenario((_request, body) => (body.operation === 'show'
+            ? { status: 403, json: { code: 'feature_disabled', message } }
+            : unexpected(String(body.operation))), async (remote: Remote) => {
+            await expect(databaseQueryWithConfig(NAME, SQL, {}, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code: 'feature_disabled', message, status: 403 });
+
+            expect(remote.operations()).toEqual(['show']);
+        });
+    });
+
+    it('schema renders each table as a name line plus parenthesized columns, tables separated by one blank line', async () => {
+        await scenario(database((op) => (op === 'schema' ? { json: SCHEMA_BODY } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(remote.operations()).toEqual(['show', 'schema']);
+            expect(out.text()).toBe('daily_totals\n  day (VARCHAR), total_cents (INTEGER)\n\nevents\n  id (BIGINT)');
+        });
+    });
+
+    it('schema prints No tables. for an empty catalog', async () => {
+        await scenario(database((op) => (op === 'schema' ? { json: { tables: [] } } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toBe('No tables.');
+        });
+    });
+
+    it('schema prints the note on its own last line after a blank line', async () => {
+        const note = 'Catalog truncated to the first 100 tables.';
+        await scenario(database((op) => (op === 'schema' ? { json: { tables: [SCHEMA_BODY.tables[0]], note } } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toBe(`daily_totals\n  day (VARCHAR), total_cents (INTEGER)\n\n${note}`);
+        });
+    });
+
+    it('schema --json prints the validated tables, with and without the note', async () => {
+        const table = SCHEMA_BODY.tables[0];
+        const note = 'Catalog truncated to the first 100 tables.';
+        await scenario(database((op) => (op === 'schema' ? { json: { tables: [table], note } } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, { json: true }, config(remote.origin), { stdout: out.stdout });
+
+            expect(JSON.parse(out.text())).toEqual({ tables: [table], note });
+        });
+        await scenario(database((op) => (op === 'schema' ? { json: { tables: [table] } } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, { json: true }, config(remote.origin), { stdout: out.stdout });
+
+            expect(JSON.parse(out.text())).toEqual({ tables: [table] });
+        });
+    });
+
+    it('schema fails closed when a column lacks its type (control)', async () => {
+        const body = { tables: [{ name: 'daily_totals', columns: [{ name: 'day' }] }] };
+        await scenario(database((op) => (op === 'schema' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            await expect(databaseSchemaWithConfig(NAME, {}, config(remote.origin), { stdout: () => undefined }))
+                .rejects.toMatchObject({ code: 'upstream_unavailable', message: 'The database response was invalid.' });
+
+            expect(remote.operations()).toEqual(['show', 'schema']);
+        });
+    });
+
+    it('schema renders a column that has a type (twin of the missing-type control)', async () => {
+        const body = { tables: [{ name: 'daily_totals', columns: [{ name: 'day', type: 'VARCHAR' }] }] };
+        await scenario(database((op) => (op === 'schema' ? { json: body } : unexpected(op))), async (remote: Remote) => {
+            const out = output();
+
+            await databaseSchemaWithConfig(NAME, {}, config(remote.origin), { stdout: out.stdout });
+
+            expect(out.text()).toBe('daily_totals\n  day (VARCHAR)');
         });
     });
 
@@ -797,6 +1018,21 @@ describe('the built binary', () => {
             expect(remote.calls.map((call) => call.body)).toEqual([{ operation: 'versions', name: NAME, limit: 5 }]);
         } finally {
             await new Promise<void>((resolve) => remote.server.close(() => resolve()));
+            env.cleanup();
+        }
+    });
+
+    it('database query --help names the analytical cap and the DuckDB file server cap', async () => {
+        expect(fs.existsSync(CLI_BINARY)).toBe(true); // CLI not built — run `npm run build` first
+        const env = makeTmpEnv();
+        try {
+            const result = await runCli(['database', 'query', '--help'], env.home, fs.realpathSync(env.cwd));
+
+            expect(result.code).toBe(0);
+            const help = result.stdout.replace(/\s+/g, ' ');
+            expect(help).toMatch(/up to 10000/);
+            expect(help).toMatch(/1000 by default/);
+        } finally {
             env.cleanup();
         }
     });

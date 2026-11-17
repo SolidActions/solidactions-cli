@@ -158,8 +158,7 @@ download that does not match. It also refuses to pull over a target that has a
 `<path>.wal` write-ahead file beside it, even with `--yes`: close the program
 that has the database open (or remove that file) and pull again. `versions <name>` lists the published versions,
 newest first, and `rollback <name> <version>` makes an earlier one current
-after a `--yes` confirmation. `query` and `schema` answer that queries on
-DuckDB databases arrive with the next release.
+after a `--yes` confirmation. `query` and `schema` read the latest published version (read-only SQL on that version; `--limit` asks for fewer rows, and the server caps the rows it returns, 1000 by default) and answer `no_published_version` until a workflow has published one.
 
 `ingest --mode replace` overwrites a table's contents with no `--yes` prompt
 (unlike `drop-table`, which is a separate, rarer, schema-shaped operation) —
