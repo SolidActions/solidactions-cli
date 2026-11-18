@@ -66,9 +66,13 @@ describe('native database client CI contract', () => {
         expect(
             Object.values(remoteSyncJob.services ?? {}).map((service) => service.image),
         ).toContain(REMOTE_SYNC_IMAGE);
+        const remoteSyncServices = Object.values(remoteSyncJob.services ?? {});
+        expect(remoteSyncServices).toHaveLength(2);
+        expect(remoteSyncServices.map((service) => service.image)).toEqual([REMOTE_SYNC_IMAGE, REMOTE_SYNC_IMAGE]);
 
         const commands = (remoteSyncJob.steps ?? []).map((step) => step.run ?? '').join('\n');
         expect(commands).toContain('npm ci');
         expect(commands).toContain('node scripts/probe-database-client-sync.mjs');
+        expect(commands).toContain('node scripts/probe-database-replica-cache.mjs');
     });
 });
