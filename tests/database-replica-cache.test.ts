@@ -10,6 +10,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+    REPLICA_CACHE_HEARTBEAT_MS,
     REPLICA_CACHE_REPLACEMENT_WINDOW_MS,
     REPLICA_CACHE_SKIP_MS,
     REPLICA_CACHE_STALE_LOCK_MS,
@@ -516,6 +517,138 @@ describe('acquireReplicaCache', () => {
         await cache.release();
         expect(fs.existsSync(snapshot)).toBe(false);
         expect(fs.existsSync(path.join(keyDir(root), 'lock'))).toBe(false);
+    });
+});
+
+describe('replica cache lock heartbeat (I5)', () => {
+    const HOUR_MS = 60 * 60 * 1000;
+    const HEARTBEAT_MS = 20;
+    /** The real clock: the heartbeat stamps the lock with `now()`, and these rows read the mtime against `Date.now`. */
+    const realNow = (): number => Date.now();
+
+    function setMtimeAgo(file: string, ageMs: number): void {
+        const when = (Date.now() - ageMs) / 1000;
+        fs.utimesSync(file, when, when);
+    }
+
+    function lockAgeMs(file: string): number {
+        return Date.now() - fs.statSync(file).mtimeMs;
+    }
+
+    async function waitUntil(condition: () => boolean, what: string): Promise<void> {
+        const deadline = Date.now() + 5000;
+        while (!condition()) {
+            if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+    }
+
+    /** A negative row's window: about seven heartbeat ticks, long enough that a live interval would have fired. */
+    const quietWindow = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 7 * HEARTBEAT_MS));
+
+    it('the default heartbeat is five minutes, well inside the one-hour stale window', () => {
+        expect(REPLICA_CACHE_HEARTBEAT_MS).toBe(5 * 60 * 1000);
+        expect(REPLICA_CACHE_HEARTBEAT_MS).toBeLessThan(REPLICA_CACHE_STALE_LOCK_MS);
+    });
+
+    it('a held lock whose mtime is two hours old is refreshed within a few heartbeats', async () => {
+        const root = makeRoot();
+        const cache = expectReady(await acquire(root, realNow, { heartbeatMs: HEARTBEAT_MS }));
+        const lockPath = path.join(keyDir(root), 'lock');
+        try {
+            setMtimeAgo(lockPath, 2 * HOUR_MS);
+
+            await waitUntil(() => lockAgeMs(lockPath) < 5000, 'the heartbeat to refresh the lock mtime');
+
+            expect(readJson(lockPath)).toMatchObject({ pid: OUR_PID, host: OUR_HOST });
+        } finally {
+            await cache.release();
+        }
+    });
+
+    it('with the default heartbeat the same two-hour-old lock is not refreshed in a short window (the control for the rows around it)', async () => {
+        const root = makeRoot();
+        const cache = expectReady(await acquire(root, realNow));
+        const lockPath = path.join(keyDir(root), 'lock');
+        try {
+            setMtimeAgo(lockPath, 2 * HOUR_MS);
+
+            await quietWindow();
+
+            expect(lockAgeMs(lockPath)).toBeGreaterThan(HOUR_MS);
+        } finally {
+            await cache.release();
+        }
+    });
+
+    it('another host answers busy for a lock whose heartbeat kept it fresh, and reclaims the same lock without one', async () => {
+        const heartbeatRoot = makeRoot();
+        const held = expectReady(await acquire(heartbeatRoot, realNow, { heartbeatMs: HEARTBEAT_MS }));
+        const heartbeatLock = path.join(keyDir(heartbeatRoot), 'lock');
+        const plainRoot = makeRoot();
+        const plain = expectReady(await acquire(plainRoot, realNow));
+        const plainLock = path.join(keyDir(plainRoot), 'lock');
+        let reclaimed: ReplicaCache | undefined;
+        try {
+            setMtimeAgo(heartbeatLock, 2 * HOUR_MS);
+            await waitUntil(() => lockAgeMs(heartbeatLock) < 5000, 'the heartbeat to refresh the lock mtime');
+            setMtimeAgo(plainLock, 2 * HOUR_MS);
+
+            const withHeartbeat = await acquire(heartbeatRoot, realNow, { hostname: 'host-b', pid: 999, processAlive: () => false });
+            const withoutHeartbeat = await acquire(plainRoot, realNow, { hostname: 'host-b', pid: 999, processAlive: () => false });
+
+            expect(withHeartbeat).toEqual({ kind: 'skipped', reason: 'busy' });
+            expect(readJson(heartbeatLock)).toMatchObject({ pid: OUR_PID, host: OUR_HOST });
+            // Positive control: the module's own reclaim rule takes a two-hour-old lock nothing refreshed.
+            reclaimed = expectReady(withoutHeartbeat);
+            expect(readJson(plainLock)).toMatchObject({ pid: 999, host: 'host-b' });
+        } finally {
+            await held.release();
+            await plain.release();
+            await reclaimed?.release();
+        }
+    });
+
+    it('after release no interval is left: a lock record that carries the old nonce is not refreshed', async () => {
+        const root = makeRoot();
+        const cache = expectReady(await acquire(root, realNow, { heartbeatMs: HEARTBEAT_MS }));
+        const lockPath = path.join(keyDir(root), 'lock');
+        const record = fs.readFileSync(lockPath, 'utf8');
+        setMtimeAgo(lockPath, 2 * HOUR_MS);
+        await waitUntil(() => lockAgeMs(lockPath) < 5000, 'the heartbeat to refresh the lock mtime');
+
+        await cache.release();
+        expect(fs.existsSync(lockPath)).toBe(false);
+        // The same record, so only a surviving interval could touch it.
+        fs.writeFileSync(lockPath, record);
+        setMtimeAgo(lockPath, 2 * HOUR_MS);
+        await quietWindow();
+
+        expect(lockAgeMs(lockPath)).toBeGreaterThan(HOUR_MS);
+        expect(fs.readFileSync(lockPath, 'utf8')).toBe(record);
+    });
+
+    it('a lock that is not ours is not refreshed, and is left as it is', async () => {
+        const root = makeRoot();
+        const cache = expectReady(await acquire(root, realNow, { heartbeatMs: HEARTBEAT_MS }));
+        const lockPath = path.join(keyDir(root), 'lock');
+        try {
+            // Positive control: while the lock is ours the heartbeat does refresh it.
+            setMtimeAgo(lockPath, 2 * HOUR_MS);
+            await waitUntil(() => lockAgeMs(lockPath) < 5000, 'the heartbeat to refresh the lock mtime');
+
+            const foreign = JSON.stringify({ pid: 777, host: 'host-c', nonce: 'foreign', at: 2 });
+            fs.writeFileSync(lockPath, foreign);
+            // A tick that read our record before the swap finishes inside this window; later ticks see the foreign one.
+            await quietWindow();
+            setMtimeAgo(lockPath, 2 * HOUR_MS);
+            await quietWindow();
+
+            expect(lockAgeMs(lockPath)).toBeGreaterThan(HOUR_MS);
+            expect(fs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+        } finally {
+            await cache.release();
+        }
     });
 });
 

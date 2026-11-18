@@ -16,6 +16,8 @@ export const REPLICA_CACHE_REPLACEMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export const REPLICA_CACHE_SKIP_MS = 7 * 24 * 60 * 60 * 1000;
 export const REPLICA_CACHE_STALE_LOCK_MS = 60 * 60 * 1000;
 export const REPLICA_CACHE_STALE_RECLAIM_MS = 60 * 1000;
+/** How often a held lock's mtime is refreshed, so another host never judges a live lock stale (I5). */
+export const REPLICA_CACHE_HEARTBEAT_MS = 5 * 60 * 1000;
 
 export interface ReplicaCacheIdentity {
     host: string;
@@ -113,6 +115,8 @@ export async function acquireReplicaCache(options: {
     pid?: number;
     hostname?: string;
     processAlive?: (pid: number) => boolean;
+    /** Lock refresh interval; defaults to `REPLICA_CACHE_HEARTBEAT_MS`. */
+    heartbeatMs?: number;
 }): Promise<ReplicaCacheOutcome> {
     const filesystem = options.filesystem ?? fs.promises;
     const { now, identity } = options;
@@ -130,6 +134,7 @@ export async function acquireReplicaCache(options: {
         const locked = await takeLock(filesystem, dir, ours, now, options.processAlive ?? defaultProcessAlive);
         if (!locked) return { kind: 'skipped', reason: 'busy' };
         cache = new CacheHandle(filesystem, dir, lockPath, ours.nonce, now);
+        cache.startHeartbeat(options.heartbeatMs ?? REPLICA_CACHE_HEARTBEAT_MS);
 
         await filesystem.rm(cache.snapshotPath, { force: true });
         const stored = await readMeta(filesystem, path.join(dir, 'meta.json'));
@@ -182,6 +187,7 @@ class CacheHandle implements ReplicaCache {
     warm = false;
     meta: ReplicaCacheMeta = defaultMeta();
     private released = false;
+    private heartbeat: NodeJS.Timeout | null = null;
     private readonly dataDir: string;
 
     constructor(
@@ -194,6 +200,27 @@ class CacheHandle implements ReplicaCache {
         this.dataDir = path.join(dir, 'data');
         this.replicaPath = path.join(this.dataDir, 'replica.db');
         this.snapshotPath = path.join(dir, 'snapshot.tmp');
+    }
+
+    /** Refreshes the lock's mtime every `intervalMs` while it is still ours; the timer never keeps the process alive. */
+    startHeartbeat(intervalMs: number): void {
+        this.heartbeat = setInterval(() => {
+            void this.refreshLock();
+        }, intervalMs);
+        this.heartbeat.unref();
+    }
+
+    private async refreshLock(): Promise<void> {
+        try {
+            const stat = await lstatIfPresent(this.filesystem, this.lockPath);
+            if (stat === null || !stat.isFile()) return;
+            const record = parseLockRecord(await this.filesystem.readFile(this.lockPath, 'utf8'));
+            if (record === null || record.nonce !== this.nonce || this.released) return;
+            const at = new Date(this.now());
+            await this.filesystem.utimes(this.lockPath, at, at);
+        } catch {
+            // Ignored: a missed refresh only makes the lock look older; the next tick tries again.
+        }
     }
 
     async wipe(): Promise<void> {
@@ -228,6 +255,8 @@ class CacheHandle implements ReplicaCache {
     async release(): Promise<void> {
         if (this.released) return;
         this.released = true;
+        if (this.heartbeat !== null) clearInterval(this.heartbeat);
+        this.heartbeat = null;
         await this.discardSnapshot();
         try {
             const stat = await lstatIfPresent(this.filesystem, this.lockPath);

@@ -72,13 +72,23 @@ async function writeReplica(file: string, rows: ItemRow[]): Promise<void> {
     }
 }
 
-/** Reads `items` back through a real local client, from a private copy so nothing appears beside `file`. */
+/** Copies `file` and the `-wal` / `-shm` companions beside it: a real writer leaves its newest rows in `-wal`. */
+function copyWithCompanions(file: string, copy: string): void {
+    fs.copyFileSync(file, copy);
+    fs.chmodSync(copy, 0o600);
+    for (const suffix of ['-wal', '-shm']) {
+        if (!fs.existsSync(`${file}${suffix}`)) continue;
+        fs.copyFileSync(`${file}${suffix}`, `${copy}${suffix}`);
+        fs.chmodSync(`${copy}${suffix}`, 0o600);
+    }
+}
+
+/** Reads `items` back through a real local client, from a private copy of `file` and its companions so nothing appears beside `file`. */
 async function readItems(file: string): Promise<ItemRow[]> {
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-database-pull-cache-read-'));
     roots.push(scratch);
     const copy = path.join(scratch, 'copy.db');
-    fs.copyFileSync(file, copy);
-    fs.chmodSync(copy, 0o600);
+    copyWithCompanions(file, copy);
     const client = createRealClient({ url: pathToFileURL(copy).href, intMode: 'string' });
     try {
         const result = await client.execute('SELECT id, label FROM items ORDER BY id');
@@ -132,6 +142,8 @@ function cacheHarness(root: string) {
     let recordLocalStatements = false;
     // Call site 1: what the sync stand-in does on its Nth `sync()`; the default writes the server rows.
     let onSync: (index: number, file: string) => Promise<void> = async (_index, file) => writeReplica(file, server.rows);
+    // Call site 1: what the stand-in's `createClient` does on its Nth call, before it hands the client back; it may throw.
+    let onCreate: (index: number, file: string) => void = () => undefined;
 
     const dependencies: DatabaseCommandDependencies = {
         cwd: root,
@@ -161,6 +173,7 @@ function cacheHarness(root: string) {
                 syncConfigs.push({ ...config });
                 const index = syncConfigs.length;
                 events.push(`create:${index}`);
+                onCreate(index, fileURLToPath(String(config.url)));
                 return {
                     execute: async () => {
                         throw new Error('The sync stand-in runs no SQL.');
@@ -232,6 +245,9 @@ function cacheHarness(root: string) {
         },
         setSync: (behaviour: (index: number, file: string) => Promise<void>) => {
             onSync = behaviour;
+        },
+        setCreate: (behaviour: (index: number, file: string) => void) => {
+            onCreate = behaviour;
         },
         pull: (target: string, options: Record<string, unknown> = { yes: true }) =>
             databasePullWithConfig(NAME, target, options, CONFIG, dependencies),
@@ -384,6 +400,79 @@ describe('database pull through the hidden replica cache', () => {
         expect(harness.syncConfigs.at(-1)?.url).toBe(harness.replicaUrl);
         expect(dataAtSync).toEqual([[]]);
         expect(await readItems(target)).toEqual([[1, 'alpha'], [7, 'after the fallback']]);
+    });
+
+    describe('a cold cache that fails for a local reason falls back to the uncached path (I3)', () => {
+        function cannotOpenDatabaseFile(): Error {
+            return Object.assign(new Error('SQLITE_CANTOPEN: unable to open database file'), { code: 'SQLITE_CANTOPEN' });
+        }
+
+        it('a cold sync that fails with SQLITE_CANTOPEN publishes through the uncached path', async () => {
+            const harness = cacheHarness(tempRoot());
+            const target = path.join(harness.outDir, 'analytics.db');
+            harness.server.rows = [[1, 'alpha'], [4, 'from the uncached path']];
+            harness.setSync(async (_index, file) => {
+                if (file === harness.replicaPath) throw cannotOpenDatabaseFile();
+                await writeReplica(file, harness.server.rows);
+            });
+            const before = fs.readdirSync(harness.outDir);
+
+            await harness.pull(target);
+
+            expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.replicaUrl, pathToFileURL(harness.tempFor(target)).href]);
+            expect(await readItems(target)).toEqual([[1, 'alpha'], [4, 'from the uncached path']]);
+            expectOnlyTargetAdded(harness, before, target);
+            expect(fs.readdirSync(harness.dataDir)).toEqual([]);
+            expect(fs.existsSync(path.join(harness.cacheDir, 'lock'))).toBe(false);
+            expect(harness.delays).toEqual([]);
+            expect(harness.stderr).toEqual([]);
+        });
+
+        it('a cold createClient that throws publishes through the uncached path', async () => {
+            const harness = cacheHarness(tempRoot());
+            const target = path.join(harness.outDir, 'analytics.db');
+            harness.server.rows = [[1, 'alpha'], [5, 'after the open failed']];
+            harness.setCreate((_index, file) => {
+                if (file === harness.replicaPath) throw cannotOpenDatabaseFile();
+            });
+            const before = fs.readdirSync(harness.outDir);
+
+            await harness.pull(target);
+
+            expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.replicaUrl, pathToFileURL(harness.tempFor(target)).href]);
+            // The cache client never existed: no sync ran against the cache path, and the uncached one synced once.
+            expect(harness.events.filter((event) => event.startsWith('sync:'))).toEqual(['sync:2']);
+            expect(await readItems(target)).toEqual([[1, 'alpha'], [5, 'after the open failed']]);
+            expectOnlyTargetAdded(harness, before, target);
+            expect(fs.readdirSync(harness.dataDir)).toEqual([]);
+            expect(fs.existsSync(path.join(harness.cacheDir, 'lock'))).toBe(false);
+            expect(harness.stderr).toEqual([]);
+        });
+
+        it('when the uncached path also fails the error is upstream_unavailable and the target is untouched', async () => {
+            const harness = cacheHarness(tempRoot());
+            const target = path.join(harness.outDir, 'analytics.db');
+            fs.writeFileSync(target, 'OLD REPLICA');
+            harness.setSync(async () => {
+                throw cannotOpenDatabaseFile();
+            });
+            const before = fs.readdirSync(harness.outDir);
+
+            let caught: any;
+            try {
+                await harness.pull(target);
+            } catch (error) {
+                caught = error;
+            }
+
+            expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+            expect(`${String(caught)} ${JSON.stringify(caught)}`).not.toContain('SQLITE_CANTOPEN');
+            expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.replicaUrl, pathToFileURL(harness.tempFor(target)).href]);
+            expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+            expect(fs.readdirSync(harness.outDir).sort()).toEqual(before.sort());
+            expect(fs.readdirSync(harness.dataDir)).toEqual([]);
+            expect(fs.existsSync(path.join(harness.cacheDir, 'lock'))).toBe(false);
+        });
     });
 
     it('transient failures retry on the same cache path with backoff', async () => {
@@ -705,7 +794,7 @@ describe('database pull through the hidden replica cache', () => {
             // Positive control: VACUUM INTO of a copy succeeds and its product checks ok.
             const control = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-database-pull-cache-control-'));
             roots.push(control);
-            fs.copyFileSync(harness.replicaPath, path.join(control, 'replica.db'));
+            copyWithCompanions(harness.replicaPath, path.join(control, 'replica.db'));
             const vacuumed = createRealClient({ url: pathToFileURL(path.join(control, 'replica.db')).href, intMode: 'string' });
             try {
                 await vacuumed.execute(`VACUUM INTO '${path.join(control, 'snapshot.db').replaceAll("'", "''")}'`);

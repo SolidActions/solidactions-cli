@@ -85,13 +85,23 @@ async function writeReplica(file: string, rows: ItemRow[], freePages = false): P
     }
 }
 
-/** Runs `sql` through a real local client on a private copy of `file`, so nothing appears beside `file`. */
+/** Copies `file` and the `-wal` / `-shm` companions beside it: a real writer leaves its newest rows in `-wal`. */
+function copyWithCompanions(file: string, copy: string): void {
+    fs.copyFileSync(file, copy);
+    fs.chmodSync(copy, 0o600);
+    for (const suffix of ['-wal', '-shm']) {
+        if (!fs.existsSync(`${file}${suffix}`)) continue;
+        fs.copyFileSync(`${file}${suffix}`, `${copy}${suffix}`);
+        fs.chmodSync(`${copy}${suffix}`, 0o600);
+    }
+}
+
+/** Runs `sql` through a real local client on a private copy of `file` and its companions, so nothing appears beside `file`. */
 async function readCopy(file: string, sql: string): Promise<unknown[][]> {
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-database-writable-pull-cache-read-'));
     roots.push(scratch);
     const copy = path.join(scratch, 'copy.db');
-    fs.copyFileSync(file, copy);
-    fs.chmodSync(copy, 0o600);
+    copyWithCompanions(file, copy);
     const client = createRealClient({ url: pathToFileURL(copy).href, intMode: 'string' });
     try {
         return (await client.execute(sql)).rows.map((row) => Array.from({ length: row.length }, (_value, index) => row[index]));
@@ -449,6 +459,57 @@ describe('database pull --writable through the hidden replica cache', () => {
             expect(harness.reads).toEqual([]);
             expect(harness.executions).toEqual([]);
             expect(harness.stdout.slice(stdoutBefore)).toEqual([]);
+            expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
+            expect(fs.readdirSync(harness.outDir).sort()).toEqual(before.sort());
+            expect(fs.existsSync(harness.lockPath)).toBe(false);
+        });
+    });
+
+    describe('a cold cache whose initial open fails for a local reason opens the session uncached once (I3)', () => {
+        function cannotOpenDatabaseFile(): Error {
+            return Object.assign(new Error('SQLITE_CANTOPEN: unable to open database file'), { code: 'SQLITE_CANTOPEN' });
+        }
+
+        it('the session opens uncached and runs its statements', async () => {
+            const harness = writableCacheHarness(tempRoot());
+            const target = path.join(harness.outDir, 'analytics.db');
+            harness.setSync(async (_index, file) => {
+                if (file === harness.replicaPath) throw cannotOpenDatabaseFile();
+                await writeReplica(file, harness.server.rows);
+            });
+            harness.setLines(["INSERT INTO items (id, label) VALUES (3, 'gamma');", '.exit']);
+            const before = fs.readdirSync(harness.outDir);
+
+            await harness.pull(target);
+
+            expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.replicaUrl, harness.tempUrl(target)]);
+            expect(harness.executions).toEqual([{ client: 2, sql: "INSERT INTO items (id, label) VALUES (3, 'gamma');" }]);
+            expect(harness.stdout.filter((line) => line === WARNING)).toHaveLength(1);
+            expect(await readItems(target)).toEqual([[1, 'alpha'], [2, 'beta']]);
+            expectOnlyTargetAdded(harness, before, target);
+            expect(fs.readdirSync(harness.dataDir)).toEqual([]);
+            expect(fs.existsSync(harness.lockPath)).toBe(false);
+            expect(harness.stderr).toEqual([]);
+        });
+
+        it('when the uncached open also fails the error is upstream_unavailable and the target is untouched', async () => {
+            const harness = writableCacheHarness(tempRoot());
+            const target = path.join(harness.outDir, 'analytics.db');
+            fs.writeFileSync(target, 'OLD REPLICA');
+            harness.setSync(async () => {
+                throw cannotOpenDatabaseFile();
+            });
+            harness.setLines(['DELETE FROM items;', '.exit']);
+            const before = fs.readdirSync(harness.outDir);
+
+            const error = await caught(harness.pull(target));
+
+            expect(error).toMatchObject({ code: 'upstream_unavailable' });
+            expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain('SQLITE_CANTOPEN');
+            expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.replicaUrl, harness.tempUrl(target)]);
+            expect(harness.reads).toEqual([]);
+            expect(harness.executions).toEqual([]);
+            expect(harness.stdout).toEqual([]);
             expect(fs.readFileSync(target, 'utf8')).toBe('OLD REPLICA');
             expect(fs.readdirSync(harness.outDir).sort()).toEqual(before.sort());
             expect(fs.existsSync(harness.lockPath)).toBe(false);

@@ -2321,11 +2321,17 @@ async function databaseWritablePullWithConfig(
             try {
                 await openAttachedClient(true, first);
             } catch (error) {
-                // A warm replica the server will not continue: wipe it and open cold, once (review finding 8b).
-                if (!startedWarm || !(error instanceof DatabaseOperationError) || error.code !== 'upstream_unavailable') {
-                    throw error;
-                }
-                if (await wipeOrDropCache()) {
+                if (!(error instanceof DatabaseOperationError) || error.code !== 'upstream_unavailable') throw error;
+                if (!startedWarm) {
+                    // A cold cache that cannot open or sync (a full disk, an unopenable cache folder) must not fail
+                    // a session the uncached path would open: drop the cache and open uncached, once (I3).
+                    await cache!.wipe().catch(() => undefined);
+                    await cache!.release();
+                    cache = undefined;
+                    reserved = undefined;
+                    await openAttachedClient(true);
+                } else if (await wipeOrDropCache()) {
+                    // A warm replica the server will not continue: wipe it and open cold, once (review finding 8b).
                     await openAttachedClient(true, first);
                 } else {
                     await openAttachedClient(true);
@@ -2791,7 +2797,6 @@ async function databaseCachedReadonlyPullWithConfig(
         cache = outcome.cache;
 
         const replicaUrl = pathToFileURL(cache.replicaPath).href;
-        const startedWarm = cache.warm;
         const cacheReplicaStat = async () => {
             try {
                 return await lstatIfPresent(io.filesystem, cache!.replicaPath);
@@ -2826,9 +2831,8 @@ async function databaseCachedReadonlyPullWithConfig(
                     intMode: 'string',
                 }) as DatabaseClient;
             } catch {
-                // A warm replica the native client cannot open is a cache fault (D5).
-                if (startedWarm) throw new ReplicaCacheFallback('The cache replica could not be opened.');
-                throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+                // A replica the native client cannot open, cold or warm, is a cache fault: the uncached path runs once (D5, I3).
+                throw new ReplicaCacheFallback('The cache replica could not be opened.');
             }
 
             let attemptFailure: unknown;
@@ -2870,9 +2874,10 @@ async function databaseCachedReadonlyPullWithConfig(
             }
 
             const failureClass = classifyPullFailure(attemptFailure);
-            // A warm replica the server will not continue: wipe, and the uncached path runs its own attempts (review 14).
-            if (failureClass === 'deterministic' && startedWarm) {
-                throw new ReplicaCacheFallback('A warm cache sync failed.');
+            // A sync that failed for a reason retrying cannot cure, warm or cold (a replica the server will not
+            // continue, a full disk, an unopenable cache folder): wipe, and the uncached path runs its own attempts (review 14, I3).
+            if (failureClass === 'deterministic') {
+                throw new ReplicaCacheFallback('The cache sync failed.');
             }
             const hasAnotherAttempt = attempt + 1 < PULL_ATTEMPTS;
             if (failureClass === 'credential_expiry' && !credentialRemintUsed && hasAnotherAttempt) {
