@@ -88,6 +88,7 @@ import {
 import { databasePush } from './commands/database-push';
 import { databaseExport } from './commands/database-export';
 import { setCliWorkspaceOverride } from './utils/config';
+import { DATABASE_PULL_HELP } from './utils/database-pull-guidance';
 import { displayHost } from './utils/host-display';
 import { setActiveCommandPath } from './utils/mutating-commands';
 import { emitAgentFreshnessNudges } from './utils/agent-freshness';
@@ -416,7 +417,8 @@ database
     .option('-y, --yes', 'Overwrite without confirmation')
     .option('--writable', 'Open a foreground writable session')
     .option('--version <n>', 'DuckDB databases: pull this published version instead of the latest', (value) => parseStrictPositiveInteger(value))
-    .addHelpText('after', `
+    .option('--no-cache', 'Do not read or write the local replica cache for this pull')
+    .addHelpText('after', `${DATABASE_PULL_HELP}
 A DuckDB database (--kind duckdb_file) is saved to .solidactions/databases/<name>.duckdb
 unless you give a path. Pulling it needs Node 22.15 or newer. List its versions with
 \`solidactions database versions <name>\`.`)
