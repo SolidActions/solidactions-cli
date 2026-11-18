@@ -1017,7 +1017,10 @@ async function removeOwnedFiles(
 }
 
 function pullSidecars(temp: string): string[] {
-    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`, `${temp}-client_wal_index`];
+    // The real database host's sync client also leaves `${temp}-info` (68 bytes) beside the
+    // replica; it must be owned here or `finalizeReplica` renames only the main file and the
+    // hidden `-info` stays beside the user's copy (cli#266).
+    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`, `${temp}-client_wal_index`, `${temp}-info`];
 }
 
 async function anyPathExists(filesystem: DatabaseFileSystem, candidates: string[]): Promise<boolean> {

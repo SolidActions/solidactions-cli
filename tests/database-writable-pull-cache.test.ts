@@ -869,4 +869,26 @@ describe('database pull --writable through the hidden replica cache', () => {
         expectOnlyTargetAdded(harness, before, target);
         expect(harness.stderr).toEqual([]);
     });
+
+    it('an uncached writable pull removes the `-info` file the real host leaves beside the temp', async () => {
+        const harness = writableCacheHarness(tempRoot());
+        const target = path.join(harness.outDir, 'analytics.db');
+        harness.setSync(async (_index, file) => {
+            await writeReplica(file, harness.server.rows);
+            // The real database host's sync client leaves a 68-byte `-info` beside the replica (cli#266).
+            fs.writeFileSync(`${file}-info`, 'x'.repeat(68));
+        });
+        harness.setLines(['.exit']);
+        const before = fs.readdirSync(harness.outDir);
+
+        await harness.pull(target, { yes: true, cache: false });
+
+        expect(harness.mints).toEqual(['write']);
+        expect(harness.syncConfigs.map((config) => config.url)).toEqual([harness.tempUrl(target)]);
+        expect(await readItems(target)).toEqual([[1, 'alpha'], [2, 'beta']]);
+        expect(fs.existsSync(`${fileURLToPath(harness.tempUrl(target))}-info`)).toBe(false);
+        expect(fs.statSync(target).mode & 0o777).toBe(0o444);
+        expectOnlyTargetAdded(harness, before, target);
+        expect(harness.stderr).toEqual([]);
+    });
 });
