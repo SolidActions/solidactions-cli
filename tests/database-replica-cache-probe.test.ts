@@ -1,3 +1,5 @@
+import { spawnSync } from 'child_process';
+import net from 'net';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +10,14 @@ interface ReplicaCacheProbeModule {
     describeCompanions: (names: string[]) => string[];
     digestRows: (rows: Array<[number | string, string]>) => string;
     classifyOutcome: (error: unknown, matched: boolean) => string;
+    startCountingProxy: (remoteUrl: string) => Promise<{
+        url: string;
+        bytes: () => number;
+        resetCounter: () => void;
+        armFailure: (limit: number) => void;
+        disarmFailure: () => void;
+        close: () => Promise<void>;
+    }>;
 }
 
 async function loadProbe(): Promise<ReplicaCacheProbeModule> {
@@ -78,5 +88,53 @@ describe('database replica cache probe', () => {
 
         expect(classifyOutcome(undefined, true)).toBe('succeeds-correct');
         expect(classifyOutcome(undefined, false)).toBe('succeeds-WRONG');
+    });
+
+    it('serves the counting proxy from a worker with synchronous shared counters and closes cleanly', async () => {
+        const { startCountingProxy } = await loadProbe();
+
+        // Nothing listens on port 1, so the proxy has no upstream: this proves the proxy lifecycle alone.
+        const proxy = await startCountingProxy('http://127.0.0.1:1');
+        try {
+            expect(proxy.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+            expect(proxy.bytes()).toBe(0);
+            expect(() => {
+                proxy.resetCounter();
+                proxy.armFailure(5);
+                proxy.disarmFailure();
+            }).not.toThrow();
+            expect(proxy.bytes()).toBe(0);
+
+            // Positive control: the proxy accepts, finds no upstream and closes the client.
+            const closed = await new Promise<boolean>((resolve) => {
+                const socket = net.connect({ host: '127.0.0.1', port: Number(new URL(proxy.url).port) });
+                socket.on('error', () => undefined);
+                socket.on('close', () => resolve(true));
+            });
+            expect(closed).toBe(true);
+        } finally {
+            await proxy.close();
+        }
+    });
+
+    it('keeps accepting connections while this thread is blocked, as a native sync handshake blocks it', async () => {
+        const { startCountingProxy } = await loadProbe();
+        const proxy = await startCountingProxy('http://127.0.0.1:1');
+        try {
+            // spawnSync blocks this thread until the child exits. The child connects to the proxy and
+            // exits 0 only when the proxy closed it (no upstream), which needs the proxy's event loop to
+            // run; a proxy on this thread would leave the child to its 5 s timeout (exit 2).
+            const child = spawnSync(process.execPath, ['-e', `
+                const net = require('node:net');
+                const socket = net.connect({ host: '127.0.0.1', port: Number(process.env.PROXY_PORT) });
+                socket.on('error', () => undefined);
+                socket.on('close', () => process.exit(0));
+                setTimeout(() => process.exit(2), 5000);
+            `], { env: { ...process.env, PROXY_PORT: new URL(proxy.url).port }, timeout: 15000 });
+
+            expect(child.status).toBe(0);
+        } finally {
+            await proxy.close();
+        }
     });
 });

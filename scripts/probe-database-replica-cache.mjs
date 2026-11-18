@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readdir, rm, stat, truncate, writeFile } from 'node:fs/promises';
-import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 
 const SEED_ROWS = 3000;
 const SECOND_SEED_ROWS = 500;
@@ -51,62 +51,122 @@ function toPairs(rows) {
     return rows.map((row) => [String(row[0]), String(row[1])]);
 }
 
-async function startCountingProxy(remoteUrl) {
-    const { hostname, port } = new URL(remoteUrl);
-    const sockets = new Set();
-    let counted = 0;
-    let armedLimit = null;
-    let armedCounted = 0;
+const PROXY_LIFETIME_MS = 120_000;
+const COUNTED = 0;
+const ARMED_LIMIT = 1;
+const ARMED_COUNTED = 2;
+const NOT_ARMED = -1n;
 
-    const destroyAll = () => {
-        for (const socket of sockets) socket.destroy();
-    };
+// The proxy runs in a worker thread: a native libsql createClient with a syncUrl
+// blocks the calling thread through its first handshake, so a proxy on the probe's
+// own thread could never accept that connection. The counters live in a
+// SharedArrayBuffer so the main thread reads and writes them synchronously.
+const PROXY_WORKER_SOURCE = `
+const net = require('node:net');
+const { workerData, parentPort } = require('node:worker_threads');
+const counters = new BigInt64Array(workerData.shared);
+const { hostname, port, lifetimeMs, counted: COUNTED, armedLimit: ARMED_LIMIT, armedCounted: ARMED_COUNTED } = workerData;
+const sockets = new Set();
+const destroyAll = () => {
+    for (const socket of sockets) socket.destroy();
+};
 
-    const server = net.createServer((client) => {
-        const upstream = net.connect({ host: hostname, port: Number(port) });
-        for (const socket of [client, upstream]) {
-            sockets.add(socket);
-            socket.on('error', () => socket.destroy());
-            socket.on('close', () => sockets.delete(socket));
-        }
-        client.on('close', () => upstream.destroy());
-        upstream.on('close', () => client.destroy());
-        client.on('data', (chunk) => upstream.write(chunk));
-        upstream.on('data', (chunk) => {
-            counted += chunk.length;
-            if (armedLimit !== null) {
-                armedCounted += chunk.length;
-                if (armedCounted >= armedLimit) {
-                    armedLimit = null;
-                    destroyAll();
-                    return;
-                }
+const server = net.createServer((client) => {
+    const upstream = net.connect({ host: hostname, port });
+    for (const socket of [client, upstream]) {
+        sockets.add(socket);
+        socket.on('error', () => socket.destroy());
+        socket.on('close', () => sockets.delete(socket));
+    }
+    client.on('close', () => upstream.destroy());
+    upstream.on('close', () => client.destroy());
+    client.on('data', (chunk) => upstream.write(chunk));
+    upstream.on('data', (chunk) => {
+        const length = BigInt(chunk.length);
+        Atomics.add(counters, COUNTED, length);
+        const limit = Atomics.load(counters, ARMED_LIMIT);
+        if (limit >= 0n) {
+            const armedCounted = Atomics.add(counters, ARMED_COUNTED, length) + length;
+            if (armedCounted >= limit) {
+                Atomics.store(counters, ARMED_LIMIT, -1n);
+                destroyAll();
+                return;
             }
-            client.write(chunk);
-        });
+        }
+        client.write(chunk);
     });
+});
 
-    await new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', resolve);
+// A hung probe must fail, not hang: after the lifetime every socket is destroyed, which
+// makes a blocked native handshake error out, and nothing new is accepted.
+const watchdog = setTimeout(() => {
+    destroyAll();
+    server.close();
+}, lifetimeMs);
+watchdog.unref();
+
+server.once('error', (error) => parentPort.postMessage({ error: String(error && error.message || error) }));
+server.listen(0, '127.0.0.1', () => parentPort.postMessage({ port: server.address().port }));
+
+parentPort.on('message', (message) => {
+    if (message === 'close') {
+        clearTimeout(watchdog);
+        destroyAll();
+        server.close(() => parentPort.close());
+    }
+});
+`;
+
+export async function startCountingProxy(remoteUrl) {
+    const { hostname, port } = new URL(remoteUrl);
+    const counters = new BigInt64Array(new SharedArrayBuffer(3 * BigInt64Array.BYTES_PER_ELEMENT));
+    Atomics.store(counters, ARMED_LIMIT, NOT_ARMED);
+
+    const worker = new Worker(PROXY_WORKER_SOURCE, {
+        eval: true,
+        workerData: {
+            shared: counters.buffer,
+            hostname,
+            port: Number(port),
+            lifetimeMs: PROXY_LIFETIME_MS,
+            counted: COUNTED,
+            armedLimit: ARMED_LIMIT,
+            armedCounted: ARMED_COUNTED,
+        },
     });
+    const exited = new Promise((resolve) => worker.once('exit', resolve));
+
+    let listeningPort;
+    try {
+        listeningPort = await new Promise((resolve, reject) => {
+            worker.once('message', (message) => {
+                if (message.error) reject(new Error(`The counting proxy failed to listen: ${message.error}`));
+                else resolve(message.port);
+            });
+            worker.once('error', reject);
+            worker.once('exit', () => reject(new Error('The counting proxy worker exited before it was listening.')));
+        });
+    } catch (error) {
+        await worker.terminate();
+        throw error;
+    }
 
     return {
-        url: `http://127.0.0.1:${server.address().port}`,
-        bytes: () => counted,
+        url: `http://127.0.0.1:${listeningPort}`,
+        bytes: () => Number(Atomics.load(counters, COUNTED)),
         resetCounter: () => {
-            counted = 0;
+            Atomics.store(counters, COUNTED, 0n);
         },
         armFailure: (limit) => {
-            armedLimit = limit;
-            armedCounted = 0;
+            Atomics.store(counters, ARMED_COUNTED, 0n);
+            Atomics.store(counters, ARMED_LIMIT, BigInt(limit));
         },
         disarmFailure: () => {
-            armedLimit = null;
+            Atomics.store(counters, ARMED_LIMIT, NOT_ARMED);
         },
         close: async () => {
-            destroyAll();
-            await new Promise((resolve) => server.close(resolve));
+            worker.postMessage('close');
+            await exited;
         },
     };
 }
