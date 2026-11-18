@@ -2068,6 +2068,7 @@ async function databaseWritablePullWithConfig(
     options: DatabasePullOptions,
     config: Config,
     io: ResolvedCommandDependencies,
+    row?: DatabaseRecord,
 ): Promise<void> {
     const target = resolveDatabaseDestination(
         io,
@@ -2078,6 +2079,10 @@ async function databaseWritablePullWithConfig(
     let reservationHandle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
     let ownsTemp = false;
     let ownsSidecars = false;
+    // With a cache (cli#262) the libSQL replica lives in the cache and `temp` stays the open reservation.
+    let cache: ReplicaCache | undefined;
+    let cacheOrigin: string | null = null;
+    let reserved: ReservedFileIdentity | undefined;
     let client: DatabaseClient | undefined;
     let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
     let credentialDeadline: DatabaseCredentialDeadline | undefined;
@@ -2102,10 +2107,19 @@ async function databaseWritablePullWithConfig(
         }
     };
 
-    const openAttachedClient = async (initial: boolean): Promise<void> => {
+    const openAttachedClient = async (
+        initial: boolean,
+        preloaded?: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>,
+    ): Promise<void> => {
+        const replicaPath = cache?.replicaPath ?? temp!;
+        // The cache module checks its own folders (`<root>/<key>`, `data`); a symlinked ancestor of the
+        // cache root (a linked home) is the user's setup, so only the replica file itself is checked there (I3).
+        const assertSafeReplicaAncestors = async (): Promise<void> => {
+            if (!cache) await assertNoSymlinkComponents(io.filesystem, replicaPath);
+        };
         if (!initial) {
-            await assertNoSymlinkComponents(io.filesystem, temp!);
-            const beforeMint = await lstatIfPresent(io.filesystem, temp!);
+            await assertSafeReplicaAncestors();
+            const beforeMint = await lstatIfPresent(io.filesystem, replicaPath);
             if (!beforeMint || beforeMint.isSymbolicLink() || !beforeMint.isFile()) {
                 throw new DatabaseOperationError(
                     'unsafe_destination',
@@ -2114,32 +2128,45 @@ async function databaseWritablePullWithConfig(
             }
         }
 
-        let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
-        try {
-            loaded = await loadDatabaseClientBeforeMint(
-                () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
-                { loadClient: io.loadClient },
-            );
-        } catch (error) {
-            const safeError = freshSafeFileError(error);
-            if (!initial && error instanceof DatabaseOperationError) {
-                throw new WritableRenewalAttemptError(safeError, true);
+        let loaded = preloaded;
+        if (!loaded) {
+            try {
+                loaded = await loadDatabaseClientBeforeMint(
+                    () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
+                    { loadClient: io.loadClient },
+                );
+            } catch (error) {
+                const safeError = freshSafeFileError(error);
+                if (!initial && error instanceof DatabaseOperationError) {
+                    throw new WritableRenewalAttemptError(safeError, true);
+                }
+                throw safeError;
             }
-            throw safeError;
         }
         const access = validateWritableAccess(loaded.access, io.now(), io.monotonicNow());
         const createClient = loaded.createClient as (config: Record<string, unknown>) => DatabaseClient;
+        // Another server answered the renewal mint: the cache replica is not its copy (plan D3, I6).
+        if (cache && !initial && syncOriginOf(access.url) !== cacheOrigin) {
+            throw new WritableRenewalAttemptError(
+                new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.'),
+                true,
+            );
+        }
 
-        if (initial) {
+        if (initial && !cache) {
             await handoffReplicaReservation(io, temp!, reservationHandle!);
             reservationHandle = undefined;
             ownsTemp = false;
         }
 
-        await assertNoSymlinkComponents(io.filesystem, temp!);
-        const beforeCreate = await lstatIfPresent(io.filesystem, temp!);
+        await assertSafeReplicaAncestors();
+        const beforeCreate = await lstatIfPresent(io.filesystem, replicaPath);
         if (
-            (initial && beforeCreate !== null)
+            (initial && !cache && beforeCreate !== null)
+            // A warm cache replica is a regular file the session continues (review finding 8b). A non-regular
+            // one was wiped before this open; one appearing since is a race and is refused.
+            || (initial && cache !== undefined && beforeCreate !== null
+                && (beforeCreate.isSymbolicLink() || !beforeCreate.isFile()))
             || (!initial && (!beforeCreate || beforeCreate.isSymbolicLink() || !beforeCreate.isFile()))
         ) {
             throw new DatabaseOperationError(
@@ -2151,7 +2178,7 @@ async function databaseWritablePullWithConfig(
         let opened: DatabaseClient;
         try {
             opened = createClient({
-                url: pathToFileURL(temp!).href,
+                url: pathToFileURL(replicaPath).href,
                 syncUrl: access.url,
                 authToken: access.token,
                 intMode: 'string',
@@ -2185,7 +2212,7 @@ async function databaseWritablePullWithConfig(
             syncFailed = true;
         }
 
-        const replicaStat = await lstatIfPresent(io.filesystem, temp!);
+        const replicaStat = await lstatIfPresent(io.filesystem, replicaPath);
         if (replicaStat?.isFile() && !replicaStat.isSymbolicLink()) ownsTemp = true;
         if (
             syncFailed
@@ -2207,6 +2234,27 @@ async function databaseWritablePullWithConfig(
         credentialDeadline = access.deadline;
     };
 
+    const discardReservation = async (): Promise<void> => {
+        if (reservationHandle) {
+            try {
+                await reservationHandle.close();
+            } catch {
+                // Cleanup below remains scoped to the exclusively reserved path.
+            }
+            reservationHandle = undefined;
+        }
+        // With a cache the temp is ours only while it is still the reserved inode.
+        if (temp && ownsTemp && reserved) ownsTemp = await isReservedFile(io, temp, reserved);
+        if (temp) {
+            await removeOwnedFiles(io.filesystem, [
+                ...(ownsTemp ? [temp] : []),
+                ...(ownsSidecars ? pullSidecars(temp) : []),
+            ]);
+        }
+        ownsTemp = false;
+        ownsSidecars = false;
+    };
+
     try {
         if (!await confirmFileOverwrite(target, options, io)) return;
 
@@ -2222,7 +2270,68 @@ async function databaseWritablePullWithConfig(
         }
         ownsSidecars = true;
 
-        await openAttachedClient(true);
+        let first: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>> | undefined;
+        if (row && cacheEligible(io, options)) {
+            // The first mint comes before the cache: its URL host is part of the cache identity (review finding 1).
+            const minted = await loadDatabaseClientBeforeMint(
+                () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
+                { loadClient: io.loadClient },
+            );
+            const outcome = await acquireReplicaCache({
+                root: io.replicaCacheRoot!,
+                identity: cacheIdentity(config, name, row, minted.access),
+                now: io.now,
+            });
+            if (outcome.kind === 'skipped') {
+                const note = cacheSkipNote(outcome.reason);
+                if (note !== undefined) io.stderr(note);
+            } else {
+                cache = outcome.cache;
+                cacheOrigin = syncOriginOf(minted.access.url);
+                first = minted;
+                const reservedStat = await reservationHandle.stat();
+                reserved = { dev: reservedStat.dev, ino: reservedStat.ino };
+            }
+        }
+
+        /** Wipes the cache; when the wipe itself fails, drops the cache (lock released) so the session runs uncached (I3). */
+        const wipeOrDropCache = async (): Promise<boolean> => {
+            try {
+                await cache!.wipe();
+                return true;
+            } catch {
+                await cache!.release();
+                cache = undefined;
+                reserved = undefined;
+                return false;
+            }
+        };
+        if (cache) {
+            // A replica that is a symlink or not a regular file is a cache fault: wipe and open cold (I3).
+            const existingReplica = await lstatIfPresent(io.filesystem, cache.replicaPath);
+            if (existingReplica && (existingReplica.isSymbolicLink() || !existingReplica.isFile())) {
+                await wipeOrDropCache();
+            }
+        }
+
+        if (!cache) {
+            await openAttachedClient(true);
+        } else {
+            const startedWarm = cache.warm;
+            try {
+                await openAttachedClient(true, first);
+            } catch (error) {
+                // A warm replica the server will not continue: wipe it and open cold, once (review finding 8b).
+                if (!startedWarm || !(error instanceof DatabaseOperationError) || error.code !== 'upstream_unavailable') {
+                    throw error;
+                }
+                if (await wipeOrDropCache()) {
+                    await openAttachedClient(true, first);
+                } else {
+                    await openAttachedClient(true);
+                }
+            }
+        }
         io.stdout(WRITABLE_WARNING);
         inputSession = createWritableInput(io);
         const accumulator = new DatabaseSqlStatementAccumulator();
@@ -2357,9 +2466,41 @@ async function databaseWritablePullWithConfig(
 
         if (sessionFailure && !publishAfterFailure) throw sessionFailure;
 
-        await finalizeReplica(io, temp, target, localCreateClient!);
-        ownsTemp = false;
-        ownsSidecars = false;
+        if (cache) {
+            try {
+                await snapshotCacheReplica(io, localCreateClient!, cache, { temp, handle: reservationHandle! });
+            } catch {
+                // The session's writes are on the server already (readYourWrites, offline: false):
+                // replay nothing, publish a read-only copy through the uncached pull (review finding 8a).
+                await cache.wipe().catch(() => undefined);
+                await discardReservation();
+                io.stderr("The live session's writes are saved. Publishing a read-only copy instead.");
+                // `io` is the resolved dependency object, which satisfies DatabaseCommandDependencies.
+                await databasePullWithConfig(
+                    name,
+                    destination,
+                    { yes: true, cache: false, skipWorkflowWarning: true },
+                    config,
+                    io,
+                );
+                if (sessionFailure) throw sessionFailure;
+                return;
+            }
+            reservationHandle = undefined;
+            await publishSnapshot(io, temp, target, reserved!);
+            ownsTemp = false;
+            ownsSidecars = false;
+            try {
+                await cache.markSynced();
+            } catch {
+                // The file is published; a cache whose meta.json could not be written is not trusted again (D5).
+                await cache.wipe().catch(() => undefined);
+            }
+        } else {
+            await finalizeReplica(io, temp, target, localCreateClient!);
+            ownsTemp = false;
+            ownsSidecars = false;
+        }
         if (sessionFailure) throw sessionFailure;
         io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
     } catch (error) {
@@ -2377,20 +2518,10 @@ async function databaseWritablePullWithConfig(
                 // Cleanup below remains scoped to this invocation's replica.
             }
         }
-        if (reservationHandle) {
-            try {
-                await reservationHandle.close();
-            } catch {
-                // Cleanup below remains scoped to the exclusively reserved path.
-            }
-        }
-        if (temp) {
-            await removeOwnedFiles(io.filesystem, [
-                ...(ownsTemp ? [temp] : []),
-                ...(ownsSidecars ? pullSidecars(temp) : []),
-            ]);
-        }
+        await discardReservation();
         throw freshSafeFileError(error);
+    } finally {
+        await cache?.release();
     }
 }
 
@@ -2811,7 +2942,7 @@ export async function databasePullWithConfig(
         io.stderr(WORKFLOW_RUN_PULL_WARNING);
     }
     if (options.writable) {
-        return databaseWritablePullWithConfig(name, destination, options, config, io);
+        return databaseWritablePullWithConfig(name, destination, options, config, io, row);
     }
 
     const target = resolveDatabaseDestination(
