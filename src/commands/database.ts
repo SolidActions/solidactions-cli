@@ -45,6 +45,16 @@ import {
     zstdDecompressAvailable,
 } from '../utils/database-download';
 import { defaultIngestBatchId, ingestFormatFromExtension } from '../utils/database-ingest-digest';
+import { isInsideWorkflowRun, WORKFLOW_RUN_PULL_WARNING } from '../utils/database-pull-guidance';
+import {
+    ReplicaCache,
+    ReplicaCacheError,
+    ReplicaCacheIdentity,
+    ReplicaCacheOutcome,
+    acquireReplicaCache,
+    defaultReplicaCacheRoot,
+    syncOriginOf,
+} from '../utils/database-replica-cache';
 
 export type DatabaseKind = 'libsql' | 'duckdb' | 'duckdb_file';
 export type DatabaseActivity = 'active' | 'idle' | 'idle_no_credit' | 'waking' | 'optimizing';
@@ -146,6 +156,10 @@ interface DatabasePullOptions {
     yes?: boolean;
     writable?: boolean;
     version?: number;
+    /** `--no-cache` sets false; commander sets true when the flag is absent. */
+    cache?: boolean;
+    /** Internal only (no CLI flag): the workflow-run warning was already printed by this invocation. */
+    skipWorkflowWarning?: boolean;
 }
 
 interface DatabaseVersionsOptions {
@@ -181,6 +195,10 @@ export interface DatabaseCommandDependencies extends DatabaseClientDependencies 
     sleep?: (milliseconds: number) => Promise<void>;
     /** Whether this Node can decompress zstd; defaults to a check of `zlib`. */
     zstdAvailable?: boolean;
+    /** The hidden replica cache root for `database pull`; undefined leaves the cache off (plan D1). */
+    replicaCacheRoot?: string;
+    /** The environment the workflow-run warning reads; defaults to `process.env`. */
+    env?: NodeJS.ProcessEnv;
     put?: (
         url: string,
         body: fs.ReadStream | Buffer,
@@ -207,6 +225,8 @@ interface ResolvedCommandDependencies {
     dataPlaneTimeoutMs: number;
     sleep: (milliseconds: number) => Promise<void>;
     zstdAvailable: boolean;
+    replicaCacheRoot: string | undefined;
+    env: NodeJS.ProcessEnv;
     put: NonNullable<DatabaseCommandDependencies['put']>;
 }
 
@@ -254,6 +274,8 @@ function resolveDependencies(dependencies: DatabaseCommandDependencies): Resolve
             setTimeout(resolve, milliseconds);
         })),
         zstdAvailable: dependencies.zstdAvailable ?? zstdDecompressAvailable(),
+        replicaCacheRoot: dependencies.replicaCacheRoot,
+        env: dependencies.env ?? process.env,
         put: dependencies.put ?? axios.put,
     };
 }
@@ -995,7 +1017,10 @@ async function removeOwnedFiles(
 }
 
 function pullSidecars(temp: string): string[] {
-    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`, `${temp}-client_wal_index`];
+    // The real database host's sync client also leaves `${temp}-info` (68 bytes) beside the
+    // replica; it must be owned here or `finalizeReplica` renames only the main file and the
+    // hidden `-info` stays beside the user's copy (cli#266).
+    return [`${temp}-wal`, `${temp}-shm`, `${temp}-journal`, `${temp}-client_wal_index`, `${temp}-info`];
 }
 
 async function anyPathExists(filesystem: DatabaseFileSystem, candidates: string[]): Promise<boolean> {
@@ -2046,6 +2071,7 @@ async function databaseWritablePullWithConfig(
     options: DatabasePullOptions,
     config: Config,
     io: ResolvedCommandDependencies,
+    row?: DatabaseRecord,
 ): Promise<void> {
     const target = resolveDatabaseDestination(
         io,
@@ -2056,6 +2082,10 @@ async function databaseWritablePullWithConfig(
     let reservationHandle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
     let ownsTemp = false;
     let ownsSidecars = false;
+    // With a cache (cli#262) the libSQL replica lives in the cache and `temp` stays the open reservation.
+    let cache: ReplicaCache | undefined;
+    let cacheOrigin: string | null = null;
+    let reserved: ReservedFileIdentity | undefined;
     let client: DatabaseClient | undefined;
     let localCreateClient: ((config: Record<string, unknown>) => DatabaseClient) | undefined;
     let credentialDeadline: DatabaseCredentialDeadline | undefined;
@@ -2080,10 +2110,19 @@ async function databaseWritablePullWithConfig(
         }
     };
 
-    const openAttachedClient = async (initial: boolean): Promise<void> => {
+    const openAttachedClient = async (
+        initial: boolean,
+        preloaded?: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>,
+    ): Promise<void> => {
+        const replicaPath = cache?.replicaPath ?? temp!;
+        // The cache module checks its own folders (`<root>/<key>`, `data`); a symlinked ancestor of the
+        // cache root (a linked home) is the user's setup, so only the replica file itself is checked there (I3).
+        const assertSafeReplicaAncestors = async (): Promise<void> => {
+            if (!cache) await assertNoSymlinkComponents(io.filesystem, replicaPath);
+        };
         if (!initial) {
-            await assertNoSymlinkComponents(io.filesystem, temp!);
-            const beforeMint = await lstatIfPresent(io.filesystem, temp!);
+            await assertSafeReplicaAncestors();
+            const beforeMint = await lstatIfPresent(io.filesystem, replicaPath);
             if (!beforeMint || beforeMint.isSymbolicLink() || !beforeMint.isFile()) {
                 throw new DatabaseOperationError(
                     'unsafe_destination',
@@ -2092,32 +2131,45 @@ async function databaseWritablePullWithConfig(
             }
         }
 
-        let loaded: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>>;
-        try {
-            loaded = await loadDatabaseClientBeforeMint(
-                () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
-                { loadClient: io.loadClient },
-            );
-        } catch (error) {
-            const safeError = freshSafeFileError(error);
-            if (!initial && error instanceof DatabaseOperationError) {
-                throw new WritableRenewalAttemptError(safeError, true);
+        let loaded = preloaded;
+        if (!loaded) {
+            try {
+                loaded = await loadDatabaseClientBeforeMint(
+                    () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
+                    { loadClient: io.loadClient },
+                );
+            } catch (error) {
+                const safeError = freshSafeFileError(error);
+                if (!initial && error instanceof DatabaseOperationError) {
+                    throw new WritableRenewalAttemptError(safeError, true);
+                }
+                throw safeError;
             }
-            throw safeError;
         }
         const access = validateWritableAccess(loaded.access, io.now(), io.monotonicNow());
         const createClient = loaded.createClient as (config: Record<string, unknown>) => DatabaseClient;
+        // Another server answered the renewal mint: the cache replica is not its copy (plan D3, I6).
+        if (cache && !initial && syncOriginOf(access.url) !== cacheOrigin) {
+            throw new WritableRenewalAttemptError(
+                new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.'),
+                true,
+            );
+        }
 
-        if (initial) {
+        if (initial && !cache) {
             await handoffReplicaReservation(io, temp!, reservationHandle!);
             reservationHandle = undefined;
             ownsTemp = false;
         }
 
-        await assertNoSymlinkComponents(io.filesystem, temp!);
-        const beforeCreate = await lstatIfPresent(io.filesystem, temp!);
+        await assertSafeReplicaAncestors();
+        const beforeCreate = await lstatIfPresent(io.filesystem, replicaPath);
         if (
-            (initial && beforeCreate !== null)
+            (initial && !cache && beforeCreate !== null)
+            // A warm cache replica is a regular file the session continues (review finding 8b). A non-regular
+            // one was wiped before this open; one appearing since is a race and is refused.
+            || (initial && cache !== undefined && beforeCreate !== null
+                && (beforeCreate.isSymbolicLink() || !beforeCreate.isFile()))
             || (!initial && (!beforeCreate || beforeCreate.isSymbolicLink() || !beforeCreate.isFile()))
         ) {
             throw new DatabaseOperationError(
@@ -2129,7 +2181,7 @@ async function databaseWritablePullWithConfig(
         let opened: DatabaseClient;
         try {
             opened = createClient({
-                url: pathToFileURL(temp!).href,
+                url: pathToFileURL(replicaPath).href,
                 syncUrl: access.url,
                 authToken: access.token,
                 intMode: 'string',
@@ -2163,7 +2215,7 @@ async function databaseWritablePullWithConfig(
             syncFailed = true;
         }
 
-        const replicaStat = await lstatIfPresent(io.filesystem, temp!);
+        const replicaStat = await lstatIfPresent(io.filesystem, replicaPath);
         if (replicaStat?.isFile() && !replicaStat.isSymbolicLink()) ownsTemp = true;
         if (
             syncFailed
@@ -2185,6 +2237,27 @@ async function databaseWritablePullWithConfig(
         credentialDeadline = access.deadline;
     };
 
+    const discardReservation = async (): Promise<void> => {
+        if (reservationHandle) {
+            try {
+                await reservationHandle.close();
+            } catch {
+                // Cleanup below remains scoped to the exclusively reserved path.
+            }
+            reservationHandle = undefined;
+        }
+        // With a cache the temp is ours only while it is still the reserved inode.
+        if (temp && ownsTemp && reserved) ownsTemp = await isReservedFile(io, temp, reserved);
+        if (temp) {
+            await removeOwnedFiles(io.filesystem, [
+                ...(ownsTemp ? [temp] : []),
+                ...(ownsSidecars ? pullSidecars(temp) : []),
+            ]);
+        }
+        ownsTemp = false;
+        ownsSidecars = false;
+    };
+
     try {
         if (!await confirmFileOverwrite(target, options, io)) return;
 
@@ -2200,7 +2273,74 @@ async function databaseWritablePullWithConfig(
         }
         ownsSidecars = true;
 
-        await openAttachedClient(true);
+        let first: Awaited<ReturnType<typeof loadDatabaseClientBeforeMint>> | undefined;
+        if (row && cacheEligible(io, options)) {
+            // The first mint comes before the cache: its URL host is part of the cache identity (review finding 1).
+            const minted = await loadDatabaseClientBeforeMint(
+                () => requestDatabaseAccess(config, name, 'write', requestDependencies(io)),
+                { loadClient: io.loadClient },
+            );
+            const outcome = await acquireReplicaCache({
+                root: io.replicaCacheRoot!,
+                identity: cacheIdentity(config, name, row, minted.access),
+                now: io.now,
+            });
+            if (outcome.kind === 'skipped') {
+                const note = cacheSkipNote(outcome.reason);
+                if (note !== undefined) io.stderr(note);
+            } else {
+                cache = outcome.cache;
+                cacheOrigin = syncOriginOf(minted.access.url);
+                first = minted;
+                const reservedStat = await reservationHandle.stat();
+                reserved = { dev: reservedStat.dev, ino: reservedStat.ino };
+            }
+        }
+
+        /** Wipes the cache; when the wipe itself fails, drops the cache (lock released) so the session runs uncached (I3). */
+        const wipeOrDropCache = async (): Promise<boolean> => {
+            try {
+                await cache!.wipe();
+                return true;
+            } catch {
+                await cache!.release();
+                cache = undefined;
+                reserved = undefined;
+                return false;
+            }
+        };
+        if (cache) {
+            // A replica that is a symlink or not a regular file is a cache fault: wipe and open cold (I3).
+            const existingReplica = await lstatIfPresent(io.filesystem, cache.replicaPath);
+            if (existingReplica && (existingReplica.isSymbolicLink() || !existingReplica.isFile())) {
+                await wipeOrDropCache();
+            }
+        }
+
+        if (!cache) {
+            await openAttachedClient(true);
+        } else {
+            const startedWarm = cache.warm;
+            try {
+                await openAttachedClient(true, first);
+            } catch (error) {
+                if (!(error instanceof DatabaseOperationError) || error.code !== 'upstream_unavailable') throw error;
+                if (!startedWarm) {
+                    // A cold cache that cannot open or sync (a full disk, an unopenable cache folder) must not fail
+                    // a session the uncached path would open: drop the cache and open uncached, once (I3).
+                    await cache!.wipe().catch(() => undefined);
+                    await cache!.release();
+                    cache = undefined;
+                    reserved = undefined;
+                    await openAttachedClient(true);
+                } else if (await wipeOrDropCache()) {
+                    // A warm replica the server will not continue: wipe it and open cold, once (review finding 8b).
+                    await openAttachedClient(true, first);
+                } else {
+                    await openAttachedClient(true);
+                }
+            }
+        }
         io.stdout(WRITABLE_WARNING);
         inputSession = createWritableInput(io);
         const accumulator = new DatabaseSqlStatementAccumulator();
@@ -2335,9 +2475,41 @@ async function databaseWritablePullWithConfig(
 
         if (sessionFailure && !publishAfterFailure) throw sessionFailure;
 
-        await finalizeReplica(io, temp, target, localCreateClient!);
-        ownsTemp = false;
-        ownsSidecars = false;
+        if (cache) {
+            try {
+                await snapshotCacheReplica(io, localCreateClient!, cache, { temp, handle: reservationHandle! });
+            } catch {
+                // The session's writes are on the server already (readYourWrites, offline: false):
+                // replay nothing, publish a read-only copy through the uncached pull (review finding 8a).
+                await cache.wipe().catch(() => undefined);
+                await discardReservation();
+                io.stderr("The live session's writes are saved. Publishing a read-only copy instead.");
+                // `io` is the resolved dependency object, which satisfies DatabaseCommandDependencies.
+                await databasePullWithConfig(
+                    name,
+                    destination,
+                    { yes: true, cache: false, skipWorkflowWarning: true },
+                    config,
+                    io,
+                );
+                if (sessionFailure) throw sessionFailure;
+                return;
+            }
+            reservationHandle = undefined;
+            await publishSnapshot(io, temp, target, reserved!);
+            ownsTemp = false;
+            ownsSidecars = false;
+            try {
+                await cache.markSynced();
+            } catch {
+                // The file is published; a cache whose meta.json could not be written is not trusted again (D5).
+                await cache.wipe().catch(() => undefined);
+            }
+        } else {
+            await finalizeReplica(io, temp, target, localCreateClient!);
+            ownsTemp = false;
+            ownsSidecars = false;
+        }
         if (sessionFailure) throw sessionFailure;
         io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
     } catch (error) {
@@ -2355,20 +2527,399 @@ async function databaseWritablePullWithConfig(
                 // Cleanup below remains scoped to this invocation's replica.
             }
         }
+        await discardReservation();
+        throw freshSafeFileError(error);
+    } finally {
+        await cache?.release();
+    }
+}
+
+/** A cache problem inside a cached pull: the cache is wiped and the uncached path runs (plan D5, invariant I3). */
+class ReplicaCacheFallback extends Error {}
+
+type DatabaseFileHandle = Awaited<ReturnType<DatabaseFileSystem['open']>>;
+type ReplicaCacheSkipReason = Extract<ReplicaCacheOutcome, { kind: 'skipped' }>['reason'];
+
+/** The reserved temp's inode, read through its open handle (`handle.stat()`). */
+interface ReservedFileIdentity {
+    dev: number;
+    ino: number;
+}
+
+const SNAPSHOT_COPY_CHUNK_BYTES = 1024 * 1024;
+
+function cacheEligible(io: ResolvedCommandDependencies, options: DatabasePullOptions): boolean {
+    return options.cache !== false && typeof io.replicaCacheRoot === 'string' && io.replicaCacheRoot !== '';
+}
+
+function cacheSkipNote(reason: ReplicaCacheSkipReason): string | undefined {
+    if (reason === 'busy') {
+        return 'Another pull of this database is using the local cache; downloading a full copy instead.';
+    }
+    if (reason === 'rewritten_often') {
+        return 'This database is replaced often, so its local cache is off for now; downloading a full copy.';
+    }
+    return undefined;
+}
+
+function cacheIdentity(
+    config: Config,
+    name: string,
+    row: DatabaseRecord,
+    access: DatabaseAccess,
+): ReplicaCacheIdentity {
+    return {
+        host: config.host,
+        workspaceId: config.workspaceId ?? '',
+        name,
+        databaseId: row.id ?? null,
+        createdAt: row.kind === 'duckdb_file' ? null : row.created_at ?? null,
+        syncOrigin: syncOriginOf(access.url),
+    };
+}
+
+function isQuickCheckOk(result: DatabaseResultSet): boolean {
+    return Array.isArray(result?.rows) && result.rows.length === 1 && result.rows[0]?.[0] === 'ok';
+}
+
+/** Runs `operation` on a credential-free local client of `file` (no `syncUrl`) and always closes it. */
+async function withLocalSnapshotClient(
+    io: ResolvedCommandDependencies,
+    createClient: (config: Record<string, unknown>) => DatabaseClient,
+    file: string,
+    operation: (execute: (sql: string) => Promise<DatabaseResultSet>) => Promise<void>,
+): Promise<void> {
+    let client: DatabaseClient | undefined;
+    let closePromise: Promise<void> | undefined;
+    const closeClient = (): Promise<void> => {
+        closePromise ??= runDatabaseClientOperationWithDeadline(
+            async () => { await client?.close(); },
+            undefined,
+            io.dataPlaneTimeoutMs,
+        );
+        return closePromise;
+    };
+    try {
+        client = createClient({ url: pathToFileURL(file).href, intMode: 'string' });
+        await operation((sql) => runDatabaseClientOperationWithDeadline(
+            () => client!.execute(sql),
+            closeClient,
+            io.dataPlaneTimeoutMs,
+        ));
+    } finally {
+        if (client) await closeClient();
+    }
+}
+
+/** Copies the snapshot's bytes into the still-open reservation; never unlinks or recreates it by path. */
+async function copySnapshotIntoReservation(
+    io: ResolvedCommandDependencies,
+    snapshotPath: string,
+    handle: DatabaseFileHandle,
+): Promise<void> {
+    const source = await io.filesystem.open(snapshotPath, 'r');
+    let snapshotSize: number;
+    let copied = 0;
+    try {
+        snapshotSize = (await source.stat()).size;
+        await handle.truncate(0);
+        const buffer = Buffer.alloc(SNAPSHOT_COPY_CHUNK_BYTES);
+        for (;;) {
+            const { bytesRead } = await source.read(buffer, 0, buffer.byteLength, copied);
+            if (bytesRead === 0) break;
+            let offset = 0;
+            while (offset < bytesRead) {
+                const { bytesWritten } = await handle.write(buffer, offset, bytesRead - offset, copied + offset);
+                if (bytesWritten <= 0) throw new ReplicaCacheFallback('The snapshot copy made no progress.');
+                offset += bytesWritten;
+            }
+            copied += bytesRead;
+        }
+    } finally {
+        await source.close();
+    }
+    await handle.sync();
+    if (copied !== snapshotSize || (await handle.stat()).size !== snapshotSize) {
+        throw new ReplicaCacheFallback('The snapshot copy is incomplete.');
+    }
+}
+
+/**
+ * Turns a synced cache replica into the reserved temp's bytes, all through the real local client:
+ * `PRAGMA quick_check` on the replica (review N1: `VACUUM INTO` rebuilds the free list, so only
+ * this check sees damage there), `VACUUM INTO` the cache's own `snapshotPath`, `PRAGMA quick_check`
+ * on the snapshot (review finding 3), then a copy into the still-open reservation handle (review
+ * finding 12), which it closes. The reserved file's `{ dev, ino }` is the caller's `handle.stat()`
+ * (the same open handle, so the same inode) and goes to `publishSnapshot`. Any failure throws
+ * `ReplicaCacheFallback`.
+ */
+async function snapshotCacheReplica(
+    io: ResolvedCommandDependencies,
+    createClient: (config: Record<string, unknown>) => DatabaseClient,
+    cache: ReplicaCache,
+    reservation: { temp: string; handle: DatabaseFileHandle },
+): Promise<void> {
+    try {
+        await withLocalSnapshotClient(io, createClient, cache.replicaPath, async (execute) => {
+            if (!isQuickCheckOk(await execute('PRAGMA quick_check'))) {
+                throw new ReplicaCacheFallback('The cache replica failed PRAGMA quick_check.');
+            }
+            await execute(`VACUUM INTO '${cache.snapshotPath.replaceAll("'", "''")}'`);
+        });
+        await withLocalSnapshotClient(io, createClient, cache.snapshotPath, async (execute) => {
+            if (!isQuickCheckOk(await execute('PRAGMA quick_check'))) {
+                throw new ReplicaCacheFallback('The snapshot failed PRAGMA quick_check.');
+            }
+        });
+        await copySnapshotIntoReservation(io, cache.snapshotPath, reservation.handle);
+        await reservation.handle.close();
+        await cache.discardSnapshot();
+    } catch (error) {
+        if (error instanceof ReplicaCacheFallback) throw error;
+        throw new ReplicaCacheFallback('The cache snapshot could not be made.');
+    }
+}
+
+/** Publishes the reserved temp (the snapshot's bytes) only while it is still the reserved inode. */
+async function publishSnapshot(
+    io: ResolvedCommandDependencies,
+    temp: string,
+    target: string,
+    expected: ReservedFileIdentity,
+): Promise<void> {
+    await assertNoSymlinkComponents(io.filesystem, temp);
+    const stat = await lstatIfPresent(io.filesystem, temp);
+    if (
+        !stat
+        || stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.dev !== expected.dev
+        || stat.ino !== expected.ino
+    ) {
+        throw new DatabaseOperationError('unsafe_destination', 'The database replica temporary path is unsafe.');
+    }
+    await removeOwnedFiles(io.filesystem, pullSidecars(temp));
+    if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+        throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+    }
+    await io.filesystem.chmod(temp, 0o444);
+    await assertNoSymlinkComponents(io.filesystem, target);
+    await io.filesystem.rename(temp, target);
+}
+
+async function isReservedFile(
+    io: ResolvedCommandDependencies,
+    temp: string,
+    expected: ReservedFileIdentity,
+): Promise<boolean> {
+    try {
+        const stat = await lstatIfPresent(io.filesystem, temp);
+        return stat !== null
+            && stat.isFile()
+            && !stat.isSymbolicLink()
+            && stat.dev === expected.dev
+            && stat.ino === expected.ino;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * The read-only pull through the hidden replica cache (cli#262). `'handled'`: the target is
+ * published (or the error is thrown). `'fallback'`: nothing is published, the run's own reservation
+ * is gone, and the caller runs the uncached path (plan D5).
+ */
+async function databaseCachedReadonlyPullWithConfig(
+    name: string,
+    target: string,
+    config: Config,
+    io: ResolvedCommandDependencies,
+    row: DatabaseRecord,
+): Promise<'handled' | 'fallback'> {
+    let temp: string | undefined;
+    let reservationHandle: DatabaseFileHandle | undefined;
+    let reserved: ReservedFileIdentity | undefined;
+    let ownsTemp = false;
+    let ownsSidecars = false;
+    let cache: ReplicaCache | undefined;
+
+    const discardReservation = async (): Promise<void> => {
         if (reservationHandle) {
             try {
                 await reservationHandle.close();
             } catch {
                 // Cleanup below remains scoped to the exclusively reserved path.
             }
+            reservationHandle = undefined;
         }
+        // The temp is ours only while it is still the reserved inode.
+        if (temp && ownsTemp && reserved) ownsTemp = await isReservedFile(io, temp, reserved);
         if (temp) {
             await removeOwnedFiles(io.filesystem, [
                 ...(ownsTemp ? [temp] : []),
                 ...(ownsSidecars ? pullSidecars(temp) : []),
             ]);
         }
+        ownsTemp = false;
+        ownsSidecars = false;
+    };
+
+    try {
+        const reservation = await reserveDestinationTemp(io, target);
+        temp = reservation.temp;
+        reservationHandle = reservation.handle;
+        ownsTemp = true;
+        const reservedStat = await reservationHandle.stat();
+        reserved = { dev: reservedStat.dev, ino: reservedStat.ino };
+
+        if (await anyPathExists(io.filesystem, pullSidecars(temp))) {
+            throw new DatabaseOperationError(
+                'upstream_unavailable',
+                'Database replica temporary files already exist.',
+            );
+        }
+        ownsSidecars = true;
+
+        // The first mint comes before the cache: its URL host is part of the cache identity (review finding 1).
+        const first = await loadDatabaseClientBeforeMint(
+            () => requestDatabaseAccess(config, name, 'read', requestDependencies(io)),
+            { loadClient: io.loadClient },
+        );
+        const origin = syncOriginOf(first.access.url);
+        const outcome = await acquireReplicaCache({
+            root: io.replicaCacheRoot!,
+            identity: cacheIdentity(config, name, row, first.access),
+            now: io.now,
+        });
+        if (outcome.kind === 'skipped') {
+            await discardReservation();
+            const note = cacheSkipNote(outcome.reason);
+            if (note !== undefined) io.stderr(note);
+            return 'fallback';
+        }
+        cache = outcome.cache;
+
+        const replicaUrl = pathToFileURL(cache.replicaPath).href;
+        const cacheReplicaStat = async () => {
+            try {
+                return await lstatIfPresent(io.filesystem, cache!.replicaPath);
+            } catch {
+                throw new ReplicaCacheFallback('The cache replica cannot be read.');
+            }
+        };
+        let createClient = first.createClient as (config: Record<string, unknown>) => DatabaseClient;
+        let access = first.access;
+        let synced = false;
+        let credentialRemintUsed = false;
+        for (let attempt = 0; attempt < PULL_ATTEMPTS; attempt += 1) {
+            if (attempt > 0) {
+                const minted = await loadDatabaseClientBeforeMint(
+                    () => requestDatabaseAccess(config, name, 'read', requestDependencies(io)),
+                    { loadClient: io.loadClient },
+                );
+                createClient = minted.createClient as (config: Record<string, unknown>) => DatabaseClient;
+                access = minted.access;
+                // Another server answered the re-mint: this replica is not its copy (plan D3, I6).
+                if (syncOriginOf(access.url) !== origin) {
+                    throw new ReplicaCacheFallback('The sync origin changed during the pull.');
+                }
+            }
+
+            let client: DatabaseClient;
+            try {
+                client = createClient({
+                    url: replicaUrl,
+                    syncUrl: access.url,
+                    authToken: access.token,
+                    intMode: 'string',
+                }) as DatabaseClient;
+            } catch {
+                // A replica the native client cannot open, cold or warm, is a cache fault: the uncached path runs once (D5, I3).
+                throw new ReplicaCacheFallback('The cache replica could not be opened.');
+            }
+
+            let attemptFailure: unknown;
+            let closePromise: Promise<void> | undefined;
+            const closeClient = (): Promise<void> => {
+                closePromise ??= runDatabaseClientOperationWithDeadline(
+                    async () => { await client.close(); },
+                    undefined,
+                    io.dataPlaneTimeoutMs,
+                );
+                return closePromise;
+            };
+            try {
+                if (typeof client.sync !== 'function') throw new Error('Database sync is unavailable.');
+                await runDatabaseClientOperationWithDeadline(
+                    () => client.sync!(),
+                    closeClient,
+                    io.dataPlaneTimeoutMs,
+                );
+            } catch (error) {
+                attemptFailure = error;
+            } finally {
+                try {
+                    await closeClient();
+                } catch (error) {
+                    if (!attemptFailure) attemptFailure = error;
+                }
+            }
+
+            // The replica lives in the cache: anything but a regular file there is a cache fault (D5).
+            const replicaStat = await cacheReplicaStat();
+            if (replicaStat && (replicaStat.isSymbolicLink() || !replicaStat.isFile())) {
+                throw new ReplicaCacheFallback('The cache replica is not a regular file.');
+            }
+            if (!attemptFailure) {
+                if (!replicaStat) throw new ReplicaCacheFallback('The cache replica is missing after sync.');
+                synced = true;
+                break;
+            }
+
+            const failureClass = classifyPullFailure(attemptFailure);
+            // A sync that failed for a reason retrying cannot cure, warm or cold (a replica the server will not
+            // continue, a full disk, an unopenable cache folder): wipe, and the uncached path runs its own attempts (review 14, I3).
+            if (failureClass === 'deterministic') {
+                throw new ReplicaCacheFallback('The cache sync failed.');
+            }
+            const hasAnotherAttempt = attempt + 1 < PULL_ATTEMPTS;
+            if (failureClass === 'credential_expiry' && !credentialRemintUsed && hasAnotherAttempt) {
+                credentialRemintUsed = true;
+                continue;
+            }
+            if (failureClass === 'transient_transport' && hasAnotherAttempt) {
+                await io.sleep(PULL_RETRY_BACKOFF_MS[attempt] ?? PULL_RETRY_BACKOFF_MS.at(-1)!);
+                continue;
+            }
+            break;
+        }
+
+        // I2: nothing is published from a replica whose sync did not succeed in this invocation.
+        if (!synced) {
+            throw new DatabaseOperationError('upstream_unavailable', 'Database file operation failed.');
+        }
+
+        await snapshotCacheReplica(io, createClient, cache, { temp, handle: reservationHandle });
+        reservationHandle = undefined;
+        await publishSnapshot(io, temp, target, reserved);
+        ownsTemp = false;
+        ownsSidecars = false;
+        try {
+            await cache.markSynced();
+        } catch {
+            // The file is published; a cache whose meta.json could not be written is not trusted again (D5).
+            await cache.wipe().catch(() => undefined);
+        }
+        io.stdout(`Database replica saved to ${displayDestination(io, target)}.`);
+        return 'handled';
+    } catch (error) {
+        const fallback = error instanceof ReplicaCacheFallback || error instanceof ReplicaCacheError;
+        if (fallback) await cache?.wipe().catch(() => undefined);
+        await discardReservation();
+        if (fallback) return 'fallback';
         throw freshSafeFileError(error);
+    } finally {
+        await cache?.release();
     }
 }
 
@@ -2395,8 +2946,11 @@ export async function databasePullWithConfig(
         );
     }
     refuseIfAnalyticalRow(row, name, 'sqlite-only');
+    if (isInsideWorkflowRun(io.env) && options.skipWorkflowWarning !== true) {
+        io.stderr(WORKFLOW_RUN_PULL_WARNING);
+    }
     if (options.writable) {
-        return databaseWritablePullWithConfig(name, destination, options, config, io);
+        return databaseWritablePullWithConfig(name, destination, options, config, io, row);
     }
 
     const target = resolveDatabaseDestination(
@@ -2404,14 +2958,24 @@ export async function databasePullWithConfig(
         destination,
         path.join('.solidactions', 'databases', `${safeDatabaseStem(name)}.db`),
     );
+    // Asked once, before either path (plan D8): a cache fallback never asks again.
+    try {
+        if (!await confirmFileOverwrite(target, options, io)) return;
+    } catch (error) {
+        throw freshSafeFileError(error);
+    }
+
+    const handled = cacheEligible(io, options)
+        ? await databaseCachedReadonlyPullWithConfig(name, target, config, io, row)
+        : 'fallback';
+    if (handled === 'handled') return;
+
     let temp: string | undefined;
     let reservationHandle: Awaited<ReturnType<DatabaseFileSystem['open']>> | undefined;
     let ownsTemp = false;
     let ownsSidecars = false;
 
     try {
-        if (!await confirmFileOverwrite(target, options, io)) return;
-
         const reservation = await reserveDestinationTemp(io, target);
         temp = reservation.temp;
         reservationHandle = reservation.handle;
@@ -2902,7 +3466,10 @@ export async function databasePull(
     options: DatabasePullOptions,
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
-    await databasePullWithConfig(name, destination, options, await requireConfigWithWorkspace(), dependencies);
+    await databasePullWithConfig(name, destination, options, await requireConfigWithWorkspace(), {
+        ...dependencies,
+        replicaCacheRoot: dependencies.replicaCacheRoot ?? defaultReplicaCacheRoot(),
+    });
 }
 
 export async function databaseVersions(

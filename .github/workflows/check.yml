@@ -46,6 +46,10 @@ jobs:
         image: ghcr.io/tursodatabase/libsql-server:3ec6803@sha256:1bc51611928ccc51229bdc40ca0defcb915907f8f9f6a664b43529de0ca45fab
         ports:
           - 8080:8080
+      database2:
+        image: ghcr.io/tursodatabase/libsql-server:3ec6803@sha256:1bc51611928ccc51229bdc40ca0defcb915907f8f9f6a664b43529de0ca45fab
+        ports:
+          - 8081:8080
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -57,7 +61,8 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:8080/health > /dev/null; then
+            if curl --fail --silent http://127.0.0.1:8080/health > /dev/null \
+              && curl --fail --silent http://127.0.0.1:8081/health > /dev/null; then
               exit 0
             fi
             sleep 1
@@ -67,6 +72,10 @@ jobs:
       - run: node scripts/probe-database-client-sync.mjs
         env:
           SOLIDACTIONS_DATABASE_SYNC_URL: http://127.0.0.1:8080
+      - run: node scripts/probe-database-replica-cache.mjs
+        env:
+          SOLIDACTIONS_DATABASE_SYNC_URL: http://127.0.0.1:8080
+          SOLIDACTIONS_DATABASE_SYNC_URL_2: http://127.0.0.1:8081
 
   release-candidate:
     runs-on: ubuntu-latest

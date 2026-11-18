@@ -100,6 +100,20 @@ describe('public README setup contract', () => {
             expect(guidance, `README missing ${option}`).toContain(option);
         }
 
+        expect(guidance, 'README missing pull --no-cache').toContain(
+            'solidactions database pull analytics --no-cache',
+        );
+
+        for (const phrase of [
+            'fetches only what changed',
+            'query the database directly',
+            'local analysis',
+            'reuse one copy',
+            'per test or per preview',
+        ]) {
+            expect(guidance, `README missing ${phrase}`).toContain(phrase);
+        }
+
         expect(guidance).toMatch(/soft-delete/i);
         expect(guidance).toMatch(/purge clock/i);
         expect(guidance).toMatch(/read-only local replica/i);

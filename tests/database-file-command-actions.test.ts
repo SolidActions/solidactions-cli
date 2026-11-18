@@ -46,7 +46,20 @@ describe('database file command registration', () => {
         expect(handlers.pull).toHaveBeenCalledWith(
             'Analytics',
             './replicas/analytics.db',
-            { yes: true, writable: true },
+            { yes: true, writable: true, cache: true },
+        );
+    });
+
+    it('dispatches pull with cache disabled when --no-cache is passed', async () => {
+        handlers.pull.mockClear();
+
+        await databaseCommand('pull').parseAsync(['Analytics', '--no-cache'], { from: 'user' });
+
+        expect(handlers.pull).toHaveBeenCalledOnce();
+        expect(handlers.pull).toHaveBeenCalledWith(
+            'Analytics',
+            undefined,
+            expect.objectContaining({ cache: false }),
         );
     });
 });

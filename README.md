@@ -110,6 +110,7 @@ solidactions database exec analytics "DELETE FROM events WHERE expired = 1" --ye
 solidactions database dump analytics backup.sql --yes
 solidactions database pull analytics .solidactions/databases/analytics.db --yes
 solidactions database pull analytics --writable
+solidactions database pull analytics --no-cache
 solidactions database import analytics backup.sql --yes
 solidactions database import analytics backup.sql --resume <checkpoint> --yes
 solidactions database push analytics complete.db --yes
@@ -132,6 +133,8 @@ solidactions database pull metrics ./metrics.duckdb --version 2 --yes
 solidactions database versions metrics --limit 20 --json
 solidactions database rollback metrics 2 --yes --json
 ```
+
+`database pull` fetches only what changed since your last pull of the same database and keeps a hidden cache per database in `~/.solidactions/cache/database-replicas`; use `--no-cache` to skip it. Inside a workflow or function, query the database directly instead of pulling (`ctx.vars` with `createDatabaseClient`). Pull only for local analysis, keep and reuse one copy, and never pull per test or per preview.
 
 `--json` produces machine-readable output where supported. `delete`, `exec`,
 `dump` overwrites, `pull` overwrites, `drop-table`, and `import` prompt before
