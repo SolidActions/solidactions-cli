@@ -104,10 +104,11 @@ export function tokenizeSql(sql: string, maxTokens?: number): SqlToken[] {
             continue;
         }
         if (character === '[') {
-            const text = readDoubled(sql, index + 1, ']', ']');
-            if (text === null) return tokens;
-            tokens.push({ kind: 'ident', text: text.value });
-            index = text.next;
+            // SQLite ends a bracket identifier at the FIRST `]` (no doubling).
+            const end = sql.indexOf(']', index + 1);
+            if (end === -1) return tokens;
+            tokens.push({ kind: 'ident', text: sql.slice(index + 1, end) });
+            index = end + 1;
             continue;
         }
         if (isWordStart(character)) {
@@ -363,13 +364,13 @@ export function mergeSchemaFacts(base: SchemaFacts, override: SchemaFacts): Sche
     return merged;
 }
 
-type GroupSafety = { status: 'safe' } | { status: 'unsafe' } | { status: 'unknown'; table: string };
+type GroupSafety = { status: 'safe' } | { status: 'unsafe' } | { status: 'unknown'; key: string; table: string };
 
 function upsertTarget(tokens: SqlToken[], index: number, facts: SchemaFacts): GroupSafety {
     const name = qualifiedName(tokens, index);
     if (name === null) return { status: 'unsafe' };
     const found = facts.get(name.key);
-    if (found === undefined) return { status: 'unknown', table: name.raw };
+    if (found === undefined) return { status: 'unknown', key: name.key, table: name.raw };
     if (found.keyed && !found.triggered) return { status: 'safe' };
     return { status: 'unsafe' };
 }
@@ -416,13 +417,17 @@ export function replayVerdict(groups: DatabaseSqlImportGroup[], facts: SchemaFac
     let firstUnsafe: DatabaseSqlImportGroup | undefined;
     let hasUnknown = false;
     const unknownTables: string[] = [];
+    const seenUnknownKeys = new Set<string>();
     for (const group of groups) {
         const safety = groupSafety(tokenizeSql(group.sql, 16), facts);
         if (safety.status === 'unsafe') {
             if (firstUnsafe === undefined) firstUnsafe = group;
         } else if (safety.status === 'unknown') {
             hasUnknown = true;
-            unknownTables.push(safety.table);
+            if (!seenUnknownKeys.has(safety.key)) {
+                seenUnknownKeys.add(safety.key);
+                unknownTables.push(safety.table);
+            }
         }
     }
     if (firstUnsafe !== undefined) return { status: 'unsafe', firstUnsafe, unknownTables: [] };

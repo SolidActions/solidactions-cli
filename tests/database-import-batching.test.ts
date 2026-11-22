@@ -97,6 +97,13 @@ describe('database import batching policy', () => {
         expect(tokenizeSql('[a b]')).toEqual([{ kind: 'ident', text: 'a b' }]);
     });
 
+    it('ends a bracket identifier at the first closing bracket', () => {
+        expect(tokenizeSql('[a]]')).toEqual([
+            { kind: 'ident', text: 'a' },
+            { kind: 'punct', text: ']' },
+        ]);
+    });
+
     it('ends the stream without throwing on an unterminated quote or comment', () => {
         expect(tokenizeSql("'abc")).toEqual([]);
         expect(tokenizeSql('/* abc')).toEqual([]);
@@ -381,6 +388,12 @@ describe('database import batching policy', () => {
             status: 'unknown',
             unknownTables: ['nope'],
         });
+        const repeated = [
+            group('INSERT OR REPLACE INTO nope VALUES (1);'),
+            group('INSERT OR REPLACE INTO "NOPE" VALUES (2);'),
+            group('INSERT OR REPLACE INTO nope VALUES (3);'),
+        ];
+        expect(replayVerdict(repeated, empty)).toEqual({ status: 'unknown', unknownTables: ['nope'] });
         const facts = schemaFactsFromSql(['CREATE TABLE t (id INTEGER PRIMARY KEY);'], 'source');
         const mixedUnsafe = [group('INSERT OR REPLACE INTO nope VALUES (1);'), group('DELETE FROM t;')];
         const unsafeVerdict = replayVerdict(mixedUnsafe, facts);
