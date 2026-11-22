@@ -316,6 +316,7 @@ describe('database import command registration', () => {
         ]);
         expect(command.options.find((option: any) => option.long === '--yes')).toBeDefined();
         expect(command.options.find((option: any) => option.long === '--resume')).toMatchObject({ required: true });
+        expect(command.options.find((option: any) => option.long === '--timeout')).toMatchObject({ required: true });
     });
 });
 
@@ -336,6 +337,66 @@ describe('database import preflight and execution', () => {
         expect(checkpointFiles(root)).toEqual([]);
         expect(test.stdout).toEqual([]);
     }, 1_000);
+
+    it.each(['0', '0s', 'abc', '1.5', '-3', '25h', ''])('refuses an invalid --timeout %s before any native load or mint', async (timeout) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT INTO t VALUES (1);');
+        const test = importHarness(root);
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true, timeout }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'invalid_timeout' });
+        expect(test.events).not.toContain('native:load');
+        expect(test.posts).toEqual([]);
+        expect(test.executions).toEqual([]);
+    });
+
+    it.each([
+        { label: 'with the raw hook unset', dataPlaneTimeoutMs: undefined as number | undefined },
+        { label: 'over a raw dataPlaneTimeoutMs', dataPlaneTimeoutMs: 60_000 as number | undefined },
+    ])('honours --timeout $label', async ({ dataPlaneTimeoutMs }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT INTO t VALUES (1);');
+        let started!: () => void;
+        const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
+        const test = importHarness(root, {
+            execute: async () => {
+                started();
+                await new Promise(() => undefined);
+            },
+        });
+        if (dataPlaneTimeoutMs !== undefined) test.dependencies.dataPlaneTimeoutMs = dataPlaneTimeoutMs;
+
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        let caught: unknown;
+        try {
+            const run = databaseImportWithConfig('Analytics', source, { yes: true, timeout: '1s' }, CONFIG, test.dependencies);
+            const settled = expect(run).rejects.toMatchObject({ code: 'upstream_unavailable' });
+            let done = false;
+            void run.then(() => { done = true; }, () => { done = true; });
+            await stalledSignal;
+            await vi.advanceTimersByTimeAsync(999);
+            expect(done).toBe(false);
+            await vi.advanceTimersByTimeAsync(1);
+            await settled;
+            try {
+                await run;
+            } catch (error) {
+                caught = error;
+            }
+        } finally {
+            vi.useRealTimers();
+        }
+
+        expect(report(caught, test)).toContain('within 1s');
+    }, 5_000);
 
     it('imports through the default per-batch limit when no timeout hook is set', async () => {
         const databaseImportWithConfig = await requireImport();
