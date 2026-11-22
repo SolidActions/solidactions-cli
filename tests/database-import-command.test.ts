@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SCHEMA_CATALOG_SQL } from '../src/utils/database-import-batching';
 import { DatabaseOperationError } from '../src/utils/database-data-plane';
 
 const CONFIG = {
@@ -64,6 +65,8 @@ interface HarnessOptions {
     expiresAt?: string[];
     post?: (attempt: number, body: Record<string, unknown>) => Promise<unknown>;
     execute?: (execution: Execution) => Promise<void>;
+    catalog?: (sql: string) => unknown[][] | Promise<unknown[][]>;
+    sleep?: (ms: number) => Promise<void>;
     onLoad?: () => void;
     filesystem?: typeof fs.promises;
 }
@@ -76,6 +79,8 @@ function importHarness(root: string, options: HarnessOptions = {}) {
     const closed: number[] = [];
     const stdout: string[] = [];
     const stderr: string[] = [];
+    const catalogReads: Array<{ client: number; sql: string }> = [];
+    const sleeps: number[] = [];
     const confirm = vi.fn(async () => {
         events.push('confirm');
         return options.confirm ?? true;
@@ -93,6 +98,10 @@ function importHarness(root: string, options: HarnessOptions = {}) {
         confirm,
         stdout: (line: string) => stdout.push(line),
         stderr: (line: string) => stderr.push(line),
+        sleep: async (ms: number) => {
+            sleeps.push(ms);
+            await options.sleep?.(ms);
+        },
         loadClient: async () => {
             events.push('native:load');
             options.onLoad?.();
@@ -102,8 +111,15 @@ function importHarness(root: string, options: HarnessOptions = {}) {
                     clients.push(config);
                     events.push(`client:${client}:create`);
                     return {
-                        execute: async () => {
-                            throw new Error('import must use executeMultiple');
+                        execute: async (sql: string) => {
+                            catalogReads.push({ client, sql: String(sql) });
+                            if (!options.catalog) {
+                                throw new Error('import must use executeMultiple');
+                            }
+                            return {
+                                columns: ['type', 'name', 'tbl_name', 'sql'],
+                                rows: await options.catalog(String(sql)),
+                            };
                         },
                         executeMultiple: async (statement: unknown) => {
                             const execution = { client, sql: String(statement) };
@@ -169,7 +185,15 @@ function importHarness(root: string, options: HarnessOptions = {}) {
         },
     };
 
-    return { events, posts, clients, executions, closed, stdout, stderr, confirm, dependencies };
+    return { events, posts, clients, executions, closed, stdout, stderr, confirm, dependencies, catalogReads, sleeps };
+}
+
+function groupCount(sql: string): number {
+    return sql.split('\n').filter((line) => /^(INSERT|CREATE)/.test(line)).length;
+}
+
+function firstStatement(sql: string): string {
+    return sql.split('\n')[2];
 }
 
 function managedEnvelope(statements: string[]): string {
@@ -311,6 +335,512 @@ describe('database import preflight and execution', () => {
         expect(test.closed).toEqual([1]);
         expect(checkpointFiles(root)).toEqual([]);
         expect(test.stdout).toEqual([]);
+    }, 1_000);
+
+    it('imports through the default per-batch limit when no timeout hook is set', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id);\nINSERT INTO t VALUES (1);');
+        const test = importHarness(root);
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions).toHaveLength(1);
+        expect(checkpointFiles(root)).toEqual([]);
+    });
+
+    it('splits a stalled batch in half and finishes the import from the same statement', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
+        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
+        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([40, 20, 10, 10, 10, 10]);
+        expect(accessPosts(test)).toHaveLength(3);
+        expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 3, 3, 3]);
+        expect(test.closed).toEqual([1, 2, 3]);
+        expect(test.catalogReads).toEqual([]);
+        const retries = test.stdout.filter((line) => /did not finish within .*s; retrying from the same statement in batches of up to (20|10)/.test(line));
+        expect(retries).toHaveLength(2);
+        expect(checkpointFiles(root)).toEqual([]);
+
+        // Every committed statement ran exactly once, in source order.
+        const resting = test.executions.slice(2).map((execution) => execution.sql.split('\n').slice(2, -2));
+        expect(resting.flat()).toEqual([keyed, ...inserts]);
+        expect(firstStatement(test.executions[1].sql)).toBe(firstStatement(test.executions[0].sql));
+        expect(firstStatement(test.executions[2].sql)).toBe(firstStatement(test.executions[1].sql));
+    }, 1_000);
+
+    it.each([
+        {
+            label: 'plain INSERT',
+            statements: ['INSERT INTO t VALUES (1);', 'INSERT INTO t VALUES (2);', 'INSERT INTO t VALUES (3);'],
+        },
+        {
+            label: 'unguarded CREATE TABLE',
+            statements: ['CREATE TABLE t (id);', 'CREATE TABLE u (id);', 'CREATE TABLE v (id);'],
+        },
+        {
+            label: 'UPDATE',
+            statements: ['UPDATE t SET a = 1;', 'UPDATE t SET a = 2;', 'UPDATE t SET a = 3;'],
+        },
+        {
+            label: 'DELETE',
+            statements: ['DELETE FROM t;', 'DELETE FROM t;', 'DELETE FROM t;'],
+        },
+        {
+            label: 'DROP TABLE',
+            statements: ['DROP TABLE t;', 'DROP TABLE u;', 'DROP TABLE v;'],
+        },
+        {
+            label: 'upsert into a keyless table',
+            statements: ['CREATE TABLE t (a);', 'INSERT OR REPLACE INTO t VALUES (1);', 'INSERT OR REPLACE INTO t VALUES (2);'],
+        },
+        {
+            label: 'INSERT OR IGNORE into a keyless table',
+            statements: ['CREATE TABLE t (a);', 'INSERT OR IGNORE INTO t VALUES (1);', 'INSERT OR IGNORE INTO t VALUES (2);'],
+        },
+    ])('never retries $label statements that are not safe to repeat', async ({ statements }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain('--timeout');
+        expect(rendered).toContain('lines 1-3');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('stops a single stalling statement without a catalog read', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT OR REPLACE INTO t VALUES (1);');
+        const test = importHarness(root, {
+            execute: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('cannot be split further');
+        expect(rendered).toContain('--timeout');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('keeps progress before the failing statement and resumes from statement 7', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
+        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
+        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (7)')) await new Promise(() => undefined);
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(report(caught, test)).toContain('cannot be split further');
+        const [checkpoint] = checkpointFiles(root);
+        expect(checkpoint).toBeDefined();
+        expect(JSON.parse(fs.readFileSync(checkpoint, 'utf8'))).toMatchObject({
+            lastCompletedBatch: 2,
+            nextStatement: 7,
+            completedSourceBytes: Buffer.byteLength([keyed, ...inserts.slice(0, 6)].join('\n')),
+        });
+        expect(report(caught, test).split('\n')).toContain(resumeLine('Analytics', source, checkpoint));
+        expect(groupCount(test.executions[test.executions.length - 1].sql)).toBe(1);
+    }, 1_000);
+
+    it.each([
+        {
+            label: 'F32_BLOB column',
+            ddl: ['CREATE TABLE d (id INTEGER, e F32_BLOB(4));'],
+            inserts: 45,
+            counts: [20, 20, 6],
+        },
+        {
+            label: 'libsql_vector_idx index',
+            ddl: ['CREATE TABLE d (id INTEGER, e BLOB);', 'CREATE INDEX d_idx ON d (libsql_vector_idx(e));'],
+            inserts: 44,
+            counts: [20, 20, 6],
+        },
+        {
+            label: 'plain BLOB',
+            ddl: ['CREATE TABLE d (id INTEGER, e BLOB);'],
+            inserts: 45,
+            counts: [46],
+        },
+    ])('caps a $label source at the vector batch size', async ({ ddl, inserts, counts }) => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [...ddl, ...Array.from({ length: inserts }, (_, index) => `INSERT INTO d VALUES (${index}, X'00');`)];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root);
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual(counts);
+    });
+
+    it('reads the target schema on an unknown table and reuses the fresh client for the retry', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async (sql) => {
+                expect(sql).toBe(SCHEMA_CATALOG_SQL);
+                return [
+                    ['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)'],
+                    ['index', 'sqlite_autoindex_t_1', 't', null],
+                ];
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([40, 20, 10, 10, 10, 10]);
+        expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 3, 3, 3]);
+        expect(test.closed).toEqual([1, 2, 3]);
+        expect(test.catalogReads).toHaveLength(2);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([SCHEMA_CATALOG_SQL, SCHEMA_CATALOG_SQL]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2, 3]);
+        expect(checkpointFiles(root)).toEqual([]);
+    }, 1_000);
+
+    it('does not retry when the target schema agrees the table has no key', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [['table', 't', 't', 'CREATE TABLE t (a)']],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('not safe to repeat');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('does not retry when the target schema has a trigger on the table', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [
+                ['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)'],
+                ['trigger', 'tr', 't', 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END'],
+            ],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        expect(report(caught, test)).toContain('not safe to repeat');
+    }, 1_000);
+
+    it('names the table when it is not known anywhere', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('The target tables t are not known to have a primary key');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('stops when the target schema cannot be read', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => {
+                throw new Error('CATALOG_UNREADABLE');
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('could not be read');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('rereads the target schema after every timeout instead of caching it', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        let calls = 0;
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => {
+                calls += 1;
+                return calls === 1
+                    ? [['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)']]
+                    : [['table', 't', 't', 'CREATE TABLE t (a)']];
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([40, 20]);
+        expect(test.catalogReads).toHaveLength(2);
+        expect(report(caught, test)).toContain('not safe to repeat');
+    }, 1_000);
+
+    it('does not take a source IF NOT EXISTS as a keyed fact', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY);',
+            ...Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [['table', 't', 't', 'CREATE TABLE t (a)']],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        expect(report(caught, test)).toContain('not safe to repeat');
+    }, 1_000);
+
+    it('waits out a lock left by a timed-out batch and retries at the same size', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
+        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
+        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        let started!: () => void;
+        const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
+        let calls = 0;
+        const test = importHarness(root, {
+            execute: async () => {
+                calls += 1;
+                if (calls === 1) {
+                    started();
+                    await new Promise(() => undefined);
+                } else if (calls <= 3) {
+                    throw Object.assign(new Error('SQLITE_BUSY: database is locked'), { code: 'SQLITE_BUSY' });
+                }
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 60_000;
+
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+            const run = databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+            await stalledSignal;
+            await vi.advanceTimersByTimeAsync(60_000);
+            await run;
+        } finally {
+            vi.useRealTimers();
+        }
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([40, 20, 20, 20, 20]);
+        expect(test.executions[1].sql).toBe(test.executions[2].sql);
+        expect(test.executions[2].sql).toBe(test.executions[3].sql);
+        expect(test.sleeps).toEqual([1000, 2000]);
+        expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 4, 4]);
+        const locked = test.stdout.filter((line) => /still locked by the timed-out batch/.test(line));
+        expect(locked).toHaveLength(2);
+        expect(checkpointFiles(root)).toEqual([]);
+    }, 1_000);
+
+    it('stops when the lock outlasts the per-batch budget', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
+        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
+        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        let started!: () => void;
+        const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
+        let calls = 0;
+        const test = importHarness(root, {
+            execute: async () => {
+                calls += 1;
+                if (calls === 1) {
+                    started();
+                    await new Promise(() => undefined);
+                } else {
+                    throw Object.assign(new Error('SQLITE_BUSY: database is locked'), { code: 'SQLITE_BUSY' });
+                }
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 3_000;
+
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        let caught: unknown;
+        try {
+            const run = databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+            await stalledSignal;
+            await vi.advanceTimersByTimeAsync(3_000);
+            try {
+                await run;
+            } catch (error) {
+                caught = error;
+            }
+        } finally {
+            vi.useRealTimers();
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(4);
+        expect(test.sleeps).toEqual([1000, 2000]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('stayed locked');
+        expect(rendered).toContain('lines 1-20');
+        expect(rendered).toContain('--timeout');
+        expect(rendered).not.toContain('Resume with:');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('fails a lock error outside a timeout retry without waiting', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'CREATE TABLE t (id INTEGER PRIMARY KEY);\nINSERT OR REPLACE INTO t VALUES (1);');
+        const test = importHarness(root, {
+            execute: async () => {
+                throw Object.assign(new Error('SQLITE_BUSY: database is locked'), { code: 'SQLITE_BUSY' });
+            },
+        });
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'import_failed' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.sleeps).toEqual([]);
+        expect(report(caught, test)).toContain('A database import batch failed.');
     }, 1_000);
 
     it.each([
@@ -1098,16 +1628,18 @@ describe('database import resume validation', () => {
 
     it.each([
         {
-            label: 'batch count exceeds the deterministic boundary count',
-            lastCompletedBatch: 2,
+            label: 'batch count exceeds the statement position',
+            lastCompletedBatch: 101,
             nextStatement: 100,
+            skew: 0,
         },
         {
-            label: 'statement position is not a deterministic batch boundary',
+            label: 'source bytes do not match the statement boundary',
             lastCompletedBatch: 1,
             nextStatement: 50,
+            skew: 1,
         },
-    ])('rejects a checkpoint whose $label before native load or mint', async ({ lastCompletedBatch, nextStatement }) => {
+    ])('rejects a checkpoint whose $label before native load or mint', async ({ lastCompletedBatch, nextStatement, skew }) => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
         const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
@@ -1115,7 +1647,7 @@ describe('database import resume validation', () => {
         const checkpoint = writeCheckpoint(root, checkpointFor(source, 'Analytics', {
             lastCompletedBatch,
             nextStatement,
-            completedSourceBytes: Buffer.byteLength(statements.slice(0, nextStatement).join('\n')),
+            completedSourceBytes: Buffer.byteLength(statements.slice(0, nextStatement).join('\n')) + skew,
         }));
         const test = importHarness(root);
 
@@ -1126,6 +1658,27 @@ describe('database import resume validation', () => {
         expect(test.events).not.toContain('native:load');
         expect(test.posts).toEqual([showPost('Analytics')]);
         expect(test.executions).toEqual([]);
+    });
+
+    it('resumes a relaxed checkpoint past the old deterministic boundary', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const checkpoint = writeCheckpoint(root, checkpointFor(source, 'Analytics', {
+            lastCompletedBatch: 3,
+            nextStatement: 50,
+            completedSourceBytes: Buffer.byteLength(statements.slice(0, 50).join('\n')),
+        }));
+        const test = importHarness(root);
+
+        await databaseImportWithConfig(
+            'Analytics', source, { yes: true, resume: checkpoint }, CONFIG, test.dependencies,
+        );
+
+        expect(test.executions[0].sql).toContain('VALUES (50)');
+        expect(test.executions[0].sql).not.toContain('VALUES (49)');
+        expect(checkpointFiles(root)).toEqual([]);
     });
 
     it('rejects corrupt JSON and same-size source mutation before native load or mint', async () => {

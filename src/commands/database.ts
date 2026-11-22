@@ -1477,6 +1477,8 @@ export async function databaseCreateWithConfig(
                         loadClient: io.loadClient,
                         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
                         dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
+                        batchTimeoutMs: dependencies.dataPlaneTimeoutMs,
+                        sleep: dependencies.sleep,
                     },
                 );
             }
@@ -1632,6 +1634,8 @@ export async function databaseImportWithConfig(
         loadClient: io.loadClient,
         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
         dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
+        batchTimeoutMs: dependencies.dataPlaneTimeoutMs,
+        sleep: dependencies.sleep,
     });
 }
 

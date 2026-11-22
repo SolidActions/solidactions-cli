@@ -15,15 +15,27 @@ import {
     databaseCredentialDeadline,
     databaseCredentialFailureCode,
     isDatabaseCredentialAuthFailure,
+    isDatabaseDeadlineElapsed,
 } from './database-data-plane';
+import {
+    DEFAULT_IMPORT_BATCH_TIMEOUT_MS,
+    MAX_BATCH_GROUPS,
+    SCHEMA_CATALOG_SQL,
+    VECTOR_MAX_BATCH_GROUPS,
+    isLockError,
+    lockBackoffMs,
+    mergeSchemaFacts,
+    nextBatch,
+    replayVerdict,
+    schemaFactsFromSql,
+    sourceHasVectorColumns,
+} from './database-import-batching';
 import {
     DatabaseSqlImportGroup,
     parseDatabaseImportSql,
 } from './database-sql-import';
 
 const CHECKPOINT_VERSION = 1;
-const MAX_BATCH_GROUPS = 100;
-const MAX_BATCH_BYTES = 512 * 1024;
 const RENEWAL_WINDOW_MS = 30_000;
 
 type ImportFileSystem = typeof fs.promises;
@@ -60,6 +72,8 @@ export interface DatabaseImportRunnerDependencies extends DatabaseClientDependen
     stdout: (line: string) => void;
     now: () => number;
     monotonicNow: () => number;
+    batchTimeoutMs?: number;
+    sleep?: (ms: number) => Promise<void>;
 }
 
 function importFailure(message = 'Database import failed.'): DatabaseOperationError {
@@ -131,23 +145,6 @@ function checkpointBoundary(groups: DatabaseSqlImportGroup[], nextStatement: num
     return nextStatement === 0 ? 0 : groups[nextStatement - 1].endByte;
 }
 
-function deterministicBatchCount(
-    groups: DatabaseSqlImportGroup[],
-    nextStatement: number,
-): number | null {
-    if (nextStatement === 0) return 0;
-    let cursor = 0;
-    let count = 0;
-    while (cursor < groups.length) {
-        const batch = nextBatch(groups, cursor);
-        cursor = batch.nextStatement;
-        count += 1;
-        if (cursor === nextStatement) return count;
-        if (cursor > nextStatement) return null;
-    }
-    return null;
-}
-
 function validateCheckpoint(
     value: unknown,
     database: string,
@@ -162,9 +159,6 @@ function validateCheckpoint(
     const expectedBoundary = typeof nextStatement === 'number'
         ? checkpointBoundary(groups, nextStatement)
         : null;
-    const expectedBatchCount = typeof nextStatement === 'number'
-        ? deterministicBatchCount(groups, nextStatement)
-        : null;
 
     if (
         checkpoint?.version !== CHECKPOINT_VERSION
@@ -173,8 +167,9 @@ function validateCheckpoint(
         || source.sizeBytes !== sizeBytes
         || typeof checkpoint.lastCompletedBatch !== 'number'
         || !Number.isInteger(checkpoint.lastCompletedBatch)
-        || checkpoint.lastCompletedBatch !== expectedBatchCount
         || typeof nextStatement !== 'number'
+        || checkpoint.lastCompletedBatch < (nextStatement === 0 ? 0 : 1)
+        || checkpoint.lastCompletedBatch > nextStatement
         || expectedBoundary === null
         || completedSourceBytes !== expectedBoundary
     ) {
@@ -402,26 +397,6 @@ async function removeCheckpoint(filesystem: ImportFileSystem, target: string): P
     }
 }
 
-interface ImportBatch {
-    groups: DatabaseSqlImportGroup[];
-    nextStatement: number;
-}
-
-function nextBatch(groups: DatabaseSqlImportGroup[], start: number): ImportBatch {
-    const selected: DatabaseSqlImportGroup[] = [];
-    let bytes = 0;
-    let index = start;
-    while (index < groups.length && selected.length < MAX_BATCH_GROUPS) {
-        const groupBytes = Buffer.byteLength(groups[index].sql, 'utf8');
-        if (selected.length > 0 && bytes + groupBytes > MAX_BATCH_BYTES) break;
-        selected.push(groups[index]);
-        bytes += groupBytes;
-        index += 1;
-        if (groupBytes > MAX_BATCH_BYTES) break;
-    }
-    return { groups: selected, nextStatement: index };
-}
-
 function batchSql(groups: DatabaseSqlImportGroup[]): string {
     return [
         'PRAGMA foreign_keys=OFF;',
@@ -538,6 +513,13 @@ export async function runPreparedDatabaseImport(
         return clientClosePromise;
     };
 
+    const batchTimeoutMs = dependencies.batchTimeoutMs ?? DEFAULT_IMPORT_BATCH_TIMEOUT_MS;
+    const sleep = dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    let batchCap = sourceHasVectorColumns(prepared.groups) ? VECTOR_MAX_BATCH_GROUPS : MAX_BATCH_GROUPS;
+    let retryingAfterTimeout = false;
+    let lockAttempts = 0;
+    let lockWaitedMs = 0;
+
     try {
         while (nextStatement < prepared.groups.length) {
             const deadlineNow = deadline?.clock === 'monotonic' ? dependencies.monotonicNow() : dependencies.now();
@@ -550,14 +532,91 @@ export async function runPreparedDatabaseImport(
                 deadline = acquired.deadline;
             }
 
-            const batch = nextBatch(prepared.groups, nextStatement);
+            const batch = nextBatch(prepared.groups, nextStatement, batchCap);
             try {
                 await runDatabaseClientOperationWithDeadline(
                     () => client!.executeMultiple!(batchSql(batch.groups)),
                     closeCurrentClient,
-                    dependencies.dataPlaneTimeoutMs ?? DEFAULT_DATABASE_DATA_PLANE_TIMEOUT_MS,
+                    batchTimeoutMs,
                 );
             } catch (error) {
+                const batchFrom = batch.groups[0].startLine;
+                const batchTo = batch.groups[batch.groups.length - 1].endLine;
+                const dropClient = () => {
+                    void closeCurrentClient().catch(() => undefined);
+                    client = undefined;
+                    clientClosePromise = undefined;
+                    deadline = undefined;
+                };
+
+                // D7: a lock error that follows a retried timeout: same batch, same size, bounded backoff.
+                if (retryingAfterTimeout && isLockError(error)) {
+                    const delay = lockBackoffMs(lockAttempts, batchTimeoutMs - lockWaitedMs);
+                    if (delay <= 0) {
+                        throw new DatabaseOperationError(
+                            'upstream_unavailable',
+                            `The database stayed locked for ${Math.round(batchTimeoutMs / 1000)}s after a batch timed out (lines ${batchFrom}-${batchTo}); the timed-out transaction may still be running. Wait and resume, or raise the per-batch limit with --timeout.`,
+                        );
+                    }
+                    lockAttempts += 1;
+                    lockWaitedMs += delay;
+                    dropClient();
+                    dependencies.stdout(`The database is still locked by the timed-out batch; retrying the same ${batch.groups.length} statements in ${Math.round(delay / 100) / 10}s.`);
+                    await sleep(delay);
+                    continue;
+                }
+
+                // D1, D2, D8: a deadline timeout.
+                if (isDatabaseDeadlineElapsed(error)) {
+                    let keepFreshClient = false;
+                    const size = batch.groups.length;
+                    const seconds = Math.round(batchTimeoutMs / 1000);
+                    const sourceFacts = schemaFactsFromSql(prepared.groups.slice(0, batch.nextStatement).map((group) => group.sql), 'source');
+                    let verdict = replayVerdict(batch.groups, sourceFacts);
+                    if (size >= 2 && verdict.status === 'unknown') {
+                        // D8: a read of the target catalog, on a fresh client, under the per-batch deadline (never cached).
+                        dropClient();
+                        const acquired = await acquireClient(prepared, config, dependencies);
+                        client = acquired.client;
+                        deadline = acquired.deadline;
+                        keepFreshClient = true;
+                        let rows: Array<ArrayLike<unknown>>;
+                        try {
+                            rows = (await runDatabaseClientOperationWithDeadline(
+                                () => client!.execute(SCHEMA_CATALOG_SQL),
+                                closeCurrentClient,
+                                batchTimeoutMs,
+                            )).rows;
+                        } catch {
+                            throw new DatabaseOperationError(
+                                'upstream_unavailable',
+                                `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s, and the target schema could not be read to check whether repeating it is safe, so it was not retried. Raise the per-batch limit with --timeout (for example --timeout 15m).`,
+                            );
+                        }
+                        // D8: the facts are used for this verdict only and dropped; the next timeout reads again.
+                        const catalogFacts = schemaFactsFromSql(rows.map((row) => String(row[3] ?? '')), 'catalog');
+                        verdict = replayVerdict(batch.groups, mergeSchemaFacts(sourceFacts, catalogFacts));
+                    }
+                    if (size >= 2 && verdict.status === 'safe') {
+                        if (!keepFreshClient) dropClient();
+                        batchCap = Math.max(1, Math.floor(size / 2));
+                        retryingAfterTimeout = true;
+                        lockAttempts = 0;
+                        lockWaitedMs = 0;
+                        dependencies.stdout(
+                            `A batch of ${size} statements did not finish within ${seconds}s; retrying from the same statement in batches of up to ${batchCap}.`,
+                        );
+                        continue;
+                    }
+                    const reason = size === 1
+                        ? `A single statement (lines ${batchFrom}-${batchTo}, ${Buffer.byteLength(batch.groups[0].sql, 'utf8')} bytes) did not finish within ${seconds}s and cannot be split further.`
+                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)` : `The target tables ${verdict.unknownTables.join(', ')} are not known to have a primary key or unique constraint, so repeating the batch is not safe`}, so it was not retried; if the table has no unique key, check it before resuming.`;
+                    throw new DatabaseOperationError(
+                        'upstream_unavailable',
+                        `Database operation timed out. ${reason} Raise the per-batch limit with --timeout (for example --timeout 15m).`,
+                    );
+                }
+
                 if (error instanceof DatabaseOperationError) throw error;
                 if (deadline && isDatabaseCredentialAuthFailure(error)) {
                     const code = databaseCredentialFailureCode(deadline, dependencies.now(), dependencies.monotonicNow());
@@ -596,6 +655,9 @@ export async function runPreparedDatabaseImport(
 
             checkpointPublished = true;
             completedBatches += 1;
+            retryingAfterTimeout = false;
+            lockAttempts = 0;
+            lockWaitedMs = 0;
             nextStatement = batch.nextStatement;
             completedSourceBytes = boundary;
             dependencies.stdout(
