@@ -227,11 +227,14 @@ line. Sources with vector columns use smaller batches. A lock held by a
 timed-out batch is waited out with a bounded backoff before the same batch is
 retried.
 
-Limits: a table with a trigger, a statement that omits its key columns, or a
-plain `INSERT` dump is never retried; a source that only inserts into an
-existing vector table starts at the full batch size and halves it on the first
-timeout; writing the same key twice with different values can, if a timed-out
-batch commits late (after later batches), leave the older value in place.
+Limits: a table with a trigger, a statement that omits its key columns, a
+plain `INSERT` dump, or a batch that contains a plain `CREATE` (a dump's first
+batch, which holds its `CREATE TABLE` statements), `DROP`, or `ALTER` is never
+retried either: a timeout there stops with the resume line; a source that only
+inserts into an existing vector table starts at the full batch size and halves
+it on the first timeout; writing the same key twice with different values can,
+if a timed-out batch commits late (after later batches), leave the older value
+in place.
 
 ## Configuration
 

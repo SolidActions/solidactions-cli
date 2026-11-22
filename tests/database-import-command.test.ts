@@ -413,12 +413,15 @@ describe('database import preflight and execution', () => {
     it('splits a stalled batch in half and finishes the import from the same statement', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
-        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
-        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
-        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
         const test = importHarness(root, {
             execute: async ({ sql }) => {
                 if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async (sql) => {
+                expect(sql).toBe(SCHEMA_CATALOG_SQL);
+                return [['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)']];
             },
         });
         test.dependencies.dataPlaneTimeoutMs = 10;
@@ -429,14 +432,16 @@ describe('database import preflight and execution', () => {
         expect(accessPosts(test)).toHaveLength(3);
         expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 3, 3, 3]);
         expect(test.closed).toEqual([1, 2, 3]);
-        expect(test.catalogReads).toEqual([]);
+        expect(test.catalogReads).toHaveLength(2);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([SCHEMA_CATALOG_SQL, SCHEMA_CATALOG_SQL]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2, 3]);
         const retries = test.stdout.filter((line) => /did not finish within .*s; retrying from the same statement in batches of up to (20|10)/.test(line));
         expect(retries).toHaveLength(2);
         expect(checkpointFiles(root)).toEqual([]);
 
         // Every committed statement ran exactly once, in source order.
         const resting = test.executions.slice(2).map((execution) => execution.sql.split('\n').slice(2, -2));
-        expect(resting.flat()).toEqual([keyed, ...inserts]);
+        expect(resting.flat()).toEqual(statements);
         expect(firstStatement(test.executions[1].sql)).toBe(firstStatement(test.executions[0].sql));
         expect(firstStatement(test.executions[2].sql)).toBe(firstStatement(test.executions[1].sql));
     }, 1_000);
@@ -524,12 +529,15 @@ describe('database import preflight and execution', () => {
     it('keeps progress before the failing statement and resumes from statement 7', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
-        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
-        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
-        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
         const test = importHarness(root, {
             execute: async ({ sql }) => {
                 if (sql.includes('VALUES (7)')) await new Promise(() => undefined);
+            },
+            catalog: async (sql) => {
+                expect(sql).toBe(SCHEMA_CATALOG_SQL);
+                return [['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)']];
             },
         });
         test.dependencies.dataPlaneTimeoutMs = 10;
@@ -548,10 +556,19 @@ describe('database import preflight and execution', () => {
         expect(JSON.parse(fs.readFileSync(checkpoint, 'utf8'))).toMatchObject({
             lastCompletedBatch: 2,
             nextStatement: 7,
-            completedSourceBytes: Buffer.byteLength([keyed, ...inserts.slice(0, 6)].join('\n')),
+            completedSourceBytes: Buffer.byteLength(statements.slice(0, 7).join('\n')),
         });
         expect(report(caught, test).split('\n')).toContain(resumeLine('Analytics', source, checkpoint));
         expect(groupCount(test.executions[test.executions.length - 1].sql)).toBe(1);
+        expect(test.catalogReads).toHaveLength(5);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([
+            SCHEMA_CATALOG_SQL,
+            SCHEMA_CATALOG_SQL,
+            SCHEMA_CATALOG_SQL,
+            SCHEMA_CATALOG_SQL,
+            SCHEMA_CATALOG_SQL,
+        ]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2, 3, 4, 5, 6]);
     }, 1_000);
 
     it.each([
@@ -794,9 +811,8 @@ describe('database import preflight and execution', () => {
     it('waits out a lock left by a timed-out batch and retries at the same size', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
-        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
-        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
-        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
         let started!: () => void;
         const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
         let calls = 0;
@@ -809,6 +825,10 @@ describe('database import preflight and execution', () => {
                 } else if (calls <= 3) {
                     throw Object.assign(new Error('SQLITE_BUSY: database is locked'), { code: 'SQLITE_BUSY' });
                 }
+            },
+            catalog: async (sql) => {
+                expect(sql).toBe(SCHEMA_CATALOG_SQL);
+                return [['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)']];
             },
         });
         test.dependencies.dataPlaneTimeoutMs = 60_000;
@@ -827,6 +847,9 @@ describe('database import preflight and execution', () => {
         expect(test.executions[1].sql).toBe(test.executions[2].sql);
         expect(test.executions[2].sql).toBe(test.executions[3].sql);
         expect(test.sleeps).toEqual([1000, 2000]);
+        expect(test.catalogReads).toHaveLength(1);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([SCHEMA_CATALOG_SQL]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2]);
         expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 4, 4]);
         const locked = test.stdout.filter((line) => /still locked by the timed-out batch/.test(line));
         expect(locked).toHaveLength(2);
@@ -836,9 +859,8 @@ describe('database import preflight and execution', () => {
     it('stops when the lock outlasts the per-batch budget', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
-        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
-        const inserts = Array.from({ length: 39 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
-        const source = sourceFile(root, [keyed, ...inserts].join('\n'));
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
         let started!: () => void;
         const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
         let calls = 0;
@@ -852,6 +874,10 @@ describe('database import preflight and execution', () => {
                     throw Object.assign(new Error('SQLITE_BUSY: database is locked'), { code: 'SQLITE_BUSY' });
                 }
             },
+            catalog: async (sql) => {
+                expect(sql).toBe(SCHEMA_CATALOG_SQL);
+                return [['table', 't', 't', 'CREATE TABLE t (id INTEGER PRIMARY KEY)']];
+            },
         });
         test.dependencies.dataPlaneTimeoutMs = 3_000;
 
@@ -859,13 +885,10 @@ describe('database import preflight and execution', () => {
         let caught: unknown;
         try {
             const run = databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+            const settled = run.then(() => undefined, (error: unknown) => error);
             await stalledSignal;
             await vi.advanceTimersByTimeAsync(3_000);
-            try {
-                await run;
-            } catch (error) {
-                caught = error;
-            }
+            caught = await settled;
         } finally {
             vi.useRealTimers();
         }
@@ -873,6 +896,9 @@ describe('database import preflight and execution', () => {
         expect(caught).toMatchObject({ code: 'upstream_unavailable' });
         expect(test.executions).toHaveLength(4);
         expect(test.sleeps).toEqual([1000, 2000]);
+        expect(test.catalogReads).toHaveLength(1);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([SCHEMA_CATALOG_SQL]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2]);
         const rendered = report(caught, test);
         expect(rendered).toContain('stayed locked');
         expect(rendered).toContain('lines 1-20');
