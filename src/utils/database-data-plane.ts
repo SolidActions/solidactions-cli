@@ -187,6 +187,10 @@ class DatabaseDeadlineElapsed extends DatabaseOperationError {
     }
 }
 
+export function isDatabaseDeadlineElapsed(error: unknown): boolean {
+    return error instanceof DatabaseDeadlineElapsed;
+}
+
 async function requestWithDeadline<T>(
     operation: (signal: AbortSignal, timeoutMs: number) => Promise<T>,
     timeoutMs: number,
