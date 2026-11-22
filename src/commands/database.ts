@@ -1612,6 +1612,7 @@ export async function databaseImportWithConfig(
         options.resume,
         io.cwd,
         io.filesystem,
+        options.timeout,
     );
 
     if (!options.yes) {
@@ -1638,6 +1639,7 @@ export async function databaseImportWithConfig(
         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
         dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
         batchTimeoutMs,
+        resumeTimeout: options.timeout,
         sleep: dependencies.sleep,
     });
 }

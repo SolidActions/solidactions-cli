@@ -398,6 +398,99 @@ describe('database import preflight and execution', () => {
         expect(report(caught, test)).toContain('within 1s');
     }, 5_000);
 
+    it('carries --timeout onto both resume lines when the flag was passed', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        let started!: () => void;
+        const stalledSignal = new Promise<void>((resolve) => { started = resolve; });
+        let calls = 0;
+        const test = importHarness(root, {
+            execute: async () => {
+                calls += 1;
+                if (calls === 1) return;
+                started();
+                await new Promise(() => undefined);
+            },
+        });
+
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        let caught: unknown;
+        try {
+            const run = databaseImportWithConfig('Analytics', source, { yes: true, timeout: '1s' }, CONFIG, test.dependencies);
+            const settled = run.then(() => undefined, (error: unknown) => error);
+            await stalledSignal;
+            await vi.advanceTimersByTimeAsync(1_000);
+            caught = await settled;
+        } finally {
+            vi.useRealTimers();
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        const [checkpoint] = checkpointFiles(root);
+        expect(checkpoint).toBeDefined();
+        expect(report(caught, test).split('\n').filter((line) => line.startsWith('Resume with:'))).toEqual([
+            `${resumeLine('Analytics', source, checkpoint)} --timeout 1s`,
+        ]);
+        expectNoSecrets(report(caught, test));
+
+        const repeat = importHarness(root);
+        let refused: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true, timeout: '1s' }, CONFIG, repeat.dependencies);
+        } catch (error) {
+            refused = error;
+        }
+
+        expect(refused).toMatchObject({ code: 'import_failed' });
+        expect(repeat.executions).toEqual([]);
+        expect(report(refused, repeat).split('\n').filter((line) => line.startsWith('Resume with:'))).toEqual([
+            `${resumeLine('Analytics', source, checkpoint)} --timeout 1s`,
+        ]);
+        expectNoSecrets(report(refused, repeat));
+    }, 5_000);
+
+    it('omits --timeout from both resume lines when the flag was not passed', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 101 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const interrupted = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('VALUES (100)')) throw new Error('INITIAL_FAILURE');
+            },
+        });
+
+        let initialFailure: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, interrupted.dependencies);
+        } catch (error) {
+            initialFailure = error;
+        }
+
+        const [checkpoint] = checkpointFiles(root);
+        expect(checkpoint).toBeDefined();
+        const guidance = report(initialFailure, interrupted).split('\n').filter((line) => line.startsWith('Resume with:'));
+        expect(guidance).toEqual([resumeLine('Analytics', source, checkpoint)]);
+        expectNoSecrets(report(initialFailure, interrupted));
+
+        const test = importHarness(root);
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'import_failed' });
+        expect(test.executions).toEqual([]);
+        expect(report(caught, test).split('\n').filter((line) => line.startsWith('Resume with:'))).toEqual([
+            resumeLine('Analytics', source, checkpoint),
+        ]);
+        expectNoSecrets(report(caught, test));
+    });
+
     it('imports through the default per-batch limit when no timeout hook is set', async () => {
         const databaseImportWithConfig = await requireImport();
         const root = tempRoot();
@@ -444,6 +537,41 @@ describe('database import preflight and execution', () => {
         expect(resting.flat()).toEqual(statements);
         expect(firstStatement(test.executions[1].sql)).toBe(firstStatement(test.executions[0].sql));
         expect(firstStatement(test.executions[2].sql)).toBe(firstStatement(test.executions[1].sql));
+    }, 1_000);
+
+    it('retries from source facts alone when the source declares the key and drops the stalled client', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const keyed = 'CREATE TABLE t (id INTEGER PRIMARY KEY);';
+        const inserts = Array.from({ length: 139 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index + 1});`);
+        const statements = [keyed, ...inserts];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (!sql.includes('CREATE') && sql.split('INSERT OR REPLACE').length - 1 > 10) {
+                    await new Promise(() => undefined);
+                }
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([100, 40, 20, 10, 10, 10, 10]);
+        expect(test.executions.map((execution) => execution.client)).toEqual([1, 1, 2, 3, 3, 3, 3]);
+        expect(test.closed).toEqual([1, 2, 3]);
+        expect(test.catalogReads).toEqual([]);
+        const retries = test.stdout.filter((line) => /did not finish within .*s; retrying from the same statement in batches of up to (20|10)/.test(line));
+        expect(retries).toHaveLength(2);
+        expect(checkpointFiles(root)).toEqual([]);
+
+        // Every committed statement ran exactly once, in source order.
+        const committed = [test.executions[0], ...test.executions.slice(3)]
+            .map((execution) => execution.sql.split('\n').slice(2, -2));
+        expect(committed.flat()).toEqual(statements);
+        expect(firstStatement(test.executions[2].sql)).toBe(firstStatement(test.executions[1].sql));
+        expect(firstStatement(test.executions[3].sql)).toBe(firstStatement(test.executions[2].sql));
+        expectNoSecrets(test.stdout);
     }, 1_000);
 
     it.each([
@@ -523,6 +651,34 @@ describe('database import preflight and execution', () => {
         const rendered = report(caught, test);
         expect(rendered).toContain('cannot be split further');
         expect(rendered).toContain('--timeout');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('says the batch may have committed on an unsafe stop instead of blaming a keyless table', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const source = sourceFile(root, 'INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\nINSERT INTO t VALUES (3);');
+        const test = importHarness(root, {
+            execute: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain('--timeout');
+        expect(rendered).toContain('lines 1-3');
+        expect(rendered).toContain('the batch may have committed, so check the last rows of its tables before resuming.');
+        expect(rendered).not.toContain('if the table has no unique key');
         expectNoSecrets(rendered);
     }, 1_000);
 

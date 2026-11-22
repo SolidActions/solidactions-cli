@@ -73,6 +73,7 @@ export interface DatabaseImportRunnerDependencies extends DatabaseClientDependen
     now: () => number;
     monotonicNow: () => number;
     batchTimeoutMs?: number;
+    resumeTimeout?: string;
     sleep?: (ms: number) => Promise<void>;
 }
 
@@ -89,8 +90,9 @@ function safeStem(database: string): string {
         .slice(0, 80) || 'database';
 }
 
-function resumeLine(database: string, file: string, checkpoint: string): string {
-    return `Resume with: solidactions database import ${JSON.stringify(database)} ${JSON.stringify(file)} --resume ${JSON.stringify(checkpoint)} --yes`;
+function resumeLine(database: string, file: string, checkpoint: string, resumeTimeout?: string): string {
+    const timeoutSuffix = resumeTimeout !== undefined ? ` --timeout ${resumeTimeout}` : '';
+    return `Resume with: solidactions database import ${JSON.stringify(database)} ${JSON.stringify(file)} --resume ${JSON.stringify(checkpoint)} --yes${timeoutSuffix}`;
 }
 
 function checkpointPath(cwd: string, database: string, sha256: string, sizeBytes: number): string {
@@ -237,6 +239,7 @@ export async function bindPreparedDatabaseImport(
     resume: string | undefined,
     cwd: string,
     filesystem: ImportFileSystem,
+    resumeTimeout?: string,
 ): Promise<PreparedDatabaseImport> {
     const { file, source, sha256, sizeBytes, groups } = prepared;
     const deterministic = checkpointPath(cwd, database, sha256, sizeBytes);
@@ -274,7 +277,7 @@ export async function bindPreparedDatabaseImport(
     if (deterministicStat) {
         await readCheckpoint(filesystem, deterministic, database, sha256, sizeBytes, groups);
         throw importFailure(
-            `A matching import checkpoint already exists.\n${resumeLine(database, file, deterministic)}`,
+            `A matching import checkpoint already exists.\n${resumeLine(database, file, deterministic, resumeTimeout)}`,
         );
     }
 
@@ -296,9 +299,10 @@ export async function prepareDatabaseImport(
     resume: string | undefined,
     cwd: string,
     filesystem: ImportFileSystem,
+    resumeTimeout?: string,
 ): Promise<PreparedDatabaseImport> {
     const prepared = await prepareDatabaseImportSource(file, cwd, filesystem);
-    return bindPreparedDatabaseImport(prepared, database, resume, cwd, filesystem);
+    return bindPreparedDatabaseImport(prepared, database, resume, cwd, filesystem, resumeTimeout);
 }
 
 async function ensureSafeDirectory(filesystem: ImportFileSystem, directory: string): Promise<void> {
@@ -610,7 +614,7 @@ export async function runPreparedDatabaseImport(
                     }
                     const reason = size === 1
                         ? `A single statement (lines ${batchFrom}-${batchTo}, ${Buffer.byteLength(batch.groups[0].sql, 'utf8')} bytes) did not finish within ${seconds}s and cannot be split further.`
-                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)` : `The target tables ${verdict.unknownTables.join(', ')} are not known to have a primary key or unique constraint, so repeating the batch is not safe`}, so it was not retried; if the table has no unique key, check it before resuming.`;
+                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)` : `The target tables ${verdict.unknownTables.join(', ')} are not known to have a primary key or unique constraint, so repeating the batch is not safe`}, so it was not retried; the batch may have committed, so check the last rows of its tables before resuming.`;
                     throw new DatabaseOperationError(
                         'upstream_unavailable',
                         `Database operation timed out. ${reason} Raise the per-batch limit with --timeout (for example --timeout 15m).`,
@@ -694,7 +698,7 @@ export async function runPreparedDatabaseImport(
             || ['reads_exhausted', 'writes_exhausted', 'storage_exhausted'].includes(failure.code)
             || failure.status === 429;
         const guidance = checkpointPublished && !suppressResume && !policyRefusal
-            ? `\nLast completed position: batch ${completedBatches}, ${nextStatement} statements, ${completedSourceBytes} source bytes.\n${resumeLine(prepared.database, prepared.file, prepared.checkpointPath)}`
+            ? `\nLast completed position: batch ${completedBatches}, ${nextStatement} statements, ${completedSourceBytes} source bytes.\n${resumeLine(prepared.database, prepared.file, prepared.checkpointPath, dependencies.resumeTimeout)}`
             : '';
         throw new DatabaseOperationError(failure.code, `${failure.message}${guidance}`, failure.status);
     }
