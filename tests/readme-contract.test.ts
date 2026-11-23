@@ -96,12 +96,16 @@ describe('public README setup contract', () => {
             expect(guidance, `README missing ${command}`).toContain(command);
         }
 
-        for (const option of ['--json', '--yes', '--from', '--writable', '--resume']) {
+        for (const option of ['--json', '--yes', '--from', '--writable', '--resume', '--timeout']) {
             expect(guidance, `README missing ${option}`).toContain(option);
         }
 
         expect(guidance, 'README missing pull --no-cache').toContain(
             'solidactions database pull analytics --no-cache',
+        );
+
+        expect(guidance, 'README missing import --timeout example').toContain(
+            'solidactions database import analytics big.sql --timeout 15m --yes',
         );
 
         for (const phrase of [

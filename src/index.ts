@@ -454,6 +454,9 @@ database
     .argument('<file.sql>', 'SQL file')
     .option('-y, --yes', 'Skip confirmation')
     .option('--resume <checkpoint>', 'Resume from a validated import checkpoint')
+    .option('--timeout <duration>', 'Per-batch time limit, e.g. 30s, 15m, 1h (default 5m). A batch that times out is retried in smaller halves when its statements are safe to repeat (INSERT OR REPLACE, INSERT OR IGNORE, CREATE ... IF NOT EXISTS)')
+    .addHelpText('after', `
+The default per-batch limit is 5 minutes. A timed-out batch whose statements are safe to repeat (INSERT OR REPLACE / INSERT OR IGNORE into a table with a primary key or unique constraint and no trigger, CREATE ... IF NOT EXISTS) is retried in smaller batches, otherwise the run stops with the usual resume line. Sources with vector columns use smaller batches. A lock held by a timed-out batch is waited out with a bounded backoff before the same batch is retried.`)
     .action(async (name, file, options) => {
         await databaseImport(name, file, options);
     });

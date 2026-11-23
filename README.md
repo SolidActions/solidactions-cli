@@ -113,6 +113,7 @@ solidactions database pull analytics --writable
 solidactions database pull analytics --no-cache
 solidactions database import analytics backup.sql --yes
 solidactions database import analytics backup.sql --resume <checkpoint> --yes
+solidactions database import analytics big.sql --timeout 15m --yes
 solidactions database push analytics complete.db --yes
 solidactions database create analytics --kind duckdb --json
 solidactions database list --kind duckdb --json
@@ -216,6 +217,24 @@ Imports commit bounded batches and atomically record a source-bound checkpoint
 under `.solidactions/imports/`. After a partial failure, copy the exact printed
 `--resume <checkpoint>` command to continue without replaying completed
 batches; do not restart the same checkpointed source with a plain import.
+
+`database import` sends the file in batches with a default per-batch limit of
+5 minutes (`--timeout 15m` raises it). A timed-out batch whose statements are
+safe to repeat (`INSERT OR REPLACE` / `INSERT OR IGNORE` into a table with a
+primary key or unique constraint and no trigger, `CREATE ... IF NOT EXISTS`)
+is retried in smaller batches, otherwise the run stops with the usual resume
+line. Sources with vector columns use smaller batches. A lock held by a
+timed-out batch is waited out with a bounded backoff before the same batch is
+retried.
+
+Limits: a table with a trigger, a statement that omits its key columns, a
+plain `INSERT` dump, or a batch that contains a plain `CREATE` (a dump's first
+batch, which holds its `CREATE TABLE` statements), `DROP`, or `ALTER` is never
+retried either: a timeout there stops with the resume line; a source that only
+inserts into an existing vector table starts at the full batch size and halves
+it on the first timeout; writing the same key twice with different values can,
+if a timed-out batch commits late (after later batches), leave the older value
+in place.
 
 ## Configuration
 

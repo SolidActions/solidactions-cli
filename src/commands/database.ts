@@ -31,6 +31,7 @@ import { loadDatabaseClientBeforeMint } from '../utils/database-client-support';
 import { analyticalVerbKindMismatch } from '../utils/database-kind-refusal';
 import { DatabaseSqlStatementAccumulator } from '../utils/database-sql-import';
 export { parseDatabaseImportSql } from '../utils/database-sql-import';
+import { parseImportTimeoutMs } from '../utils/database-import-batching';
 import {
     bindPreparedDatabaseImport,
     prepareDatabaseImport,
@@ -175,6 +176,7 @@ interface DatabaseRollbackOptions {
 interface DatabaseImportOptions {
     yes?: boolean;
     resume?: string;
+    timeout?: string;
 }
 
 type DatabaseFileSystem = typeof fs.promises;
@@ -1477,6 +1479,8 @@ export async function databaseCreateWithConfig(
                         loadClient: io.loadClient,
                         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
                         dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
+                        batchTimeoutMs: dependencies.dataPlaneTimeoutMs,
+                        sleep: dependencies.sleep,
                     },
                 );
             }
@@ -1600,6 +1604,7 @@ export async function databaseImportWithConfig(
     dependencies: DatabaseCommandDependencies = {},
 ): Promise<void> {
     const io = resolveDependencies(dependencies);
+    const batchTimeoutMs = options.timeout !== undefined ? parseImportTimeoutMs(options.timeout) : dependencies.dataPlaneTimeoutMs;
     await refuseIfAnalytical(config, name, 'sqlite-only', io);
     const prepared = await prepareDatabaseImport(
         name,
@@ -1607,6 +1612,7 @@ export async function databaseImportWithConfig(
         options.resume,
         io.cwd,
         io.filesystem,
+        options.timeout,
     );
 
     if (!options.yes) {
@@ -1632,6 +1638,9 @@ export async function databaseImportWithConfig(
         loadClient: io.loadClient,
         controlPlaneTimeoutMs: io.controlPlaneTimeoutMs,
         dataPlaneTimeoutMs: io.dataPlaneTimeoutMs,
+        batchTimeoutMs,
+        resumeTimeout: options.timeout,
+        sleep: dependencies.sleep,
     });
 }
 
