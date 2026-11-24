@@ -69,7 +69,8 @@ describe('workspace set — scoped not-found disambiguation (#73)', () => {
 
                 const errText = errorSpy.mock.calls.join(' ');
                 expect(errText).toContain("not found in this session's authorized workspaces");
-                expect(errText).toContain('login --device');
+                expect(errText).toContain('`solidactions login`');
+                expect(errText).not.toContain('login --device');
                 expect(exitSpy).toHaveBeenCalledWith(1);
             },
         );

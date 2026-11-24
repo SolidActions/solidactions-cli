@@ -7,6 +7,7 @@ import { displayHost } from './host-display';
 export interface Config {
     host: string;
     apiKey: string;
+    signIn?: 'browser';     // written by the browser (device) sign-in next to its token; a key sign-in writes none
     workspace?: string;     // human-readable slug; cosmetic
     workspaceId?: string;   // canonical UUID used in API calls
     workspaceOrg?: string;  // organization name for workspaceId; cosmetic, enables org-qualified display offline
@@ -240,6 +241,11 @@ export function mergeConfigs(
 
     const host = pick('host');
     const apiKey = pick('apiKey');
+    // The browser-sign-in marker travels with the layer that supplied the key: an
+    // environment key, or a folder key over a global browser config, is a key.
+    const signIn: Config['signIn'] = apiKey.source === 'env'
+        ? undefined
+        : (apiKey.source === localPath ? local?.signIn : global?.signIn);
 
     // A local config that defines its own credentials (host or apiKey) is
     // anchored to a different account/tenant than the global config — its
@@ -317,6 +323,7 @@ export function mergeConfigs(
         config: {
             host: (defaultHost ? DEFAULT_HOST : host.value ?? '') as string,
             apiKey: (credentialConflict ? '' : apiKey.value ?? '') as string,
+            ...(signIn !== undefined && !credentialConflict ? { signIn } : {}),
             workspace: workspace.value as string | undefined,
             workspaceId: workspaceId.value as string | undefined,
             workspaceOrg: workspaceId.org,

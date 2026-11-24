@@ -40,8 +40,17 @@ const CLI_SCOPES_WITH_CONNECT_LINKS = 'env env:reveal deploy runs docs databases
 // until every server picks up the companion change.
 const CLI_SCOPES_LEGACY = 'env deploy runs docs databases';
 
+// The per-area list (#2911 part 3), tried first: each area is asked for at Read
+// (`:read`) and at Read and edit (`:edit`) so the consent screen can narrow it
+// line by line. `workspace:read` is what the API group gate and this command's
+// own workspace lookup need whenever any other scope is kept. A server that has
+// not registered one of these names rejects the whole request with
+// `invalid_scope`, and the next list is tried.
+const CLI_SCOPES_FINE = 'deploy:read deploy:edit runs:read runs:edit env:read env:edit crews:read crews:edit '
+    + 'docs:read docs:edit databases:read databases:edit connections:request env:reveal workspace:read';
+
 // Tried in order; each retry only on 400 `invalid_scope`.
-const CLI_SCOPE_LISTS = [CLI_SCOPES_WITH_CONNECT_LINKS, CLI_SCOPES_WITH_REVEAL, CLI_SCOPES_LEGACY];
+const CLI_SCOPE_LISTS = [CLI_SCOPES_FINE, CLI_SCOPES_WITH_CONNECT_LINKS, CLI_SCOPES_WITH_REVEAL, CLI_SCOPES_LEGACY];
 
 interface DeviceCodeResponse {
     device_code: string;
@@ -58,11 +67,11 @@ export interface TokenResponse {
 }
 
 /**
- * Request a device code with the full scope list (`connections:request` and
- * `env:reveal` included). If the server doesn't yet recognize a scope it
- * rejects the whole request with 400 `invalid_scope` — retry with the next,
- * shorter list (without `connections:request`, then the legacy list without
- * `env:reveal`) so login still succeeds: at most 3 requests. Any other
+ * Request a device code with the per-area scope list first. If the server
+ * doesn't yet recognize a scope it rejects the whole request with 400
+ * `invalid_scope` — retry with the next, older list (the coarse list with
+ * `connections:request`, then without it, then the legacy list without
+ * `env:reveal`) so login still succeeds: at most 4 requests. Any other
  * rejection (e.g. a bad client_id) still fails loudly; only this specific,
  * detectable condition is swallowed.
  */
@@ -113,7 +122,7 @@ export async function pollForToken(
 
     while (true) {
         if (elapsed + interval > expiresInSeconds) {
-            throw new Error('device code expired — run `solidactions login --device` again');
+            throw new Error('device code expired — run `solidactions login` again');
         }
         await sleep(interval * 1000);
         elapsed += interval;
@@ -135,7 +144,7 @@ export async function pollForToken(
                 continue;
             }
             if (oauthError === 'expired_token') {
-                throw new Error('device code expired — run `solidactions login --device` again');
+                throw new Error('device code expired — run `solidactions login` again');
             }
             throw new Error(oauthError || error.message);
         }
@@ -171,7 +180,7 @@ export async function deviceLogin(
         return;
     }
 
-    const config: Config = { host, apiKey: token.access_token };
+    const config: Config = { host, apiKey: token.access_token, signIn: 'browser' };
     await persistPreflightedLoginCredential(config, preflight, options);
 
     let workspaces: WorkspaceLookupRecord[];

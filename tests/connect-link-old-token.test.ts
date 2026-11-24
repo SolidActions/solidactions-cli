@@ -72,19 +72,20 @@ describe('connect link commands with an older token', () => {
         fs.rmSync(root, { recursive: true, force: true });
     });
 
-    it('connect with an older token points at login --device, not an authentication failure', async () => {
+    it('connect with an older token points at the browser sign-in, not an authentication failure', async () => {
         const result = await runCli(['connection', 'connect', 'gmail', '--name', 'gmail-main'], home, cwd);
 
         expect(result.status).toBe(1);
         expect(requests).toHaveLength(1);
         expect(result.stderr).toContain('Failed: 403');
         expect(result.stderr).toContain(OLD_TOKEN_MESSAGE);
-        expect(result.stderr).toContain('solidactions login --device');
+        expect(result.stderr).toContain('Run `solidactions login` again to get it');
+        expect(result.stderr).not.toContain('login --device');
         expect(result.stderr).not.toContain('Authentication failed');
         expect(result.stdout).toBe('');
     });
 
-    it('wait with an older token points at login --device after exactly 1 request', async () => {
+    it('wait with an older token points at the browser sign-in after exactly 1 request', async () => {
         const result = await runCli(['connection', 'wait', '01JBTEST'], home, cwd);
 
         expect(result.status).toBe(1);
@@ -92,7 +93,8 @@ describe('connect link commands with an older token', () => {
         expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/v1/connections/requests/01JBTEST' });
         expect(result.stderr).toContain('Failed: 403');
         expect(result.stderr).toContain(OLD_TOKEN_MESSAGE);
-        expect(result.stderr).toContain('solidactions login --device');
+        expect(result.stderr).toContain('Run `solidactions login` again to get it');
+        expect(result.stderr).not.toContain('login --device');
         expect(result.stderr).not.toContain('Authentication failed');
         expect(result.stdout).toBe('');
     });

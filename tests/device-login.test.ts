@@ -93,7 +93,7 @@ describe('pollForToken', () => {
         responses = Array.from({ length: 20 }, () => ({ status: 400, body: { error: 'authorization_pending' } }));
 
         await expect(pollForToken(HOST(), 'client-id', 'devcode', 0.05, 0.15, 0.02)).rejects.toThrow(
-            'device code expired — run `solidactions login --device` again',
+            'device code expired — run `solidactions login` again',
         );
     });
 });

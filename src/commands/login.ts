@@ -44,7 +44,14 @@ export const API_KEY_PROMPT = {
 
 interface LoginSecretOptions {
     stdin?: boolean;
+    /** `--api-key [key]`: the key when a value followed it, `true` for the bare flag. */
+    apiKeyFlag?: string | boolean;
+    /** `--device`: hidden and ignored on its own; an error next to any key source. */
+    device?: boolean;
 }
+
+/** What `login` does: sign in with the browser, or with this key. */
+export type LoginDecision = { kind: 'browser' } | { kind: 'key'; apiKey: string };
 
 interface LoginSecretDependencies {
     input?: NodeJS.ReadableStream;
@@ -61,29 +68,46 @@ async function readAll(input: NodeJS.ReadableStream): Promise<string> {
 }
 
 /**
- * Resolve a login secret without requiring it in argv. The positional key is
- * retained for backwards compatibility, while new interactive documentation
- * uses the masked prompt and automation can opt into stdin explicitly.
+ * Decide how `login` signs in. With no key source it is the browser sign-in.
+ * A key comes from `--api-key KEY`, the masked prompt (bare `--api-key`),
+ * `--stdin`, or the legacy positional argument, and only one of them may be
+ * given. The key never has to be in argv.
  */
 export async function resolveLoginApiKey(
     apiKey: string | undefined,
     options: LoginSecretOptions = {},
     dependencies: LoginSecretDependencies = {},
-): Promise<string> {
-    if (apiKey && options.stdin) {
-        throw new Error('Pass the API key either as the legacy positional argument or via --stdin, not both.');
+): Promise<LoginDecision> {
+    const flagGiven = options.apiKeyFlag !== undefined && options.apiKeyFlag !== false;
+    const flagValue = typeof options.apiKeyFlag === 'string' ? options.apiKeyFlag : undefined;
+    const keySources = [apiKey !== undefined, flagValue !== undefined, options.stdin === true].filter(Boolean).length;
+    const anyKeySource = keySources > 0 || flagGiven;
+
+    if (options.device && anyKeySource) {
+        throw new Error(
+            'A key and the browser sign-in cannot be combined. '
+            + 'Drop --device to sign in with the key, or drop the key to sign in with the browser.',
+        );
+    }
+    if (keySources > 1 || (apiKey !== undefined && flagGiven)) {
+        throw new Error(
+            'Pass the API key one way only: --api-key KEY, --stdin, or the legacy positional argument, not more than one.',
+        );
+    }
+    if (!anyKeySource) {
+        return { kind: 'browser' };
     }
 
-    let resolved = apiKey;
+    let resolved = apiKey ?? flagValue;
 
     if (options.stdin) {
         resolved = await readAll(dependencies.input ?? process.stdin);
-    } else if (!resolved) {
+    } else if (resolved === undefined) {
         const isTTY = dependencies.isTTY ?? process.stdin.isTTY === true;
         if (!isTTY) {
             throw new Error(
-                'API key is required in non-interactive mode. Pipe it with --stdin, ' +
-                'or set SOLIDACTIONS_API_KEY without running login.',
+                'No terminal to ask for the API key. Pass it as --api-key KEY, pipe it with --stdin, '
+                + 'or set SOLIDACTIONS_API_KEY without running login.',
             );
         }
 
@@ -98,12 +122,12 @@ export async function resolveLoginApiKey(
         }
     }
 
-    const trimmed = resolved?.trim();
+    const trimmed = resolved.trim();
     if (!trimmed) {
         throw new Error('API key is required.');
     }
 
-    return trimmed;
+    return { kind: 'key', apiKey: trimmed };
 }
 
 export function clearConfig(): void {
@@ -207,7 +231,8 @@ const LOGIN_REFUSAL_MESSAGE =
 
 export const DEVICE_LOGIN_REFUSAL_MESSAGE =
     'No TTY detected. Re-run with the config destination made explicit: '
-    + 'solidactions login --device --global --workspace <name>';
+    + 'solidactions login --global --workspace <name> '
+    + '(or use an API key: solidactions login --api-key <KEY> --global, or --stdin)';
 
 export interface LoginWritePreflight {
     target: WriteTarget;

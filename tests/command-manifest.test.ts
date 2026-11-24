@@ -287,7 +287,8 @@ describe('buildCommandManifest — the real solidactions program', () => {
         const login = findCommand(manifest, 'login')!;
         expect(login.options.find((o) => o.long === '--host')!.hidden).toBe(true);
         expect(login.options.find((o) => o.long === '--dev')!.hidden).toBe(true);
-        expect(login.options.find((o) => o.long === '--device')!.hidden).toBe(false);
+        expect(login.options.find((o) => o.long === '--device')!.hidden).toBe(true);
+        expect(login.options.find((o) => o.long === '--api-key')!.hidden).toBe(false);
 
         expect(findCommand(manifest, 'skill', 'run')!.hidden).toBe(true);
         expect(findCommand(manifest, 'skill', 'exec')!.options.find((o) => o.long === '--target')!.required).toBe(true);

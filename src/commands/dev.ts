@@ -750,7 +750,7 @@ export async function runDev(opts: RunDevOptions): Promise<RunDevResult> {
         }
         if (droppedSecretCount > 0) {
             if (apiClient!.revealDenied) {
-                summary += ` — ${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var' : 'vars'} unavailable: your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, or set a test value with \`solidactions env set\`.`;
+                summary += ` — ${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var' : 'vars'} unavailable: your API key lacks the 'env:reveal' ability. Run \`solidactions login\` and tick "Show secret values", use a key with env:reveal, or set a test value with \`solidactions env set\`.`;
             } else {
                 summary += ` (${droppedSecretCount} secret ${droppedSecretCount === 1 ? 'var is' : 'vars are'} not available to local dev — set a test value in your dev environment with \`solidactions env set\`, or pass values via \`-i\`.)`;
             }

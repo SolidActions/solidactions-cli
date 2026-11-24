@@ -144,7 +144,7 @@ export function execLocally(args: ExecLocallyArgs): never {
     if (args.skippedSecrets.length > 0) {
         process.stderr.write(chalk.yellow(
             `${args.skippedSecrets.length} secret ${args.skippedSecrets.length === 1 ? 'var' : 'vars'} unavailable (${args.skippedSecrets.join(', ')}): ` +
-            `your API key lacks the 'env:reveal' ability. Mint a key with env:reveal, set a dev value with \`solidactions crew env set\`, or use --env-file.\n`,
+            `your API key lacks the 'env:reveal' ability. Run \`solidactions login\` and tick "Show secret values", use a key with env:reveal, set a dev value with \`solidactions crew env set\`, or use --env-file.\n`,
         ));
     }
 

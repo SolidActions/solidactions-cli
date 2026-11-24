@@ -89,6 +89,7 @@ describe('augmentSandboxEgressMessage', () => {
 
         expect(result.message).toBe('Request failed with status code 403');
         expect(result.response.data.message).toContain('limited set of workspaces');
-        expect(result.response.data.message).toContain('login --device');
+        expect(result.response.data.message).toContain('Re-run `solidactions login` to change scope.');
+        expect(result.response.data.message).not.toContain('login --device');
     });
 });

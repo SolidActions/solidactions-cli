@@ -7,7 +7,7 @@ Public setup guides: [www.solidactions.com/docs](https://www.solidactions.com/do
 ## Prerequisites
 
 - Node.js 24 for generated workflow projects (`@solidactions/sdk` requires Node 24)
-- A SolidActions account, workspace, and API key
+- A SolidActions account and workspace (an API key is only needed for scripts and CI)
 
 ## Installation
 
@@ -17,10 +17,11 @@ npm install -g @solidactions/cli
 
 ## Quick Start
 
-Create an API key in the SolidActions app under **Settings → API Keys**, then run:
+Sign in from your terminal:
 
 ```bash
-# The API key is requested in a masked prompt and is not placed in shell history.
+# Opens the browser sign-in: the CLI prints an address and a code and waits
+# while you approve it in the browser. No key is typed or placed in shell history.
 solidactions login --global
 
 # Choose one agent target. init creates the project and installs local skills.
@@ -37,6 +38,14 @@ The generated `hello` workflow requires no third-party credentials. A successful
 run completes with a greeting of `Hello, Ada!`; use the run ID printed by the
 command with `solidactions run view <run-id>` (accepts the numeric run id or
 the run UUID) or open the run in the app.
+
+To sign in with an API key instead (create one in the SolidActions app under
+**Settings → API Keys**), use `--api-key`. With no value it asks for the key in a
+masked prompt:
+
+```bash
+solidactions login --api-key --global
+```
 
 For non-interactive automation, explicitly read the key from stdin instead of
 placing it in argv:
@@ -333,9 +342,10 @@ Workspace: <name> — organization <org> (<workspaceId>)
 
 ### `solidactions login` flags
 
-- With no positional argument, `login` securely prompts for the API key using
-  masked input. This is the recommended interactive flow.
+- With no key, `login` starts the browser sign-in: it prints an address and a code and waits while you approve it in the browser. This is the recommended flow. Without a terminal it needs `--global` or `--local` (and `--workspace` when you have more than one workspace).
+- `--api-key` — sign in with an API key instead of the browser. With no value it asks for the key in a masked prompt (needs a terminal). `--api-key KEY` uses that key without asking, for scripts; a key on the command line stays in your shell history, so prefer `--stdin` or the `SOLIDACTIONS_API_KEY` environment variable.
 - `--stdin` — read the API key from stdin for explicitly non-interactive use.
+- The browser sign-in is the default; an API key is given with `--api-key` or `--stdin`. Give only one way to sign in (a key together with the browser sign-in is refused).
 - `--local` — write config to `./.solidactions/config.json` in the current folder.
 - `--global` — write config to `~/.solidactions/config.json` (today's default).
 - `--gitignore` — with `--local`, auto-add `.solidactions/` to `.gitignore` without prompting.
@@ -421,7 +431,7 @@ Use `solidactions <command> --help` for full flag details on any command.
 
 | Command | Description |
 |---------|-------------|
-| `login` | Authenticate via a masked API-key prompt (`--stdin` for automation) |
+| `login` | Sign in through the browser (`--api-key` for an API key, `--stdin` for automation) |
 | `logout` | Remove saved credentials |
 | `whoami` | Show current configuration |
 | `init [directory]` | Scaffold a new project (files + AI skills) |

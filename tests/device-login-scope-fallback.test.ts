@@ -1,10 +1,10 @@
 /**
- * requestDeviceCode requests the full scope list (including `env:reveal` and,
- * since cli#219, `connections:request`) first. Servers that haven't
- * registered one of those scopes reject the ENTIRE device-code request with
- * 400 `invalid_scope` — this must degrade gracefully through the next scope
- * lists (at most 3 requests), rather than hard-breaking
- * `solidactions login --device` for every user of that server. Real
+ * requestDeviceCode requests the fine per-area scope list first (#2911 part 3),
+ * then degrades through the older lists: with connect links, with `env:reveal`,
+ * and the legacy coarse list. Servers that haven't registered one of the
+ * requested scopes reject the ENTIRE device-code request with 400
+ * `invalid_scope` — this must degrade gracefully (at most 4 requests), rather
+ * than hard-breaking `solidactions login` for every user of that server. Real
  * in-process HTTP server, no mocks.
  */
 import http from 'http';
@@ -68,23 +68,36 @@ describe('requestDeviceCode — scope fallback', () => {
         };
     }
 
-    it('falls back to the legacy scope list when the server rejects env:reveal with invalid_scope', async () => {
+    const FINE = 'deploy:read deploy:edit runs:read runs:edit env:read env:edit crews:read crews:edit '
+        + 'docs:read docs:edit databases:read databases:edit connections:request env:reveal workspace:read';
+    const WITH_CONNECT_LINKS = 'env env:reveal deploy runs docs databases connections:request';
+    const WITH_REVEAL = 'env env:reveal deploy runs docs databases';
+    const LEGACY = 'env deploy runs docs databases';
+
+    it('makes one request with the fine scope list when the server accepts it', async () => {
+        const started = await startServer(() => acceptedCode());
+        server = started.server;
+
+        const result = await requestDeviceCode(started.host);
+
+        expect(result.device_code).toBe('device-code');
+        expect(started.requests).toHaveLength(1);
+        expect(started.requests[0].scope).toBe(FINE);
+    });
+
+    it('makes 2 requests, fine then the connect-links list, when the server rejects only the fine scopes', async () => {
         const started = await startServer((body) => {
-            return String(body.scope).includes('env:reveal') ? invalidScope() : acceptedCode();
+            return String(body.scope).includes('deploy:read') ? invalidScope() : acceptedCode();
         });
         server = started.server;
 
         const result = await requestDeviceCode(started.host);
 
         expect(result.device_code).toBe('device-code');
-        expect(started.requests).toHaveLength(3);
-        expect(String(started.requests[0].scope)).toContain('env:reveal');
-        expect(String(started.requests[1].scope)).toContain('env:reveal');
-        expect(String(started.requests[2].scope)).not.toContain('env:reveal');
-        expect(String(started.requests[2].scope)).not.toContain('connections:request');
+        expect(started.requests.map((request) => request.scope)).toEqual([FINE, WITH_CONNECT_LINKS]);
     });
 
-    it('drops connections:request and keeps env:reveal when the server rejects only connections:request', async () => {
+    it('makes 3 requests, ending on the env:reveal list, when the server rejects connections:request', async () => {
         const started = await startServer((body) => {
             return String(body.scope).includes('connections:request') ? invalidScope() : acceptedCode();
         });
@@ -93,31 +106,32 @@ describe('requestDeviceCode — scope fallback', () => {
         const result = await requestDeviceCode(started.host);
 
         expect(result.device_code).toBe('device-code');
-        expect(started.requests).toHaveLength(2);
-        expect(String(started.requests[0].scope)).toContain('connections:request');
-        expect(String(started.requests[1].scope)).toContain('env:reveal');
-        expect(String(started.requests[1].scope)).not.toContain('connections:request');
+        expect(started.requests.map((request) => request.scope)).toEqual([FINE, WITH_CONNECT_LINKS, WITH_REVEAL]);
     });
 
-    it('makes only one request, including env:reveal, when the server accepts the full scope list', async () => {
-        const started = await startServer(() => ({
-            status: 200,
-            body: {
-                device_code: 'device-code',
-                user_code: 'USER-CODE',
-                verification_uri: 'https://example.test/device',
-                expires_in: 600,
-                interval: 5,
-            },
-        }));
+    it('makes 4 requests, ending on the legacy list, when the server rejects env:reveal', async () => {
+        const started = await startServer((body) => {
+            return String(body.scope).includes('env:reveal') ? invalidScope() : acceptedCode();
+        });
         server = started.server;
 
         const result = await requestDeviceCode(started.host);
 
         expect(result.device_code).toBe('device-code');
-        expect(started.requests).toHaveLength(1);
-        expect(String(started.requests[0].scope)).toContain('env:reveal');
-        expect(String(started.requests[0].scope)).toContain('connections:request');
+        expect(started.requests.map((request) => request.scope)).toEqual([
+            FINE,
+            WITH_CONNECT_LINKS,
+            WITH_REVEAL,
+            LEGACY,
+        ]);
+    });
+
+    it('stops after 4 requests and rejects when even the legacy list is refused with invalid_scope', async () => {
+        const started = await startServer(() => invalidScope());
+        server = started.server;
+
+        await expect(requestDeviceCode(started.host)).rejects.toBeTruthy();
+        expect(started.requests).toHaveLength(4);
     });
 
     it('does not retry and rejects on a 400 for an unrelated reason (e.g. invalid_client)', async () => {

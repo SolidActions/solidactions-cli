@@ -389,7 +389,7 @@ export async function resolveWorkspaceInput(
         console.error(chalk.red(
             `Workspace "${input}" not found in this session's authorized workspaces `
             + `(scope: ${scope.mode}${scope.workspace_ids.length ? `, covering ${scope.workspace_ids.join(', ')}` : ''}). `
-            + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login --device`.',
+            + 'If it exists but is out of scope, re-authenticate with broader scope: `solidactions login`.',
         ));
     } else {
         console.error(chalk.red(describeWorkspaceMatchFailure(result)));
