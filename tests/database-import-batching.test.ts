@@ -8,6 +8,7 @@ import {
     MAX_IMPORT_TIMEOUT_MS,
     SCHEMA_CATALOG_SQL,
     VECTOR_MAX_BATCH_GROUPS,
+    batchCreatedFacts,
     isLockError,
     lockBackoffMs,
     mergeSchemaFacts,
@@ -329,6 +330,7 @@ describe('database import batching policy', () => {
         expect(replayVerdict([keylessGroup], keyless)).toEqual({
             status: 'unsafe',
             firstUnsafe: keylessGroup,
+            unsafeTable: { name: 'k', reason: 'no-key' },
             unknownTables: [],
         });
         const triggered = schemaFactsFromSql(
@@ -342,7 +344,230 @@ describe('database import batching policy', () => {
         expect(replayVerdict([triggeredGroup], triggered)).toEqual({
             status: 'unsafe',
             firstUnsafe: triggeredGroup,
+            unsafeTable: { name: 't', reason: 'trigger' },
             unknownTables: [],
+        });
+    });
+
+    describe('batchCreatedFacts and the unsafe reason', () => {
+        it('row A takes the batch table with its source key when the target lacks it', () => {
+            const groups = [
+                group('CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, v);'),
+                group('CREATE INDEX IF NOT EXISTS i ON docs(v);'),
+            ];
+            expect(batchCreatedFacts(groups, new Map(), new Set()).get('docs')).toEqual({
+                keyed: true,
+                triggered: false,
+            });
+        });
+
+        it('row B never returns a table the catalog already has', () => {
+            const groups = [
+                group('CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, v);'),
+                group('CREATE INDEX IF NOT EXISTS i ON docs(v);'),
+            ];
+            const catalogFacts = new Map([['docs', { keyed: false, triggered: false }]]);
+            const result = batchCreatedFacts(groups, catalogFacts, new Set());
+            expect(result.size).toBe(0);
+            expect(result.get('docs')).toBeUndefined();
+        });
+
+        it('row C keeps a keyless batch table unsafe but counts its unique index', () => {
+            const keyless = batchCreatedFacts(
+                [group('CREATE TABLE IF NOT EXISTS k (a, b);')],
+                new Map(),
+                new Set(),
+            );
+            expect(keyless.get('k')).toEqual({ keyed: false, triggered: false });
+            const keyed = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS k (a);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS ki ON k(a);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(keyed.get('k')).toEqual({ keyed: true, triggered: false });
+        });
+
+        it('row D marks a trigger the batch creates and refuses to repeat its upsert', () => {
+            const groups = [
+                group('CREATE TABLE IF NOT EXISTS t (id PRIMARY KEY);'),
+                group('CREATE TRIGGER IF NOT EXISTS tr AFTER INSERT ON t BEGIN SELECT 1; END;'),
+            ];
+            const created = batchCreatedFacts(groups, new Map(), new Set());
+            expect(created.get('t')).toEqual({ keyed: true, triggered: true });
+            const upsert = group('INSERT OR REPLACE INTO t VALUES (1);');
+            expect(replayVerdict([upsert], created)).toEqual({
+                status: 'unsafe',
+                firstUnsafe: upsert,
+                unsafeTable: { name: 't', reason: 'trigger' },
+                unknownTables: [],
+            });
+        });
+
+        it('row E gives nothing for an index or trigger on a table the batch does not create, nor for a plain CREATE TABLE', () => {
+            const groups = [
+                group('CREATE UNIQUE INDEX IF NOT EXISTS i ON u(a);'),
+                group('CREATE TRIGGER IF NOT EXISTS tr AFTER INSERT ON u BEGIN SELECT 1; END;'),
+                group('CREATE TABLE p (id PRIMARY KEY);'),
+            ];
+            const result = batchCreatedFacts(groups, new Map(), new Set());
+            expect(result.size).toBe(0);
+            expect(result.get('u')).toBeUndefined();
+            expect(result.get('p')).toBeUndefined();
+        });
+
+        it('row F names the keyless table and its reason on an unsafe upsert', () => {
+            const upsert = group('INSERT OR REPLACE INTO k VALUES (1);');
+            const verdict = replayVerdict([upsert], new Map([['k', { keyed: false, triggered: false }]]));
+            expect(verdict.status).toBe('unsafe');
+            expect(verdict.firstUnsafe).toBe(upsert);
+            expect(verdict.unsafeTable).toEqual({ name: 'k', reason: 'no-key' });
+            expect(verdict.unknownTables).toEqual([]);
+        });
+
+        it('row H drops a replayed unique index the target already holds, so the new table stays keyless', () => {
+            const groups = [
+                group('CREATE TABLE IF NOT EXISTS k (a);'),
+                group('CREATE UNIQUE INDEX IF NOT EXISTS ki ON k(a);'),
+            ];
+            expect(batchCreatedFacts(groups, new Map(), new Set(['ki'])).get('k')).toEqual({
+                keyed: false,
+                triggered: false,
+            });
+            expect(batchCreatedFacts(groups, new Map(), new Set()).get('k')).toEqual({
+                keyed: true,
+                triggered: false,
+            });
+        });
+
+        it('row J drops a guarded unique index whose name the batch itself already took', () => {
+            // Shape (a): the plain index takes the name, so the guarded unique repeat is a silent no-op on the replay.
+            const guardedRepeat = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(guardedRepeat.get('b')).toEqual({ keyed: false, triggered: false });
+            // Shape (b): the second guarded unique index of the same name is a no-op, so b stays keyless while a stays keyed.
+            const crossTable = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS a (x);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS ux ON a(x);'),
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS ux ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(crossTable.get('a')).toEqual({ keyed: true, triggered: false });
+            expect(crossTable.get('b')).toEqual({ keyed: false, triggered: false });
+            // The key folds case and unquotes: a quoted upper-case repeat of the name is the same name.
+            const quotedCase = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS "U" ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(quotedCase.get('b')).toEqual({ keyed: false, triggered: false });
+            // Schema-qualified repeats share the key: main.u is the same name as u.
+            const qualified = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS main.u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(qualified.get('b')).toEqual({ keyed: false, triggered: false });
+            // An unguarded unique index still counts: only the guarded repeat after it is dropped.
+            const unguardedFirst = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE UNIQUE INDEX u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(unguardedFirst.get('b')).toEqual({ keyed: true, triggered: false });
+            // An unguarded plain index also occupies the name for a later guarded unique repeat.
+            const unguardedPlain = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(unguardedPlain.get('b')).toEqual({ keyed: false, triggered: false });
+        });
+
+        it('row I returns nothing when the batch creates a table twice or drops it', () => {
+            const twice = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS k (a);'),
+                    group('CREATE TABLE IF NOT EXISTS k (id PRIMARY KEY);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(twice.size).toBe(0);
+            expect(twice.get('k')).toBeUndefined();
+            const dropped = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                    group('DROP TABLE m;'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(dropped.size).toBe(0);
+            expect(dropped.get('m')).toBeUndefined();
+        });
+
+        it('row K returns no fact when a dropped or renamed table is recreated once', () => {
+            const recreated = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS m (a);'),
+                    group('DROP TABLE m;'),
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(recreated.size).toBe(0);
+            expect(recreated.get('m')).toBeUndefined();
+            const droppedFirst = batchCreatedFacts(
+                [
+                    group('DROP TABLE m;'),
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(droppedFirst.size).toBe(0);
+            expect(droppedFirst.get('m')).toBeUndefined();
+            const renamed = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                    group('ALTER TABLE x RENAME TO m;'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(renamed.size).toBe(0);
+            expect(renamed.get('m')).toBeUndefined();
         });
     });
 
