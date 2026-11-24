@@ -21,11 +21,16 @@ export interface TableFacts { keyed: boolean; triggered: boolean }
 /** Key: the table name lower-cased and unquoted (a `main.` prefix dropped). */
 export type SchemaFacts = Map<string, TableFacts>;
 
+/** Why a known table makes a statement unsafe to repeat. */
+export interface UnsafeTable { name: string; reason: 'no-key' | 'trigger' }
+
 export interface ReplayVerdict {
     /** safe: every statement is safe to repeat. unsafe: at least one is definitely not. unknown: none is definitely unsafe, but a table's keys are not known. */
     status: 'safe' | 'unsafe' | 'unknown';
     /** The first statement that is definitely not safe (status unsafe). */
     firstUnsafe?: DatabaseSqlImportGroup;
+    /** Set only when firstUnsafe is an upsert into a table the facts know: the table as written in the statement and why it is unsafe ('trigger' wins over 'no-key' when both hold). */
+    unsafeTable?: UnsafeTable;
     /** Names (as written in the source) of the tables whose keys are not known (status unknown). */
     unknownTables: string[];
 }
@@ -364,7 +369,10 @@ export function mergeSchemaFacts(base: SchemaFacts, override: SchemaFacts): Sche
     return merged;
 }
 
-type GroupSafety = { status: 'safe' } | { status: 'unsafe' } | { status: 'unknown'; key: string; table: string };
+type GroupSafety =
+    | { status: 'safe' }
+    | { status: 'unsafe'; table?: string; reason?: 'no-key' | 'trigger' }
+    | { status: 'unknown'; key: string; table: string };
 
 function upsertTarget(tokens: SqlToken[], index: number, facts: SchemaFacts): GroupSafety {
     const name = qualifiedName(tokens, index);
@@ -372,7 +380,7 @@ function upsertTarget(tokens: SqlToken[], index: number, facts: SchemaFacts): Gr
     const found = facts.get(name.key);
     if (found === undefined) return { status: 'unknown', key: name.key, table: name.raw };
     if (found.keyed && !found.triggered) return { status: 'safe' };
-    return { status: 'unsafe' };
+    return { status: 'unsafe', table: name.raw, reason: found.triggered ? 'trigger' : 'no-key' };
 }
 
 function groupSafety(tokens: SqlToken[], facts: SchemaFacts): GroupSafety {
@@ -415,13 +423,19 @@ function groupSafety(tokens: SqlToken[], facts: SchemaFacts): GroupSafety {
 /** Judge whether the whole batch can be run twice with the same final state (D1). */
 export function replayVerdict(groups: DatabaseSqlImportGroup[], facts: SchemaFacts): ReplayVerdict {
     let firstUnsafe: DatabaseSqlImportGroup | undefined;
+    let unsafeTable: UnsafeTable | undefined;
     let hasUnknown = false;
     const unknownTables: string[] = [];
     const seenUnknownKeys = new Set<string>();
     for (const group of groups) {
         const safety = groupSafety(tokenizeSql(group.sql, 16), facts);
         if (safety.status === 'unsafe') {
-            if (firstUnsafe === undefined) firstUnsafe = group;
+            if (firstUnsafe === undefined) {
+                firstUnsafe = group;
+                if (safety.table !== undefined && safety.reason !== undefined) {
+                    unsafeTable = { name: safety.table, reason: safety.reason };
+                }
+            }
         } else if (safety.status === 'unknown') {
             hasUnknown = true;
             if (!seenUnknownKeys.has(safety.key)) {
@@ -430,9 +444,107 @@ export function replayVerdict(groups: DatabaseSqlImportGroup[], facts: SchemaFac
             }
         }
     }
-    if (firstUnsafe !== undefined) return { status: 'unsafe', firstUnsafe, unknownTables: [] };
+    if (firstUnsafe !== undefined) {
+        return unsafeTable === undefined
+            ? { status: 'unsafe', firstUnsafe, unknownTables: [] }
+            : { status: 'unsafe', firstUnsafe, unsafeTable, unknownTables: [] };
+    }
     if (hasUnknown) return { status: 'unknown', unknownTables };
     return { status: 'safe', unknownTables: [] };
+}
+
+/**
+ * The facts the batch's own CREATE TABLE IF NOT EXISTS statements will give a table the target does not have yet.
+ * Walks `groups` in order with the 'catalog' origin (statements taken as written), then returns only the tables that
+ * (a) the batch itself creates, exactly once, with CREATE TABLE IF NOT EXISTS (a name created, dropped or renamed more than once in the batch is not returned) and (b) are NOT keys of `catalogFacts`.
+ * A table in `catalogFacts` is never returned (the target's shape wins). An index or trigger on a table the batch does not create gives nothing.
+ * `catalogObjectNames` is every `name` (second column) of the catalog read, lower-cased: a batch CREATE UNIQUE INDEX IF NOT EXISTS whose name is in it is a no-op on the replay, so it is left out of the walk.
+ */
+export function batchCreatedFacts(
+    groups: DatabaseSqlImportGroup[],
+    catalogFacts: SchemaFacts,
+    catalogObjectNames: ReadonlySet<string>,
+): SchemaFacts {
+    const walked = groups.filter((group) => !isNoopUniqueIndex(group.sql, catalogObjectNames));
+    const created = collectCreatedTableKeys(groups);
+    const walkedFacts = schemaFactsFromSql(walked.map((g) => g.sql), 'catalog');
+    const result: SchemaFacts = new Map();
+    for (const [key, facts] of walkedFacts) {
+        if (created.has(key) && !catalogFacts.has(key)) {
+            result.set(key, { keyed: facts.keyed, triggered: facts.triggered });
+        }
+    }
+    return result;
+}
+
+/** True when `sql` is a CREATE UNIQUE INDEX IF NOT EXISTS whose index name is in `catalogObjectNames` (a no-op on the replay). */
+function isNoopUniqueIndex(sql: string, catalogObjectNames: ReadonlySet<string>): boolean {
+    const tokens = tokenizeSql(sql);
+    if (wordAt(tokens, 0) !== 'CREATE') return false;
+    let index = 1;
+    let unique = false;
+    while (wordAt(tokens, index) === 'UNIQUE' || wordAt(tokens, index) === 'VIRTUAL') {
+        if (wordAt(tokens, index) === 'UNIQUE') unique = true;
+        index += 1;
+    }
+    if (!unique || wordAt(tokens, index) !== 'INDEX') return false;
+    const skip = skipIfNotExists(tokens, index + 1);
+    if (!skip.ifNotExists) return false;
+    const name = qualifiedName(tokens, skip.index);
+    if (name === null) return false;
+    return catalogObjectNames.has(name.key);
+}
+
+/**
+ * Keys of tables the batch creates with CREATE TABLE IF NOT EXISTS, exactly once.
+ * A key created more than once, or dropped or renamed at all, is excluded (SQLite keeps
+ * the first create, so a later statement must not decide). TEMP tables are never counted.
+ */
+function collectCreatedTableKeys(groups: DatabaseSqlImportGroup[]): Set<string> {
+    const creates = new Map<string, { count: number; guarded: boolean }>();
+    const tainted = new Set<string>();
+    for (const group of groups) {
+        const tokens = tokenizeSql(group.sql);
+        const head = wordAt(tokens, 0);
+        if (head === 'CREATE') {
+            if (wordAt(tokens, 1) === 'TEMP' || wordAt(tokens, 1) === 'TEMPORARY') continue;
+            let index = 1;
+            while (wordAt(tokens, index) === 'UNIQUE' || wordAt(tokens, index) === 'VIRTUAL') {
+                index += 1;
+            }
+            if (wordAt(tokens, index) !== 'TABLE') continue;
+            const skip = skipIfNotExists(tokens, index + 1);
+            const name = qualifiedName(tokens, skip.index);
+            if (name === null) continue;
+            const seen = creates.get(name.key);
+            if (seen === undefined) {
+                creates.set(name.key, { count: 1, guarded: skip.ifNotExists });
+            } else {
+                seen.count += 1;
+            }
+        } else if (head === 'DROP') {
+            if (wordAt(tokens, 1) !== 'TABLE') continue;
+            let index = 2;
+            if (wordAt(tokens, index) === 'IF' && wordAt(tokens, index + 1) === 'EXISTS') index += 2;
+            const name = qualifiedName(tokens, index);
+            if (name === null) continue;
+            tainted.add(name.key);
+        } else if (head === 'ALTER') {
+            if (wordAt(tokens, 1) !== 'TABLE') continue;
+            const from = qualifiedName(tokens, 2);
+            if (from === null) continue;
+            if (wordAt(tokens, from.next) !== 'RENAME' || wordAt(tokens, from.next + 1) !== 'TO') continue;
+            const to = qualifiedName(tokens, from.next + 2);
+            if (to === null) continue;
+            tainted.add(from.key);
+            tainted.add(to.key);
+        }
+    }
+    const created = new Set<string>();
+    for (const [key, seen] of creates) {
+        if (seen.count === 1 && seen.guarded && !tainted.has(key)) created.add(key);
+    }
+    return created;
 }
 
 /** A libsql lock error: code SQLITE_BUSY* / SQLITE_LOCKED*, or a message matching /database (?:table )?is locked/i. */
