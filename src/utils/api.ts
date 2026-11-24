@@ -392,8 +392,20 @@ export function formatApiFailure(status: number, data: unknown): string {
         : `Failed: ${status}`;
 }
 
-/** The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo. */
+/**
+ * The one-line 401 every command prints: names the host that refused the key (cli#156), never its userinfo.
+ * When the active config is a browser sign-in (#2911 part 4) it says the sign-in has ended instead.
+ */
 export function authFailedLine(host: string): string {
+    let browserSignIn = false;
+    try {
+        browserSignIn = resolveConfig()?.config.signIn === 'browser';
+    } catch {
+        browserSignIn = false;
+    }
+    if (browserSignIn) {
+        return `Your browser sign-in to ${displayHost(host)} has ended. Run "solidactions login --global" to sign in again.`;
+    }
     return `Authentication failed against ${displayHost(host)}. Run "solidactions login --global" to re-configure.`;
 }
 

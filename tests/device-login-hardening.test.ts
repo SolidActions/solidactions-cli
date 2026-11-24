@@ -214,7 +214,7 @@ describe('device login destination and credential hardening', () => {
 
         await deviceLogin({ host: host(), global: true });
 
-        expect(baseConfigAtDiscovery).toEqual({ host: host(), apiKey: 'approved-token' });
+        expect(baseConfigAtDiscovery).toEqual({ host: host(), apiKey: 'approved-token', signIn: 'browser' });
         expect(fs.existsSync(path.join(otherHome, '.solidactions', 'config.json'))).toBe(false);
         expect(JSON.parse(fs.readFileSync(originalPath, 'utf-8'))).toMatchObject({
             host: host(),
@@ -239,6 +239,7 @@ describe('device login destination and credential hardening', () => {
         expect(JSON.parse(fs.readFileSync(existingPath, 'utf-8'))).toEqual({
             host: host(),
             apiKey: 'approved-token',
+            signIn: 'browser',
         });
         const backup = fs.readdirSync(path.dirname(existingPath))
             .find((entry) => entry.startsWith('config.json.bak-'));
