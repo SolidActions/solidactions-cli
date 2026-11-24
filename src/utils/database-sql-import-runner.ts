@@ -22,6 +22,7 @@ import {
     MAX_BATCH_GROUPS,
     SCHEMA_CATALOG_SQL,
     VECTOR_MAX_BATCH_GROUPS,
+    batchCreatedFacts,
     isLockError,
     lockBackoffMs,
     mergeSchemaFacts,
@@ -552,6 +553,9 @@ export async function runPreparedDatabaseImport(
                     clientClosePromise = undefined;
                     deadline = undefined;
                 };
+                // D3: every stop below is a first-batch stop while nothing is
+                // checkpointed yet; a later batch keeps its resume line instead.
+                const firstBatchHint = checkpointPublished ? '' : ' Nothing was checkpointed yet, so there is no resume line; the first batch may or may not have committed. Check its tables, then rerun the whole import with a longer --timeout (for example --timeout 15m).';
 
                 // D7: a lock error that follows a retried timeout: same batch, same size, bounded backoff.
                 if (retryingAfterTimeout && isLockError(error)) {
@@ -559,7 +563,7 @@ export async function runPreparedDatabaseImport(
                     if (delay <= 0) {
                         throw new DatabaseOperationError(
                             'upstream_unavailable',
-                            `The database stayed locked for ${Math.round(batchTimeoutMs / 1000)}s after a batch timed out (lines ${batchFrom}-${batchTo}); the timed-out transaction may still be running. Wait and resume, or raise the per-batch limit with --timeout.`,
+                            `The database stayed locked for ${Math.round(batchTimeoutMs / 1000)}s after a batch timed out (lines ${batchFrom}-${batchTo}); the timed-out transaction may still be running. Wait and resume, or raise the per-batch limit with --timeout.${firstBatchHint}`,
                         );
                     }
                     lockAttempts += 1;
@@ -594,12 +598,13 @@ export async function runPreparedDatabaseImport(
                         } catch {
                             throw new DatabaseOperationError(
                                 'upstream_unavailable',
-                                `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s, and the target schema could not be read to check whether repeating it is safe, so it was not retried. Raise the per-batch limit with --timeout (for example --timeout 15m).`,
+                                `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s, and the target schema could not be read to check whether repeating it is safe, so it was not retried. Raise the per-batch limit with --timeout (for example --timeout 15m).${firstBatchHint}`,
                             );
                         }
                         // D8: the facts are used for this verdict only and dropped; the next timeout reads again.
                         const catalogFacts = schemaFactsFromSql(rows.map((row) => String(row[3] ?? '')), 'catalog');
-                        verdict = replayVerdict(batch.groups, mergeSchemaFacts(sourceFacts, catalogFacts));
+                        const catalogObjectNames = new Set(rows.map((row) => String(row[1] ?? '').toLowerCase()));
+                        verdict = replayVerdict(batch.groups, mergeSchemaFacts(mergeSchemaFacts(sourceFacts, catalogFacts), batchCreatedFacts(batch.groups, catalogFacts, catalogObjectNames)));
                     }
                     if (size >= 2 && verdict.status === 'safe') {
                         if (!keepFreshClient) dropClient();
@@ -614,10 +619,10 @@ export async function runPreparedDatabaseImport(
                     }
                     const reason = size === 1
                         ? `A single statement (lines ${batchFrom}-${batchTo}, ${Buffer.byteLength(batch.groups[0].sql, 'utf8')} bytes) did not finish within ${seconds}s and cannot be split further.`
-                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)` : `The target tables ${verdict.unknownTables.join(', ')} are not known to have a primary key or unique constraint, so repeating the batch is not safe`}, so it was not retried; the batch may have committed, so check the last rows of its tables before resuming.`;
+                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? (verdict.unsafeTable ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} writes into table ${verdict.unsafeTable.name}, which ${verdict.unsafeTable.reason === 'trigger' ? 'has a trigger' : 'has no primary key or unique constraint (in the target, or as this batch creates it)'}, so it is not safe to repeat` : `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)`) : `The table(s) ${verdict.unknownTables.join(', ')} are not in the target database yet and this batch does not create them, so repeating the batch is not safe`}, so it was not retried; the batch may have committed, so check the last rows of its tables before resuming.`;
                     throw new DatabaseOperationError(
                         'upstream_unavailable',
-                        `Database operation timed out. ${reason} Raise the per-batch limit with --timeout (for example --timeout 15m).`,
+                        `Database operation timed out. ${reason} Raise the per-batch limit with --timeout (for example --timeout 15m).${firstBatchHint}`,
                     );
                 }
 

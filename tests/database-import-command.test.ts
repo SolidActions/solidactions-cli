@@ -330,12 +330,22 @@ describe('database import preflight and execution', () => {
         });
         test.dependencies.dataPlaneTimeoutMs = 10;
 
-        await expect(databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies))
-            .rejects.toMatchObject({ code: 'upstream_unavailable' });
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
 
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
         expect(test.closed).toEqual([1]);
         expect(checkpointFiles(root)).toEqual([]);
         expect(test.stdout).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('cannot be split further');
+        expect(rendered).toContain(' Nothing was checkpointed yet, so there is no resume line; the first batch may or may not have committed. Check its tables, then rerun the whole import with a longer --timeout (for example --timeout 15m).');
+        expect(rendered).not.toContain('Resume with:');
+        expectNoSecrets(rendered);
     }, 1_000);
 
     it.each(['0', '0s', 'abc', '1.5', '-3', '25h', ''])('refuses an invalid --timeout %s before any native load or mint', async (timeout) => {
@@ -869,7 +879,245 @@ describe('database import preflight and execution', () => {
         expect(test.executions).toHaveLength(1);
         expect(test.catalogReads).toHaveLength(1);
         const rendered = report(caught, test);
-        expect(rendered).toContain('The target tables t are not known to have a primary key');
+        expect(rendered).toContain('The table(s) t are not in the target database yet and this batch does not create them');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('retries a first batch that creates its own keyed table and finishes from the same statement', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, v TEXT);',
+            'CREATE INDEX IF NOT EXISTS docs_v ON docs(v);',
+            ...Array.from({ length: 30 }, (_, index) => `INSERT OR REPLACE INTO docs VALUES (${index}, 'x');`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([32, 16, 8, 8, 8, 8]);
+        expect(test.executions.map((execution) => execution.client)).toEqual([1, 2, 3, 3, 3, 3]);
+        expect(test.closed).toEqual([1, 2, 3]);
+        expect(test.catalogReads).toHaveLength(2);
+        expect(test.catalogReads.map((read) => read.sql)).toEqual([SCHEMA_CATALOG_SQL, SCHEMA_CATALOG_SQL]);
+        expect(test.catalogReads.map((read) => read.client)).toEqual([2, 3]);
+        const retries = test.stdout.filter((line) => /did not finish within .*s; retrying from the same statement in batches of up to (16|8)/.test(line));
+        expect(retries).toHaveLength(2);
+        expect(test.executions[2].sql).toContain('CREATE TABLE IF NOT EXISTS docs');
+        expect(test.executions[2].sql).toContain('CREATE INDEX IF NOT EXISTS docs_v');
+        // Every committed statement ran exactly once, in source order.
+        const resting = test.executions.slice(2).map((execution) => execution.sql.split('\n').slice(2, -2));
+        expect(resting.flat()).toEqual(statements);
+        expect(firstStatement(test.executions[1].sql)).toBe(firstStatement(test.executions[0].sql));
+        expect(firstStatement(test.executions[2].sql)).toBe(firstStatement(test.executions[1].sql));
+        expect(checkpointFiles(root)).toEqual([]);
+    }, 1_000);
+
+    it('stops on the target shape when the target already holds the table without a key', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, v TEXT);',
+            'CREATE INDEX IF NOT EXISTS docs_v ON docs(v);',
+            ...Array.from({ length: 30 }, (_, index) => `INSERT OR REPLACE INTO docs VALUES (${index}, 'x');`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [['table', 'docs', 'docs', 'CREATE TABLE docs (id, v)']],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('table docs, which has no primary key or unique constraint');
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain('lines 3-3');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('stops on a trigger the batch itself creates', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS t (id PRIMARY KEY);',
+            'CREATE TRIGGER IF NOT EXISTS tr AFTER INSERT ON t BEGIN SELECT 1; END;',
+            ...Array.from({ length: 30 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        // No catalog read here: the source-origin walk already marks the trigger
+        // (walkCreateTrigger has no origin gate), so the verdict is unsafe before
+        // any catalog read. The batchCreatedFacts trigger route is pinned by
+        // tests/database-import-batching.test.ts row D.
+        expect(test.catalogReads).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('table t, which has a trigger');
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain('lines 3-3');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('names a table the batch does not create instead of blaming a keyless table', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS a (id PRIMARY KEY);',
+            ...Array.from({ length: 10 }, (_, index) => `INSERT OR REPLACE INTO a VALUES (${index});`),
+            ...Array.from({ length: 20 }, (_, index) => `INSERT OR REPLACE INTO b VALUES (${index});`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('The table(s) b are not in the target database yet and this batch does not create them');
+        expect(rendered).not.toContain('are not known to have');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('ignores a replayed unique index whose name the target already holds', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE IF NOT EXISTS k (a);',
+            'CREATE UNIQUE INDEX IF NOT EXISTS ki ON k(a);',
+            ...Array.from({ length: 30 }, (_, index) => `INSERT OR REPLACE INTO k VALUES (${index});`),
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.split('INSERT OR REPLACE').length - 1 > 10) await new Promise(() => undefined);
+            },
+            catalog: async () => [['index', 'ki', 'other', 'CREATE UNIQUE INDEX ki ON other(x)']],
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toHaveLength(1);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('table k, which has no primary key or unique constraint');
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain('lines 3-3');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('hints at the first batch when a multi-statement plain batch stalls', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = Array.from({ length: 40 }, (_, index) => `INSERT INTO t VALUES (${index});`);
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async () => new Promise(() => undefined),
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(1);
+        expect(test.catalogReads).toEqual([]);
+        const rendered = report(caught, test);
+        expect(rendered).toContain('not safe to repeat');
+        expect(rendered).toContain(' Nothing was checkpointed yet, so there is no resume line; the first batch may or may not have committed. Check its tables, then rerun the whole import with a longer --timeout (for example --timeout 15m).');
+        expect(rendered).not.toContain('Resume with:');
+        expectNoSecrets(rendered);
+    }, 1_000);
+
+    it('keeps the resume line and no first-batch hint when a second batch stalls', async () => {
+        const databaseImportWithConfig = await requireImport();
+        const root = tempRoot();
+        const statements = [
+            'CREATE TABLE t (id PRIMARY KEY);',
+            ...Array.from({ length: 150 }, (_, index) => `INSERT OR REPLACE INTO t VALUES (${index});`),
+            'UPDATE t SET a = 1;',
+        ];
+        const source = sourceFile(root, statements.join('\n'));
+        const test = importHarness(root, {
+            execute: async ({ sql }) => {
+                if (sql.includes('UPDATE')) await new Promise(() => undefined);
+            },
+        });
+        test.dependencies.dataPlaneTimeoutMs = 10;
+
+        let caught: unknown;
+        try {
+            await databaseImportWithConfig('Analytics', source, { yes: true }, CONFIG, test.dependencies);
+        } catch (error) {
+            caught = error;
+        }
+
+        expect(caught).toMatchObject({ code: 'upstream_unavailable' });
+        expect(test.executions).toHaveLength(2);
+        expect(test.executions.map((execution) => groupCount(execution.sql))).toEqual([100, 51]);
+        expect(test.catalogReads).toEqual([]);
+        const [checkpoint] = checkpointFiles(root);
+        expect(checkpoint).toBeDefined();
+        const rendered = report(caught, test);
+        expect(rendered.split('\n')).toContain(resumeLine('Analytics', source, checkpoint));
+        expect(rendered).not.toContain('Nothing was checkpointed yet');
         expectNoSecrets(rendered);
     }, 1_000);
 
@@ -900,6 +1148,7 @@ describe('database import preflight and execution', () => {
         expect(test.catalogReads).toHaveLength(1);
         const rendered = report(caught, test);
         expect(rendered).toContain('could not be read');
+        expect(rendered).toContain(' Nothing was checkpointed yet, so there is no resume line; the first batch may or may not have committed. Check its tables, then rerun the whole import with a longer --timeout (for example --timeout 15m).');
         expectNoSecrets(rendered);
     }, 1_000);
 
@@ -1059,6 +1308,7 @@ describe('database import preflight and execution', () => {
         expect(rendered).toContain('stayed locked');
         expect(rendered).toContain('lines 1-20');
         expect(rendered).toContain('--timeout');
+        expect(rendered).toContain(' Nothing was checkpointed yet, so there is no resume line; the first batch may or may not have committed. Check its tables, then rerun the whole import with a longer --timeout (for example --timeout 15m).');
         expect(rendered).not.toContain('Resume with:');
         expectNoSecrets(rendered);
     }, 1_000);
