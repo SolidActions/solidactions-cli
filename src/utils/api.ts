@@ -151,7 +151,7 @@ export function augmentWorkspaceForbiddenMessage(error: any): any {
     if (error?.response?.status === 403 && error.response.data?.code === 'workspace_forbidden') {
         error.response.data.message =
             'This session is scoped to a limited set of workspaces. '
-            + 'Re-run `solidactions login --device` to change scope.';
+            + 'Re-run `solidactions login` to change scope.';
     }
     return error;
 }
@@ -174,11 +174,11 @@ export function augmentTokenMissingAbilityMessage(error: any): any {
         && response.data?.code === 'token_missing_ability'
         && isDatabaseAbility
     ) {
-        const hint = 'Run `solidactions login --device` to refresh database access.';
+        const hint = 'Run `solidactions login` to refresh database access.';
         const message = typeof response.data.message === 'string' && response.data.message.length > 0
             ? response.data.message
             : 'This session does not have database access.';
-        if (!message.includes('solidactions login --device')) {
+        if (!message.includes(hint)) {
             response.data.message = `${message}\n\n${hint}`;
         }
     }
@@ -191,9 +191,9 @@ export function augmentTokenMissingAbilityMessage(error: any): any {
         && isEnvRevealAbility
     ) {
         const hint = "The 'env:reveal' ability grants plaintext disclosure of secret values. "
-            + 'Re-run `solidactions login --device` and tick "Reveal secret values" on the consent screen, '
+            + 'Re-run `solidactions login` and tick "Show secret values" on the consent screen, '
             + 'or create an API key with the \'env:reveal\' ability checked at Settings → API keys '
-            + 'and `solidactions login` with that key.';
+            + 'and `solidactions login --api-key` with that key.';
         const message = typeof response.data.message === 'string' && response.data.message.length > 0
             ? response.data.message
             : "This session does not have the 'env:reveal' ability.";
@@ -208,12 +208,33 @@ export function augmentTokenMissingAbilityMessage(error: any): any {
         && requiredAbility === 'connections:request'
     ) {
         const hint = "Connect links need the 'connections:request' ability. "
-            + 'Run `solidactions login --device` again to get it, or create an API key with '
-            + "'connections:request' checked at Settings → API keys and `solidactions login` with that key.";
+            + 'Run `solidactions login` again to get it, or create an API key with '
+            + "'connections:request' checked at Settings → API keys and `solidactions login --api-key` with that key.";
         const message = typeof response.data.message === 'string' && response.data.message.length > 0
             ? response.data.message
             : "This session does not have the 'connections:request' ability.";
         if (!message.includes('Connect links need')) {
+            response.data.message = `${message}\n\n${hint}`;
+        }
+    }
+
+    // A fine ability (`deploy:edit`, `runs:read`, ...) this sign-in was not given. The
+    // databases, env:reveal and connections:request abilities have their own hints above.
+    if (
+        response?.status === 403
+        && response.data?.code === 'token_missing_ability'
+        && typeof requiredAbility === 'string'
+        && /^[a-z][a-z-]*:(read|edit)$/.test(requiredAbility)
+        && !isDatabaseAbility
+        && !isEnvRevealAbility
+        && requiredAbility !== 'connections:request'
+    ) {
+        const hint = `This sign-in does not allow ${requiredAbility}. `
+            + 'Run "solidactions login" and turn it on, or use an API key with that ability.';
+        const message = typeof response.data.message === 'string' && response.data.message.length > 0
+            ? response.data.message
+            : `This session does not have the '${requiredAbility}' ability.`;
+        if (!message.includes('This sign-in does not allow')) {
             response.data.message = `${message}\n\n${hint}`;
         }
     }

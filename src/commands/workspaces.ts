@@ -123,7 +123,7 @@ export async function workspaceSet(input: string, options: WorkspaceSetOptions =
         if (isKnownOutOfScope && looksLikeUuid(input)) {
             console.error(chalk.red(
                 `This session is scoped to workspace(s) ${config.scopedWorkspaceIds.join(', ')}. `
-                + 'Re-run `solidactions login --device` to change scope.',
+                + 'Re-run `solidactions login` to change scope.',
             ));
             process.exit(1);
         }

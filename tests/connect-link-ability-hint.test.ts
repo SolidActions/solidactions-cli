@@ -22,7 +22,9 @@ describe("augmentTokenMissingAbilityMessage — 'connections:request' branch", (
         const message = result.response.data.message as string;
 
         expect(message.startsWith(SERVER_MESSAGE)).toBe(true);
-        expect(message).toContain('solidactions login --device');
+        expect(message).toContain('Run `solidactions login` again to get it');
+        expect(message).not.toContain('login --device');
+        expect(message).toContain('`solidactions login --api-key` with that key');
         expect(message).toContain('Settings → API keys');
         expect(message).toContain("'connections:request'");
     });
@@ -44,7 +46,8 @@ describe("augmentTokenMissingAbilityMessage — 'connections:request' branch", (
         const message = augmentTokenMissingAbilityMessage(error).response.data.message as string;
 
         expect(message).toContain("This session does not have the 'connections:request' ability.");
-        expect(message).toContain('solidactions login --device');
+        expect(message).toContain('Run `solidactions login` again to get it');
+        expect(message).not.toContain('login --device');
     });
 
     it('returns a 403 forbidden (the user cannot build in Automate) unchanged', () => {

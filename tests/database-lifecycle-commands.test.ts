@@ -760,7 +760,8 @@ describe('database lifecycle error boundary', () => {
 
         expect(caught).toMatchObject({ code: 'token_missing_ability', status: 403 });
         expect(caught?.message).toContain("does not have the 'databases:read' ability");
-        expect(caught?.message).toContain('solidactions login --device');
+        expect(caught?.message).toContain('Run `solidactions login` to refresh database access.');
+        expect(caught?.message).not.toContain('login --device');
         const rendered = `${String(caught)}\n${JSON.stringify(caught)}\n${test.stderr.join('\n')}`;
         expect(rendered).not.toContain(CONFIG.apiKey);
         expect(rendered).not.toContain('RAW_AXIOS_TOKEN_ABILITY_SENTINEL');

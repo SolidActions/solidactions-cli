@@ -15,7 +15,7 @@ describe('database device-token compatibility', () => {
         });
     });
 
-    it('requests the coarse databases scope during device authorization', async () => {
+    it('requests the per-area databases scopes first during device authorization', async () => {
         const requests: Record<string, unknown>[] = [];
         server = http.createServer((req, res) => {
             let raw = '';
@@ -48,10 +48,20 @@ describe('database device-token compatibility', () => {
         // the server strips it from the token unless the user opts in. It has
         // to be requested here regardless, because a device code's scope set is
         // frozen at creation and consent can never add to it.
-        // `connections:request` joined in cli#219 (connect links).
-        expect(String(requests[0]?.scope).split(/\s+/).sort()).toEqual(
-            ['connections:request', 'databases', 'deploy', 'docs', 'env', 'env:reveal', 'runs'],
-        );
+        // `connections:request` joined in cli#219 (connect links). Since #2911 the
+        // first request is the per-area list (Read and Read and edit for each area,
+        // plus `workspace:read`); the coarse list is only the fallback for a server
+        // that rejects it with `invalid_scope`.
+        expect(String(requests[0]?.scope).split(/\s+/).sort()).toEqual([
+            'connections:request',
+            'crews:edit', 'crews:read',
+            'databases:edit', 'databases:read',
+            'deploy:edit', 'deploy:read',
+            'docs:edit', 'docs:read',
+            'env:edit', 'env:read', 'env:reveal',
+            'runs:edit', 'runs:read',
+            'workspace:read',
+        ]);
     });
 
     it('exports a reusable stale-token hint for database ability failures', async () => {
@@ -74,7 +84,8 @@ describe('database device-token compatibility', () => {
         const result = (augment as (error: any) => any)(error);
 
         expect(result.response.data.message).toContain("does not have the 'databases' ability");
-        expect(result.response.data.message).toContain('solidactions login --device');
+        expect(result.response.data.message).toContain('Run `solidactions login` to refresh database access.');
+        expect(result.response.data.message).not.toContain('login --device');
 
         const unrelated: any = {
             response: { status: 403, data: { code: 'forbidden', message: 'Access denied.' } },
@@ -93,6 +104,6 @@ describe('database device-token compatibility', () => {
             },
         };
         expect((augment as (error: any) => any)(otherAbility)).toBe(otherAbility);
-        expect(otherAbility.response.data.message).not.toContain('solidactions login --device');
+        expect(otherAbility.response.data.message).toBe("This API key does not have the 'env' ability.");
     });
 });
