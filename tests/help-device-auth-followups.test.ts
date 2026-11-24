@@ -44,8 +44,10 @@ describe('device-auth follow-up --help docs', () => {
         const out = help(['login']);
         expect(out).toContain('SOLIDACTIONS_API_KEY');
         expect(out).toMatch(/takes\s+precedence/);
-        // Makes the (device) login flow unnecessary.
-        expect(out).toMatch(/login --device/);
+        // Makes the login flow unnecessary. `--device` is hidden now (cli#275),
+        // so the sentence names plain `login`.
+        expect(out).toMatch(/you do not need to run\s+`login`\s+at all/);
+        expect(out).not.toContain('--device');
     });
 
     it('#1002 login --help explains sole-workspace auto-selection and multiple-workspace choice', () => {

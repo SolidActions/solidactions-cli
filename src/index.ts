@@ -212,10 +212,14 @@ program.hook('preAction', (thisCommand, actionCommand) => {
 
 program
     .command('login')
-    .description('Authenticate the CLI (prompts securely for your API key, or via --device for browser-based login)')
-    .argument('[api-key]', 'Legacy positional API key (prefer the masked prompt, --stdin, or --device)')
+    .description('Sign in to SolidActions (opens your browser; use --api-key for an API key)')
+    // The positional key still works but is not advertised: no description (so no
+    // Arguments section) and a usage line without it.
+    .argument('[api-key]')
+    .usage('[options]')
+    .option('--api-key [key]', 'Sign in with an API key instead of the browser. With no value it shows a masked prompt for the key. A key on the command line stays in your shell history; prefer --stdin or the SOLIDACTIONS_API_KEY environment variable.')
     .option('--stdin', 'Read the API key from stdin (for non-interactive automation)')
-    .option('--device', 'Authenticate via browser using OAuth device authorization')
+    .addOption(new Option('--device', 'Sign in with the browser (the default, accepted and ignored)').hideHelp())
     .addOption(new Option('--dev', 'Use local development server (http://localhost:8000)').hideHelp())
     .addOption(new Option('--host <url>', 'Custom API host URL').hideHelp())
     .option('--workspace <name-or-id>', 'Set workspace by name, slug, or ID. A sole workspace is auto-selected; use --workspace to choose among multiple workspaces.')
@@ -226,15 +230,19 @@ program
 Environment:
   SOLIDACTIONS_API_KEY  When set, this key takes precedence over any saved
                         credentials and is used directly — you do not need to run
-                        \`login\` (or \`login --device\`) at all in that setup.`)
+                        \`login\` at all in that setup.`)
     .action(async (apiKey, options) => {
-        if (options.device) {
+        const decision = await resolveLoginApiKey(apiKey, {
+            stdin: options.stdin,
+            apiKeyFlag: options.apiKey,
+            device: options.device,
+        });
+        if (decision.kind === 'browser') {
             const { deviceLogin } = await import('./commands/device-login');
             await deviceLogin(options);
             return;
         }
-        const resolvedApiKey = await resolveLoginApiKey(apiKey, { stdin: options.stdin });
-        await login(resolvedApiKey, options);
+        await login(decision.apiKey, options);
     });
 
 program

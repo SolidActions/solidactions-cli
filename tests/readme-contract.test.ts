@@ -20,6 +20,7 @@ describe('public README setup contract', () => {
     it('uses the secret-safe current login, deploy, and run commands', () => {
         expect(README).toContain('solidactions login --global');
         expect(README).toContain('solidactions login --stdin --global');
+        expect(README).toContain('solidactions login --api-key');
         expect(README).toContain('solidactions project deploy my-project -e production');
         expect(README).toContain('solidactions run start my-project hello -e production');
         expect(README).toContain('solidactions schedule set my-project');

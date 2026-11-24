@@ -116,7 +116,8 @@ describe('device login destination and credential hardening', () => {
         expect(deviceCodeRequests).toBe(0);
         expect(errorLines.join('\n')).toContain(
             'No TTY detected. Re-run with the config destination made explicit: '
-            + 'solidactions login --device --global --workspace <name>',
+            + 'solidactions login --global --workspace <name> '
+            + '(or use an API key: solidactions login --api-key <KEY> --global, or --stdin)',
         );
     });
 

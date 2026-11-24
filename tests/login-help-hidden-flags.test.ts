@@ -39,16 +39,35 @@ describe('login --help hides internal-only --host/--dev flags (#994)', () => {
         expect(out).not.toMatch(/--host\b/);
     });
 
-    it('does not advertise --dev as an option (distinct from the legitimate --device flag)', () => {
+    it('does not advertise --dev as an option (a prefix of the hidden --device)', () => {
         const out = help(['login']);
-        // --dev is a prefix of --device, so a naive `.toContain('--dev')` would
-        // false-positive against the (legitimate, still-advertised) --device
-        // flag. \b requires a non-word boundary right after "--dev", which
-        // "--device" does not have (v/i are both word chars), so this
-        // correctly distinguishes the two.
+        // \b requires a non-word boundary right after "--dev", so this would
+        // also catch a "--device" line: neither hidden flag may show.
         expect(out).not.toMatch(/--dev\b/);
-        // Sanity check the word-boundary assertion actually discriminates:
-        // --device itself must still be present and documented.
-        expect(out).toContain('--device');
+        expect(out).not.toContain('--device');
+    });
+});
+
+describe('login --help for the browser-first sign-in (cli#275)', () => {
+    it('describes the browser sign-in and offers --api-key', () => {
+        const out = help(['login']);
+        expect(out).toMatch(/Sign in to SolidActions \(opens your\s+browser; use --api-key for an API key\)/);
+        expect(out).toContain('--api-key [key]');
+        expect(out).toContain('masked prompt');
+    });
+
+    it('says a key on the command line stays in shell history and names the two safer ways', () => {
+        const out = help(['login']);
+        expect(out).toMatch(/stays\s+in\s+your\s+shell\s+history/);
+        expect(out).toContain('--stdin');
+        expect(out).toMatch(/--stdin\s+or\s+the\s+SOLIDACTIONS_API_KEY\s+environment\s+variable/);
+    });
+
+    it('hides the old positional key and --device (both still work, see tests/login-env-host.test.ts)', () => {
+        const out = help(['login']);
+        expect(out).not.toContain('[api-key]');
+        expect(out).not.toMatch(/^Arguments:/m);
+        expect(out).not.toContain('--device');
+        expect(out).toMatch(/^Usage: solidactions login \[options\]$/m);
     });
 });
