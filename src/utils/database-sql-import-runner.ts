@@ -561,9 +561,12 @@ export async function runPreparedDatabaseImport(
                 if (retryingAfterTimeout && isLockError(error)) {
                     const delay = lockBackoffMs(lockAttempts, batchTimeoutMs - lockWaitedMs);
                     if (delay <= 0) {
+                        const lockHint = checkpointPublished
+                            ? 'Wait and resume, or raise the per-batch limit with --timeout.'
+                            : 'Wait, then rerun the whole import, or raise the per-batch limit with --timeout.';
                         throw new DatabaseOperationError(
                             'upstream_unavailable',
-                            `The database stayed locked for ${Math.round(batchTimeoutMs / 1000)}s after a batch timed out (lines ${batchFrom}-${batchTo}); the timed-out transaction may still be running. Wait and resume, or raise the per-batch limit with --timeout.${firstBatchHint}`,
+                            `The database stayed locked for ${Math.round(batchTimeoutMs / 1000)}s after a batch timed out (lines ${batchFrom}-${batchTo}); the timed-out transaction may still be running. ${lockHint}${firstBatchHint}`,
                         );
                     }
                     lockAttempts += 1;
@@ -617,9 +620,10 @@ export async function runPreparedDatabaseImport(
                         );
                         continue;
                     }
+                    const recheckHint = checkpointPublished ? 'before resuming.' : 'before rerunning.';
                     const reason = size === 1
                         ? `A single statement (lines ${batchFrom}-${batchTo}, ${Buffer.byteLength(batch.groups[0].sql, 'utf8')} bytes) did not finish within ${seconds}s and cannot be split further.`
-                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? (verdict.unsafeTable ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} writes into table ${verdict.unsafeTable.name}, which ${verdict.unsafeTable.reason === 'trigger' ? 'has a trigger' : 'has no primary key or unique constraint (in the target, or as this batch creates it)'}, so it is not safe to repeat` : `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)`) : `The table(s) ${verdict.unknownTables.join(', ')} are not in the target database yet and this batch does not create them, so repeating the batch is not safe`}, so it was not retried; the batch may have committed, so check the last rows of its tables before resuming.`;
+                        : `A batch of ${size} statements (lines ${batchFrom}-${batchTo}) did not finish within ${seconds}s and may or may not have committed. ${verdict.status === 'unsafe' && verdict.firstUnsafe ? (verdict.unsafeTable ? `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} writes into table ${verdict.unsafeTable.name}, which ${verdict.unsafeTable.reason === 'trigger' ? 'has a trigger' : 'has no primary key or unique constraint (in the target, or as this batch creates it)'}, so it is not safe to repeat` : `The statement at lines ${verdict.firstUnsafe.startLine}-${verdict.firstUnsafe.endLine} is not safe to repeat (a plain INSERT or CREATE, an UPDATE or DELETE, or an INSERT OR REPLACE/IGNORE into a table without a primary key or unique constraint, or with a trigger)`) : `The table(s) ${verdict.unknownTables.join(', ')} are not in the target database yet and this batch does not create them, so repeating the batch is not safe`}, so it was not retried; the batch may have committed, so check the last rows of its tables ${recheckHint}`;
                     throw new DatabaseOperationError(
                         'upstream_unavailable',
                         `Database operation timed out. ${reason} Raise the per-batch limit with --timeout (for example --timeout 15m).${firstBatchHint}`,

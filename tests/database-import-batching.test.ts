@@ -442,6 +442,77 @@ describe('database import batching policy', () => {
             });
         });
 
+        it('row J drops a guarded unique index whose name the batch itself already took', () => {
+            // Shape (a): the plain index takes the name, so the guarded unique repeat is a silent no-op on the replay.
+            const guardedRepeat = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(guardedRepeat.get('b')).toEqual({ keyed: false, triggered: false });
+            // Shape (b): the second guarded unique index of the same name is a no-op, so b stays keyless while a stays keyed.
+            const crossTable = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS a (x);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS ux ON a(x);'),
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS ux ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(crossTable.get('a')).toEqual({ keyed: true, triggered: false });
+            expect(crossTable.get('b')).toEqual({ keyed: false, triggered: false });
+            // The key folds case and unquotes: a quoted upper-case repeat of the name is the same name.
+            const quotedCase = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS "U" ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(quotedCase.get('b')).toEqual({ keyed: false, triggered: false });
+            // Schema-qualified repeats share the key: main.u is the same name as u.
+            const qualified = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX IF NOT EXISTS main.u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(qualified.get('b')).toEqual({ keyed: false, triggered: false });
+            // An unguarded unique index still counts: only the guarded repeat after it is dropped.
+            const unguardedFirst = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE UNIQUE INDEX u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(unguardedFirst.get('b')).toEqual({ keyed: true, triggered: false });
+            // An unguarded plain index also occupies the name for a later guarded unique repeat.
+            const unguardedPlain = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS b (y);'),
+                    group('CREATE INDEX u ON b(y);'),
+                    group('CREATE UNIQUE INDEX IF NOT EXISTS u ON b(y);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(unguardedPlain.get('b')).toEqual({ keyed: false, triggered: false });
+        });
+
         it('row I returns nothing when the batch creates a table twice or drops it', () => {
             const twice = batchCreatedFacts(
                 [
@@ -463,6 +534,40 @@ describe('database import batching policy', () => {
             );
             expect(dropped.size).toBe(0);
             expect(dropped.get('m')).toBeUndefined();
+        });
+
+        it('row K returns no fact when a dropped or renamed table is recreated once', () => {
+            const recreated = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS m (a);'),
+                    group('DROP TABLE m;'),
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(recreated.size).toBe(0);
+            expect(recreated.get('m')).toBeUndefined();
+            const droppedFirst = batchCreatedFacts(
+                [
+                    group('DROP TABLE m;'),
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(droppedFirst.size).toBe(0);
+            expect(droppedFirst.get('m')).toBeUndefined();
+            const renamed = batchCreatedFacts(
+                [
+                    group('CREATE TABLE IF NOT EXISTS m (id PRIMARY KEY);'),
+                    group('ALTER TABLE x RENAME TO m;'),
+                ],
+                new Map(),
+                new Set(),
+            );
+            expect(renamed.size).toBe(0);
+            expect(renamed.get('m')).toBeUndefined();
         });
     });
 

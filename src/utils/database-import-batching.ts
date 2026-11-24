@@ -458,14 +458,14 @@ export function replayVerdict(groups: DatabaseSqlImportGroup[], facts: SchemaFac
  * Walks `groups` in order with the 'catalog' origin (statements taken as written), then returns only the tables that
  * (a) the batch itself creates, exactly once, with CREATE TABLE IF NOT EXISTS (a name created, dropped or renamed more than once in the batch is not returned) and (b) are NOT keys of `catalogFacts`.
  * A table in `catalogFacts` is never returned (the target's shape wins). An index or trigger on a table the batch does not create gives nothing.
- * `catalogObjectNames` is every `name` (second column) of the catalog read, lower-cased: a batch CREATE UNIQUE INDEX IF NOT EXISTS whose name is in it is a no-op on the replay, so it is left out of the walk.
+ * `catalogObjectNames` is every `name` (second column) of the catalog read, lower-cased: a batch CREATE UNIQUE INDEX IF NOT EXISTS whose name is in it is a no-op on the replay, so it is left out of the walk. The same holds inside the batch itself: SQLite treats a second CREATE [UNIQUE] INDEX IF NOT EXISTS of an already-taken index name as a silent no-op (it keeps the first index, even a plain non-unique one), so index names seen earlier in the batch occupy the name for the statements after them.
  */
 export function batchCreatedFacts(
     groups: DatabaseSqlImportGroup[],
     catalogFacts: SchemaFacts,
     catalogObjectNames: ReadonlySet<string>,
 ): SchemaFacts {
-    const walked = groups.filter((group) => !isNoopUniqueIndex(group.sql, catalogObjectNames));
+    const walked = withoutNoopUniqueIndexes(groups, catalogObjectNames);
     const created = collectCreatedTableKeys(groups);
     const walkedFacts = schemaFactsFromSql(walked.map((g) => g.sql), 'catalog');
     const result: SchemaFacts = new Map();
@@ -477,22 +477,49 @@ export function batchCreatedFacts(
     return result;
 }
 
-/** True when `sql` is a CREATE UNIQUE INDEX IF NOT EXISTS whose index name is in `catalogObjectNames` (a no-op on the replay). */
-function isNoopUniqueIndex(sql: string, catalogObjectNames: ReadonlySet<string>): boolean {
+/** The index name a CREATE [UNIQUE] INDEX [IF NOT EXISTS] statement occupies, or null when `sql` is not one. TEMP indexes live in the temp schema, so they never occupy a persistent name. */
+function createIndexName(sql: string): { key: string; unique: boolean; ifNotExists: boolean } | null {
     const tokens = tokenizeSql(sql);
-    if (wordAt(tokens, 0) !== 'CREATE') return false;
+    if (wordAt(tokens, 0) !== 'CREATE') return null;
+    if (wordAt(tokens, 1) === 'TEMP' || wordAt(tokens, 1) === 'TEMPORARY') return null;
     let index = 1;
     let unique = false;
     while (wordAt(tokens, index) === 'UNIQUE' || wordAt(tokens, index) === 'VIRTUAL') {
         if (wordAt(tokens, index) === 'UNIQUE') unique = true;
         index += 1;
     }
-    if (!unique || wordAt(tokens, index) !== 'INDEX') return false;
+    if (wordAt(tokens, index) !== 'INDEX') return null;
     const skip = skipIfNotExists(tokens, index + 1);
-    if (!skip.ifNotExists) return false;
     const name = qualifiedName(tokens, skip.index);
-    if (name === null) return false;
-    return catalogObjectNames.has(name.key);
+    if (name === null) return null;
+    return { key: name.key, unique, ifNotExists: skip.ifNotExists };
+}
+
+/**
+ * `groups` without a CREATE UNIQUE INDEX IF NOT EXISTS whose index name is already taken: by the target catalog
+ * (`catalogObjectNames`, lower-cased), or by an earlier CREATE [UNIQUE] INDEX [IF NOT EXISTS] in the batch itself.
+ * SQLite replays such a guarded repeat as a silent no-op, so the walk must not count it as a key. Every CREATE INDEX
+ * name seen (plain or unique, guarded or not, schema-qualified or quoted: the key folds case and drops `main.`)
+ * occupies the name for the statements after it.
+ */
+function withoutNoopUniqueIndexes(
+    groups: DatabaseSqlImportGroup[],
+    catalogObjectNames: ReadonlySet<string>,
+): DatabaseSqlImportGroup[] {
+    const seen = new Set<string>();
+    for (const name of catalogObjectNames) seen.add(name.toLowerCase());
+    const walked: DatabaseSqlImportGroup[] = [];
+    for (const group of groups) {
+        const occupied = createIndexName(group.sql);
+        if (occupied === null) {
+            walked.push(group);
+            continue;
+        }
+        if (occupied.unique && occupied.ifNotExists && seen.has(occupied.key)) continue;
+        seen.add(occupied.key);
+        walked.push(group);
+    }
+    return walked;
 }
 
 /**

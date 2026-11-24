@@ -227,14 +227,17 @@ line. Sources with vector columns use smaller batches. A lock held by a
 timed-out batch is waited out with a bounded backoff before the same batch is
 retried.
 
-Limits: a table with a trigger, a statement that omits its key columns, a
+Limits: a table with a trigger, a
 plain `INSERT` dump, or a batch that contains a plain `CREATE`, `DROP`, or
 `ALTER` is never retried either: a timeout there stops with the resume line.
-A dump's first batch that creates its own tables with `CREATE TABLE IF NOT
-EXISTS` is retried when the table is not in the target yet and the statements
-after it are `INSERT OR REPLACE` into a table that has a primary key or unique
-constraint and no trigger (an existing table of the same name is judged by the
-target's own shape). When nothing has been checkpointed yet (the first batch
+A statement that leaves a key column out, NULL or defaulted (a keyed table
+filled by rowid) is not detected: if its batch times out and commits late, the
+retry can insert those rows a second time.
+A batch that creates its own tables with `CREATE TABLE IF NOT EXISTS` (a
+dump's first batch, for one) is retried when the table is not in the target
+yet and the statements after it are `INSERT OR REPLACE` into a table that has
+a primary key or unique constraint and no trigger (an existing table of the
+same name is judged by the target's own shape). When nothing has been checkpointed yet (the first batch
 stopped), the message says there is no resume line and that the first batch may
 have committed; check its tables and rerun the whole import with a longer
 `--timeout`. A table of the same name created by another writer in the seconds
