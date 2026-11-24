@@ -228,13 +228,21 @@ timed-out batch is waited out with a bounded backoff before the same batch is
 retried.
 
 Limits: a table with a trigger, a statement that omits its key columns, a
-plain `INSERT` dump, or a batch that contains a plain `CREATE` (a dump's first
-batch, which holds its `CREATE TABLE` statements), `DROP`, or `ALTER` is never
-retried either: a timeout there stops with the resume line; a source that only
-inserts into an existing vector table starts at the full batch size and halves
-it on the first timeout; writing the same key twice with different values can,
-if a timed-out batch commits late (after later batches), leave the older value
-in place.
+plain `INSERT` dump, or a batch that contains a plain `CREATE`, `DROP`, or
+`ALTER` is never retried either: a timeout there stops with the resume line.
+A dump's first batch that creates its own tables with `CREATE TABLE IF NOT
+EXISTS` is retried when the table is not in the target yet and the statements
+after it are `INSERT OR REPLACE` into a table that has a primary key or unique
+constraint and no trigger (an existing table of the same name is judged by the
+target's own shape). When nothing has been checkpointed yet (the first batch
+stopped), the message says there is no resume line and that the first batch may
+have committed; check its tables and rerun the whole import with a longer
+`--timeout`. A table of the same name created by another writer in the seconds
+between the check and the retry is not detected. A source that only inserts
+into an existing vector table starts at the full batch size and halves it on
+the first timeout; writing the same key twice with different values can, if a
+timed-out batch commits late (after later batches), leave the older value in
+place.
 
 ## Configuration
 
